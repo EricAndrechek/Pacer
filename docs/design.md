@@ -64,26 +64,49 @@ lower fill gaps.
   `ClaudeCodeMeta` so we can re-scan on parser changes.
 - Authoritative for token counts and per-day per-model breakdowns.
 
-### Tier 2 — Statusline (optional opt-in optimization)
+### Tier 2 — Statusline (optional polish/convenience)
 
 - `pacertap` binary, invoked by Claude Code per refresh tick when user
   opts in.
 - Reads JSON from stdin, posts to daemon's UDS.
-- Optionally chains through to user's existing statusline (`--forward-to`)
-  so it composes with `ccstatusline`, `claude-hud`, the user's own
-  `claudestatus_go`, etc. — no last-write-wins fight.
-- **Adds value beyond Tier 1**: rate-limit windows pushed every ~300ms
-  (no need for OAuth poll while session is active), session-level
-  cumulative cost from Claude Code's own calculation (useful for
-  cross-checking pricing).
-- **Pacer works fully without it.** This is a boost, not a dependency.
+- Optionally chains through to user's existing statusline by passing
+  the chained command as positional args (no `--forward-to` flag — see
+  CLI shapes below). Composes with `ccstatusline`, `claude-hud`, the
+  user's own `claudestatus_go`, etc.
+- **Honest value prop.** Tier 3 (OAuth) already provides rate-limit
+  data; Tier 1 (JSONL) already provides token data. What statusline
+  uniquely adds is small:
+    - Lower-latency rate-limit refresh during active sessions
+      (~300ms vs OAuth's 5min poll cadence).
+    - Reduces OAuth API pressure during active sessions.
+    - A few extras not in JSONL: `total_duration_ms` vs
+      `total_api_duration_ms`, `total_lines_added/removed`,
+      `effort.level`, `thinking.enabled`.
+    - CC's own `total_cost_usd` for cross-checking against ours.
+- **Pacer works fully without it.** This is polish, not a dependency.
+  Reasonable to defer to v1.1 if v1 scope tightens.
 - Daemon watches `~/.claude/settings.json` via FSEventStream. If our
   binary disappears from `statusLine.command`, fire a notification —
   user can re-enable in one click. Never silent re-inject.
 
-### Tier 3 — OAuth `/api/oauth/usage` (between-session sustaining)
+**`pacertap` CLI shapes** (settings.json `command` value):
+```
+pacertap                                          # tap only, emits minimal Pacer status
+pacertap ~/.claude/claudestatus_go                # chain to existing statusline
+pacertap ccstatusline --visual-burn-rate emoji    # chain with downstream's flags
+pacertap --debug -- /weird/path                   # `--` separates pacertap flags from chain
+```
+Implementation: read stdin once, post to UDS, then if `argv[1:]` is
+non-empty, fork+exec it with the original stdin piped in and proxy its
+stdout. Else emit Pacer's own minimal status text.
 
-- Polls only when no statusline data has arrived in the last ~5 min.
+### Tier 3 — OAuth `/api/oauth/usage` (rate-limit windows)
+
+- Primary source for 5h and 7d rate-limit windows. Always-on when CC is
+  installed and credentials are present.
+- During active statusline sessions, can defer polling because
+  statusline pushes the same data sub-second. Without statusline,
+  this is the only rate-limit source.
 - 5-minute cadence (server-side aggregation cadence — faster polling
   returns stale data).
 - Honors `Retry-After`, exponential backoff to 1 hour on 429.
@@ -195,9 +218,10 @@ claude-hud, ccusage statusline, user's own scripts all want
 1. **Opt-in only.** Pacer never writes to `settings.json` without
    explicit per-write user confirmation.
 2. **Auto-detect existing statusline** during onboarding. If
-   `statusLine.command` is already set, Pacer pre-fills its `--forward-to`
-   value with the existing path. The result chains: Claude Code →
-   `pacertap` → existing statusline. Both render. Both get data.
+   `statusLine.command` is already set, Pacer pre-fills the chained
+   command in the proposed write: `pacertap <existing-command>`. Result
+   chains: Claude Code → `pacertap` → existing statusline. Both render.
+   Both get data.
 3. **Preview before write.** Onboarding shows the diff to `settings.json`
    before applying.
 4. **Watch and notify.** Daemon watches `~/.claude/settings.json` via
@@ -209,7 +233,7 @@ claude-hud, ccusage statusline, user's own scripts all want
 
 `pacertap` is intentionally tiny — single file, no UI dependencies, fast
 startup. Optionally symlinked into `~/.local/bin/pacertap` so the
-config line is just `"command": "pacertap"`.
+config line is just `"command": "pacertap ..."`.
 
 ## IPC protocol
 
@@ -363,7 +387,8 @@ Eight milestones, each ending with something testable end-to-end.
    `SMAppService.agent`, FSEventStream + 60s backstop, full historical
    scan on first run, populate SwiftData.
 4. **Statusline binary** — `pacertap`, reads stdin, writes via daemon UDS,
-   chain-mode (`--forward-to`), watch+notify in daemon.
+   chain-mode via positional `argv[1:]`, watch+notify in daemon.
+   *Reasonable to defer to v1.1 if v1 scope tightens.*
 5. **OAuth + Keychain** — `SecItemCopyMatching` direct access, polling
    loop, 429 handling.
 6. **Main UI** — Dashboard with Charts (one chart at a time, each
