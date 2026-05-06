@@ -1,0 +1,30 @@
+Show usage report grouped by session billing blocks
+
+USAGE:
+  ccusage blocks <OPTIONS>
+
+OPTIONS:
+  -s, --since <since>                            Filter from date (YYYYMMDD format)
+  -u, --until <until>                            Filter until date (YYYYMMDD format)
+  -j, --json                                     Output in JSON format (default: false)
+  -m, --mode [mode]                              Cost calculation mode: auto (use costUSD if exists, otherwise calculate), calculate (always calculate), display (always use costUSD) (default: auto, choices: auto | calculate | display)
+  -d, --debug                                    Show pricing mismatch information for debugging (default: false)
+  --debug-samples [debug-samples]                Number of sample discrepancies to show in debug output (default: 5) (default: 5)
+  -o, --order [order]                            Sort order: desc (newest first) or asc (oldest first) (default: asc, choices: desc | asc)
+  -b, --breakdown                                Show per-model cost breakdown (default: false)
+  -O, --offline                                  Use cached pricing data for Claude models instead of fetching from API (default: false)
+  --no-offline                                   Negatable of -O, --offline
+  --color                                        Enable colored output (default: auto). FORCE_COLOR=1 has the same effect.
+  --no-color                                     Disable colored output (default: auto). NO_COLOR=1 has the same effect.
+  -z, --timezone <timezone>                      Timezone for date grouping (e.g., UTC, America/New_York, Asia/Tokyo). Default: system timezone
+  -l, --locale [locale]                          Locale for date/time formatting (e.g., en-US, ja-JP, de-DE) (default: en-CA)
+  -q, --jq <jq>                                  Process JSON output with jq command (requires jq binary, implies --json)
+  --config <config>                              Path to configuration file (default: auto-discovery)
+  --compact                                      Force compact mode for narrow displays (better for screenshots) (default: false)
+  -a, --active                                   Show only active block with projections (default: false)
+  -r, --recent                                   Show blocks from last 3 days (including active) (default: false)
+  -t, --token-limit <token-limit>                Token limit for quota warnings (e.g., 500000 or "max")
+  -n, --session-length [session-length]          Session block duration in hours (default: 5) (default: 5)
+  -h, --help                                     Display this help message
+  -v, --version                                  Display this version
+

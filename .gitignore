@@ -1,0 +1,47 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.xccheckout
+
+# Swift Package Manager
+.build/
+.swiftpm/
+.netrc
+# Package.resolved is committed — this is an app, we want reproducible builds.
+
+# Generated Xcode project (regenerated from project.yml)
+Pacer.xcodeproj/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Sparkle
+sparkle-private-key
+*.priv
+
+# Local build artifacts
+*.app
+*.dmg
+appcast.xml
+updates/
+
+# Editor
+.vscode/
+.idea/
+*.swp
