@@ -1,0 +1,78 @@
+name: Pacer
+options:
+  bundleIdPrefix: com.ericandrechek
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "15.0"
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: YZXWMJ5VBY
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    OTHER_LDFLAGS: "-Wl,-no_warn_duplicate_libraries"
+
+packages:
+  PacerCore:
+    path: PacerCore
+
+targets:
+  Pacer:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
+        PRODUCT_NAME: Pacer
+        CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Eric Andrechek"
+        INFOPLIST_KEY_CFBundleDisplayName: Pacer
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: PacerCore
+        product: PacerCore
+      - target: PacerWidgets
+
+  PacerDaemon:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Daemon
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.daemon
+        PRODUCT_NAME: PacerDaemon
+        CODE_SIGN_ENTITLEMENTS: Daemon/PacerDaemon.entitlements
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: PacerCore
+        product: PacerCore
+
+  PacerWidgets:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Widgets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.widgets
+        PRODUCT_NAME: PacerWidgets
+        CODE_SIGN_ENTITLEMENTS: Widgets/PacerWidgets.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        INFOPLIST_KEY_CFBundleDisplayName: Pacer Widgets
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: PacerCore
+        product: PacerCore

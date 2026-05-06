@@ -63,3 +63,33 @@ These are subtle, easy to miss, and break user-visible numbers:
   decisions where Pacer deviates from ccusage (e.g. cache-tier split,
   Anthropic OAuth fallback) — leave a comment so the next reader doesn't
   "fix" it back.
+
+## Project layout & build
+
+- `project.yml` is the source of truth — `Pacer.xcodeproj` is generated
+  by XcodeGen and gitignored. Run `xcodegen generate` after edits.
+- Targets:
+    - `App/` → `Pacer.app` (SwiftUI app, embeds widgets)
+    - `Daemon/` → `PacerDaemon` (CLI tool, LaunchAgent in M3+)
+    - `Widgets/` → `PacerWidgets.appex` (widget extension)
+    - `PacerCore/` → local Swift package (models, parsers, store)
+- Each non-package target has its own `.entitlements` file declaring the
+  shared App Group `group.com.ericandrechek.pacer`. The App Group lets
+  the daemon, app, and widgets share a single SwiftData container at
+  `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+- Local PacerCore tests: `cd PacerCore && swift test`.
+- Full build verification (no-sign): `xcodebuild ... CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build`
+  (see README for the full invocation).
+- Local dev runs through Xcode with the user's own team selected.
+
+## Team IDs
+
+Two certs in keychain (`security find-identity -v -p codesigning`):
+- `<REDACTED_DEV_TEAM_ID>` — Apple Development cert for local dev signing
+- `YZXWMJ5VBY` — Developer ID Application cert for distribution
+
+`project.yml` currently sets `DEVELOPMENT_TEAM: YZXWMJ5VBY`. If a Debug
+build trips on missing provisioning profiles, the user should open the
+project in Xcode and let it auto-resolve, or manually flip the team in
+the Signing & Capabilities tab. Distribution (M8 Sparkle release) will
+use `YZXWMJ5VBY` explicitly with the Developer ID cert.

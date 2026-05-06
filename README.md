@@ -28,9 +28,35 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
 | --- | --- |
 | `Pacer.app` | Main UI, MenuBarExtra |
 | `PacerDaemon` | LaunchAgent — polling, IPC, notifications |
-| `pacertap` | Optional statusline tap binary |
 | `PacerWidgets` | WidgetKit extension |
 | `PacerCore` | Shared Swift package — parsers, models, IPC schema |
+| `pacertap` | Optional statusline tap binary (deferred to v1.1) |
+
+## Building
+
+The Xcode project is generated from `project.yml` via [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+
+```sh
+brew install xcodegen   # one-time
+xcodegen generate       # produces Pacer.xcodeproj (gitignored)
+open Pacer.xcodeproj    # build and run from Xcode
+```
+
+`Pacer.xcodeproj` is regenerated whenever `project.yml` changes — never
+edit the `.xcodeproj` directly. PacerCore is a local Swift package
+(`PacerCore/`) consumed by all targets.
+
+To build from CLI without code signing (verification only):
+
+```sh
+xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+For a runnable build, open the project in Xcode and let Xcode handle
+provisioning under your Apple ID.
 
 ## License
 
