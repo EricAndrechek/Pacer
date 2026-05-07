@@ -14,8 +14,28 @@ settings:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     ENABLE_HARDENED_RUNTIME: YES
-    CODE_SIGN_STYLE: Automatic
     OTHER_LDFLAGS: "-Wl,-no_warn_duplicate_libraries"
+    # xcodebuild builds the bundles unsigned; bin/dev-install.sh
+    # signs everything afterwards with Developer ID Application.
+    #
+    # We deliberately bypass Xcode's signing flow because:
+    #   - Apple Development (auto-provisioned) signing produces a
+    #     csreq-less TCC.db row for kTCCServiceSystemPolicyAppData,
+    #     so the "Pacer would like to access data from other apps"
+    #     prompt re-fires on every launch (AGENTS.md bug #6).
+    #   - Switching to Manual + Developer ID Application inside
+    #     project.yml runs into Xcode demanding a Developer ID
+    #     provisioning profile for the App Groups capability,
+    #     which would force the user to register a profile in the
+    #     Apple Developer portal.
+    # Direct codesign sidesteps both: the Mach-O carries the
+    # Developer ID Application cert chain (matching what the
+    # eventual Sparkle release will look like) without any portal
+    # round-trip, and TCC writes a populated csreq blob so the
+    # Allow click sticks across launches.
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
 
 packages:
   PacerCore:

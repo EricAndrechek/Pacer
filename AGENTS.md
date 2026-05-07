@@ -321,29 +321,71 @@ all of them. Mentioned here so future agents don't repeat them:
    The test suite can't catch this because it never installs to
    /Applications.
 
-6. **Apple Development-signed builds re-prompt
-   `kTCCServiceSystemPolicyAppData` for the GUI app on every launch,
-   regardless of how many times the user clicks Allow.** The Allow
-   click records `auth_value=5` in `~/Library/Application Support/
-   com.apple.TCC/TCC.db` but the row's `csreq` (code-signing
-   requirement blob) ends up empty / unstable, so on the next
-   launch TCC can't verify the binary identity and re-prompts.
-   Compare to apps signed with `Developer ID Application` (Docker,
-   iTerm) which get a populated 160–212-byte `csreq` and stay
-   granted. The fix is signing the dev build with Developer ID
-   instead of Apple Development; until then, expect one prompt per
-   GUI launch on macOS Sequoia. The daemon side stays fine because
-   it's launched once by launchd and KeepAlive keeps it up across
-   GUI restarts. `get-task-allow=false` in both entitlements files
-   removes one untrusted-binary signal but does not on its own
-   stop the prompt.
+6. **macOS Sequoia 15+ re-prompts `kTCCServiceSystemPolicyAppData`
+   for the GUI app on every launch in the dev workflow, even after
+   Developer ID signing + notarization + stapling.** This is rooted
+   in Pacer's architecture: the App (`com.ericandrechek.pacer`) and
+   the daemon (`com.ericandrechek.pacer.daemon`) are separate
+   bundle IDs sharing the App Group container at
+   `~/Library/Group Containers/group.com.ericandrechek.pacer/`.
+   Sequoia's "App Management" framework treats split-identity access
+   to a shared group container as cross-app data access and asks the
+   user to confirm. The Allow click writes a row with
+   `auth_value=5` but `csreq` stays empty, so TCC can't validate
+   the identity on the next launch and re-prompts.
 
-   Diagnose by inspecting the row TCC creates after an Allow click:
+   Comparison points (apps that DON'T re-prompt have a populated
+   `csreq`): iTerm and Docker both have `length(csreq)` of 160–196
+   bytes. Pacer's row has `length(csreq)=0` even after every
+   diagnostic / signing improvement we tried.
+
+   What we tried that DIDN'T fix the prompt:
+     - Developer ID Application signing (manual codesign post-build)
+     - `xcrun notarytool submit --wait` + `stapler staple` (status:
+       Accepted, ticket validated)
+     - `spctl -av` reports `accepted source=Notarized Developer ID`
+     - `com.apple.security.get-task-allow=false` on both entitlements
+     - Patching `MCMMetadataCreator` in the container metadata plist
+       so the App is recognized as the group's creator
+     - Hardened Runtime, secure timestamps, deep --strict verify
+
+   What DID help (still committed, still useful):
+     - Bundle-style codesign identifier on the daemon
+       (`OTHER_CODE_SIGN_FLAGS = --identifier=com.ericandrechek.pacer.daemon`).
+       Without this the daemon prompts AGAIN whenever launchd
+       restarts it.
+     - Notarization is the shipping requirement; we keep it in the
+       dev install path so dev-signed = release-signed.
+
+   Pragmatic stance for v1: accept the dev-time prompt. Production
+   users get a single notarized release via Sparkle and (per the
+   M8 plan) the daemon will be registered through SMAppService
+   instead of raw launchctl. SMAppService-launched helpers are
+   reported to inherit the parent app's TCC identity, which would
+   eliminate this prompt for end users — but this needs to be
+   verified on a real shipping build before the v1 release. If
+   it turns out to also affect end users, the architectural fix is
+   one of:
+     - Move the daemon under SMAppService with `BundleProgram`
+       resolved against the app bundle (verify TCC identity is
+       inherited).
+     - Replace the LaunchAgent daemon with an XPC service hosted
+       inside the app bundle (XPC helpers definitively share the
+       parent's TCC identity).
+     - Have the daemon write through the App via XPC instead of
+       touching the App Group container directly (preserves
+       LaunchAgent architecture but removes the cross-bundle-ID
+       container access).
+
+   Diagnose by inspecting the TCC row after an Allow click:
    `sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db
    "SELECT auth_value, length(csreq) FROM access WHERE
-   client='com.ericandrechek.pacer';"` — a populated `length(csreq)`
-   (>0) means persistence will work; `0` means the prompt comes
-   back next launch.
+   client='com.ericandrechek.pacer';"` — a populated
+   `length(csreq)` (160+) means persistence will work; `0` means
+   the prompt comes back next launch. The `tccd` log line
+   `Session scoped auth is invalid for client: <private>` right
+   before each `AUTHREQ_PROMPTING` confirms TCC is treating the
+   recorded grant as session-only.
 
    Auxiliary one-time fix when migrating from an older daemon
    identifier: `~/Library/Group Containers/group.com.ericandrechek.pacer/
@@ -351,8 +393,19 @@ all of them. Mentioned here so future agents don't repeat them:
    that first created the container in `MCMMetadataCreator`. If
    that's the old `PacerDaemon` (binary-name) identifier, patch it
    to `com.ericandrechek.pacer` with `plutil -replace
-   MCMMetadataCreator -string com.ericandrechek.pacer "$plist"`
-   so the App is recognized as the container's owning bundle ID.
+   MCMMetadataCreator -string com.ericandrechek.pacer "$plist"`.
+   Doesn't suppress the prompt on its own but is a prerequisite for
+   the App to be recognized as the group's owning bundle ID.
+
+   Notarization credential setup (one-time): create an App Store
+   Connect API key at App Store Connect → Users and Access →
+   Integrations → Team Keys with the "Developer" role. Save the
+   `.p8` file, then store credentials with
+   `xcrun notarytool store-credentials pacer-notarization
+       --key /path/to/AuthKey_<KEY_ID>.p8
+       --key-id <KEY_ID> --issuer <ISSUER_UUID>`. The Key ID is in
+   the filename and on the Keys page; the Issuer UUID is at the top
+   of the Keys page. `bin/dev-install.sh` reads from this profile.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
