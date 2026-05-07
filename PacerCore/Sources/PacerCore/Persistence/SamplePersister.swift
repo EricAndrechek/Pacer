@@ -235,6 +235,45 @@ public final class SamplePersister {
         }
     }
 
+    /// Migration: re-canonicalize every existing TokenSample's
+    /// `projectPath`. Used on startup when ScanCoordinator detects a
+    /// `pathCanonicalizationVersion` mismatch.
+    ///
+    /// Why this is needed even after a full re-scan: SamplePersister.
+    /// insert() de-dupes on `dedupKey` and never updates existing rows
+    /// — so a parse-time canonicalizer change doesn't reach
+    /// already-stored samples through the normal scan path. We have
+    /// to mutate in place.
+    ///
+    /// Both the OLD and the NEW projectPath are added to dirty
+    /// project-date pairs so the recomputer can deletes the old
+    /// `agent-…` rollup row and inserts under the canonicalized
+    /// parent path. Caller is responsible for triggering the
+    /// recomputer.
+    @discardableResult
+    public func canonicalizeProjectPaths() throws -> Int {
+        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        var changedCount = 0
+        for sample in samples {
+            guard let original = sample.projectPath else { continue }
+            let canonical = ProjectPathCanonicalizer.canonicalize(original)
+            guard canonical != original else { continue }
+            sample.projectPath = canonical
+            // Both ends of the change need recompute: the old bucket
+            // emptied (so the recomputer deletes it) and the new
+            // bucket gets the migrated samples.
+            dirtyProjectDates.insert(ProjectDatePair(
+                projectPath: original, date: sample.date))
+            dirtyProjectDates.insert(ProjectDatePair(
+                projectPath: canonical, date: sample.date))
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+            }
+            changedCount += 1
+        }
+        return changedCount
+    }
+
     private func preloadFromStore() throws {
         // SwiftData doesn't expose partial-attribute fetch (CD's
         // NSDictionaryResultType has no equivalent), so we materialize

@@ -3,6 +3,13 @@ import SwiftData
 import Charts
 import PacerCore
 
+/// What field to sort the per-session table by. Persists per-table
+/// in the App Group store (`pacer.projectDetail.sessionsSortField`).
+enum SessionsSort: String, CaseIterable, Identifiable {
+    case id, model, tokens, cost, lastSeen
+    var id: String { rawValue }
+}
+
 /// Drill-down for a single project. Presented as a sheet from
 /// `ProjectsView`. Shows:
 ///   - Cost / tokens summary headline
@@ -18,7 +25,7 @@ struct ProjectDetailView: View {
     let displayName: String
     let since: Date?
 
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismissModal) private var dismissModal
     @Query private var aggregates: [ProjectDailyAggregate]
     @Query private var sessionRows: [SessionInfo]
 
@@ -157,7 +164,7 @@ struct ProjectDetailView: View {
                 }
                 .help("Open this project's folder in Finder")
             }
-            Button("Close") { dismiss() }
+            Button("Close") { dismissModal() }
                 .keyboardShortcut(.cancelAction)
         }
     }
@@ -182,15 +189,40 @@ struct ProjectDetailView: View {
         }
     }
 
+    @State private var hoveredDate: String?
+
     private var dailyChartCard: some View {
-        PacerCard("Daily activity") {
-            Chart(dailySeries) { d in
-                BarMark(
-                    x: .value("Date", d.date),
-                    y: .value("Cost", d.cost)
-                )
-                .foregroundStyle(.tint)
-                .cornerRadius(1.5)
+        PacerCard("Daily activity", trailing: {
+            // Hover swaps the trailing slot to show the selected
+            // bar's date + cost — same pattern as DailyCostChartCard.
+            // Keeps the chart's plot area a fixed height regardless of
+            // hover state; the previous "annotation on rule mark" path
+            // pushed the bars up and down on every hover.
+            if let d = hoveredDate, let row = dailySeries.first(where: { $0.date == d }) {
+                HStack(spacing: 8) {
+                    Text(row.date)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(pacerCost(row.cost))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                }
+            }
+        }) {
+            Chart {
+                ForEach(dailySeries) { d in
+                    BarMark(
+                        x: .value("Date", d.date),
+                        y: .value("Cost", d.cost)
+                    )
+                    .foregroundStyle(.tint)
+                    .cornerRadius(1.5)
+                }
+                if let h = hoveredDate, dailySeries.contains(where: { $0.date == h }) {
+                    RuleMark(x: .value("Selected", h))
+                        .foregroundStyle(.secondary.opacity(0.5))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                }
             }
             .frame(height: 160)
             .chartYAxis {
@@ -205,8 +237,35 @@ struct ProjectDetailView: View {
                     }
                 }
             }
-            .chartXAxis(.hidden)
+            .chartXAxis {
+                // Show every Nth date label so the axis isn't crowded
+                // on long ranges. With ~90 days at default range, 10
+                // strides ≈ 9 labels; reads well at the card's width.
+                AxisMarks(values: stridedDailySeriesDates(every: max(dailySeries.count / 9, 1))) { value in
+                    AxisValueLabel {
+                        if let date = value.as(String.self) {
+                            Text(shortDailyDate(date))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .chartXSelection(value: $hoveredDate)
         }
+    }
+
+    private func stridedDailySeriesDates(every n: Int) -> [String] {
+        guard !dailySeries.isEmpty, n > 0 else { return [] }
+        return stride(from: 0, to: dailySeries.count, by: n).map { dailySeries[$0].date }
+    }
+
+    /// `2026-04-30` → `04-30`. Year omitted at this density; user
+    /// already has page context (the project detail header shows the
+    /// time range).
+    private func shortDailyDate(_ ymd: String) -> String {
+        guard ymd.count == 10 else { return ymd }
+        return String(ymd.suffix(5))
     }
 
     private var modelsCard: some View {
@@ -248,6 +307,35 @@ struct ProjectDetailView: View {
         }
     }
 
+    @AppStorage("pacer.projectDetail.sessionsSortField", store: PacerSettings.store)
+    private var sessionsSortRaw: String = SessionsSort.lastSeen.rawValue
+    @AppStorage("pacer.projectDetail.sessionsSortDescending", store: PacerSettings.store)
+    private var sessionsSortDescending: Bool = true
+
+    private var sessionsSort: SessionsSort {
+        SessionsSort(rawValue: sessionsSortRaw) ?? .lastSeen
+    }
+    private var sessionsSortBinding: Binding<SessionsSort> {
+        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
+    }
+
+    private var sortedSessions: [SessionInfo] {
+        let sorted: [SessionInfo]
+        switch sessionsSort {
+        case .id:
+            sorted = sessionRows.sorted { $0.sessionId < $1.sessionId }
+        case .model:
+            sorted = sessionRows.sorted { $0.topModel < $1.topModel }
+        case .tokens:
+            sorted = sessionRows.sorted { $0.totalTokens < $1.totalTokens }
+        case .cost:
+            sorted = sessionRows.sorted { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
+        case .lastSeen:
+            sorted = sessionRows.sorted { $0.lastSeenAt < $1.lastSeenAt }
+        }
+        return sessionsSortDescending ? sorted.reversed() : sorted
+    }
+
     private var sessionsCard: some View {
         PacerCard("Sessions", trailing: {
             Text("\(sessionRows.count) total")
@@ -255,16 +343,64 @@ struct ProjectDetailView: View {
                 .foregroundStyle(.secondary)
         }) {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(sessionRows.prefix(20)), id: \.sessionId) { row in
+                sessionsHeader
+                Divider().padding(.vertical, 2)
+                ForEach(Array(sortedSessions.prefix(20)), id: \.sessionId) { row in
                     sessionRowView(row)
                 }
-                if sessionRows.count > 20 {
-                    Text("…and \(sessionRows.count - 20) more")
+                if sortedSessions.count > 20 {
+                    Text("…and \(sortedSessions.count - 20) more")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .padding(.top, 4)
                 }
             }
+        }
+    }
+
+    private var sessionsHeader: some View {
+        HStack(alignment: .firstTextBaseline) {
+            SortableColumnHeader(
+                "ID",
+                field: SessionsSort.id,
+                alignment: .leading,
+                active: sessionsSortBinding,
+                descending: $sessionsSortDescending,
+                defaultDescending: false
+            ).frame(width: 80, alignment: .leading)
+            SortableColumnHeader(
+                "Model",
+                field: SessionsSort.model,
+                alignment: .leading,
+                active: sessionsSortBinding,
+                descending: $sessionsSortDescending,
+                defaultDescending: false
+            ).frame(maxWidth: 220, alignment: .leading)
+            Spacer()
+            SortableColumnHeader(
+                "Tokens",
+                field: SessionsSort.tokens,
+                alignment: .trailing,
+                active: sessionsSortBinding,
+                descending: $sessionsSortDescending
+            ).frame(width: 80)
+            SortableColumnHeader(
+                "Cost",
+                field: SessionsSort.cost,
+                alignment: .trailing,
+                active: sessionsSortBinding,
+                descending: $sessionsSortDescending
+            ).frame(width: 70)
+            SortableColumnHeader(
+                "Last seen",
+                field: SessionsSort.lastSeen,
+                alignment: .trailing,
+                active: sessionsSortBinding,
+                descending: $sessionsSortDescending
+            ).frame(width: 80)
+            // Reserve room for the transcript-icon column so the
+            // header columns line up with the row body.
+            Spacer().frame(width: 24)
         }
     }
 

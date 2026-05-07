@@ -26,7 +26,7 @@ struct HistoryView: View {
             MonthlyChartCard()
             TopDaysCard()
         }
-        .sheet(item: $selectedDay) { sel in
+        .dismissibleModal(item: $selectedDay) { sel in
             DayDetailView(date: sel.date)
         }
     }
@@ -241,8 +241,23 @@ private struct MonthlyChartCard: View {
 
 // MARK: - Top days
 
+enum TopDaysSort: String, CaseIterable, Identifiable {
+    case date, tokens, cost
+    var id: String { rawValue }
+}
+
 private struct TopDaysCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+
+    @AppStorage("pacer.history.topDaysSort", store: PacerSettings.store)
+    private var sortRaw: String = TopDaysSort.cost.rawValue
+    @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
+    private var descending: Bool = true
+
+    private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
+    private var sortBinding: Binding<TopDaysSort> {
+        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
+    }
 
     private struct DayRow: Identifiable {
         let date: String
@@ -251,6 +266,9 @@ private struct TopDaysCard: View {
         var id: String { date }
     }
 
+    /// Top-10 by the user's chosen field. The "top" cap is applied
+    /// AFTER sorting — so changing sort to ascending with a date
+    /// field shows the 10 oldest, not the 10 cheapest.
     private var topRows: [DayRow] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
         for row in aggregates {
@@ -260,7 +278,17 @@ private struct TopDaysCard: View {
             byDate[row.date] = v
         }
         let rows = byDate.map { DayRow(date: $0.key, cost: $0.value.cost, tokens: $0.value.tokens) }
-        return rows.sorted { $0.cost > $1.cost }.prefix(10).map { $0 }
+        let sorted: [DayRow]
+        switch sort {
+        case .date:
+            sorted = rows.sorted { $0.date < $1.date }
+        case .tokens:
+            sorted = rows.sorted { $0.tokens < $1.tokens }
+        case .cost:
+            sorted = rows.sorted { $0.cost < $1.cost }
+        }
+        let oriented = descending ? sorted.reversed() : Array(sorted)
+        return Array(oriented.prefix(10))
     }
 
     var body: some View {
@@ -272,6 +300,34 @@ private struct TopDaysCard: View {
             } else {
                 let maxCost = topRows.map(\.cost).max() ?? 1
                 VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 12) {
+                        // Empty rank column header
+                        Spacer().frame(width: 28)
+                        SortableColumnHeader(
+                            "Date",
+                            field: TopDaysSort.date,
+                            alignment: .leading,
+                            active: sortBinding,
+                            descending: $descending,
+                            defaultDescending: false
+                        ).frame(width: 140, alignment: .leading)
+                        Spacer()
+                        SortableColumnHeader(
+                            "Tokens",
+                            field: TopDaysSort.tokens,
+                            alignment: .trailing,
+                            active: sortBinding,
+                            descending: $descending
+                        ).frame(width: 80)
+                        SortableColumnHeader(
+                            "Cost",
+                            field: TopDaysSort.cost,
+                            alignment: .trailing,
+                            active: sortBinding,
+                            descending: $descending
+                        ).frame(width: 80)
+                    }
+                    Divider().padding(.vertical, 2)
                     ForEach(Array(topRows.enumerated()), id: \.element.id) { idx, row in
                         topRow(idx: idx, row: row, maxCost: maxCost)
                     }
@@ -290,7 +346,10 @@ private struct TopDaysCard: View {
             Text(prettyDate(row.date))
                 .font(.system(size: 12, weight: .medium))
                 .frame(width: 140, alignment: .leading)
-            // Inline mini-bar showing the day's relative cost.
+            // Inline mini-bar still tracks cost (the visual hierarchy
+            // is "this is how expensive this day was" regardless of
+            // which sort field the user picked) — sort just reorders
+            // which days show.
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(Color.primary.opacity(0.06))

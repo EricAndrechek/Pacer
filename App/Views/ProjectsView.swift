@@ -267,7 +267,7 @@ private struct ProjectsContent: View {
                 }
             }
         }
-        .sheet(item: $selected) { sel in
+        .dismissibleModal(item: $selected) { sel in
             ProjectDetailView(
                 projectPath: sel.path,
                 displayName: sel.displayName,

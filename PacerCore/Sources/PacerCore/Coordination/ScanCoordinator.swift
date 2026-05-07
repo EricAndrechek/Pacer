@@ -54,6 +54,20 @@ public final class ScanCoordinator {
     ///         and showed $0 for every CC line without a stored cost).
     public static let currentCostRecomputeVersion = "2"
 
+    /// Version of the project-path canonicalization rules. Bumped when
+    /// a parsing/canonicalization change requires updating in-place
+    /// the `projectPath` field on every existing TokenSample row —
+    /// because the dedup-skip path during a full re-scan otherwise
+    /// never reaches the field. Triggers a one-pass migration on
+    /// first cycle of every persister lifetime where the stored
+    /// version doesn't match.
+    ///
+    /// History:
+    /// - "1" — strip `/.claude/worktrees/<id>` and `/.worktrees/<id>`
+    ///         segments so subagent worktrees attribute back to the
+    ///         parent project.
+    public static let currentPathCanonicalizationVersion = "1"
+
     public struct Configuration: Sendable {
         public var costMode: CostMode
         public var watcherMode: JSONLWatcher.Mode
@@ -281,6 +295,24 @@ public final class ScanCoordinator {
             try activePersister.markEverySampleDirty()
             log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
         }
+
+        // Path-canonicalization migration. Walks every TokenSample,
+        // re-applies the worktree-stripping canonicalizer in place,
+        // and folds both the old and new (project, date) pairs into
+        // dirtyProjectDates so the project-aggregate recomputer
+        // moves the rollup over. We need this in addition to the
+        // scanVersion-driven full re-scan because the scan's
+        // dedup-skip path bypasses field updates on existing rows.
+        let needsPathMigration = (
+            try fetchMeta(ClaudeCodeMetaKey.pathCanonicalizationVersion)
+            != Self.currentPathCanonicalizationVersion
+        )
+        if needsPathMigration {
+            let changed = try activePersister.canonicalizeProjectPaths()
+            if changed > 0 {
+                log("integrity: canonicalized \(changed) sample(s) — worktree paths now attribute to parent projects")
+            }
+        }
         let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
@@ -345,6 +377,10 @@ public final class ScanCoordinator {
         try writeMeta(
             ClaudeCodeMetaKey.costRecomputeVersion,
             value: Self.currentCostRecomputeVersion
+        )
+        try writeMeta(
+            ClaudeCodeMetaKey.pathCanonicalizationVersion,
+            value: Self.currentPathCanonicalizationVersion
         )
         try writeMeta(
             ClaudeCodeMetaKey.lastIncrementalScanAt,

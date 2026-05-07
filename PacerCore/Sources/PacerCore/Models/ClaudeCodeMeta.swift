@@ -60,4 +60,15 @@ public enum ClaudeCodeMetaKey {
     /// stuck with $0 project costs even after upgrading, because the
     /// scan only touches "dirty" buckets.
     public static let costRecomputeVersion = "cost_recompute_version"
+
+    /// Version of the project-path canonicalization rules applied to
+    /// existing TokenSample rows. When this mismatches the running
+    /// build's `currentPathCanonicalizationVersion`, ScanCoordinator
+    /// walks every TokenSample and re-applies
+    /// `ProjectPathCanonicalizer.canonicalize` in place. We need a
+    /// separate version key from `scanVersion` because the
+    /// dedup-skip path during a full re-scan never updates existing
+    /// rows — re-parsing produces new ParsedUsageEntry values that
+    /// the SamplePersister discards as duplicates by `dedupKey`.
+    public static let pathCanonicalizationVersion = "path_canonicalization_version"
 }

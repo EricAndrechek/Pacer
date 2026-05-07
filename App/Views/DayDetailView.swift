@@ -10,7 +10,7 @@ import PacerCore
 struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismissModal) private var dismissModal
     @Query private var aggregates: [DailyAggregate]
     @Query private var samples: [TokenSample]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
@@ -117,7 +117,7 @@ struct DayDetailView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Close") { dismiss() }
+            Button("Close") { dismissModal() }
                 .keyboardShortcut(.cancelAction)
         }
     }
@@ -161,6 +161,56 @@ struct DayDetailView: View {
         }
     }
 
+    @AppStorage("pacer.dayDetail.modelsSort", store: PacerSettings.store)
+    private var modelsSortRaw: String = DayModelsSort.cost.rawValue
+    @AppStorage("pacer.dayDetail.modelsSortDescending", store: PacerSettings.store)
+    private var modelsSortDescending: Bool = true
+
+    @AppStorage("pacer.dayDetail.projectsSort", store: PacerSettings.store)
+    private var projectsSortRaw: String = DayProjectsSort.cost.rawValue
+    @AppStorage("pacer.dayDetail.projectsSortDescending", store: PacerSettings.store)
+    private var projectsSortDescending: Bool = true
+
+    private var modelsSort: DayModelsSort {
+        DayModelsSort(rawValue: modelsSortRaw) ?? .cost
+    }
+    private var projectsSort: DayProjectsSort {
+        DayProjectsSort(rawValue: projectsSortRaw) ?? .cost
+    }
+    private var modelsSortBinding: Binding<DayModelsSort> {
+        Binding(get: { modelsSort }, set: { modelsSortRaw = $0.rawValue })
+    }
+    private var projectsSortBinding: Binding<DayProjectsSort> {
+        Binding(get: { projectsSort }, set: { projectsSortRaw = $0.rawValue })
+    }
+
+    private var sortedAggregates: [DailyAggregate] {
+        let sorted: [DailyAggregate]
+        switch modelsSort {
+        case .name:
+            sorted = aggregates.sorted { $0.model < $1.model }
+        case .tokens:
+            let totalTokens: (DailyAggregate) -> Int64 = { $0.inputTokens + $0.outputTokens + $0.cacheReadTokens }
+            sorted = aggregates.sorted { totalTokens($0) < totalTokens($1) }
+        case .cost:
+            sorted = aggregates.sorted { $0.totalCostUSD < $1.totalCostUSD }
+        }
+        return modelsSortDescending ? sorted.reversed() : sorted
+    }
+
+    private var sortedProjectRows: [ProjectRow] {
+        let sorted: [ProjectRow]
+        switch projectsSort {
+        case .name:
+            sorted = projectRows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        case .tokens:
+            sorted = projectRows.sorted { $0.tokens < $1.tokens }
+        case .cost:
+            sorted = projectRows.sorted { $0.cost < $1.cost }
+        }
+        return projectsSortDescending ? sorted.reversed() : sorted
+    }
+
     private var modelsCard: some View {
         PacerCard("Models") {
             HStack(alignment: .top, spacing: 24) {
@@ -175,14 +225,45 @@ struct DayDetailView: View {
                 }
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        SortableColumnHeader(
+                            "Model",
+                            field: DayModelsSort.name,
+                            alignment: .leading,
+                            active: modelsSortBinding,
+                            descending: $modelsSortDescending,
+                            defaultDescending: false
+                        )
+                        Spacer()
+                        SortableColumnHeader(
+                            "Tokens",
+                            field: DayModelsSort.tokens,
+                            alignment: .trailing,
+                            active: modelsSortBinding,
+                            descending: $modelsSortDescending
+                        ).frame(width: 70)
+                        SortableColumnHeader(
+                            "Cost",
+                            field: DayModelsSort.cost,
+                            alignment: .trailing,
+                            active: modelsSortBinding,
+                            descending: $modelsSortDescending
+                        ).frame(width: 70)
+                    }
+                    Divider().padding(.vertical, 2)
                     let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                    ForEach(aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }, id: \.dateModelKey) { agg in
+                    ForEach(sortedAggregates, id: \.dateModelKey) { agg in
                         HStack(alignment: .firstTextBaseline) {
                             Text(pacerShortModel(agg.model))
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
+                            Text(pacerTokens(agg.inputTokens + agg.outputTokens + agg.cacheReadTokens))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .frame(width: 70, alignment: .trailing)
                             Text(pacerCost(agg.totalCostUSD))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
@@ -202,9 +283,39 @@ struct DayDetailView: View {
     }
 
     private var projectsCard: some View {
-        PacerCard("Projects") {
+        PacerCard("Projects", trailing: {
+            Text("\(projectRows.count) project\(projectRows.count == 1 ? "" : "s")")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(projectRows) { row in
+                HStack {
+                    SortableColumnHeader(
+                        "Project",
+                        field: DayProjectsSort.name,
+                        alignment: .leading,
+                        active: projectsSortBinding,
+                        descending: $projectsSortDescending,
+                        defaultDescending: false
+                    )
+                    Spacer()
+                    SortableColumnHeader(
+                        "Tokens",
+                        field: DayProjectsSort.tokens,
+                        alignment: .trailing,
+                        active: projectsSortBinding,
+                        descending: $projectsSortDescending
+                    ).frame(width: 90)
+                    SortableColumnHeader(
+                        "Cost",
+                        field: DayProjectsSort.cost,
+                        alignment: .trailing,
+                        active: projectsSortBinding,
+                        descending: $projectsSortDescending
+                    ).frame(width: 70)
+                }
+                Divider().padding(.vertical, 2)
+                ForEach(sortedProjectRows) { row in
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.displayName)
@@ -232,4 +343,15 @@ struct DayDetailView: View {
             }
         }
     }
+}
+
+/// Sort fields for the Day detail's Models / Projects mini-tables.
+enum DayModelsSort: String, CaseIterable, Identifiable {
+    case name, tokens, cost
+    var id: String { rawValue }
+}
+
+enum DayProjectsSort: String, CaseIterable, Identifiable {
+    case name, tokens, cost
+    var id: String { rawValue }
 }
