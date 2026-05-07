@@ -19,9 +19,9 @@ struct DashboardView: View {
                     .padding(.bottom, 4)
 
                 TodaySummaryCard()
+                RateLimitGaugesCard()
 
-                // Future cards land here in M6.2/M6.3/M6.4:
-                //   - RateLimitGaugesCard()  (M6.2)
+                // Future cards land here in M6.3/M6.4:
                 //   - DailyCostChartCard()   (M6.3)
                 //   - PerModelTodayCard()    (M6.4)
             }
