@@ -7,16 +7,25 @@ import PacerCore
 /// the in-process scan) so the table is sub-10ms even on populated
 /// installs, and never iterates raw `TokenSample`s.
 ///
-/// Range picker controls how far back to look (persisted across
-/// launches via @AppStorage). Sort picker controls the table's
-/// primary order. Filter field narrows the list by path. Click a
-/// project to drill into the detail sheet.
+/// **Layout**: page header is just title + subtitle. Range picker
+/// lives inline next to the data card it scopes (per the user's
+/// "closer to the thing we are showing" feedback). Sort is driven by
+/// clicking the table column headers; arrows on the active column
+/// indicate direction. Both range and sort persist via App Group
+/// `UserDefaults` under per-view keys so Models doesn't share state
+/// with Projects.
 struct ProjectsView: View {
-    @AppStorage(PacerSettings.Key.timeRange, store: PacerSettings.store)
+    @AppStorage("pacer.projects.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
     @AppStorage(PacerSettings.Key.projectsSort, store: PacerSettings.store)
     private var sortRaw: String = ProjectSort.cost.rawValue
+
+    @AppStorage("pacer.projects.sortDescending", store: PacerSettings.store)
+    private var sortDescending: Bool = true
+
+    @AppStorage("pacer.projects.overviewMetric", store: PacerSettings.store)
+    private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
     @State private var searchText: String = ""
 
@@ -26,124 +35,42 @@ struct ProjectsView: View {
     private var sort: ProjectSort {
         ProjectSort(rawValue: sortRaw) ?? .cost
     }
+    private var overviewMetric: ProjectMetric {
+        ProjectMetric(rawValue: overviewMetricRaw) ?? .cost
+    }
 
     var body: some View {
-        PageScaffold("Projects", subtitle: "Per-project rollup of cost and tokens.", trailing: {
-            rangePicker
-        }) {
-            HStack(spacing: 12) {
-                searchField
-                sortPicker
-            }
-            // Re-key on (range, sort) so the inner view's @Query
-            // rebuilds with a fresh predicate when either changes.
+        PageScaffold("Projects", subtitle: "Per-project rollup of cost and tokens.") {
             ProjectsContent(
                 range: range,
                 sort: sort,
-                searchText: searchText
+                descending: sortDescending,
+                overviewMetric: overviewMetric,
+                searchText: searchText,
+                rangeBinding: rangeBinding,
+                sortFieldBinding: sortFieldBinding,
+                sortDescendingBinding: $sortDescending,
+                overviewMetricBinding: overviewMetricBinding,
+                searchBinding: $searchText
             )
-            .id("\(range.rawValue)|\(sort.rawValue)")
+            .id("\(range.rawValue)")
         }
-    }
-
-    private var rangePicker: some View {
-        Picker("", selection: rangeBinding) {
-            ForEach(TimeRange.allCases) { r in
-                Text(r.label).tag(r)
-            }
-        }
-        .pickerStyle(.segmented)
-        .frame(maxWidth: 320)
-        .controlSize(.small)
-        .labelsHidden()
     }
 
     private var rangeBinding: Binding<TimeRange> {
-        Binding(
-            get: { range },
-            set: { rangeRaw = $0.rawValue }
-        )
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
     }
-
-    private var sortBinding: Binding<ProjectSort> {
-        Binding(
-            get: { sort },
-            set: { sortRaw = $0.rawValue }
-        )
+    private var sortFieldBinding: Binding<ProjectSort> {
+        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
     }
-
-    private var sortPicker: some View {
-        Menu {
-            ForEach(ProjectSort.allCases) { s in
-                Button {
-                    sortRaw = s.rawValue
-                } label: {
-                    if s == sort {
-                        Label(s.label, systemImage: "checkmark")
-                    } else {
-                        Text(s.label)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 11))
-                Text("Sort: \(sort.label)")
-                    .font(.system(size: 12))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .textBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(PacerDesign.cardStroke, lineWidth: 1)
-        )
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .font(.system(size: 12))
-            TextField("Filter projects by path", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-            if !searchText.isEmpty {
-                Button {
-                    searchText = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(nsColor: .textBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(PacerDesign.cardStroke, lineWidth: 1)
-        )
+    private var overviewMetricBinding: Binding<ProjectMetric> {
+        Binding(get: { overviewMetric }, set: { overviewMetricRaw = $0.rawValue })
     }
 }
 
-/// What column the Projects table sorts by. Persisted via
-/// `PacerSettings.Key.projectsSort`. Hooked up in the toolbar Menu so
-/// the user can switch without re-rendering the entire page tree.
+/// What column the Projects table sorts by. The direction is held in
+/// a separate `Bool` so users can sort ascending OR descending on any
+/// column — both bits are persisted independently.
 enum ProjectSort: String, CaseIterable, Identifiable {
     case cost
     case tokens
@@ -159,7 +86,24 @@ enum ProjectSort: String, CaseIterable, Identifiable {
         case .tokens:     return "Tokens"
         case .sessions:   return "Sessions"
         case .lastActive: return "Last active"
-        case .name:       return "Name"
+        case .name:       return "Project"
+        }
+    }
+}
+
+/// Metric a metric-pickable card colors / sizes by. Shared between
+/// the top-projects donut card and the heatmap.
+enum ProjectMetric: String, CaseIterable, Identifiable {
+    case cost
+    case tokens
+    case sessions
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .cost:     return "Cost"
+        case .tokens:   return "Tokens"
+        case .sessions: return "Sessions"
         }
     }
 }
@@ -179,8 +123,27 @@ private struct ProjectsContent: View {
     let rangeSince: Date?
     let searchText: String
     let sort: ProjectSort
+    let descending: Bool
+    let overviewMetric: ProjectMetric
 
-    init(range: TimeRange, sort: ProjectSort, searchText: String = "") {
+    let rangeBinding: Binding<TimeRange>
+    let sortFieldBinding: Binding<ProjectSort>
+    let sortDescendingBinding: Binding<Bool>
+    let overviewMetricBinding: Binding<ProjectMetric>
+    let searchBinding: Binding<String>
+
+    init(
+        range: TimeRange,
+        sort: ProjectSort,
+        descending: Bool,
+        overviewMetric: ProjectMetric,
+        searchText: String,
+        rangeBinding: Binding<TimeRange>,
+        sortFieldBinding: Binding<ProjectSort>,
+        sortDescendingBinding: Binding<Bool>,
+        overviewMetricBinding: Binding<ProjectMetric>,
+        searchBinding: Binding<String>
+    ) {
         let since: Date?
         let cutoffString: String?
         if let days = range.days {
@@ -194,6 +157,13 @@ private struct ProjectsContent: View {
         self.rangeSince = since
         self.searchText = searchText
         self.sort = sort
+        self.descending = descending
+        self.overviewMetric = overviewMetric
+        self.rangeBinding = rangeBinding
+        self.sortFieldBinding = sortFieldBinding
+        self.sortDescendingBinding = sortDescendingBinding
+        self.overviewMetricBinding = overviewMetricBinding
+        self.searchBinding = searchBinding
         if let cutoffString {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -253,18 +223,24 @@ private struct ProjectsContent: View {
                 modelCount: a.modelCount
             )
         }
+        return apply(sort: sort, descending: descending, to: unsorted)
+    }
+
+    private func apply(sort: ProjectSort, descending: Bool, to rows: [ProjectRow]) -> [ProjectRow] {
+        let sorted: [ProjectRow]
         switch sort {
         case .cost:
-            return unsorted.sorted { $0.cost > $1.cost }
+            sorted = rows.sorted { $0.cost < $1.cost }
         case .tokens:
-            return unsorted.sorted { $0.totalTokens > $1.totalTokens }
+            sorted = rows.sorted { $0.totalTokens < $1.totalTokens }
         case .sessions:
-            return unsorted.sorted { $0.sessionCount > $1.sessionCount }
+            sorted = rows.sorted { $0.sessionCount < $1.sessionCount }
         case .lastActive:
-            return unsorted.sorted { $0.lastActive > $1.lastActive }
+            sorted = rows.sorted { $0.lastActive < $1.lastActive }
         case .name:
-            return unsorted.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            sorted = rows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         }
+        return descending ? sorted.reversed() : sorted
     }
 
     private var rows: [ProjectRow] {
@@ -330,14 +306,28 @@ private struct ProjectsContent: View {
         }
     }
 
+    /// Top-N projects donut + ranking. The metric the donut/legend uses
+    /// (cost, tokens, sessions) is user-selectable via segmented picker
+    /// in the card header — mirrors the heatmap's metric picker so the
+    /// app feels consistent.
     private var overviewCard: some View {
-        PacerCard("Top projects by cost") {
-            let top = Array(rows.prefix(5))
-            let totalCost = rows.reduce(0) { $0 + $1.cost }
+        let top = Array(rows.prefix(5))
+        let totalForMetric = rows.reduce(0.0) { $0 + value(for: overviewMetric, in: $1) }
+        return PacerCard("Top projects", trailing: {
+            Picker("", selection: overviewMetricBinding) {
+                ForEach(ProjectMetric.allCases) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 240)
+            .controlSize(.small)
+            .labelsHidden()
+        }) {
             HStack(alignment: .top, spacing: 24) {
                 Chart(top) { row in
                     SectorMark(
-                        angle: .value("Cost", row.cost),
+                        angle: .value("Metric", value(for: overviewMetric, in: row)),
                         innerRadius: .ratio(0.6),
                         angularInset: 1.5
                     )
@@ -348,6 +338,7 @@ private struct ProjectsContent: View {
                 .chartLegend(.hidden)
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(top.enumerated()), id: \.offset) { idx, row in
+                        let v = value(for: overviewMetric, in: row)
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
                                 .fill(legendColor(idx))
@@ -357,12 +348,12 @@ private struct ProjectsContent: View {
                                 .lineLimit(1)
                                 .frame(maxWidth: 220, alignment: .leading)
                             Spacer(minLength: 8)
-                            Text(pacerCost(row.cost))
+                            Text(formatMetric(v, kind: overviewMetric))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
-                            if totalCost > 0 {
-                                Text("\(Int((row.cost / totalCost * 100).rounded()))%")
+                            if totalForMetric > 0 {
+                                Text("\(Int((v / totalForMetric * 100).rounded()))%")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                                     .monospacedDigit()
@@ -375,11 +366,41 @@ private struct ProjectsContent: View {
         }
     }
 
+    private func value(for metric: ProjectMetric, in row: ProjectRow) -> Double {
+        switch metric {
+        case .cost:     return row.cost
+        case .tokens:   return Double(row.totalTokens)
+        case .sessions: return Double(row.sessionCount)
+        }
+    }
+
+    private func formatMetric(_ v: Double, kind: ProjectMetric) -> String {
+        switch kind {
+        case .cost:     return pacerCost(v)
+        case .tokens:   return pacerTokens(Int64(v))
+        case .sessions: return "\(Int(v))"
+        }
+    }
+
+    /// Big project list with sortable column headers + range picker
+    /// inline in the card header. The range picker lives here (not in
+    /// the page toolbar) per the "closer to the thing we are showing"
+    /// principle — every card that scopes its data to a time window
+    /// announces the window right next to the data.
     private var projectListCard: some View {
         PacerCard("All projects", trailing: {
-            Text("\(rows.count) project\(rows.count == 1 ? "" : "s")")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                searchField
+                Picker("", selection: rangeBinding) {
+                    ForEach(TimeRange.allCases) { r in
+                        Text(r.label).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 320)
+                .controlSize(.small)
+                .labelsHidden()
+            }
         }) {
             VStack(alignment: .leading, spacing: 0) {
                 tableHeader
@@ -395,19 +416,95 @@ private struct ProjectsContent: View {
                         projectRow(row)
                     }
                 }
+                HStack {
+                    Text("\(rows.count) project\(rows.count == 1 ? "" : "s")")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.top, 8)
             }
         }
     }
 
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+            TextField("Filter", text: searchBinding)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .frame(width: 140)
+            if !searchText.isEmpty {
+                Button {
+                    searchBinding.wrappedValue = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(PacerDesign.cardStroke, lineWidth: 1)
+        )
+    }
+
+    /// Column headers double as sort controls. Click an inactive column
+    /// to make it the sort field; click the active column to flip
+    /// direction. Visual: tracked uppercase label + a small chevron on
+    /// the active column.
     private var tableHeader: some View {
         HStack(alignment: .firstTextBaseline) {
-            Eyebrow(text: "Project")
-                .padding(.leading, 8)
+            SortableColumnHeader(
+                "Project",
+                field: ProjectSort.name,
+                alignment: .leading,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding,
+                defaultDescending: false
+            )
+            .padding(.leading, 8)
+
             Spacer()
-            Eyebrow(text: "Tokens").frame(width: 100, alignment: .trailing)
-            Eyebrow(text: "Sessions").frame(width: 70, alignment: .trailing)
-            Eyebrow(text: "Last").frame(width: 90, alignment: .trailing)
-            Eyebrow(text: "Cost").frame(width: 84, alignment: .trailing)
+
+            SortableColumnHeader(
+                "Tokens",
+                field: ProjectSort.tokens,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 100)
+            SortableColumnHeader(
+                "Sessions",
+                field: ProjectSort.sessions,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 70)
+            SortableColumnHeader(
+                "Last",
+                field: ProjectSort.lastActive,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 90)
+            SortableColumnHeader(
+                "Cost",
+                field: ProjectSort.cost,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 84)
         }
         .padding(.trailing, 8)
         .padding(.bottom, 4)

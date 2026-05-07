@@ -7,32 +7,55 @@ import PacerCore
 /// name. Useful for "is sonnet doing the bulk of work or am I always
 /// reaching for opus?" / "did I switch off haiku 3 months ago?"
 struct ModelsView: View {
-    @AppStorage(PacerSettings.Key.timeRange, store: PacerSettings.store)
+    @AppStorage("pacer.models.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
+    @AppStorage("pacer.models.sortField", store: PacerSettings.store)
+    private var sortRaw: String = ModelsSort.cost.rawValue
+
+    @AppStorage("pacer.models.sortDescending", store: PacerSettings.store)
+    private var sortDescending: Bool = true
+
     private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .ninetyDays }
+    private var sort: ModelsSort { ModelsSort(rawValue: sortRaw) ?? .cost }
 
     private var rangeBinding: Binding<TimeRange> {
-        Binding(
-            get: { range },
-            set: { rangeRaw = $0.rawValue }
-        )
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
+    private var sortFieldBinding: Binding<ModelsSort> {
+        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
     }
 
     var body: some View {
-        PageScaffold("Models", subtitle: "How traffic splits across Claude models.", trailing: {
-            Picker("", selection: rangeBinding) {
-                ForEach(TimeRange.allCases) { r in
-                    Text(r.label).tag(r)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 320)
-            .controlSize(.small)
-            .labelsHidden()
-        }) {
-            ModelsContent(range: range)
-                .id(range)
+        PageScaffold("Models", subtitle: "How traffic splits across Claude models.") {
+            ModelsContent(
+                range: range,
+                sort: sort,
+                descending: sortDescending,
+                rangeBinding: rangeBinding,
+                sortFieldBinding: sortFieldBinding,
+                sortDescendingBinding: $sortDescending
+            )
+            .id(range)
+        }
+    }
+}
+
+enum ModelsSort: String, CaseIterable, Identifiable {
+    case name
+    case tokens
+    case days
+    case lastSeen
+    case cost
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .name:     return "Model"
+        case .tokens:   return "Tokens"
+        case .days:     return "Days"
+        case .lastSeen: return "Last seen"
+        case .cost:     return "Cost"
         }
     }
 }
@@ -40,7 +63,25 @@ struct ModelsView: View {
 private struct ModelsContent: View {
     @Query private var aggregates: [DailyAggregate]
 
-    init(range: TimeRange) {
+    let sort: ModelsSort
+    let descending: Bool
+    let rangeBinding: Binding<TimeRange>
+    let sortFieldBinding: Binding<ModelsSort>
+    let sortDescendingBinding: Binding<Bool>
+
+    init(
+        range: TimeRange,
+        sort: ModelsSort,
+        descending: Bool,
+        rangeBinding: Binding<TimeRange>,
+        sortFieldBinding: Binding<ModelsSort>,
+        sortDescendingBinding: Binding<Bool>
+    ) {
+        self.sort = sort
+        self.descending = descending
+        self.rangeBinding = rangeBinding
+        self.sortFieldBinding = sortFieldBinding
+        self.sortDescendingBinding = sortDescendingBinding
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
@@ -98,7 +139,7 @@ private struct ModelsContent: View {
             if r.date > a.lastSeen { a.lastSeen = r.date }
             byModel[r.model] = a
         }
-        return byModel.map { (model, a) in
+        let unsorted = byModel.map { (model, a) in
             ModelRow(
                 model: model,
                 displayName: pacerShortModel(model),
@@ -111,7 +152,21 @@ private struct ModelsContent: View {
                 firstSeen: a.firstSeen,
                 lastSeen: a.lastSeen
             )
-        }.sorted { $0.cost > $1.cost }
+        }
+        let sorted: [ModelRow]
+        switch sort {
+        case .name:
+            sorted = unsorted.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        case .tokens:
+            sorted = unsorted.sorted { $0.totalTokens < $1.totalTokens }
+        case .days:
+            sorted = unsorted.sorted { $0.activeDays < $1.activeDays }
+        case .lastSeen:
+            sorted = unsorted.sorted { $0.lastSeen < $1.lastSeen }
+        case .cost:
+            sorted = unsorted.sorted { $0.cost < $1.cost }
+        }
+        return descending ? sorted.reversed() : sorted
     }
 
     private var dailyMix: [DailyMix] {
@@ -217,9 +272,17 @@ private struct ModelsContent: View {
 
     private var listCard: some View {
         PacerCard("All models", trailing: {
-            Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+            // Inline range picker — same "controls live next to the data
+            // they scope" pattern as ProjectsView.
+            Picker("", selection: rangeBinding) {
+                ForEach(TimeRange.allCases) { r in
+                    Text(r.label).tag(r)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 320)
+            .controlSize(.small)
+            .labelsHidden()
         }) {
             VStack(alignment: .leading, spacing: 0) {
                 tableHeader
@@ -229,19 +292,57 @@ private struct ModelsContent: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                 }
+                HStack {
+                    Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.top, 8)
             }
         }
     }
 
     private var tableHeader: some View {
         HStack {
-            Eyebrow(text: "Model")
-                .padding(.leading, 8)
+            SortableColumnHeader(
+                "Model",
+                field: ModelsSort.name,
+                alignment: .leading,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding,
+                defaultDescending: false
+            )
+            .padding(.leading, 8)
             Spacer()
-            Eyebrow(text: "Tokens").frame(width: 100, alignment: .trailing)
-            Eyebrow(text: "Days").frame(width: 60, alignment: .trailing)
-            Eyebrow(text: "Last seen").frame(width: 100, alignment: .trailing)
-            Eyebrow(text: "Cost").frame(width: 84, alignment: .trailing)
+            SortableColumnHeader(
+                "Tokens",
+                field: ModelsSort.tokens,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 100)
+            SortableColumnHeader(
+                "Days",
+                field: ModelsSort.days,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 60)
+            SortableColumnHeader(
+                "Last seen",
+                field: ModelsSort.lastSeen,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 100)
+            SortableColumnHeader(
+                "Cost",
+                field: ModelsSort.cost,
+                alignment: .trailing,
+                active: sortFieldBinding,
+                descending: sortDescendingBinding
+            ).frame(width: 84)
         }
         .padding(.trailing, 8)
         .padding(.bottom, 4)

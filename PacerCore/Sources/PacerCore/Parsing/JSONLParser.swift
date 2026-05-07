@@ -78,7 +78,7 @@ public enum JSONLLineParser {
             storedCostUSD: raw.costUSD,
             dedupKey: dedupKey,
             sessionId: raw.sessionId,
-            projectPath: raw.cwd,
+            projectPath: raw.cwd.map { ProjectPathCanonicalizer.canonicalize($0) },
             claudeCodeVersion: raw.version,
             isApiErrorMessage: raw.isApiErrorMessage ?? false
         )

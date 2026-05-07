@@ -22,7 +22,22 @@ public final class ScanCoordinator {
     /// Bump this constant when a parser/aggregation change requires
     /// re-reading historical JSONL. The daemon will detect the version
     /// drift on next launch and wipe cursors so every file is re-read.
-    public static let currentScanVersion = "1"
+    /// Bump when a parsing change should reprocess every JSONL line.
+    /// The scan compares this to the stored value in
+    /// `ClaudeCodeMeta.scanVersion`; on mismatch it forces a full
+    /// re-scan (every cursor reset to byte offset 0) so all samples
+    /// re-parse with the new logic.
+    ///
+    /// History:
+    /// - "1" — initial release.
+    /// - "2" — `JSONLParser` now runs `cwd` through
+    ///         `ProjectPathCanonicalizer` so worktree-spawned agents
+    ///         attribute back to the parent project. Forced re-scan
+    ///         updates `TokenSample.projectPath` on the existing
+    ///         rows, then the cost-recompute pass on the same cycle
+    ///         rebuilds `ProjectDailyAggregate` rows under the new
+    ///         project keys.
+    public static let currentScanVersion = "2"
 
     /// Bumped when a code change requires recomputing the cost columns
     /// on existing aggregates. ScanCoordinator detects a mismatch on

@@ -256,32 +256,7 @@ struct ProjectDetailView: View {
         }) {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(sessionRows.prefix(20)), id: \.sessionId) { row in
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(String(row.sessionId.prefix(8)))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 80, alignment: .leading)
-                        Text(pacerShortModel(row.topModel))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .frame(maxWidth: 220, alignment: .leading)
-                        Spacer(minLength: 8)
-                        Text(pacerTokens(row.totalTokens))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 80, alignment: .trailing)
-                        Text(pacerCost(row.cumulativeCostUSD))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(width: 70, alignment: .trailing)
-                        Text(pacerRelative(row.lastSeenAt))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 90, alignment: .trailing)
-                    }
-                    .padding(.vertical, 2)
+                    sessionRowView(row)
                 }
                 if sessionRows.count > 20 {
                     Text("…and \(sessionRows.count - 20) more")
@@ -289,6 +264,71 @@ struct ProjectDetailView: View {
                         .foregroundStyle(.tertiary)
                         .padding(.top, 4)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sessionRowView(_ row: SessionInfo) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(String(row.sessionId.prefix(8)))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .leading)
+            Text(pacerShortModel(row.topModel))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(maxWidth: 220, alignment: .leading)
+            Spacer(minLength: 8)
+            Text(pacerTokens(row.totalTokens))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 80, alignment: .trailing)
+            Text(pacerCost(row.cumulativeCostUSD))
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 70, alignment: .trailing)
+            Text(pacerRelative(row.lastSeenAt))
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .frame(width: 80, alignment: .trailing)
+            // Reveal-transcript button. Walks `~/.claude/projects/*`
+            // looking for `<sessionId>.jsonl` (subagent worktrees write
+            // into a different encoded-cwd directory than the parent
+            // project, so a literal lookup against `projectPath`
+            // wouldn't work — we have to search). On hit, open Finder
+            // selecting the file. Disabled-look when not found.
+            Button {
+                openTranscript(for: row.sessionId)
+            } label: {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.plain)
+            .help("Reveal transcript JSONL in Finder")
+            .frame(width: 24, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Open Finder selecting the session's JSONL transcript. Searches
+    /// every `~/.claude/projects/*` because canonicalized projects
+    /// (worktree-spawned agents) live under a different encoded-cwd
+    /// directory than the project they're attributed to.
+    private func openTranscript(for sessionId: String) {
+        let fm = FileManager.default
+        let root = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects", isDirectory: true)
+        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return
+        }
+        for dir in dirs {
+            let candidate = dir.appendingPathComponent("\(sessionId).jsonl")
+            if fm.fileExists(atPath: candidate.path) {
+                NSWorkspace.shared.activateFileViewerSelecting([candidate])
+                return
             }
         }
     }
