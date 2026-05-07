@@ -143,7 +143,20 @@ struct ProjectDetailView: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
             }
-            Spacer()
+            Spacer(minLength: 12)
+            // Convenience for the user — jump to the project directory
+            // in Finder. Disabled for the synthetic "(unknown)" path
+            // that Pacer uses for samples whose JSONL line lacks `cwd`.
+            if projectPath != ProjectDailyAggregate.unknownProjectPath {
+                Button {
+                    let url = URL(fileURLWithPath: projectPath)
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                        .font(.system(size: 12))
+                }
+                .help("Open this project's folder in Finder")
+            }
             Button("Close") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }

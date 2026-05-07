@@ -26,7 +26,9 @@ public actor PricingTable {
     /// Provider-prefix candidates we try when the literal model name
     /// isn't found. Order matters — most-likely first. Sourced from
     /// ccusage's `CLAUDE_PROVIDER_PREFIXES` (apps/ccusage/src/_pricing-fetcher.ts:6-12).
-    private static let providerPrefixes: [String] = [
+    /// Internal (not private) so `Snapshot` below can reuse the same
+    /// list without duplication.
+    static let providerPrefixes: [String] = [
         "anthropic/",
         "claude-3-5-",
         "claude-3-",
@@ -94,6 +96,45 @@ public actor PricingTable {
 
     public func loadedTimestamp() -> Date? { loadedAt }
     public func modelCount() -> Int { pricingByModel.count }
+
+    /// Sendable, sync-lookup snapshot of the current pricing dictionary.
+    /// Used by recomputers and live views that walk thousands of
+    /// samples and would otherwise need to `await` the actor for each
+    /// per-row pricing lookup. Snapshot reproduces the actor's fuzzy-
+    /// match algorithm exactly so callers can swap one for the other
+    /// without behavior drift.
+    public func snapshot() -> Snapshot {
+        Snapshot(pricingByModel: pricingByModel)
+    }
+
+    public struct Snapshot: Sendable {
+        public let pricingByModel: [String: LiteLLMModelPricing]
+
+        public init(pricingByModel: [String: LiteLLMModelPricing]) {
+            self.pricingByModel = pricingByModel
+        }
+
+        /// Mirror of `PricingTable.pricing(for:)`. Same provider-prefix
+        /// fallback, same bidirectional substring fallback. Sync.
+        public func pricing(for model: String) -> LiteLLMModelPricing? {
+            if let direct = pricingByModel[model] {
+                return direct
+            }
+            for prefix in PricingTable.providerPrefixes {
+                if let hit = pricingByModel[prefix + model] {
+                    return hit
+                }
+            }
+            let modelLower = model.lowercased()
+            for (key, value) in pricingByModel {
+                let keyLower = key.lowercased()
+                if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
+                    return value
+                }
+            }
+            return nil
+        }
+    }
 
     // MARK: - Private
 

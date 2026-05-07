@@ -129,7 +129,16 @@ private struct MonthlyChartCard: View {
     var body: some View {
         let total = monthly.reduce(0) { $0 + $1.cost }
         PacerCard("Last 12 months", trailing: {
-            if !monthly.isEmpty {
+            if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
+                HStack(spacing: 8) {
+                    Text(longMonth(row.month))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(pacerCost(row.cost))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                }
+            } else if !monthly.isEmpty {
                 Text("total \(pacerCost(total))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -163,31 +172,15 @@ private struct MonthlyChartCard: View {
                     }
                 }
             }
-            if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
-                RuleMark(x: .value("Selected", selectedMonth))
+            // Selection callout moved to the card header so the chart
+            // doesn't reflow on hover. Just keep a thin dashed rule
+            // to mark the selected bar.
+            if selectedMonth != nil,
+               let m = selectedMonth,
+               monthly.contains(where: { $0.month == m }) {
+                RuleMark(x: .value("Selected", m))
                     .foregroundStyle(.secondary.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                    .annotation(position: .top, alignment: .center, spacing: 4) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(longMonth(row.month))
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(.secondary)
-                            Text(pacerCost(row.cost))
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(nsColor: .controlBackgroundColor))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(PacerDesign.cardStroke, lineWidth: 1)
-                                )
-                        )
-                        .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
-                    }
             }
         }
         .frame(height: 220)
@@ -217,6 +210,10 @@ private struct MonthlyChartCard: View {
         }
     }
 
+    /// `2026-04` → `Apr` (or `Apr '26` when the visible window straddles
+    /// a year boundary). Previously this rendered as "Apr 26" which
+    /// looked like the 26th of April rather than April 2026 — confusing
+    /// when the cells are big.
     private func shortMonth(_ ym: String) -> String {
         guard ym.count == 7,
               let yearInt = Int(ym.prefix(4)),
@@ -224,7 +221,11 @@ private struct MonthlyChartCard: View {
         else { return ym }
         let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
         guard monthInt >= 1 && monthInt <= 12 else { return ym }
-        return "\(names[monthInt - 1]) \(yearInt % 100)"
+        let yearsInWindow = Set(monthly.map { String($0.month.prefix(4)) }).count
+        if yearsInWindow > 1 {
+            return "\(names[monthInt - 1]) ’\(String(format: "%02d", yearInt % 100))"
+        }
+        return names[monthInt - 1]
     }
 
     private func longMonth(_ ym: String) -> String {

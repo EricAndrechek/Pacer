@@ -96,6 +96,35 @@ public struct CostCalculator: Sendable {
         return inputCost + outputCost + cacheReadCost + cacheCreate5mCost + cacheCreate1hCost
     }
 
+    /// Per-sample cost given a synchronous pricing snapshot. Mirrors
+    /// the `cost(for:)` actor-method logic but takes a Sendable snapshot
+    /// instead of the live actor — so views and recomputers walking
+    /// thousands of samples avoid an `await` per row.
+    ///
+    /// Honors `mode`:
+    /// - `.display`  — `storedCostUSD ?? 0`
+    /// - `.auto`     — `storedCostUSD ?? compute-from-tokens`
+    /// - `.calculate`— always compute from tokens (storedCostUSD ignored)
+    public static func cost(
+        storedCostUSD: Double?,
+        model: String,
+        breakdown: TokenBreakdown,
+        mode: CostMode,
+        snapshot: PricingTable.Snapshot
+    ) -> Double {
+        switch mode {
+        case .display:
+            return storedCostUSD ?? 0
+        case .auto:
+            if let stored = storedCostUSD { return stored }
+            guard let pricing = snapshot.pricing(for: model) else { return 0 }
+            return cost(breakdown: breakdown, pricing: pricing)
+        case .calculate:
+            guard let pricing = snapshot.pricing(for: model) else { return 0 }
+            return cost(breakdown: breakdown, pricing: pricing)
+        }
+    }
+
     private static let tier1Threshold: Int64 = 200_000
 
     private static func tieredCost(tokens: Int64, base: Double, above200k: Double?) -> Double {

@@ -7,35 +7,107 @@ import PacerCore
 /// the in-process scan) so the table is sub-10ms even on populated
 /// installs, and never iterates raw `TokenSample`s.
 ///
-/// Range picker controls how far back to look. Filter field narrows the
-/// list by path. Click a project to drill into the detail sheet.
+/// Range picker controls how far back to look (persisted across
+/// launches via @AppStorage). Sort picker controls the table's
+/// primary order. Filter field narrows the list by path. Click a
+/// project to drill into the detail sheet.
 struct ProjectsView: View {
-    @State private var range: ProjectRange = .ninetyDays
+    @AppStorage(PacerSettings.Key.timeRange, store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.ninetyDays.rawValue
+
+    @AppStorage(PacerSettings.Key.projectsSort, store: PacerSettings.store)
+    private var sortRaw: String = ProjectSort.cost.rawValue
+
     @State private var searchText: String = ""
+
+    private var range: TimeRange {
+        TimeRange(rawValue: rangeRaw) ?? .ninetyDays
+    }
+    private var sort: ProjectSort {
+        ProjectSort(rawValue: sortRaw) ?? .cost
+    }
 
     var body: some View {
         PageScaffold("Projects", subtitle: "Per-project rollup of cost and tokens.", trailing: {
             rangePicker
         }) {
-            searchField
-            // Inner view re-inits whenever range changes so its @Query
-            // rebuilds with a fresh predicate. `id(range)` makes the
-            // structural identity update explicit.
-            ProjectsContent(range: range, searchText: searchText)
-                .id(range)
+            HStack(spacing: 12) {
+                searchField
+                sortPicker
+            }
+            // Re-key on (range, sort) so the inner view's @Query
+            // rebuilds with a fresh predicate when either changes.
+            ProjectsContent(
+                range: range,
+                sort: sort,
+                searchText: searchText
+            )
+            .id("\(range.rawValue)|\(sort.rawValue)")
         }
     }
 
     private var rangePicker: some View {
-        Picker("", selection: $range) {
-            ForEach(ProjectRange.allCases) { r in
+        Picker("", selection: rangeBinding) {
+            ForEach(TimeRange.allCases) { r in
                 Text(r.label).tag(r)
             }
         }
         .pickerStyle(.segmented)
-        .frame(maxWidth: 280)
+        .frame(maxWidth: 320)
         .controlSize(.small)
         .labelsHidden()
+    }
+
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(
+            get: { range },
+            set: { rangeRaw = $0.rawValue }
+        )
+    }
+
+    private var sortBinding: Binding<ProjectSort> {
+        Binding(
+            get: { sort },
+            set: { sortRaw = $0.rawValue }
+        )
+    }
+
+    private var sortPicker: some View {
+        Menu {
+            ForEach(ProjectSort.allCases) { s in
+                Button {
+                    sortRaw = s.rawValue
+                } label: {
+                    if s == sort {
+                        Label(s.label, systemImage: "checkmark")
+                    } else {
+                        Text(s.label)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 11))
+                Text("Sort: \(sort.label)")
+                    .font(.system(size: 12))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(PacerDesign.cardStroke, lineWidth: 1)
+        )
     }
 
     private var searchField: some View {
@@ -69,23 +141,25 @@ struct ProjectsView: View {
     }
 }
 
-enum ProjectRange: String, CaseIterable, Identifiable {
-    case thirtyDays = "30d"
-    case ninetyDays = "90d"
-    case all        = "all"
+/// What column the Projects table sorts by. Persisted via
+/// `PacerSettings.Key.projectsSort`. Hooked up in the toolbar Menu so
+/// the user can switch without re-rendering the entire page tree.
+enum ProjectSort: String, CaseIterable, Identifiable {
+    case cost
+    case tokens
+    case sessions
+    case lastActive
+    case name
+
     var id: String { rawValue }
+
     var label: String {
         switch self {
-        case .thirtyDays: return "30 days"
-        case .ninetyDays: return "90 days"
-        case .all:        return "All time"
-        }
-    }
-    var days: Int? {
-        switch self {
-        case .thirtyDays: return 30
-        case .ninetyDays: return 90
-        case .all:        return nil
+        case .cost:       return "Cost"
+        case .tokens:     return "Tokens"
+        case .sessions:   return "Sessions"
+        case .lastActive: return "Last active"
+        case .name:       return "Name"
         }
     }
 }
@@ -104,8 +178,9 @@ private struct ProjectsContent: View {
 
     let rangeSince: Date?
     let searchText: String
+    let sort: ProjectSort
 
-    init(range: ProjectRange, searchText: String = "") {
+    init(range: TimeRange, sort: ProjectSort, searchText: String = "") {
         let since: Date?
         let cutoffString: String?
         if let days = range.days {
@@ -118,6 +193,7 @@ private struct ProjectsContent: View {
         }
         self.rangeSince = since
         self.searchText = searchText
+        self.sort = sort
         if let cutoffString {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -163,7 +239,7 @@ private struct ProjectsContent: View {
             if r.lastActive > a.lastActive { a.lastActive = r.lastActive }
             byProject[r.projectPath] = a
         }
-        return byProject.map { (key, a) in
+        let unsorted = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
                 displayName: pacerShortPath(key),
@@ -176,7 +252,19 @@ private struct ProjectsContent: View {
                 lastActive: a.lastActive,
                 modelCount: a.modelCount
             )
-        }.sorted { $0.cost > $1.cost }
+        }
+        switch sort {
+        case .cost:
+            return unsorted.sorted { $0.cost > $1.cost }
+        case .tokens:
+            return unsorted.sorted { $0.totalTokens > $1.totalTokens }
+        case .sessions:
+            return unsorted.sorted { $0.sessionCount > $1.sessionCount }
+        case .lastActive:
+            return unsorted.sorted { $0.lastActive > $1.lastActive }
+        case .name:
+            return unsorted.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        }
     }
 
     private var rows: [ProjectRow] {

@@ -283,7 +283,19 @@ private struct NotificationsPanel: View {
                     threshold("7-day window crosses", binding: $sevenDayPct)
                 }
             }, footer: {
-                Text("Notifications fire at most once per cycle. The first banner triggers the system permission prompt; if you click Don't Allow you can re-enable in System Settings → Notifications → Pacer.")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Notifications fire at most once per cycle, and only on a fresh upward crossing. The first banner triggers the system permission prompt.")
+                    HStack(spacing: 8) {
+                        Text("Not seeing banners?")
+                        Button("Open System Settings → Notifications") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                    Text("Pacer's banner style is set there — choose **Banners** or **Alerts** rather than **None**.")
+                }
             })
 
             PacerCard("Daily cost alert", content: {
@@ -318,19 +330,30 @@ private struct NotificationsPanel: View {
         }
     }
 
+    /// Threshold row with a slider + numeric stepper. Replaces the
+    /// fixed 50/75/90 picker so users can pick any percentage from
+    /// 1-99 — wanted custom alert points (e.g. 80%, 95%) for finer
+    /// control.
     @ViewBuilder
     private func threshold(_ label: String, binding: Binding<Int>) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(label)
-            Spacer()
-            Picker("", selection: binding) {
-                Text("50%").tag(50)
-                Text("75%").tag(75)
-                Text("90%").tag(90)
-            }
-            .labelsHidden()
-            .frame(width: 80)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { Double(binding.wrappedValue) },
+                    set: { binding.wrappedValue = Int($0.rounded()) }
+                ),
+                in: 1...99,
+                step: 1
+            )
+            .frame(width: 160)
             .disabled(!enabled)
+            Text("\(binding.wrappedValue)%")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+                .foregroundStyle(enabled ? .primary : .secondary)
         }
     }
 

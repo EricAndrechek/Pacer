@@ -107,49 +107,59 @@ struct HeatmapCard: View {
         cached = Cached(grid: weeks, maxCost: computedMax)
     }
 
-    private static let weekdayLabels = ["M", "T", "W", "T", "F", "S", "S"]
+    private static let weekdayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     var body: some View {
         PacerCard("Activity heatmap", trailing: { legend }) {
             ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     monthLabelRow
-                    HStack(alignment: .top, spacing: 4) {
+                    HStack(alignment: .top, spacing: Self.cellSpacing) {
                         weekdayColumn
                         ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
                             weekColumn(week)
                         }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 6)
             }
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
+    /// Cell + spacing dimensions. Pulled out so changes apply to the
+    /// month label row, weekday column, and grid in lock-step. Bigger
+    /// than the GitHub-original because Pacer's heatmap card has more
+    /// horizontal real estate than a profile sidebar would.
+    private static let cellSize: CGFloat = 14
+    private static let cellSpacing: CGFloat = 3
+    private static let weekdayColumnWidth: CGFloat = 18
+
     /// Month label appears above the first week whose Monday falls
-    /// inside that month. Keeps consecutive duplicates suppressed so
-    /// you don't see "Apr Apr Apr" — only the transition column gets
-    /// the label.
+    /// inside that month. Now anchors over a window of cells wide
+    /// enough to fit the full 3-letter month name without truncating
+    /// to "N..." / "D..." like the prior 12pt-wide column did.
     @ViewBuilder
     private var monthLabelRow: some View {
-        // Same width math as the grid below: weekdayColumn(width 12 +
-        // padding 2 = 14) → 12-wide week columns each separated by 4pt.
-        HStack(alignment: .center, spacing: 4) {
-            // weekdayColumn spacer
-            Spacer().frame(width: 14, height: 11)
-            ForEach(Array(grid.enumerated()), id: \.offset) { idx, week in
+        HStack(alignment: .center, spacing: Self.cellSpacing) {
+            Spacer().frame(width: Self.weekdayColumnWidth, height: 13)
+            ForEach(Array(grid.enumerated()), id: \.offset) { idx, _ in
                 Group {
                     if let label = monthLabel(for: idx) {
                         Text(label)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            // Allow the label to overflow the single
+                            // column it's anchored to so "Apr" / "May"
+                            // never get clipped — visually each label
+                            // just leads its month's first column.
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(width: Self.cellSize, height: 13, alignment: .leading)
                     } else {
-                        Color.clear
+                        Color.clear.frame(width: Self.cellSize, height: 13)
                     }
                 }
-                .frame(width: 12, height: 11, alignment: .leading)
             }
         }
     }
@@ -173,30 +183,30 @@ struct HeatmapCard: View {
     }
 
     private var weekdayColumn: some View {
-        VStack(alignment: .trailing, spacing: 3) {
+        VStack(alignment: .trailing, spacing: Self.cellSpacing) {
             ForEach(Array(Self.weekdayLabels.enumerated()), id: \.offset) { idx, day in
-                // Only show every other label so it doesn't feel cramped.
+                // Show every other label so it doesn't feel cramped.
                 if idx % 2 == 0 {
                     Text(day)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 12, height: 12)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: Self.weekdayColumnWidth, height: Self.cellSize, alignment: .trailing)
                 } else {
-                    Spacer().frame(width: 12, height: 12)
+                    Spacer().frame(width: Self.weekdayColumnWidth, height: Self.cellSize)
                 }
             }
         }
-        .padding(.trailing, 2)
+        .padding(.trailing, 4)
     }
 
     @ViewBuilder
     private func weekColumn(_ week: [Cell?]) -> some View {
-        VStack(spacing: 3) {
+        VStack(spacing: Self.cellSpacing) {
             ForEach(0..<7, id: \.self) { idx in
                 if let cell = week[idx] {
                     cellView(cell)
                 } else {
-                    Color.clear.frame(width: 12, height: 12)
+                    Color.clear.frame(width: Self.cellSize, height: Self.cellSize)
                 }
             }
         }
@@ -207,9 +217,9 @@ struct HeatmapCard: View {
         Button {
             onDayTap(cell.dateKey)
         } label: {
-            RoundedRectangle(cornerRadius: 2)
+            RoundedRectangle(cornerRadius: 3)
                 .fill(color(for: cell.cost))
-                .frame(width: 12, height: 12)
+                .frame(width: Self.cellSize, height: Self.cellSize)
         }
         .buttonStyle(.plain)
         .help(tooltip(for: cell))

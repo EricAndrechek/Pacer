@@ -7,17 +7,27 @@ import PacerCore
 /// name. Useful for "is sonnet doing the bulk of work or am I always
 /// reaching for opus?" / "did I switch off haiku 3 months ago?"
 struct ModelsView: View {
-    @State private var range: ModelsRange = .ninetyDays
+    @AppStorage(PacerSettings.Key.timeRange, store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.ninetyDays.rawValue
+
+    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .ninetyDays }
+
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(
+            get: { range },
+            set: { rangeRaw = $0.rawValue }
+        )
+    }
 
     var body: some View {
         PageScaffold("Models", subtitle: "How traffic splits across Claude models.", trailing: {
-            Picker("", selection: $range) {
-                ForEach(ModelsRange.allCases) { r in
+            Picker("", selection: rangeBinding) {
+                ForEach(TimeRange.allCases) { r in
                     Text(r.label).tag(r)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 280)
+            .frame(maxWidth: 320)
             .controlSize(.small)
             .labelsHidden()
         }) {
@@ -27,31 +37,10 @@ struct ModelsView: View {
     }
 }
 
-enum ModelsRange: String, CaseIterable, Identifiable {
-    case thirtyDays = "30d"
-    case ninetyDays = "90d"
-    case all        = "all"
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .thirtyDays: return "30 days"
-        case .ninetyDays: return "90 days"
-        case .all:        return "All time"
-        }
-    }
-    var days: Int? {
-        switch self {
-        case .thirtyDays: return 30
-        case .ninetyDays: return 90
-        case .all:        return nil
-        }
-    }
-}
-
 private struct ModelsContent: View {
     @Query private var aggregates: [DailyAggregate]
 
-    init(range: ModelsRange) {
+    init(range: TimeRange) {
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast

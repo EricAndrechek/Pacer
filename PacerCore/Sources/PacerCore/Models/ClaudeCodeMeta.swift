@@ -52,4 +52,12 @@ public enum ClaudeCodeMetaKey {
     public static let statsCacheVersion = "stats_cache_version"
     public static let statsCacheLastComputedDate = "stats_cache_last_computed_date"
     public static let statsCacheTotalMessages = "stats_cache_total_messages"
+
+    /// Version of the cost-aggregation logic. Bumped when we ship a fix
+    /// that requires rebuilding `ProjectDailyAggregate` /
+    /// `SessionInfo` / `DailyAggregate` totals from existing
+    /// TokenSamples — without this, users on the buggy version stay
+    /// stuck with $0 project costs even after upgrading, because the
+    /// scan only touches "dirty" buckets.
+    public static let costRecomputeVersion = "cost_recompute_version"
 }

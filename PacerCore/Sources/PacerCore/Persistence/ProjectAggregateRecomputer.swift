@@ -15,10 +15,19 @@ public final class ProjectAggregateRecomputer {
 
     private let container: ModelContainer
     private let context: ModelContext
+    private let mode: CostMode
+    private let pricingTable: PricingTable
 
-    public init(container: ModelContainer, context: ModelContext) {
+    public init(
+        container: ModelContainer,
+        context: ModelContext,
+        mode: CostMode = .auto,
+        pricingTable: PricingTable = .shared
+    ) {
         self.container = container
         self.context = context
+        self.mode = mode
+        self.pricingTable = pricingTable
     }
 
     public struct Stats: Sendable {
@@ -39,23 +48,34 @@ public final class ProjectAggregateRecomputer {
     public func recompute(pairs: Set<ProjectDatePair>) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
+        // Pricing must be loaded before we walk samples — without it
+        // every TokenSample whose `sourceCostUSD` is nil contributes
+        // $0 to the project rollup, which is exactly the bug the
+        // Projects view was hitting before this fix.
+        try? await pricingTable.ensureLoaded()
+        let snapshot = await pricingTable.snapshot()
         if pairs.count >= Self.bulkRecomputeThreshold {
             // See AggregateRecomputer — commit any pending main-context
             // inserts so the background worker's separate context can
             // see them.
             try context.save()
             let worker = ProjectAggregateBulkWorker(modelContainer: container)
-            return try await worker.bulkRecompute(pairs: pairs)
+            return try await worker.bulkRecompute(
+                pairs: pairs, mode: mode, snapshot: snapshot)
         }
         for pair in pairs {
             stats.pairsRecomputed += 1
-            try recomputeOne(pair: pair, stats: &stats)
+            try recomputeOne(pair: pair, snapshot: snapshot, stats: &stats)
         }
         // No save here — see comment in `AggregateRecomputer.recompute`.
         return stats
     }
 
-    private func recomputeOne(pair: ProjectDatePair, stats: inout Stats) throws {
+    private func recomputeOne(
+        pair: ProjectDatePair,
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws {
         let dateString = pair.date
         let path = pair.projectPath
         let unknownPath = ProjectDailyAggregate.unknownProjectPath
@@ -86,7 +106,11 @@ public final class ProjectAggregateRecomputer {
         ).first
 
         Self.applySamples(
-            pair: pair, samples: samples, existing: existing,
+            pair: pair,
+            samples: samples,
+            existing: existing,
+            mode: mode,
+            snapshot: snapshot,
             insert: { context.insert($0) },
             delete: { context.delete($0) },
             stats: &stats
@@ -97,6 +121,8 @@ public final class ProjectAggregateRecomputer {
         pair: ProjectDatePair,
         samples: [TokenSample],
         existing: ProjectDailyAggregate?,
+        mode: CostMode,
+        snapshot: PricingTable.Snapshot,
         insert: (ProjectDailyAggregate) -> Void,
         delete: (ProjectDailyAggregate) -> Void,
         stats: inout Stats
@@ -128,7 +154,27 @@ public final class ProjectAggregateRecomputer {
             cacheReadTokens += s.cacheReadTokens
             cacheCreation5mTokens += s.cacheCreation5mTokens
             cacheCreation1hTokens += s.cacheCreation1hTokens
-            let cost = s.sourceCostUSD ?? 0
+            // Cost via the same per-sample path AggregateRecomputer
+            // uses: prefer Claude Code's stored value when present
+            // (auto/display modes), fall back to tokens × pricing.
+            // Previously this was just `s.sourceCostUSD ?? 0`, which
+            // silently treated every CC line without a stored cost as
+            // free — that's why the Projects tab showed $0 across the
+            // board for many users.
+            let breakdown = TokenBreakdown(
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                cacheReadTokens: s.cacheReadTokens,
+                cacheCreation5mTokens: s.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.cacheCreation1hTokens
+            )
+            let cost = CostCalculator.cost(
+                storedCostUSD: s.sourceCostUSD,
+                model: s.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
             totalCost += cost
             if let sid = s.sessionId, !sid.isEmpty {
                 sessions.insert(sid)
@@ -187,7 +233,11 @@ actor ProjectAggregateBulkWorker {
 
     private static let yieldInterval = 32
 
-    func bulkRecompute(pairs: Set<ProjectDatePair>) async throws -> ProjectAggregateRecomputer.Stats {
+    func bulkRecompute(
+        pairs: Set<ProjectDatePair>,
+        mode: CostMode,
+        snapshot: PricingTable.Snapshot
+    ) async throws -> ProjectAggregateRecomputer.Stats {
         var stats = ProjectAggregateRecomputer.Stats(
             pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
 
@@ -211,6 +261,8 @@ actor ProjectAggregateBulkWorker {
                 pair: pair,
                 samples: samples,
                 existing: existing,
+                mode: mode,
+                snapshot: snapshot,
                 insert: { modelContext.insert($0) },
                 delete: { modelContext.delete($0) },
                 stats: &stats

@@ -16,10 +16,19 @@ public final class SessionInfoRecomputer {
 
     private let container: ModelContainer
     private let context: ModelContext
+    private let mode: CostMode
+    private let pricingTable: PricingTable
 
-    public init(container: ModelContainer, context: ModelContext) {
+    public init(
+        container: ModelContainer,
+        context: ModelContext,
+        mode: CostMode = .auto,
+        pricingTable: PricingTable = .shared
+    ) {
         self.container = container
         self.context = context
+        self.mode = mode
+        self.pricingTable = pricingTable
     }
 
     public struct Stats: Sendable {
@@ -38,19 +47,29 @@ public final class SessionInfoRecomputer {
     public func recompute(sessionIds: Set<String>) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
+        // Same fix as ProjectAggregateRecomputer: pricing must be loaded
+        // before walking samples or every sample without a stored
+        // costUSD silently contributes $0 to the session rollup.
+        try? await pricingTable.ensureLoaded()
+        let snapshot = await pricingTable.snapshot()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
             try context.save()
             let worker = SessionInfoBulkWorker(modelContainer: container)
-            return try await worker.bulkRecompute(sessionIds: sessionIds)
+            return try await worker.bulkRecompute(
+                sessionIds: sessionIds, mode: mode, snapshot: snapshot)
         }
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
-            try recomputeOne(sessionId: sid, stats: &stats)
+            try recomputeOne(sessionId: sid, snapshot: snapshot, stats: &stats)
         }
         return stats
     }
 
-    private func recomputeOne(sessionId: String, stats: inout Stats) throws {
+    private func recomputeOne(
+        sessionId: String,
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws {
         let sid = sessionId
         let samples = try context.fetch(
             FetchDescriptor<TokenSample>(
@@ -63,7 +82,11 @@ public final class SessionInfoRecomputer {
             )
         ).first
         Self.applySamples(
-            sessionId: sid, samples: samples, existing: existing,
+            sessionId: sid,
+            samples: samples,
+            existing: existing,
+            mode: mode,
+            snapshot: snapshot,
             insert: { context.insert($0) },
             delete: { context.delete($0) },
             stats: &stats
@@ -74,6 +97,8 @@ public final class SessionInfoRecomputer {
         sessionId: String,
         samples: [TokenSample],
         existing: SessionInfo?,
+        mode: CostMode,
+        snapshot: PricingTable.Snapshot,
         insert: (SessionInfo) -> Void,
         delete: (SessionInfo) -> Void,
         stats: inout Stats
@@ -111,7 +136,23 @@ public final class SessionInfoRecomputer {
             cacheReadTokens += s.cacheReadTokens
             cache5m += s.cacheCreation5mTokens
             cache1h += s.cacheCreation1hTokens
-            cost += s.sourceCostUSD ?? 0
+            // Cost via the cost-mode-aware path. See same comment in
+            // ProjectAggregateRecomputer.applySamples — fall back to
+            // tokens × pricing when CC didn't store a cost.
+            let breakdown = TokenBreakdown(
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                cacheReadTokens: s.cacheReadTokens,
+                cacheCreation5mTokens: s.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.cacheCreation1hTokens
+            )
+            cost += CostCalculator.cost(
+                storedCostUSD: s.sourceCostUSD,
+                model: s.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
             let t = s.inputTokens + s.outputTokens + s.cacheReadTokens
             modelTokens[s.model, default: 0] += t
             if firstModel == nil { firstModel = s.model }
@@ -161,7 +202,11 @@ actor SessionInfoBulkWorker {
 
     private static let yieldInterval = 32
 
-    func bulkRecompute(sessionIds: Set<String>) async throws -> SessionInfoRecomputer.Stats {
+    func bulkRecompute(
+        sessionIds: Set<String>,
+        mode: CostMode,
+        snapshot: PricingTable.Snapshot
+    ) async throws -> SessionInfoRecomputer.Stats {
         var stats = SessionInfoRecomputer.Stats(
             sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
 
@@ -186,6 +231,8 @@ actor SessionInfoBulkWorker {
                 sessionId: sid,
                 samples: grouped[sid] ?? [],
                 existing: existingById[sid],
+                mode: mode,
+                snapshot: snapshot,
                 insert: { modelContext.insert($0) },
                 delete: { modelContext.delete($0) },
                 stats: &stats

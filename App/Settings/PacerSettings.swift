@@ -72,6 +72,8 @@ public enum PacerSettings {
         public static let notifyOnDailyCost      = PacerPreferenceKeys.notifyOnDailyCost
         public static let dailyCostThresholdUSD  = PacerPreferenceKeys.dailyCostThresholdUSD
         public static let costMode               = PacerPreferenceKeys.costMode
+        public static let timeRange              = PacerPreferenceKeys.timeRange
+        public static let projectsSort           = PacerPreferenceKeys.projectsSort
     }
 
     // MARK: - Defaults
@@ -85,6 +87,8 @@ public enum PacerSettings {
         Key.notifyOnDailyCost:     false,
         Key.dailyCostThresholdUSD: 50.0,
         Key.costMode:              "auto",
+        Key.timeRange:             "90d",
+        Key.projectsSort:          "cost",
     ]
 
     /// Register the defaults dict on first launch — `@AppStorage`'s

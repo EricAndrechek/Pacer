@@ -215,6 +215,26 @@ public final class SamplePersister {
         dirtySessionIds.formUnion(ids)
     }
 
+    /// Mark every sample-driven aggregate as needing recompute.
+    /// Used on startup when ScanCoordinator detects a `costRecomputeVersion`
+    /// mismatch — the on-disk aggregates are correct topologically but
+    /// were computed with the buggy `sourceCostUSD ?? 0` path, so we
+    /// have to rebuild every (date, model), (project, date), and
+    /// session bucket from the underlying TokenSamples. Re-uses the
+    /// same one-pass scan we already do at preload, just without
+    /// subtracting the existing aggregate set.
+    public func markEverySampleDirty() throws {
+        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        for sample in samples {
+            dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
+            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+            dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+            }
+        }
+    }
+
     private func preloadFromStore() throws {
         // SwiftData doesn't expose partial-attribute fetch (CD's
         // NSDictionaryResultType has no equivalent), so we materialize

@@ -14,6 +14,14 @@ public enum PacerPreferenceKeys {
     public static let notifyOnDailyCost      = "pacer.notifications.dailyCost"
     public static let dailyCostThresholdUSD  = "pacer.notifications.dailyCostThreshold"
     public static let costMode               = "pacer.display.costMode"
+    /// Time-range selector shared by Projects, Models, and any future
+    /// "rolling N-day" view. Persisted so the user's last-chosen window
+    /// is remembered across launches — the prior local-state @State
+    /// reset to "90 days" every time the app reopened.
+    public static let timeRange              = "pacer.view.timeRange"
+    /// Sort field used by the Projects view. Persists across launches
+    /// so reopening the app doesn't snap back to "by cost descending".
+    public static let projectsSort           = "pacer.view.projectsSort"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls

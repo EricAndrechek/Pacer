@@ -63,6 +63,13 @@ public final class NotificationCoordinator {
         content.title = "Pacer test notification"
         content.body = "Notifications are working. Real warnings fire when a window crosses your threshold."
         content.sound = .default
+        // .timeSensitive lets the banner break through Focus modes and
+        // — more importantly here — increases the odds that macOS
+        // displays it as a popup rather than silently routing it to
+        // Notification Center. Users still need "Banners" or "Alerts"
+        // selected in System Settings → Notifications → Pacer; the
+        // Settings UI now points at that with a helper button.
+        content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(
             identifier: "pacer.test.\(Int(Date().timeIntervalSince1970))",
             content: content,
@@ -114,6 +121,7 @@ public final class NotificationCoordinator {
         let label: String = window == "five_hour" ? "5-hour" : "7-day"
         content.body = "\(label) usage hit \(Int(currentPct.rounded()))% (threshold \(Int(threshold))%)."
         content.sound = .default
+        content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(
             identifier: cycleKey,
@@ -172,6 +180,7 @@ public final class NotificationCoordinator {
         content.title = "Pacer spend warning"
         content.body = String(format: "Today's cost reached $%.2f (threshold $%.2f).", currentCost, threshold)
         content.sound = .default
+        content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
         try? await center.add(request)

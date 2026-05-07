@@ -24,6 +24,21 @@ public final class ScanCoordinator {
     /// drift on next launch and wipe cursors so every file is re-read.
     public static let currentScanVersion = "1"
 
+    /// Bumped when a code change requires recomputing the cost columns
+    /// on existing aggregates. ScanCoordinator detects a mismatch on
+    /// startup and folds every known sample's (date,model),
+    /// (project,date), and sessionId into the persister's dirty set
+    /// — the recomputers then rebuild every aggregate row from the
+    /// underlying TokenSamples.
+    ///
+    /// History:
+    /// - "1" — initial release.
+    /// - "2" — fixed `ProjectAggregateRecomputer` and
+    ///         `SessionInfoRecomputer` to honor cost mode + pricing
+    ///         (previously they collapsed to `sourceCostUSD ?? 0`
+    ///         and showed $0 for every CC line without a stored cost).
+    public static let currentCostRecomputeVersion = "2"
+
     public struct Configuration: Sendable {
         public var costMode: CostMode
         public var watcherMode: JSONLWatcher.Mode
@@ -238,6 +253,19 @@ public final class ScanCoordinator {
             activePersister.addDirtySessionIds(recoverySessionIds)
             log("integrity: \(recoverySessionIds.count) session(s) missing SessionInfo rows - rebuilding")
         }
+        // Cost-recompute version bump: existing aggregate rows are
+        // present but were computed with a buggy cost path. Mark every
+        // sample-driven aggregate dirty so the recomputers rebuild
+        // them. After the cycle's terminal save we write the new
+        // version to ClaudeCodeMeta so this only fires once per bump.
+        let needsCostRebuild = (
+            try fetchMeta(ClaudeCodeMetaKey.costRecomputeVersion)
+            != Self.currentCostRecomputeVersion
+        )
+        if needsCostRebuild {
+            try activePersister.markEverySampleDirty()
+            log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
+        }
         let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
@@ -263,12 +291,24 @@ public final class ScanCoordinator {
             container: container, context: context, mode: configuration.costMode)
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
 
+        // Both recomputers below previously ignored cost mode entirely
+        // — they summed `sample.sourceCostUSD ?? 0`, which silently
+        // recorded $0 for every Claude Code line that didn't carry a
+        // stored cost. Threading the same cost mode + pricing table
+        // that AggregateRecomputer uses fixes the Projects view's
+        // $0.00 columns and the LiveActivity card's last-hour cost.
         let projectRecomputer = ProjectAggregateRecomputer(
-            container: container, context: context)
+            container: container,
+            context: context,
+            mode: configuration.costMode
+        )
         let projectRecomputeStats = try await projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
 
         let sessionRecomputer = SessionInfoRecomputer(
-            container: container, context: context)
+            container: container,
+            context: context,
+            mode: configuration.costMode
+        )
         let sessionRecomputeStats = try await sessionRecomputer.recompute(sessionIds: activePersister.dirtySessionIds)
 
         var probeResult: StatsCacheProbe.ProbeResult?
@@ -287,6 +327,10 @@ public final class ScanCoordinator {
         // scan, so the next run is incremental). scanVersion gates
         // future full re-scans on parser changes.
         try writeMeta(ClaudeCodeMetaKey.scanVersion, value: Self.currentScanVersion)
+        try writeMeta(
+            ClaudeCodeMetaKey.costRecomputeVersion,
+            value: Self.currentCostRecomputeVersion
+        )
         try writeMeta(
             ClaudeCodeMetaKey.lastIncrementalScanAt,
             value: ISO8601DateFormatter.shared.string(from: started)
