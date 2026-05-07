@@ -150,6 +150,17 @@ struct MenuBarContent: View {
                     NSApp.activate(ignoringOtherApps: true)
                     openWindow(id: "main")
                 }
+                Button("Settings…") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    if #available(macOS 14, *) {
+                        // The newer Settings scene API is opened via
+                        // an internal selector; OS-level menu sends
+                        // 'showSettingsWindow:'.
+                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    } else {
+                        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                    }
+                }
                 Spacer()
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)

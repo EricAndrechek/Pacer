@@ -17,6 +17,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 16) {
                 DashboardHeader()
 
+                WelcomeCard()
                 TodaySummaryCard()
                 PaceChartCard()
                 DailyCostChartCard()
