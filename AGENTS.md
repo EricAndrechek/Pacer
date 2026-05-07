@@ -64,6 +64,62 @@ These are subtle, easy to miss, and break user-visible numbers:
   Anthropic OAuth fallback) — leave a comment so the next reader doesn't
   "fix" it back.
 
+## App target — what's where
+
+The SwiftUI app is organized like this (under `App/`):
+
+```
+App/
+  PacerApp.swift                — @main scene graph (WindowGroup + Settings + MenuBarExtra),
+                                  registers UserDefaults defaults at launch, plumbs the export
+                                  CommandGroup.
+  ContentView.swift             — top-level TabView (Dashboard / History / Projects / Debug),
+                                  ⌘1..4 keyboard shortcuts.
+
+  Settings/
+    PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
+                                  style/icon and notification thresholds. Single source of
+                                  truth for prefs across all targets.
+
+  Notifications/
+    NotificationCoordinator.swift — UNUserNotificationCenter wrapper. Posts banners on
+                                    rate-limit threshold crossings and daily-cost ceiling.
+                                    Cycle dedup via ClaudeCodeMeta keys.
+    NotificationsHost.swift     — invisible View under ContentView that holds @Query
+                                  subscriptions and dispatches to the coordinator on
+                                  upward crossings. Seeds lastSeen* on appear.
+
+  Export/
+    CSVExporter.swift           — three flavors (daily totals / daily by model / project
+                                  totals). RFC 4180 escape, NSSavePanel, NSAlert on error.
+
+  Views/
+    DashboardView.swift         — header + WelcomeCard + Today + LiveActivity + PaceChart +
+                                  DailyCost + PerModelToday.
+    HistoryView.swift           — Lifetime + Heatmap + Monthly + TopDays. Sheet to DayDetail.
+    ProjectsView.swift          — range picker + search + Top-5 donut + full list. Sheet to
+                                  ProjectDetail.
+    DebugView.swift             — daemon resources + storage stats + raw rate-limit samples +
+                                  meta keys + LaunchAgent dual status + recent samples.
+    SettingsView.swift          — TabView of Menu Bar / Notifications / Data / About.
+
+    MenuBarContent.swift        — MenuBarLabel (status item) + MenuBarContent (popover).
+                                  Both honor PacerSettings.
+
+    Components/
+      CircularGauge.swift       — donut + percentage primitive used by PaceChart, MenuBar,
+                                  widgets. Color from UsageBand.
+      DaemonResourceProbe.swift — PID/CPU/RSS via pgrep+ps, store size via FileManager.
+
+    PaceChartCard.swift, TodaySummaryCard.swift, DailyCostChartCard.swift,
+    PerModelTodayCard.swift, LiveActivityCard.swift, HeatmapCard.swift,
+    DayDetailView.swift, ProjectDetailView.swift, WelcomeCard.swift  — dashboard cards.
+```
+
+`Widgets/` holds three real widgets (TodayCost / PaceGauges / DailyChart) bundled by
+`PacerWidgetsBundle.swift`. Each widget has its own `TimelineProvider` that reads the
+shared SwiftData container directly — no IPC.
+
 ## Project layout & build
 
 - `project.yml` is the source of truth — `Pacer.xcodeproj` is generated

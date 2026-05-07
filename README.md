@@ -8,19 +8,40 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
 
 ## What it does
 
-- Tracks Claude Code session usage in real time (sub-second reactivity to
-  JSONL writes via `FSEventStream`).
-- Surfaces 5-hour and 7-day rate-limit windows with pace projections, both
-  from local data and from Anthropic's `/api/oauth/usage` endpoint.
-- Calculates costs from LiteLLM pricing data with three modes (`auto` /
-  `calculate` / `display`), matching `ccusage` semantics.
-- Runs as a regular app, a `MenuBarExtra`, and via Desktop / Notification
-  Center widgets — pick one or all.
-- Optional opt-in statusline integration that taps Claude Code's per-tick
-  push data without disrupting any existing statusline tool.
-- Exposes a Unix-domain-socket IPC for third-party consumers (e.g. the
-  [reference-impl](https://github.com/EricAndrechek/reference-impl) plugin can read
-  Pacer's data instead of duplicating its own JSONL scanning).
+- **Real-time tracking.** FSEvents + per-file byte-offset cursors mean
+  the daemon picks up new JSONL writes within seconds and the dashboard
+  re-renders incrementally — no full-history rescans on each event.
+- **Rate-limit pacing.** 5-hour and 7-day windows are visualized as
+  cycle-anchored pace charts (cycle start → reset on the X axis, dashed
+  pace line, actual usage curve, 4-band coloring: behind / on track /
+  ahead / >90% or >15pp ahead). Data comes from Anthropic's
+  `/api/oauth/usage` endpoint at a 5-minute cadence.
+- **Cost in three modes.** `auto` (prefer Claude Code's stored
+  `costUSD`, calculate when missing — matches `ccusage`), `calculate`
+  (always price from tokens × LiteLLM rates), `display` (only show
+  server-supplied numbers). Selectable in Settings → Data.
+- **Multiple surfaces.**
+    - Main app with four tabs: Dashboard, History, Projects, Debug.
+    - `MenuBarExtra` status item with configurable display
+      (icon-only / percent-only / both / hidden) and icon style
+      (gauge needle / ring fill / dot).
+    - Three Widget families: TodayCost (small), PaceGauges (small +
+      medium), DailyChart (medium + large).
+- **History views.** Lifetime totals, GitHub-style 26-week activity
+  heatmap, monthly bar chart, top expensive days. Click any day → drill
+  into that day's per-model and per-project detail.
+- **Per-project breakdown.** Sortable list with cost / tokens / sessions
+  / last-active, filtered by 30d / 90d / all and a substring search.
+  Click a project → drill into daily activity, models, sessions.
+- **Live activity.** Last-hour burn rate plus a wall-clock-aware
+  "if you keep this rate, today will end at $X" projection.
+- **Local notifications** (opt-in) for rate-limit threshold crossings
+  (5h or 7d at 50/75/90%) and a configurable daily-cost ceiling. Cycle
+  dedup means the same crossing won't fire twice in one window.
+- **CSV export.** Daily totals, daily by model, or project totals to a
+  spreadsheet — File menu, ⌘⇧E for the most common.
+- **App Group SwiftData.** App, daemon, and widgets share one on-disk
+  store; no IPC plumbing for read paths.
 
 ## Components
 
