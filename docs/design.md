@@ -182,7 +182,7 @@ Confirmed against this machine: only `~/.claude/` is currently active
     var sampledAt: Date
     var window: String            // "five_hour" | "seven_day"
     var usedPercentage: Double
-    var resetsAt: Date
+    var resetsAt: Date?           // nil when server returned `resets_at: null`
     var source: String            // "statusline" | "oauth"
 }
 

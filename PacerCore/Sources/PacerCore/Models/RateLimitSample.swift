@@ -18,7 +18,13 @@ public final class RateLimitSample {
     /// Percentage of the window consumed, 0–100. Server returns this
     /// pre-computed; we don't divide here.
     public var usedPercentage: Double
-    public var resetsAt: Date
+    /// When the rolling window rolls over. `nil` when the server
+    /// returned `resets_at: null` (rare — happens for some account
+    /// transitions and certain API-only states). Surfaced as nil
+    /// rather than synthesizing a sentinel so the dashboard can
+    /// distinguish "no reset time available" from "resets at the
+    /// epoch."
+    public var resetsAt: Date?
     /// `"statusline"` or `"oauth"`. Lets the read path prefer one source
     /// over the other when both are fresh, and lets us debug-compare.
     public var source: String
@@ -27,7 +33,7 @@ public final class RateLimitSample {
         sampledAt: Date,
         window: String,
         usedPercentage: Double,
-        resetsAt: Date,
+        resetsAt: Date?,
         source: String
     ) {
         self.sampledAt = sampledAt
