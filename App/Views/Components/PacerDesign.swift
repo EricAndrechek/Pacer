@@ -355,12 +355,16 @@ struct HoverRow<Content: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+                        .fill(hovering ? Color.primary.opacity(0.06) : Color.clear)
                 )
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        // Cursor flips to the pointing-hand on hover so the row reads
+        // as actionable. Pulled into the shared primitive so every
+        // table/list row picks it up automatically.
+        .pointerStyle(.link)
     }
 }
 

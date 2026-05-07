@@ -13,6 +13,7 @@ struct DayDetailView: View {
     @Environment(\.dismissModal) private var dismissModal
     @Query private var aggregates: [DailyAggregate]
     @Query private var samples: [TokenSample]
+    @Query private var sessionRows: [SessionInfo]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @State private var cached = Cached()
@@ -25,6 +26,29 @@ struct DayDetailView: View {
         _samples = Query(
             filter: #Predicate<TokenSample> { $0.date == date }
         )
+        // Sessions that touched this day: overlap on [dayStart, dayEnd].
+        // A session spanning multiple days shows up on every day it was
+        // active. Filter via lastSeenAt ≥ dayStart AND firstSeenAt < dayEnd.
+        let dayStart = Self.startOfDay(for: date)
+        let dayEnd = dayStart.addingTimeInterval(86400)
+        _sessionRows = Query(
+            filter: #Predicate<SessionInfo> {
+                $0.lastSeenAt >= dayStart && $0.firstSeenAt < dayEnd
+            },
+            sort: \.lastSeenAt,
+            order: .reverse
+        )
+    }
+
+    /// Local-midnight Date for a YYYY-MM-DD key. Falls back to
+    /// distantPast on parse failure so a malformed date key just
+    /// surfaces an empty sessions list rather than crashing.
+    private static func startOfDay(for ymd: String) -> Date {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f.date(from: ymd) ?? .distantPast
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -124,13 +148,32 @@ struct DayDetailView: View {
                 summaryCard
                 if !aggregates.isEmpty { modelsCard }
                 if !projectRows.isEmpty { projectsCard }
+                if !sessionRows.isEmpty { sessionsCard }
             }
             .padding(24)
         }
+        .scrollIndicators(.never)
         .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // Open the project's detail view stacked on top of this day
+        // modal — keeps the user oriented in the day context they
+        // started from. They can dismiss back into the day, or
+        // chain through sessions inside the project view.
+        .dismissibleModal(item: $selectedProject) { sel in
+            ProjectDetailView(
+                projectPath: sel.path,
+                displayName: sel.displayName,
+                since: sel.since
+            )
+        }
+        .dismissibleModal(item: $selectedSession) { sel in
+            SessionDetailView(session: sel.session, projectDisplayName: pacerShortPath(sel.session.projectPath))
+        }
     }
+
+    @State private var selectedProject: ProjectsView.SelectedProject?
+    @State private var selectedSession: ProjectDetailView.SelectedSession?
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -232,23 +275,16 @@ struct DayDetailView: View {
         return modelsSortDescending ? sorted.reversed() : sorted
     }
 
-    /// Tap handler on a day-detail project row: dismiss this modal,
-    /// flip the sidebar to Projects, and post the open-project
-    /// notification ProjectsView listens for. Skip the synthetic
+    /// Tap handler on a day-detail project row: open the project's
+    /// detail view stacked on top of the day modal so the user stays
+    /// oriented in the day they came from. Skip the synthetic
     /// "(unknown)" path — there's no project to open.
     private func openProject(_ row: ProjectRow) {
         guard row.path != ProjectDailyAggregate.unknownProjectPath else { return }
-        let request = ProjectsView.SelectedProject(
+        selectedProject = ProjectsView.SelectedProject(
             path: row.path,
             displayName: row.displayName,
-            since: nil  // day detail had no time-range scope, so go all-time
-        )
-        // Close this modal first so the project modal opens cleanly
-        // on top of the Projects view (rather than stacking modals).
-        dismissModal()
-        NotificationCenter.default.post(
-            name: .pacerOpenProject,
-            object: request
+            since: nil  // day detail has no time-range scope, so go all-time
         )
     }
 
@@ -441,6 +477,75 @@ struct DayDetailView: View {
                                 .frame(width: 16, alignment: .trailing)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Sessions active on this day. Complements the projects card
+    /// above: projects answer "what areas of work", sessions answer
+    /// "what conversations". Each row links to a SessionDetailView.
+    private var sessionsCard: some View {
+        PacerCard("Sessions", trailing: {
+            Text("\(sessionRows.count) on this day")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Eyebrow(text: "Session")
+                    Spacer()
+                    Eyebrow(text: "Project")
+                        .frame(width: 130, alignment: .leading)
+                    Eyebrow(text: "Cost")
+                        .frame(width: 70, alignment: .trailing)
+                    Eyebrow(text: "Last")
+                        .frame(width: 70, alignment: .trailing)
+                    Spacer().frame(width: 16)
+                }
+                .padding(.bottom, 2)
+                Divider().padding(.vertical, 2)
+                ForEach(sessionRows.prefix(20), id: \.sessionId) { row in
+                    HoverRow(action: {
+                        selectedSession = ProjectDetailView.SelectedSession(session: row)
+                    }) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(String(row.sessionId.prefix(8)))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(pacerShortModel(row.topModel))
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Text(pacerShortPath(row.projectPath))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(width: 130, alignment: .leading)
+                            Text(pacerCost(row.cumulativeCostUSD))
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .frame(width: 70, alignment: .trailing)
+                            Text(pacerRelative(row.lastSeenAt))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 70, alignment: .trailing)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 16, alignment: .trailing)
+                        }
+                    }
+                }
+                if sessionRows.count > 20 {
+                    Text("+ \(sessionRows.count - 20) more")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
                 }
             }
         }

@@ -24,7 +24,9 @@ struct HistoryView: View {
                 selectedDay = SelectedDay(date: dayKey)
             }
             MonthlyChartCard()
-            TopDaysCard()
+            TopDaysCard { dayKey in
+                selectedDay = SelectedDay(date: dayKey)
+            }
         }
         .dismissibleModal(item: $selectedDay) { sel in
             DayDetailView(date: sel.date)
@@ -32,10 +34,26 @@ struct HistoryView: View {
     }
 }
 
-// MARK: - Lifetime summary
+// MARK: - Range-scoped summary
 
+/// Headline tile-grid summary that's range-scopable. Replaces the
+/// pre-redesign "Lifetime"-only card. The range picker lets the user
+/// see "Last 7 days", "Last 30 days", "Last 1 year", or "All time"
+/// without leaving the History tab — answering the user's "I want to
+/// see totals per year/month/etc" feedback. Range persists across
+/// launches via App Group `UserDefaults`.
 private struct LifetimeSummaryCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+
+    @AppStorage("pacer.history.summaryRange", store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.all.rawValue
+
+    private var range: TimeRange {
+        TimeRange(rawValue: rangeRaw) ?? .all
+    }
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
 
     private struct Totals {
         var cost: Double = 0
@@ -52,7 +70,9 @@ private struct LifetimeSummaryCard: View {
         var dates = Set<String>()
         var models = Set<String>()
         var minDate: String?
+        let cutoff = range.since.flatMap { TokenSample.formatDate($0) }
         for row in aggregates {
+            if let cutoff, row.date < cutoff { continue }
             t.cost += row.totalCostUSD
             t.input += row.inputTokens
             t.output += row.outputTokens
@@ -67,17 +87,40 @@ private struct LifetimeSummaryCard: View {
         return t
     }
 
+    private var cardTitle: String {
+        switch range {
+        case .sevenDays:  return "Last 7 days"
+        case .thirtyDays: return "Last 30 days"
+        case .ninetyDays: return "Last 90 days"
+        case .oneYear:    return "Last 12 months"
+        case .all:        return "Lifetime"
+        }
+    }
+
     var body: some View {
         let t = totals
-        PacerCard("Lifetime", trailing: {
-            if let first = t.firstDate {
-                Text("since \(first)")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+        PacerCard(cardTitle, trailing: {
+            HStack(spacing: 10) {
+                if range == .all, let first = t.firstDate {
+                    Text("since \(first)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Picker("", selection: rangeBinding) {
+                    ForEach(TimeRange.allCases) { r in
+                        Text(r.shortLabel).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .controlSize(.small)
+                .labelsHidden()
             }
         }) {
             if t.distinctDays == 0 {
-                Text("No history yet — start using Claude Code and Pacer will catch up.")
+                Text(range == .all
+                     ? "No history yet — start using Claude Code and Pacer will catch up."
+                     : "No activity in this range. Try widening the time window.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             } else {
@@ -249,10 +292,17 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 private struct TopDaysCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
 
+    let onDayTap: (String) -> Void
+
     @AppStorage("pacer.history.topDaysSort", store: PacerSettings.store)
     private var sortRaw: String = TopDaysSort.cost.rawValue
     @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
     private var descending: Bool = true
+
+    /// Toggle to reveal the next 10 (and so on). The user flagged
+    /// "showing top 10 silently" — now there's a chip in the header
+    /// indicating "showing N of M" plus a Show more / Show less link.
+    @State private var showAll: Bool = false
 
     private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
     private var sortBinding: Binding<TopDaysSort> {
@@ -266,10 +316,11 @@ private struct TopDaysCard: View {
         var id: String { date }
     }
 
-    /// Top-10 by the user's chosen field. The "top" cap is applied
-    /// AFTER sorting — so changing sort to ascending with a date
-    /// field shows the 10 oldest, not the 10 cheapest.
-    private var topRows: [DayRow] {
+    /// All days, sorted by the user's chosen field. We compute the
+    /// full set so the header chip ("X of Y") tells the truth and the
+    /// "Show more" reveal can extend without re-sorting. The visible
+    /// slice in the body is `topRows.prefix(showAll ? rows.count : 10)`.
+    private var sortedRows: [DayRow] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
         for row in aggregates {
             var v = byDate[row.date] ?? (0, 0)
@@ -287,18 +338,45 @@ private struct TopDaysCard: View {
         case .cost:
             sorted = rows.sorted { $0.cost < $1.cost }
         }
-        let oriented = descending ? sorted.reversed() : Array(sorted)
-        return Array(oriented.prefix(10))
+        return descending ? sorted.reversed() : Array(sorted)
+    }
+
+    /// Slice the sorted set rendered in the body. Capped at 10 by
+    /// default; the toggle reveals the rest in chunks of 25 so the
+    /// reveal isn't an instant 1000-row dump on long histories.
+    private var visibleRows: [DayRow] {
+        let all = sortedRows
+        if showAll {
+            return Array(all.prefix(min(all.count, 100)))
+        }
+        return Array(all.prefix(10))
     }
 
     var body: some View {
-        PacerCard("Most expensive days") {
-            if topRows.isEmpty {
+        let all = sortedRows
+        let visible = visibleRows
+        let title: String = {
+            switch sort {
+            case .cost:    return "Most expensive days"
+            case .tokens:  return "Heaviest token days"
+            case .date:    return descending ? "Most recent days" : "Earliest days"
+            }
+        }()
+        PacerCard(title, trailing: {
+            HStack(spacing: 8) {
+                if !all.isEmpty {
+                    Text("showing \(visible.count) of \(all.count)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }) {
+            if all.isEmpty {
                 Text("No data yet.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             } else {
-                let maxCost = topRows.map(\.cost).max() ?? 1
+                let maxCost = visible.map(\.cost).max() ?? 1
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 12) {
                         // Empty rank column header
@@ -326,10 +404,33 @@ private struct TopDaysCard: View {
                             active: sortBinding,
                             descending: $descending
                         ).frame(width: 80)
+                        // Reserve space for the row's chevron column.
+                        Spacer().frame(width: 16)
                     }
                     Divider().padding(.vertical, 2)
-                    ForEach(Array(topRows.enumerated()), id: \.element.id) { idx, row in
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
                         topRow(idx: idx, row: row, maxCost: maxCost)
+                    }
+                    if all.count > 10 {
+                        HStack {
+                            Spacer()
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    showAll.toggle()
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text(showAll ? "Show top 10" : "Show top 100")
+                                    Image(systemName: showAll ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 9, weight: .semibold))
+                                }
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.tint)
+                            }
+                            .buttonStyle(.plain)
+                            Spacer()
+                        }
+                        .padding(.top, 8)
                     }
                 }
             }
@@ -338,43 +439,44 @@ private struct TopDaysCard: View {
 
     @ViewBuilder
     private func topRow(idx: Int, row: DayRow, maxCost: Double) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("#\(idx + 1)")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundStyle(.tertiary)
-                .frame(width: 28, alignment: .leading)
-            Text(prettyDate(row.date))
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 140, alignment: .leading)
-            // Inline mini-bar still tracks cost (the visual hierarchy
-            // is "this is how expensive this day was" regardless of
-            // which sort field the user picked) — sort just reorders
-            // which days show.
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(height: 6)
-                GeometryReader { geo in
+        HoverRow(action: { onDayTap(row.date) }) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("#\(idx + 1)")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 28, alignment: .leading)
+                Text(prettyDate(row.date))
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 140, alignment: .leading)
+                ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.accentColor.opacity(0.85))
-                        .frame(
-                            width: geo.size.width * CGFloat(row.cost / max(maxCost, 0.0001)),
-                            height: 6
-                        )
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(height: 6)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor.opacity(0.85))
+                            .frame(
+                                width: geo.size.width * CGFloat(row.cost / max(maxCost, 0.0001)),
+                                height: 6
+                            )
+                    }
+                    .frame(height: 6)
                 }
-                .frame(height: 6)
+                Text(pacerTokens(row.tokens))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 80, alignment: .trailing)
+                Text(pacerCost(row.cost))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .frame(width: 80, alignment: .trailing)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 16, alignment: .trailing)
             }
-            Text(pacerTokens(row.tokens))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 80, alignment: .trailing)
-            Text(pacerCost(row.cost))
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 80, alignment: .trailing)
         }
-        .padding(.vertical, 4)
     }
 
     /// `2026-04-30` → `Thu Apr 30`. Compact + day-of-week so the user

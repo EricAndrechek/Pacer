@@ -37,7 +37,7 @@ struct TodayDetailsCard: View {
             } else {
                 VStack(alignment: .leading, spacing: 18) {
                     metricGrid
-                    if totals.cacheHitRatio > 0 {
+                    if totals.cacheReadTokens > 0 {
                         cacheRatio
                     }
                 }
@@ -63,34 +63,55 @@ struct TodayDetailsCard: View {
         }
     }
 
+    /// Cache-utilization line. Headline is the share of input bytes
+    /// that were served from cache rather than re-billed at full input
+    /// price. Sub-line shows the absolute cached / total counts so the
+    /// user can see how much they actually saved (the % alone reads as
+    /// "100%" for almost any heavily-cached workload).
+    ///
+    /// Display uses one decimal so a typical Claude Code session at
+    /// 99.8% reads honestly instead of being floored or rounded to 100%.
     @ViewBuilder
     private var cacheRatio: some View {
-        let pct = Int((totals.cacheHitRatio * 100).rounded())
-        HStack(spacing: 8) {
-            Image(systemName: "bolt.horizontal.circle.fill")
-                .foregroundStyle(.tint)
-                .font(.system(size: 13))
-            Text("Cache hit ratio")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            // Background bar with filled progress, percent at right.
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(height: 6)
-                GeometryReader { geo in
+        let r = totals.cacheHitRatio
+        let pctText = String(format: "%.1f%%", r * 100)
+        let totalReadlike = totals.cacheReadTokens + totals.inputTokens
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle.fill")
+                    .foregroundStyle(.tint)
+                    .font(.system(size: 13))
+                Text("Cache hit rate")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.accentColor)
-                        .frame(width: geo.size.width * totals.cacheHitRatio, height: 6)
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 6)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor)
+                            .frame(width: geo.size.width * r, height: 6)
+                    }
+                    .frame(height: 6)
                 }
-                .frame(height: 6)
+                .frame(maxWidth: 220)
+                Text(pctText)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .frame(width: 56, alignment: .trailing)
             }
-            .frame(maxWidth: 220)
-            Text("\(pct)%")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 40, alignment: .trailing)
+            HStack(spacing: 4) {
+                // Indent past the icon column so the sub-line aligns
+                // with the label rather than the icon.
+                Spacer().frame(width: 21)
+                Text("\(pacerTokens(totals.cacheReadTokens)) cached / \(pacerTokens(totalReadlike)) read")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                Spacer()
+            }
         }
     }
 }

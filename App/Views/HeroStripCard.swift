@@ -15,19 +15,15 @@ import PacerCore
 /// stronger visual hierarchy: the hero number per tile, the "/ pace"
 /// secondary number, a small chip that says behind/on/ahead/danger.
 struct HeroStripCard: View {
-    /// All today's per-model rollups. ≤ a handful of rows; iterating in
-    /// body is sub-millisecond.
-    @Query private var todayAggregates: [DailyAggregate]
-    /// Last 7 calendar days for the "vs avg" trend chip on the cost
-    /// tile. ≤ 50 rows.
-    @Query private var weekAggregates: [DailyAggregate]
-    /// Latest rate-limit samples per window. We only ever look at
-    /// `.first { $0.window == ... }`, so cap the fetch at the most
-    /// recent few rows — without this the OAuth poller's growing
-    /// history would force a full materialization on every save.
-    @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
+    /// Optional click handler for the cost (Today) tile. When set, the
+    /// tile reads as actionable (cursor + hover) and forwards to the
+    /// caller — the dashboard wires this to opening today's day-detail
+    /// modal so the hero strip doubles as the primary "drill into
+    /// today" entry point.
+    let onTodayTap: (() -> Void)?
 
-    init() {
+    init(onTodayTap: (() -> Void)? = nil) {
+        self.onTodayTap = onTodayTap
         let todayString = TokenSample.formatDate(Date())
         let weekAgoString = TokenSample.formatDate(
             Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
@@ -41,6 +37,18 @@ struct HeroStripCard: View {
             }
         )
     }
+
+    /// All today's per-model rollups. ≤ a handful of rows; iterating in
+    /// body is sub-millisecond.
+    @Query private var todayAggregates: [DailyAggregate]
+    /// Last 7 calendar days for the "vs avg" trend chip on the cost
+    /// tile. ≤ 50 rows.
+    @Query private var weekAggregates: [DailyAggregate]
+    /// Latest rate-limit samples per window. We only ever look at
+    /// `.first { $0.window == ... }`, so cap the fetch at the most
+    /// recent few rows — without this the OAuth poller's growing
+    /// history would force a full materialization on every save.
+    @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
 
     private static let recentRateLimits: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
@@ -103,7 +111,7 @@ struct HeroStripCard: View {
     // MARK: - Cost tile
 
     private var costTile: some View {
-        HeroTile(label: "Today") {
+        HeroTile(label: "Today", onTap: onTodayTap) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(pacerCost(todayCost))
                     .font(.system(size: 32, weight: .semibold, design: .rounded))
@@ -221,13 +229,29 @@ struct HeroStripCard: View {
 /// One tile in the hero strip. Cards-of-cards: each tile reuses the
 /// app's standard PacerCard surface so spacing/radius/stroke stay
 /// consistent with the rest of the dashboard.
+///
+/// When `onTap` is non-nil the tile becomes a hover-reactive button
+/// — same surface, but with a subtle hover ring + pointing-hand
+/// cursor so it reads as actionable. The tile remains a passive
+/// surface when no callback is wired.
 private struct HeroTile<Content: View>: View {
     let label: String
+    var onTap: (() -> Void)? = nil
     @ViewBuilder let content: () -> Content
+    @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Eyebrow(text: label)
+        let surface = VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Eyebrow(text: label)
+                Spacer()
+                if onTap != nil {
+                    Image(systemName: "arrow.up.right.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                        .opacity(hovering ? 1.0 : 0.0)
+                }
+            }
             content()
             Spacer(minLength: 0)
         }
@@ -239,7 +263,24 @@ private struct HeroTile<Content: View>: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: PacerDesign.cardCornerRadius, style: .continuous)
-                .stroke(PacerDesign.cardStroke, lineWidth: 1)
+                .stroke(
+                    onTap != nil && hovering
+                        ? Color.accentColor.opacity(0.45)
+                        : PacerDesign.cardStroke,
+                    lineWidth: 1
+                )
         )
+
+        if let onTap {
+            Button(action: onTap) {
+                surface.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .pointerStyle(.link)
+            .help("Open today's breakdown")
+        } else {
+            surface
+        }
     }
 }

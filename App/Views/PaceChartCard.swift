@@ -87,13 +87,22 @@ struct PaceChartCard: View {
     }
 
     private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Polling /api/oauth/usage on a 5-minute cadence.")
-                .font(.system(size: 12))
-            Text("If you're signed into Claude Code, values will appear within 5 minutes of Pacer starting.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 20))
+                .foregroundStyle(.tint)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Waiting for the first rate-limit reading")
+                    .font(.system(size: 13, weight: .medium))
+                Text("Pacer checks Anthropic every 5 minutes. If you're signed into Claude Code, the 5-hour and 7-day pace will appear here shortly.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
         }
+        .frame(minHeight: 96, alignment: .topLeading)
     }
 }
 
@@ -173,14 +182,21 @@ private struct PaceChartColumn: View {
             let inCycle = windowSamples
                 .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
                 .sorted { $0.sampledAt < $1.sampledAt }
-            let paceFraction = PaceMath.paceFraction(
-                now: now, resetsAt: resets, windowDuration: duration
-            )
-            let band = PaceBand(usedPct: latest.usedPercentage, paceEndPct: paceFraction * 100)
-            let curveColor = color(for: band)
-            let curvePoints: [PacePoint] =
+            // Build curve points + per-segment band color. Each segment
+            // (i → i+1) is colored by the band at its EARLIER endpoint
+            // — so a curve that started under-pace and ramped over-pace
+            // is multicolored along its length, mirroring the
+            // reference-impl reference's intent (see PaceBand init policy).
+            // Synthesize a "now" tail point so the line tracks to the
+            // current time even when the latest sample is older.
+            let rawPoints: [PacePoint] =
                 inCycle.map { PacePoint(time: $0.sampledAt, value: $0.usedPercentage) }
                 + [PacePoint(time: now, value: latest.usedPercentage)]
+            let segments: [PaceSegment] = Self.segments(
+                from: rawPoints,
+                resetsAt: resets,
+                windowDuration: duration
+            )
 
             Chart {
                 LineMark(
@@ -196,32 +212,40 @@ private struct PaceChartColumn: View {
                 .foregroundStyle(.secondary.opacity(0.4))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-                ForEach(curvePoints) { p in
+                // Per-segment LineMarks. Each segment is its own series
+                // so adjacent segments with different colors don't bleed
+                // their colors together via Chart's auto-blending.
+                ForEach(segments) { seg in
                     LineMark(
-                        x: .value("time", p.time),
-                        y: .value("pct", p.value),
-                        series: .value("series", "used")
+                        x: .value("time", seg.start.time),
+                        y: .value("pct", seg.start.value),
+                        series: .value("series", "seg-\(seg.id)")
                     )
-                    .foregroundStyle(curveColor)
-                    .interpolationMethod(.monotone)
+                    .foregroundStyle(color(for: seg.band))
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
+                    LineMark(
+                        x: .value("time", seg.end.time),
+                        y: .value("pct", seg.end.value),
+                        series: .value("series", "seg-\(seg.id)")
+                    )
+                    .foregroundStyle(color(for: seg.band))
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
                 }
-                AreaMark(
-                    x: .value("time", curvePoints.last?.time ?? now),
-                    yStart: .value("pct", 0.0),
-                    yEnd: .value("pct", curvePoints.last?.value ?? 0)
-                )
-                .opacity(0)
 
-                PointMark(
-                    x: .value("time", now),
-                    y: .value("pct", latest.usedPercentage)
-                )
-                .foregroundStyle(curveColor)
-                .symbolSize(40)
+                if let tail = rawPoints.last {
+                    PointMark(
+                        x: .value("time", tail.time),
+                        y: .value("pct", tail.value)
+                    )
+                    .foregroundStyle(color(for: segments.last?.band ?? .white))
+                    .symbolSize(44)
+                }
             }
             .chartXScale(domain: cycleStart...resets)
             .chartYScale(domain: 0...100)
-            .chartXAxis(.hidden)
+            .chartXAxis {
+                xAxisMarks(cycleStart: cycleStart, resets: resets)
+            }
             .chartYAxis {
                 AxisMarks(values: [0, 50, 100]) { value in
                     AxisValueLabel {
@@ -234,13 +258,105 @@ private struct PaceChartColumn: View {
                     AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 }
             }
-            .frame(height: 90)
+            .frame(height: 96)
         } else {
             Text("collecting…")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-                .frame(height: 90)
+                .frame(height: 96)
         }
+    }
+
+    /// X-axis marks tuned per window. 5h cycles get 4 hour-of-day ticks
+    /// ("12p", "3p", "6p"); 7d cycles get one tick per day with the
+    /// abbreviated weekday ("Mon", "Tue"). Keeps the cycle context
+    /// readable without crowding the small chart.
+    private func xAxisMarks(cycleStart: Date, resets: Date) -> AxisMarks<some AxisMark> {
+        // 5h ≤ 6h → split into 4 ticks at quarter-cycle.
+        if duration <= 6 * 3600 {
+            let stride = duration / 4
+            let ticks: [Date] = (0...4).map { cycleStart.addingTimeInterval(Double($0) * stride) }
+            return AxisMarks(values: ticks) { value in
+                AxisValueLabel {
+                    if let d = value.as(Date.self) {
+                        Text(Self.shortHour(d))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.10))
+            }
+        }
+        // 7d → one tick per day boundary inside the cycle.
+        let cal = Calendar(identifier: .iso8601)
+        var ticks: [Date] = []
+        // First tick = next midnight after cycleStart. Walk daily until
+        // we cross resets; the chart frame will clip anything beyond.
+        if let firstMidnight = cal.nextDate(
+            after: cycleStart,
+            matching: DateComponents(hour: 0, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        ) {
+            var t = firstMidnight
+            while t < resets {
+                ticks.append(t)
+                guard let next = cal.date(byAdding: .day, value: 1, to: t) else { break }
+                t = next
+            }
+        }
+        return AxisMarks(values: ticks) { value in
+            AxisValueLabel {
+                if let d = value.as(Date.self) {
+                    Text(Self.weekday(d))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            AxisGridLine().foregroundStyle(.secondary.opacity(0.10))
+        }
+    }
+
+    /// "3p" / "12a" — compact lowercase hour-of-day. Shorter than
+    /// `DateFormatter`'s "3 PM" so it fits comfortably under a tiny
+    /// 5-hour pace chart.
+    private static func shortHour(_ date: Date) -> String {
+        let cal = Calendar.current
+        let h24 = cal.component(.hour, from: date)
+        let h12 = ((h24 + 11) % 12) + 1
+        let suffix = h24 < 12 ? "a" : "p"
+        return "\(h12)\(suffix)"
+    }
+
+    private static func weekday(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE"
+        return f.string(from: date)
+    }
+
+    /// Build per-segment band classification for the pace curve. For
+    /// each adjacent pair of points we compute the pace fraction at the
+    /// segment's earlier endpoint and the PaceBand at that moment so
+    /// segments authored when the user was behind pace render green
+    /// even if "now" is in the red.
+    private static func segments(
+        from points: [PacePoint],
+        resetsAt: Date,
+        windowDuration: TimeInterval
+    ) -> [PaceSegment] {
+        guard points.count >= 2 else { return [] }
+        var out: [PaceSegment] = []
+        out.reserveCapacity(points.count - 1)
+        for i in 0..<(points.count - 1) {
+            let a = points[i]
+            let b = points[i + 1]
+            let pace = PaceMath.paceFraction(
+                now: a.time, resetsAt: resetsAt, windowDuration: windowDuration
+            ) * 100
+            let band = PaceBand(usedPct: a.value, paceEndPct: pace)
+            out.append(PaceSegment(id: i, start: a, end: b, band: band))
+        }
+        return out
     }
 
     private func color(for band: PaceBand) -> Color {
@@ -257,4 +373,11 @@ private struct PacePoint: Identifiable {
     let time: Date
     let value: Double
     var id: TimeInterval { time.timeIntervalSince1970 }
+}
+
+private struct PaceSegment: Identifiable {
+    let id: Int
+    let start: PacePoint
+    let end: PacePoint
+    let band: PaceBand
 }

@@ -135,7 +135,17 @@ struct ProjectDetailView: View {
             }
             .padding(24)
         }
+        .scrollIndicators(.never)
         .frame(minWidth: 640, idealWidth: 760, minHeight: 540, idealHeight: 720)
+        // Stacked dismissible modal for the per-session detail. Lives
+        // here (not at the page level) because session selection only
+        // makes sense within the context of an open project modal.
+        // The session modal's dim layer covers everything underneath
+        // — clicking outside dismisses just the session modal, leaving
+        // the project modal in place.
+        .dismissibleModal(item: $selectedSession) { sel in
+            SessionDetailView(session: sel.session, projectDisplayName: displayName)
+        }
     }
 
     private var header: some View {
@@ -400,7 +410,7 @@ struct ProjectDetailView: View {
                         }
                     }
                     .frame(maxHeight: 320)
-                    .scrollIndicators(.automatic)
+                    .scrollIndicators(.never)
                 }
             }
         }
@@ -446,105 +456,51 @@ struct ProjectDetailView: View {
                 active: sessionsSortBinding,
                 descending: $sessionsSortDescending
             ).frame(width: 80)
-            // Reserve room for the transcript-icon column so the
+            // Reserve room for the row's chevron-icon column so the
             // header columns line up with the row body.
-            Spacer().frame(width: 24)
+            Spacer().frame(width: 16)
         }
+    }
+
+    @State private var selectedSession: SelectedSession?
+
+    struct SelectedSession: Identifiable {
+        let session: SessionInfo
+        var id: String { session.sessionId }
     }
 
     @ViewBuilder
     private func sessionRowView(_ row: SessionInfo) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(String(row.sessionId.prefix(8)))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 80, alignment: .leading)
-            // Session "name" — best-effort: the first real user
-            // prompt from the JSONL file (Claude Code doesn't emit a
-            // dedicated summary field on this user's install). Falls
-            // back to the model name if nothing usable is found, which
-            // is what we previously displayed unconditionally.
-            SessionTitleLabel(
-                sessionId: row.sessionId,
-                fallback: pacerShortModel(row.topModel)
-            )
-            .frame(maxWidth: 280, alignment: .leading)
-            Spacer(minLength: 8)
-            Text(pacerTokens(row.totalTokens))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 80, alignment: .trailing)
-            Text(pacerCost(row.cumulativeCostUSD))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
-            Text(pacerRelative(row.lastSeenAt))
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .frame(width: 80, alignment: .trailing)
-            // Reveal-transcript button. Walks `~/.claude/projects/*`
-            // looking for `<sessionId>.jsonl` (subagent worktrees write
-            // into a different encoded-cwd directory than the parent
-            // project, so a literal lookup against `projectPath`
-            // wouldn't work — we have to search). On hit, open Finder
-            // selecting the file. Disabled-look when not found.
-            Button {
-                openTranscript(for: row.sessionId)
-            } label: {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.plain)
-            .help("Reveal transcript JSONL in Finder")
-            .frame(width: 24, alignment: .trailing)
-        }
-        .padding(.vertical, 2)
-    }
-
-    /// Open Finder selecting the session's JSONL transcript. Searches
-    /// every `~/.claude/projects/*` because canonicalized projects
-    /// (worktree-spawned agents) live under a different encoded-cwd
-    /// directory than the project they're attributed to.
-    private func openTranscript(for sessionId: String) {
-        let fm = FileManager.default
-        let root = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects", isDirectory: true)
-        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
-            return
-        }
-        for dir in dirs {
-            let candidate = dir.appendingPathComponent("\(sessionId).jsonl")
-            if fm.fileExists(atPath: candidate.path) {
-                NSWorkspace.shared.activateFileViewerSelecting([candidate])
-                return
+        HoverRow(action: { selectedSession = SelectedSession(session: row) }) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(String(row.sessionId.prefix(8)))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 80, alignment: .leading)
+                Text(pacerShortModel(row.topModel))
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 220, alignment: .leading)
+                Spacer(minLength: 8)
+                Text(pacerTokens(row.totalTokens))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 80, alignment: .trailing)
+                Text(pacerCost(row.cumulativeCostUSD))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .frame(width: 70, alignment: .trailing)
+                Text(pacerRelative(row.lastSeenAt))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 80, alignment: .trailing)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 16, alignment: .trailing)
             }
         }
-    }
-}
-
-/// Resolves the session "name" from the JSONL on disk and renders it.
-/// Async-loaded at appear; falls back to a caller-provided string
-/// (typically the top model name) until the resolver returns.
-///
-/// Pulled into its own SwiftUI view so the parent's body doesn't have
-/// to manage Task lifecycle for ~20 sessions per project.
-private struct SessionTitleLabel: View {
-    let sessionId: String
-    let fallback: String
-    @State private var title: String?
-
-    var body: some View {
-        Text(title ?? fallback)
-            .font(.system(size: 12, weight: title == nil ? .regular : .medium))
-            .foregroundStyle(title == nil ? .secondary : .primary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .help(title ?? fallback)
-            .task(id: sessionId) {
-                let resolved = await SessionTitleResolver.shared.title(for: sessionId)
-                if Task.isCancelled { return }
-                title = resolved
-            }
     }
 }

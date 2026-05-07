@@ -43,7 +43,9 @@ struct HeatmapCard: View {
         )
     }()
 
-    private struct Cell: Identifiable {
+    /// fileprivate so the HeatmapCellButton in this file can reference
+    /// it. Still effectively scoped to this file via the outer struct.
+    fileprivate struct Cell: Identifiable {
         let date: Date
         let dateKey: String
         let cost: Double
@@ -311,23 +313,21 @@ struct HeatmapCard: View {
 
     @ViewBuilder
     private func cellView(_ cell: Cell) -> some View {
-        Button {
-            onDayTap(cell.dateKey)
-        } label: {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(color(for: cell.value(for: metric)))
-                .frame(width: Self.cellSize, height: Self.cellSize)
-        }
-        .buttonStyle(.plain)
-        .help(tooltip(for: cell))
+        HeatmapCellButton(
+            cell: cell,
+            color: color(for: cell.value(for: metric)),
+            valueText: cellValueText(cell),
+            metricLabel: metric.label.lowercased(),
+            onTap: { onDayTap(cell.dateKey) }
+        )
     }
 
-    private func tooltip(for cell: Cell) -> String {
+    private func cellValueText(_ cell: Cell) -> String {
         let v = cell.value(for: metric)
         if v > 0 {
-            return "\(cell.dateKey): \(formatTotal(v, kind: metric)) \(metric.label.lowercased())"
+            return formatTotal(v, kind: metric)
         }
-        return "\(cell.dateKey): no usage"
+        return "no usage"
     }
 
     private func color(for value: Double) -> Color {
@@ -367,6 +367,113 @@ struct HeatmapCard: View {
         case 0.4..<0.6: return Color.green.opacity(0.65)
         case 0.6..<0.8: return Color.green.opacity(0.85)
         default:        return Color.green
+        }
+    }
+}
+
+/// One heatmap cell with hover state + GitHub-style tooltip popover.
+/// The popover shows the date + value on hover, only on cells with
+/// any value (zero-cells stay quiet because the entire grid would
+/// pulse popovers on a slow mouse drag otherwise). Click anywhere on
+/// the cell drills into the day modal.
+///
+/// Pulled out of `HeatmapCard` so each cell owns its hover state —
+/// the parent body never re-renders on hover, just the one cell.
+private struct HeatmapCellButton: View {
+    let cell: HeatmapCard.Cell
+    let color: Color
+    /// Already-formatted value text — e.g. "$12.40", "32.4K", or
+    /// "no usage". Caller picks the right formatter for the active
+    /// metric so this view stays metric-agnostic.
+    let valueText: String
+    let metricLabel: String
+    let onTap: () -> Void
+
+    @State private var hovering: Bool = false
+
+    private var hasValue: Bool {
+        cell.value(for: .cost) > 0
+            || cell.value(for: .tokens) > 0
+            || cell.value(for: .sessions) > 0
+    }
+
+    /// Popover binding: only let the popover show for cells that
+    /// actually have data. Cells with no usage still highlight on
+    /// hover for affordance, but a sea of "no usage" tooltips on a
+    /// fast horizontal cursor sweep is noise.
+    private var popoverBinding: Binding<Bool> {
+        Binding(
+            get: { hovering && hasValue },
+            set: { hovering = $0 }
+        )
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(color)
+                if hovering && hasValue {
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.primary.opacity(0.4), lineWidth: 1)
+                }
+            }
+            .frame(width: 11, height: 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .pointerStyle(hasValue ? .link : .default)
+        .popover(isPresented: popoverBinding, arrowEdge: .top) {
+            HeatmapTooltipContent(
+                date: cell.date,
+                dateKey: cell.dateKey,
+                valueText: valueText,
+                metricLabel: metricLabel,
+                hasValue: hasValue
+            )
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+    }
+}
+
+/// Content of the hover popover — pretty date as the headline, the
+/// value + metric label below, and a "click to open" hint. Mirrors
+/// GitHub's contribution-cell tooltip layout, tuned for macOS.
+private struct HeatmapTooltipContent: View {
+    let date: Date
+    let dateKey: String
+    let valueText: String
+    let metricLabel: String
+    let hasValue: Bool
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        return f
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(Self.dateFmt.string(from: date))
+                .font(.system(size: 11, weight: .semibold))
+            HStack(spacing: 4) {
+                Text(valueText)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                if hasValue {
+                    Text(metricLabel)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if hasValue {
+                Text("Click to drill in")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 1)
+            }
         }
     }
 }

@@ -8,7 +8,21 @@ import PacerCore
 /// 30 days, sums per date (across models). Cost numbers are
 /// validated end-to-end against `bun x ccusage daily --json` —
 /// see `CCusageGroundTruthTests.dailyCostsMatchCapturedCcusageSnapshot`.
+///
+/// Click a bar to drill into the per-day modal (same view the
+/// History tab's heatmap opens). The hover callout in the trailing
+/// slot doubles as an affordance: when there's a selection, it shows
+/// the date + cost so the click target is clear.
 struct DailyCostChartCard: View {
+    /// Optional callback fired when the user clicks a bar. Wiring is
+    /// at the parent (DashboardView / HistoryView), so each surface
+    /// can decide whether to open the day modal locally or stay quiet.
+    let onDayTap: ((String) -> Void)?
+
+    init(onDayTap: ((String) -> Void)? = nil) {
+        self.onDayTap = onDayTap
+    }
+
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
 
@@ -91,10 +105,6 @@ struct DailyCostChartCard: View {
                     }
                 }
             }
-            // Selected-date marker is just a thin dashed rule now —
-            // no annotation. The selection callout lives in the card
-            // header (see body) so the chart's plot area stays a fixed
-            // size regardless of hover state.
             if let selectedDate, totals.contains(where: { $0.date == selectedDate }) {
                 RuleMark(x: .value("Selected", selectedDate))
                     .foregroundStyle(.secondary.opacity(0.5))
@@ -126,6 +136,29 @@ struct DailyCostChartCard: View {
             }
         }
         .chartXSelection(value: $selectedDate)
+        // Tap a bar to drill into that day. Uses the chart's selection
+        // proxy so a click anywhere on a bar (or its column) resolves
+        // to a date and forwards to the parent. No-op when the parent
+        // didn't pass an `onDayTap` (e.g. surfaces that don't host a
+        // day-detail modal).
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { location in
+                        guard let onDayTap else { return }
+                        guard let plotFrame = proxy.plotFrame else { return }
+                        let frame = geo[plotFrame]
+                        let x = location.x - frame.minX
+                        guard x >= 0, x <= frame.width else { return }
+                        if let date: String = proxy.value(atX: x) {
+                            onDayTap(date)
+                        }
+                    }
+                    .pointerStyle(onDayTap != nil ? .link : .default)
+            }
+        }
     }
 
     private func stridedDates(every n: Int, totals: [DailyTotal]) -> [String] {

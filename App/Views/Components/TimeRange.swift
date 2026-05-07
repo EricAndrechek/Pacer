@@ -10,6 +10,7 @@ public enum TimeRange: String, CaseIterable, Identifiable {
     case sevenDays   = "7d"
     case thirtyDays  = "30d"
     case ninetyDays  = "90d"
+    case oneYear     = "1y"
     case all         = "all"
 
     public var id: String { rawValue }
@@ -19,7 +20,21 @@ public enum TimeRange: String, CaseIterable, Identifiable {
         case .sevenDays:   return "7 days"
         case .thirtyDays:  return "30 days"
         case .ninetyDays:  return "90 days"
+        case .oneYear:     return "1 year"
         case .all:         return "All time"
+        }
+    }
+
+    /// Short label used in tighter pickers (e.g. the History summary
+    /// card's segmented control). Same set of choices as `label` but
+    /// dropped to two-character codes so all five fit in a narrow row.
+    public var shortLabel: String {
+        switch self {
+        case .sevenDays:   return "7d"
+        case .thirtyDays:  return "30d"
+        case .ninetyDays:  return "90d"
+        case .oneYear:     return "1y"
+        case .all:         return "All"
         }
     }
 
@@ -29,6 +44,7 @@ public enum TimeRange: String, CaseIterable, Identifiable {
         case .sevenDays:   return 7
         case .thirtyDays:  return 30
         case .ninetyDays:  return 90
+        case .oneYear:     return 365
         case .all:         return nil
         }
     }

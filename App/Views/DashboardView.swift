@@ -17,19 +17,39 @@ import PacerCore
 /// updates stay incremental: a new TokenSample only invalidates the
 /// cards that read TokenSample/DailyAggregate, not the rate-limit hero.
 struct DashboardView: View {
+    @State private var selectedDay: SelectedDay?
+
+    private struct SelectedDay: Identifiable {
+        let date: String
+        var id: String { date }
+    }
+
     var body: some View {
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage."
         ) {
             WelcomeCard()
-            HeroStripCard()
+            HeroStripCard(onTodayTap: openToday)
             PaceChartCard()
             LiveActivityCard()
             TodayDetailsCard()
             TodayTimelineCard()
             PerModelTodayCard()
-            DailyCostChartCard()
+            DailyCostChartCard(onDayTap: { dayKey in
+                selectedDay = SelectedDay(date: dayKey)
+            })
         }
+        .dismissibleModal(item: $selectedDay) { sel in
+            DayDetailView(date: sel.date)
+        }
+    }
+
+    /// Open today's day-detail modal. Pinned to the user's local
+    /// timezone via TokenSample.formatDate so the date key matches
+    /// what aggregates actually store under.
+    private func openToday() {
+        let today = TokenSample.formatDate(Date())
+        selectedDay = SelectedDay(date: today)
     }
 }
