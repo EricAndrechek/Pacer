@@ -61,9 +61,7 @@ public actor PricingTable {
             let decoded = try Self.decode(data: data)
             replace(with: decoded)
         } catch {
-            FileHandle.standardError.write(
-                Data("[PricingTable] refresh failed (\(error)) — keeping existing snapshot\n".utf8)
-            )
+            Log.write("PricingTable", "refresh failed (\(error)) — keeping existing snapshot")
         }
     }
 

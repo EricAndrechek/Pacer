@@ -8,7 +8,7 @@ struct PacerDaemonMain {
         do {
             try await runDaemon()
         } catch {
-            FileHandle.standardError.write(Data("[PacerDaemon] fatal: \(error)\n".utf8))
+            Log.write("PacerDaemon", "fatal: \(error)")
             exit(1)
         }
     }
@@ -25,9 +25,10 @@ struct PacerDaemonMain {
         let watchdog = Task.detached(priority: .background) {
             try? await Task.sleep(nanoseconds: 30_000_000_000)
             if Task.isCancelled { return }
-            FileHandle.standardError.write(Data(
-                "[PacerDaemon] WARNING: SwiftData container creation has not completed after 30s. Likely a stuck SQLite lock — check `lsof <store-path>` for orphan PacerDaemon processes (especially in SX 'kernel-stuck' state). A reboot clears them.\n".utf8
-            ))
+            Log.write(
+                "PacerDaemon",
+                "WARNING: SwiftData container creation has not completed after 30s. Likely a stuck SQLite lock — check `lsof <store-path>` for orphan PacerDaemon processes (especially in SX 'kernel-stuck' state). A reboot clears them."
+            )
         }
         let container: ModelContainer
         do {
@@ -93,7 +94,7 @@ struct PacerDaemonMain {
     }
 
     static func log(_ message: String) {
-        FileHandle.standardError.write(Data("[PacerDaemon] \(message)\n".utf8))
+        Log.write("PacerDaemon", message)
     }
 
     /// Installs a SIGTERM/SIGINT handler via DispatchSourceSignal. The

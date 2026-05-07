@@ -332,7 +332,7 @@ public final class ScanCoordinator {
     }
 
     private func log(_ message: String) {
-        FileHandle.standardError.write(Data("[ScanCoordinator] \(message)\n".utf8))
+        Log.write("ScanCoordinator", message)
     }
 
     /// Emit a log line for "interesting" scans only:

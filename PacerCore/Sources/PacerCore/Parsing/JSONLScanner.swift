@@ -135,9 +135,7 @@ public actor JSONLScanner {
             } catch {
                 // Per ccusage: a single unreadable file shouldn't poison
                 // the scan. Don't update its cursor — next scan retries.
-                FileHandle.standardError.write(
-                    Data("[JSONLScanner] skipping \(c.url.lastPathComponent): \(error)\n".utf8)
-                )
+                Log.write("JSONLScanner", "skipping \(c.url.lastPathComponent): \(error)")
                 continue
             }
         }

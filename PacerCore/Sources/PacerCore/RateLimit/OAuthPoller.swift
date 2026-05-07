@@ -317,9 +317,7 @@ public actor OAuthPoller {
                 // move on. The next successful poll will write fresh
                 // samples; we deliberately don't stop the poller for
                 // a single persistence failure.
-                FileHandle.standardError.write(
-                    Data("[OAuthPoller] persist failed: \(error)\n".utf8)
-                )
+                Log.write("OAuthPoller", "persist failed: \(error)")
             }
         }
     }

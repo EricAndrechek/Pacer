@@ -100,9 +100,7 @@ public actor JSONLWatcher {
         if started {
             self.fsEvents = watcher
         } else {
-            FileHandle.standardError.write(
-                Data("[JSONLWatcher] FSEventStream failed to start; relying on backstop only\n".utf8)
-            )
+            Log.write("JSONLWatcher", "FSEventStream failed to start; relying on backstop only")
         }
 
         // 60s backstop. Always emits — no coalesce — so even if FSEvents
