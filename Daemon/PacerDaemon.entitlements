@@ -9,14 +9,24 @@
 		<string>group.com.ericandrechek.pacer</string>
 	</array>
 	<!--
-	  team-identifier is required for macOS Sequoia 15+ to recognize
-	  PacerDaemon as same-team as the parent Pacer.app and waive the
-	  "Pacer would like to access data from other apps" prompt that
-	  fires every launch when the daemon opens the shared App Group
-	  container. Without this key TCC treats the daemon as a separate
-	  third-party app reaching into com.ericandrechek.pacer's data.
+	  Match the parent app's get-task-allow=false. See Pacer.app
+	  entitlements for the longer note.
+
+	  We deliberately do NOT add com.apple.developer.team-identifier
+	  here. That entitlement requires a matching provisioning
+	  profile, and Xcode doesn't generate one for tool targets —
+	  adding it makes AMFI reject the daemon at launchd start with
+	  -413 "No matching profile found", silently leaving the agent
+	  bootstrapped but never running. Don't add it back without
+	  also wiring up a profile.
+
+	  The bundle-style codesign identifier (set via
+	  OTHER_CODE_SIGN_FLAGS in project.yml) plus the matching
+	  team in the Mach-O signature are enough to suppress the
+	  daemon-side TCC prompt; the parent app's prompt is a separate
+	  problem rooted in development-cert signing.
 	-->
-	<key>com.apple.developer.team-identifier</key>
-	<string>YZXWMJ5VBY</string>
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
 </dict>
 </plist>

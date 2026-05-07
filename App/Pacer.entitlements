@@ -8,5 +8,22 @@
 	<array>
 		<string>group.com.ericandrechek.pacer</string>
 	</array>
+	<!--
+	  Force get-task-allow=false even on Debug builds. Xcode auto-
+	  injects it as true for development signing so a debugger can
+	  attach, but Pacer is run from /Applications under launchd
+	  (via `make install`), not from Xcode's Run scheme, so debugger
+	  attach isn't useful. Stripping the entitlement removes one
+	  "this binary is debuggable / untrusted" signal that Sequoia's
+	  TCC weighs when deciding whether to persist Allow grants.
+	  (It does not fully solve the every-launch
+	  kTCCServiceSystemPolicyAppData prompt for Apple Development-
+	  signed builds — see `docs/research/tcc-app-management.md` if
+	  that note exists, or AGENTS.md "real-run bug #6" — but this
+	  is a prerequisite for the Distribution-signed shipping path
+	  and matches what the Sparkle release will look like.)
+	-->
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
 </dict>
 </plist>

@@ -295,26 +295,64 @@ all of them. Mentioned here so future agents don't repeat them:
    see a launchctl-managed daemon at 0% CPU with no log output, run
    `lsof "$HOME/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite"`
    — any SX-state daemon listed there is the culprit.
-5. **PacerDaemon must be signed with a bundle-style identifier and
-   carry the team-identifier entitlement, or macOS Sequoia 15+ prompts
-   "Pacer would like to access data from other apps" on every launch.**
-   Tool targets get codesign `Identifier=PacerDaemon` (the binary name)
-   by default and don't pick up `com.apple.developer.team-identifier`
-   automatically. With those missing, TCC sees the daemon as a separate
-   third-party app reaching into `com.ericandrechek.pacer`'s App Group
-   container and prompts `kTCCServiceSystemPolicyAppData` every time
-   the daemon opens `~/Library/Group Containers/group.com.ericandrechek.pacer/`.
-   Two settings make TCC waive the prompt:
-     - `OTHER_CODE_SIGN_FLAGS = "--identifier=com.ericandrechek.pacer.daemon"`
-       in the daemon target (so codesign records a bundle-style ID).
-     - `com.apple.developer.team-identifier = YZXWMJ5VBY` in
-       `Daemon/PacerDaemon.entitlements`.
-   Diagnose with `codesign -dvv` (look for `Identifier=`) and
-   `codesign -d --entitlements -` (look for the team-identifier key).
-   Confirm via `log show --predicate 'process == "tccd"' --info --last 5m | grep AUTHREQ_PROMPTING`
-   — a clean run produces no `kTCCServiceSystemPolicyAppData` prompt
-   for the daemon. Don't drop these settings; the test suite can't
-   catch this because it never installs to /Applications.
+5. **PacerDaemon must be signed with a bundle-style identifier or
+   macOS Sequoia 15+ prompts "Pacer would like to access data from
+   other apps" on every launch for the daemon.** Tool targets get
+   codesign `Identifier=PacerDaemon` (the binary name) by default,
+   which TCC sees as a separate third-party app reaching into
+   `com.ericandrechek.pacer`'s App Group container — prompting
+   `kTCCServiceSystemPolicyAppData` every time. Force a bundle-style
+   ID with `OTHER_CODE_SIGN_FLAGS = "--identifier=com.ericandrechek.pacer.daemon"`
+   in the daemon target settings. Verify with `codesign -dvv` (look
+   for `Identifier=com.ericandrechek.pacer.daemon`).
+
+   **Do NOT add `com.apple.developer.team-identifier` to the daemon's
+   entitlements** — it requires a matching provisioning profile,
+   which Xcode doesn't generate for tool targets, and AMFI rejects
+   the binary at launchd start with -413 "No matching profile found".
+   The Mach-O signature already carries TeamIdentifier=YZXWMJ5VBY
+   from the development cert; that's enough to suppress the
+   daemon-side prompt once the bundle-style ID is in place.
+
+   Confirm via `log show --predicate 'process == "tccd"' --info
+   --last 5m | grep AUTHREQ_PROMPTING` — a clean daemon run produces
+   no `kTCCServiceSystemPolicyAppData` prompt with
+   `Resp:{TCCDProcess: identifier=com.ericandrechek.pacer.daemon}`.
+   The test suite can't catch this because it never installs to
+   /Applications.
+
+6. **Apple Development-signed builds re-prompt
+   `kTCCServiceSystemPolicyAppData` for the GUI app on every launch,
+   regardless of how many times the user clicks Allow.** The Allow
+   click records `auth_value=5` in `~/Library/Application Support/
+   com.apple.TCC/TCC.db` but the row's `csreq` (code-signing
+   requirement blob) ends up empty / unstable, so on the next
+   launch TCC can't verify the binary identity and re-prompts.
+   Compare to apps signed with `Developer ID Application` (Docker,
+   iTerm) which get a populated 160–212-byte `csreq` and stay
+   granted. The fix is signing the dev build with Developer ID
+   instead of Apple Development; until then, expect one prompt per
+   GUI launch on macOS Sequoia. The daemon side stays fine because
+   it's launched once by launchd and KeepAlive keeps it up across
+   GUI restarts. `get-task-allow=false` in both entitlements files
+   removes one untrusted-binary signal but does not on its own
+   stop the prompt.
+
+   Diagnose by inspecting the row TCC creates after an Allow click:
+   `sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db
+   "SELECT auth_value, length(csreq) FROM access WHERE
+   client='com.ericandrechek.pacer';"` — a populated `length(csreq)`
+   (>0) means persistence will work; `0` means the prompt comes
+   back next launch.
+
+   Auxiliary one-time fix when migrating from an older daemon
+   identifier: `~/Library/Group Containers/group.com.ericandrechek.pacer/
+   .com.apple.containermanagerd.metadata.plist` records the binary
+   that first created the container in `MCMMetadataCreator`. If
+   that's the old `PacerDaemon` (binary-name) identifier, patch it
+   to `com.ericandrechek.pacer` with `plutil -replace
+   MCMMetadataCreator -string com.ericandrechek.pacer "$plist"`
+   so the App is recognized as the container's owning bundle ID.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
