@@ -7,8 +7,8 @@ import PacerCore
 /// session early ("oh I just burned through $5 in 20 minutes").
 ///
 /// Reads `TokenSample` rows from the last hour. With cursor-based
-/// scanning the daemon writes near-realtime, so this card moves
-/// visibly as Claude Code is actively running.
+/// scanning Pacer writes near-realtime, so this card moves visibly
+/// as Claude Code is actively running.
 struct LiveActivityCard: View {
     @Query private var recentSamples: [TokenSample]
     @Query private var todayAggregates: [DailyAggregate]

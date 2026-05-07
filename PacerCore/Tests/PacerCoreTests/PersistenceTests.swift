@@ -162,7 +162,7 @@ private func makeEntry(
     // End-to-end check: feeding the recovered pairs into the recomputer
     // actually creates the missing aggregates.
     persister.addDirtyPairs(recovered)
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     _ = try await recomputer.recompute(pairs: persister.dirtyPairs)
 
     // Three aggregates total: the pre-existing (day1, opus) + the two
@@ -234,7 +234,7 @@ private func makeEntry(
 
     let dirtyDate = TokenSample.formatDate(day)
     // Cost mode .display so we don't need network/pricing for this test.
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     let stats = try await recomputer.recompute(pairs: persister.dirtyPairs)
     #expect(stats.aggregatesUpserted == 1)
 
@@ -256,7 +256,7 @@ private func makeEntry(
     _ = try persister.insert(makeEntry(timestamp: day, model: "claude-sonnet-4-6", input: 50, dedup: "b:1"))
     try persister.flush()
 
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     let stats = try await recomputer.recompute(pairs: persister.dirtyPairs)
     #expect(stats.aggregatesUpserted == 2)
 
@@ -277,7 +277,7 @@ private func makeEntry(
     let day = Date(timeIntervalSince1970: 1_756_800_000)
     _ = try persister.insert(makeEntry(timestamp: day, input: 100, dedup: "a:1"))
     try persister.flush()
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     _ = try await recomputer.recompute(pairs: persister.dirtyPairs)
 
     // Second insert into same bucket; recompute should overwrite, not duplicate.
@@ -303,7 +303,7 @@ private func makeEntry(
         timestamp: day, input: 10, output: 20, cacheRead: 30, cache5m: 40, cache1h: 50, dedup: "b:1"))
     try persister.flush()
 
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     _ = try await recomputer.recompute(pairs: persister.dirtyPairs)
 
     let agg = try context.fetch(FetchDescriptor<DailyAggregate>()).first!
@@ -326,7 +326,7 @@ private func makeEntry(
     _ = try persister.insert(makeEntry(timestamp: day, storedCost: nil, dedup: "c:1"))
     try persister.flush()
 
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     _ = try await recomputer.recompute(pairs: persister.dirtyPairs)
 
     let agg = try context.fetch(FetchDescriptor<DailyAggregate>()).first!
@@ -348,7 +348,7 @@ private func makeEntry(
     try context.save()
     #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 1)
 
-    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
     let stats = try await recomputer.recompute(pairs: [DateModelPair(date: date, model: model)])
     #expect(stats.aggregatesDeleted == 1)
     #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 0)
@@ -378,7 +378,7 @@ private func makeEntry(
         sessionId: "sess-3", projectPath: "/Users/eric/repo-b"))
     try persister.flush()
 
-    let recomputer = ProjectAggregateRecomputer(context: context)
+    let recomputer = ProjectAggregateRecomputer(container: container, context: context)
     let stats = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
     #expect(stats.pairsRecomputed == 2)
     #expect(stats.aggregatesUpserted == 2)
@@ -411,7 +411,7 @@ private func makeEntry(
     _ = try persister.insert(makeEntry(timestamp: day, dedup: "b:1", projectPath: nil))
     try persister.flush()
 
-    let recomputer = ProjectAggregateRecomputer(context: context)
+    let recomputer = ProjectAggregateRecomputer(container: container, context: context)
     _ = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
 
     let aggregates = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
@@ -441,7 +441,7 @@ private func makeEntry(
     }
     try persister.flush()
 
-    let recomputer = ProjectAggregateRecomputer(context: context)
+    let recomputer = ProjectAggregateRecomputer(container: container, context: context)
     let stats = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
     #expect(stats.pairsRecomputed == 70)
     #expect(stats.aggregatesUpserted == 70)
@@ -475,7 +475,7 @@ private func makeEntry(
         sessionId: "sess-B", projectPath: "/p2"))
     try persister.flush()
 
-    let recomputer = SessionInfoRecomputer(context: context)
+    let recomputer = SessionInfoRecomputer(container: container, context: context)
     let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
     #expect(stats.sessionsRecomputed == 2)
     #expect(stats.sessionsUpserted == 2)
@@ -514,7 +514,7 @@ private func makeEntry(
 
     #expect(persister.dirtySessionIds.isEmpty)
 
-    let recomputer = SessionInfoRecomputer(context: context)
+    let recomputer = SessionInfoRecomputer(container: container, context: context)
     let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
     #expect(stats.sessionsRecomputed == 0)
     #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 0)
@@ -531,7 +531,7 @@ private func makeEntry(
         timestamp: day, input: 100, dedup: "a:1",
         sessionId: "sess-A", projectPath: "/p1"))
     try persister.flush()
-    let recomputer = SessionInfoRecomputer(context: context)
+    let recomputer = SessionInfoRecomputer(container: container, context: context)
     _ = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
 
     persister.clearDirtyPairs()
@@ -568,7 +568,7 @@ private func makeEntry(
     }
     try persister.flush()
 
-    let recomputer = SessionInfoRecomputer(context: context)
+    let recomputer = SessionInfoRecomputer(container: container, context: context)
     let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
     #expect(stats.sessionsRecomputed == 70)
     #expect(stats.sessionsUpserted == 70)

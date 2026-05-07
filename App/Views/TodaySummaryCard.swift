@@ -3,7 +3,7 @@ import SwiftData
 import PacerCore
 
 /// Today's totals, computed from `DailyAggregate` rows for the local
-/// `YYYY-MM-DD`. Reads only — no work that touches the daemon's write
+/// `YYYY-MM-DD`. Reads only — no work that touches the scan's write
 /// path. Intentionally independent of the rate-limit OAuth poll: this
 /// card surfaces what we know from JSONL, the gauges card surfaces
 /// what we know from the OAuth endpoint.
@@ -115,7 +115,7 @@ struct TodaySummaryCard: View {
     }
 
     private var emptyState: some View {
-        Text("No usage logged today yet. The daemon writes within seconds of any Claude Code activity.")
+        Text("No usage logged today yet. Pacer will write within seconds of any Claude Code activity.")
             .foregroundStyle(.secondary)
             .font(.system(.body, design: .monospaced))
     }

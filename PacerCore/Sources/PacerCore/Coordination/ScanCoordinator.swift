@@ -61,6 +61,7 @@ public final class ScanCoordinator {
         public let durationSeconds: Double
     }
 
+    private let container: ModelContainer
     private let context: ModelContext
     private let configuration: Configuration
     private let scanner: JSONLScanner
@@ -68,7 +69,7 @@ public final class ScanCoordinator {
     private let resolver: ClaudePathResolver
     private let probe: StatsCacheProbe?
     /// nil disables OAuth polling. Tests leave this nil so no network
-    /// or keychain access happens; the daemon constructs a default
+    /// or keychain access happens; the app constructs a default
     /// `OAuthClient()` to enable Tier 3 rate-limit windowing.
     private let oauthPoller: OAuthPoller?
 
@@ -88,12 +89,6 @@ public final class ScanCoordinator {
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
 
-    /// Previous self-resource snapshot, used to compute delta-CPU% on
-    /// the next heartbeat. nil before the first call to
-    /// `recordHeartbeat()` and reset implicitly after the daemon
-    /// restarts.
-    private var lastSelfSnapshot: SelfResourceProbe.Snapshot?
-
     public init(
         container: ModelContainer,
         configuration: Configuration = Configuration(),
@@ -101,6 +96,7 @@ public final class ScanCoordinator {
         resolver: ClaudePathResolver = ClaudePathResolver(),
         oauthClient: OAuthClient? = nil
     ) {
+        self.container = container
         self.context = ModelContext(container)
         self.configuration = configuration
         self.scanner = JSONLScanner()
@@ -183,27 +179,6 @@ public final class ScanCoordinator {
         }
     }
 
-    /// Capture this process's PID/RSS/CPU and write a JSON-encoded
-    /// `DaemonStats` into `ClaudeCodeMeta`. Called every few seconds by
-    /// the daemon so the GUI's Debug tab can read resource info from
-    /// SwiftData instead of shelling out to `pgrep`/`ps` (which on
-    /// Sequoia would re-prompt the TCC App Management permission).
-    public func recordHeartbeat() throws {
-        guard let snap = SelfResourceProbe.capture() else { return }
-        let cpuPercent = lastSelfSnapshot.flatMap {
-            SelfResourceProbe.cpuPercent(from: $0, to: snap)
-        }
-        lastSelfSnapshot = snap
-        let stats = DaemonStats(
-            pid: snap.pid,
-            rssBytes: snap.rssBytes,
-            cpuPercent: cpuPercent,
-            timestamp: snap.timestamp
-        )
-        try writeMeta(ClaudeCodeMetaKey.daemonStats, value: stats.encoded())
-        try context.save()
-    }
-
     // MARK: - Internal
 
     private func runScanCycle() async throws -> ScanReport {
@@ -284,13 +259,16 @@ public final class ScanCoordinator {
             skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate
         )
 
-        let recomputer = AggregateRecomputer(context: context, mode: configuration.costMode)
+        let recomputer = AggregateRecomputer(
+            container: container, context: context, mode: configuration.costMode)
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
 
-        let projectRecomputer = ProjectAggregateRecomputer(context: context)
+        let projectRecomputer = ProjectAggregateRecomputer(
+            container: container, context: context)
         let projectRecomputeStats = try await projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
 
-        let sessionRecomputer = SessionInfoRecomputer(context: context)
+        let sessionRecomputer = SessionInfoRecomputer(
+            container: container, context: context)
         let sessionRecomputeStats = try await sessionRecomputer.recompute(sessionIds: activePersister.dirtySessionIds)
 
         var probeResult: StatsCacheProbe.ProbeResult?

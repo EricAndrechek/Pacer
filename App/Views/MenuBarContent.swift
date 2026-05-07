@@ -176,14 +176,12 @@ struct MenuBarContent: View {
                 }
                 Button("Settings…") {
                     NSApp.activate(ignoringOtherApps: true)
-                    if #available(macOS 14, *) {
-                        // The newer Settings scene API is opened via
-                        // an internal selector; OS-level menu sends
-                        // 'showSettingsWindow:'.
-                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    } else {
-                        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-                    }
+                    openWindow(id: "main")
+                    // Settings is a tab inside the main window now,
+                    // not a separate Settings scene. Posting the
+                    // notification flips the TabView selection.
+                    NotificationCenter.default.post(
+                        name: .pacerOpenSettings, object: nil)
                 }
                 Spacer()
                 Button("Quit") {

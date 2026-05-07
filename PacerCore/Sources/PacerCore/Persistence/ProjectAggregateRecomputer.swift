@@ -13,9 +13,11 @@ import SwiftData
 @MainActor
 public final class ProjectAggregateRecomputer {
 
+    private let container: ModelContainer
     private let context: ModelContext
 
-    public init(context: ModelContext) {
+    public init(container: ModelContainer, context: ModelContext) {
+        self.container = container
         self.context = context
     }
 
@@ -25,76 +27,37 @@ public final class ProjectAggregateRecomputer {
         public var aggregatesDeleted: Int
     }
 
-    /// Above this many dirty pairs we switch from per-pair fetches to a
-    /// single full-table sweep + in-memory grouping. The crossover
-    /// roughly matches when 2700 small SQLite calls become slower than
-    /// one ~30k-row fetch + a hashmap pass; chosen conservatively so
-    /// backfill (always thousands of pairs) takes the bulk path while
-    /// normal incremental scans (≤ a couple dozen pairs) stay on the
-    /// per-pair path.
+    /// Above this many dirty pairs we hand off to a background
+    /// `@ModelActor` worker so the recompute doesn't block MainActor.
+    /// Backfill (always thousands of pairs) takes the bulk path; normal
+    /// incremental scans (≤ a couple dozen pairs) stay on the per-pair
+    /// main-context path where the predicate-filtered fetches are
+    /// cheap and visibility of in-flight inserts is free.
     private static let bulkRecomputeThreshold = 64
-    /// How often the bulk path yields back to the run loop. The work
-    /// stays on MainActor so it can touch SwiftData; yielding every
-    /// few dozen pairs lets SwiftUI service draw ticks and click events
-    /// during the first-install backfill instead of freezing the UI
-    /// until the whole 345-bucket pass finishes.
-    private static let yieldInterval = 32
 
     @discardableResult
     public func recompute(pairs: Set<ProjectDatePair>) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
         if pairs.count >= Self.bulkRecomputeThreshold {
-            try await recomputeBulk(pairs: pairs, stats: &stats)
-        } else {
-            for pair in pairs {
-                stats.pairsRecomputed += 1
-                try recomputeOne(pair: pair, stats: &stats)
-            }
+            // See AggregateRecomputer — commit any pending main-context
+            // inserts so the background worker's separate context can
+            // see them.
+            try context.save()
+            let worker = ProjectAggregateBulkWorker(modelContainer: container)
+            return try await worker.bulkRecompute(pairs: pairs)
         }
-        // No save here — see comment in `AggregateRecomputer.recompute`.
-        // The cycle's terminal save in `ScanCoordinator.runScanCycle`
-        // commits every recomputer's changes in one shot.
-        return stats
-    }
-
-    /// Backfill / large-batch path: one fetch of every TokenSample,
-    /// one fetch of every ProjectDailyAggregate, group both into
-    /// dictionaries, then update each dirty pair from in-memory data.
-    /// Avoids the 2700-small-fetches storm that the per-pair path
-    /// would do on first install.
-    private func recomputeBulk(pairs: Set<ProjectDatePair>, stats: inout Stats) async throws {
-        let allSamples = try context.fetch(FetchDescriptor<TokenSample>())
-        var grouped: [ProjectDatePair: [TokenSample]] = [:]
-        for s in allSamples {
-            let path = s.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            grouped[ProjectDatePair(projectPath: path, date: s.date), default: []].append(s)
-        }
-        let existingAll = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
-        var existingByKey: [String: ProjectDailyAggregate] = [:]
-        for agg in existingAll {
-            existingByKey[agg.projectDateKey] = agg
-        }
-        var processed = 0
         for pair in pairs {
             stats.pairsRecomputed += 1
-            let key = ProjectDailyAggregate.makeKey(projectPath: pair.projectPath, date: pair.date)
-            let existing = existingByKey[key]
-            let samples = grouped[pair] ?? []
-            applySamples(pair: pair, samples: samples, existing: existing, stats: &stats)
-            processed += 1
-            if processed.isMultiple(of: Self.yieldInterval) {
-                await Task.yield()
-            }
+            try recomputeOne(pair: pair, stats: &stats)
         }
+        // No save here — see comment in `AggregateRecomputer.recompute`.
+        return stats
     }
 
     private func recomputeOne(pair: ProjectDatePair, stats: inout Stats) throws {
         let dateString = pair.date
         let path = pair.projectPath
-        // Match samples both for the explicit-path case and the
-        // missing-path "(unknown)" bucket. Doing the predicate match in
-        // one pass is cheaper than two queries.
         let unknownPath = ProjectDailyAggregate.unknownProjectPath
         let samples: [TokenSample]
         if path == unknownPath {
@@ -122,23 +85,27 @@ public final class ProjectAggregateRecomputer {
             )
         ).first
 
-        applySamples(pair: pair, samples: samples, existing: existing, stats: &stats)
+        Self.applySamples(
+            pair: pair, samples: samples, existing: existing,
+            insert: { context.insert($0) },
+            delete: { context.delete($0) },
+            stats: &stats
+        )
     }
 
-    /// Shared upsert/delete logic used by both the per-pair and bulk
-    /// recompute paths. `samples` may be empty — in that case the
-    /// existing aggregate row (if any) is deleted.
-    private func applySamples(
+    fileprivate nonisolated static func applySamples(
         pair: ProjectDatePair,
         samples: [TokenSample],
         existing: ProjectDailyAggregate?,
+        insert: (ProjectDailyAggregate) -> Void,
+        delete: (ProjectDailyAggregate) -> Void,
         stats: inout Stats
     ) {
         let path = pair.projectPath
         let dateString = pair.date
         if samples.isEmpty {
             if let existing {
-                context.delete(existing)
+                delete(existing)
                 stats.aggregatesDeleted += 1
             }
             return
@@ -189,7 +156,7 @@ public final class ProjectAggregateRecomputer {
             existing.modelTokensJSON = modelTokensJSON
             existing.modelCostJSON = modelCostJSON
         } else {
-            context.insert(ProjectDailyAggregate(
+            insert(ProjectDailyAggregate(
                 projectPath: path,
                 date: dateString,
                 inputTokens: inputTokens,
@@ -207,5 +174,54 @@ public final class ProjectAggregateRecomputer {
             ))
         }
         stats.aggregatesUpserted += 1
+    }
+}
+
+/// Off-main bulk recompute path. Owns its own `ModelContext` via
+/// `@ModelActor`, fetches every TokenSample once, groups by
+/// `(project, date)`, upserts each dirty pair, then saves. SwiftData
+/// fans the committed changes out to MainActor `@Query` subscribers
+/// so Projects/ProjectDetail refresh once the worker finishes.
+@ModelActor
+actor ProjectAggregateBulkWorker {
+
+    private static let yieldInterval = 32
+
+    func bulkRecompute(pairs: Set<ProjectDatePair>) async throws -> ProjectAggregateRecomputer.Stats {
+        var stats = ProjectAggregateRecomputer.Stats(
+            pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
+
+        let allSamples = try modelContext.fetch(FetchDescriptor<TokenSample>())
+        var grouped: [ProjectDatePair: [TokenSample]] = [:]
+        for s in allSamples {
+            let path = s.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+            grouped[ProjectDatePair(projectPath: path, date: s.date), default: []].append(s)
+        }
+        let existingAll = try modelContext.fetch(FetchDescriptor<ProjectDailyAggregate>())
+        var existingByKey: [String: ProjectDailyAggregate] = [:]
+        for agg in existingAll { existingByKey[agg.projectDateKey] = agg }
+
+        var processed = 0
+        for pair in pairs {
+            stats.pairsRecomputed += 1
+            let key = ProjectDailyAggregate.makeKey(projectPath: pair.projectPath, date: pair.date)
+            let existing = existingByKey[key]
+            let samples = grouped[pair] ?? []
+            ProjectAggregateRecomputer.applySamples(
+                pair: pair,
+                samples: samples,
+                existing: existing,
+                insert: { modelContext.insert($0) },
+                delete: { modelContext.delete($0) },
+                stats: &stats
+            )
+            processed += 1
+            if processed.isMultiple(of: Self.yieldInterval) {
+                await Task.yield()
+            }
+        }
+
+        try modelContext.save()
+        return stats
     }
 }

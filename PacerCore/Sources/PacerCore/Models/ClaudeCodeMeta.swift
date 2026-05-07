@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 
-/// Generic key/value bag for daemon-internal state and debug probes.
+/// Generic key/value bag for scan-internal state and debug probes.
 /// Used for things that don't justify their own table: parser version,
 /// last-full-scan timestamp, last-incremental-scan mtime cutoff, the
 /// stats-cache.json mirror values for sanity checks, etc.
@@ -29,7 +29,7 @@ public enum ClaudeCodeMetaKey {
     /// Version of the parser+aggregation pipeline that produced the
     /// current `TokenSample`/`DailyAggregate` rows. Bumped when we ship
     /// a parsing change that would re-classify existing data, so the
-    /// daemon knows to do a full re-scan on first launch after upgrade.
+    /// scan knows to do a full re-scan on first launch after upgrade.
     public static let scanVersion = "scan_version"
 
     /// ISO-8601 timestamp of the last full historical scan (any root).
@@ -52,16 +52,4 @@ public enum ClaudeCodeMetaKey {
     public static let statsCacheVersion = "stats_cache_version"
     public static let statsCacheLastComputedDate = "stats_cache_last_computed_date"
     public static let statsCacheTotalMessages = "stats_cache_total_messages"
-
-    // MARK: - Daemon heartbeat
-    //
-    // JSON-encoded `DaemonStats` written every few seconds by the
-    // running PacerDaemon. The Debug tab reads this row instead of
-    // shelling out to `pgrep`/`ps`, which on macOS Sequoia trigger the
-    // "would like to access data from other apps" TCC prompt every
-    // time they enumerate processes. The daemon is the only legitimate
-    // writer; if the value is missing or the timestamp is older than
-    // ~30 seconds the GUI shows "—" for the resource columns.
-
-    public static let daemonStats = "daemon_stats"
 }

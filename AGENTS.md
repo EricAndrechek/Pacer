@@ -89,10 +89,10 @@ App/
                                   ~/Library/Logs/Pacer/Pacer.err.log so Log.write output
                                   survives non-terminal launches. Posts a "Pacer paused"
                                   banner from applicationShouldTerminate.
-    AppBackgroundService.swift  — In-process equivalent of the retired PacerDaemon CLI.
-                                  Constructs and runs ScanCoordinator (FSEvents JSONL scan +
-                                  OAuth polling + SwiftData persistence) inside the app
-                                  process. start() is idempotent; stop() is awaited from
+    AppBackgroundService.swift  — In-process background data collector. Constructs and
+                                  runs ScanCoordinator (FSEvents JSONL scan + OAuth polling
+                                  + SwiftData persistence) inside the app process.
+                                  start() is idempotent; stop() is awaited from
                                   applicationShouldTerminate so saves flush before exit.
 
   Settings/
@@ -120,9 +120,10 @@ App/
                                   ProjectDetail.
     ModelsView.swift            — range picker + token-share donut + per-date stacked trend
                                   chart + full per-model table.
-    DebugView.swift             — daemon resources + storage stats + raw rate-limit samples +
-                                  meta keys + LaunchAgent dual status + recent samples.
-    SettingsView.swift          — TabView of Menu Bar / Notifications / Data / About.
+    SettingsView.swift          — Settings as a main-window tab — flat sectioned form with
+                                  Startup, Menu Bar, Notifications, Cost calculation,
+                                  Storage, About. Reachable via Cmd+5 or Cmd+, (which
+                                  posts `.pacerOpenSettings` and ContentView flips the tab).
 
     MenuBarContent.swift        — MenuBarLabel (status item) + MenuBarContent (popover).
                                   Both honor PacerSettings.
@@ -130,7 +131,6 @@ App/
     Components/
       CircularGauge.swift       — donut + percentage primitive used by PaceChart, MenuBar,
                                   widgets. Color from UsageBand.
-      DaemonResourceProbe.swift — PID/CPU/RSS via pgrep+ps, store size via FileManager.
 
     PaceChartCard.swift, TodaySummaryCard.swift, DailyCostChartCard.swift,
     PerModelTodayCard.swift, LiveActivityCard.swift, TodayTimelineCard.swift,
@@ -297,17 +297,15 @@ of them. Mentioned here so future agents don't repeat them:
    long-lived `SamplePersister` in `ScanCoordinator`. Don't reintroduce
    per-cycle persister construction or whole-file re-reads.
 4. **Unbounded `@Query` results murder the in-process scan loop.**
-   When data collection ran in a separate `PacerDaemon` process, an
-   unfiltered `@Query private var samples: [TokenSample]` in the GUI
-   was wasteful but isolated — the daemon's main thread was untouched.
-   In the single-binary architecture every SwiftData save fires
-   @Query refreshes on the same MainActor that the scan loop runs on;
-   a 40k-row materialization on each save turned a 200ms scan into a
-   6-minute one. Always set `fetchLimit` (or a tight predicate) on
-   `@Query<TokenSample>` reads — `WelcomeCard`, `DashboardHeader`,
-   and `DebugView` all use a static `FetchDescriptor` with
-   `fetchLimit` set; follow that pattern for any new card that just
-   needs a recent sample or "is the table non-empty" probe.
+   With data collection in the app process, every SwiftData save
+   fires @Query refreshes on the same MainActor that the scan loop
+   runs on. A 40k-row materialization on each save turned a 200ms
+   scan into a 6-minute one. Always set `fetchLimit` (or a tight
+   predicate) on `@Query<TokenSample>` reads — `WelcomeCard`,
+   `DashboardHeader`, and `LiveActivityCard` use a static
+   `FetchDescriptor` with `fetchLimit` set; follow that pattern for
+   any new card that just needs a recent sample or "is the table
+   non-empty" probe.
 
    For views that legitimately need to *aggregate* across many
    TokenSamples (Projects, ProjectDetail, History), don't iterate
@@ -320,8 +318,8 @@ of them. Mentioned here so future agents don't repeat them:
    History / Models; `ProjectDailyAggregate` (project × date) —
    backs Projects / ProjectDetail's summary, daily series, models
    donut; and `SessionInfo` (per session) — backs ProjectDetail's
-   sessions list and the Debug tab's session count. Add another
-   `@Model` + recomputer if a future view needs a new grouping.
+   sessions list. Add another `@Model` + recomputer if a future
+   view needs a new grouping.
    Views then just `@Query` the small precomputed table and group
    in the body — sub-10ms over hundreds of rows. Don't add a
    `RollupWorker`-style background actor on top of a precomputed
@@ -332,14 +330,25 @@ of them. Mentioned here so future agents don't repeat them:
    order: `AggregateRecomputer` → `ProjectAggregateRecomputer` →
    `SessionInfoRecomputer`, all reading the same `dirty*` sets the
    `SamplePersister` collected during inserts. None of them call
-   `context.save()` themselves; the cycle's terminal save in
-   `ScanCoordinator` commits everything (cursors + meta + every
-   recomputer's changes) in one shot. That collapses what used to
-   be 4 saves/cycle into 2 (one if no inserts), which halves the
-   `@Query` re-fire fan-out on every scan tick. Bulk paths in
-   `ProjectAggregateRecomputer` and `SessionInfoRecomputer` `await
-   Task.yield()` every 32 pairs/ids so the run loop services draw
-   ticks during the first-install backfill.
+   `context.save()` themselves on the per-pair (main-context) path;
+   the cycle's terminal save in `ScanCoordinator` commits everything
+   (cursors + meta + every recomputer's changes) in one shot. That
+   collapses steady-state cycles to 1-2 saves/cycle, which halves
+   the `@Query` re-fire fan-out on every scan tick.
+
+   Each recomputer has a per-pair main-thread path (used for
+   incremental scans, ≤64 dirty entries) and a bulk
+   `@ModelActor`-backed background path (used for backfill,
+   thousands of dirty entries). The bulk path owns its own
+   `ModelContext` on a non-MainActor actor, fetches everything
+   once, groups in memory, upserts, then saves through that
+   context — SwiftData fans the committed changes out to the
+   MainActor `@Query` subscribers automatically. The bulk path
+   commits the main context first so its own fetches see any
+   in-flight inserts; that's a one-extra-save cost on first
+   install and zero in steady state. Bulk paths also `await
+   Task.yield()` every 32 pairs/ids as a small extra responsiveness
+   hedge.
 
    The `consumeMissing*` recovery paths on `SamplePersister` are
    the bootstrap for newly-added rollup tables: on first scan after

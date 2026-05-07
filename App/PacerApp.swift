@@ -13,6 +13,8 @@ struct PacerApp: App {
     @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
     private var menuBarStyleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
 
+    @Environment(\.openWindow) private var openWindow
+
     private var showMenuBar: Bool {
         menuBarStyleRaw != PacerSettings.MenuBarStyle.hidden.rawValue
     }
@@ -45,12 +47,19 @@ struct PacerApp: App {
                     CSVExporter.projectTotals(context: context)
                 }
             }
-        }
-
-        // Standard macOS Settings scene — opened via Cmd+, or the
-        // app menu's "Settings..." item. Lives in its own window.
-        Settings {
-            SettingsView()
+            // Replace the macOS-standard "Settings…" item that SwiftUI
+            // would otherwise create (because there's no `Settings`
+            // scene). Instead of opening a separate window, jump to
+            // the Settings tab in the main window — the user wanted
+            // everything in one place.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                    NotificationCenter.default.post(name: .pacerOpenSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
 
         // Menu bar status item. We use `isInserted` so the user can

@@ -9,7 +9,7 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
 ## What it does
 
 - **Real-time tracking.** FSEvents + per-file byte-offset cursors mean
-  the daemon picks up new JSONL writes within seconds and the dashboard
+  Pacer picks up new JSONL writes within seconds and the dashboard
   re-renders incrementally — no full-history rescans on each event.
 - **Rate-limit pacing.** 5-hour and 7-day windows are visualized as
   cycle-anchored pace charts (cycle start → reset on the X axis, dashed
@@ -22,7 +22,7 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
   server-supplied numbers). Selectable in Settings → Data.
 - **Multiple surfaces.**
     - Main app with five tabs: Dashboard, History, Projects, Models,
-      Debug. ⌘1..5 to switch.
+      Settings. ⌘1..5 to switch (⌘5 = Settings; ⌘, also jumps there).
     - `MenuBarExtra` status item with configurable display
       (icon-only / percent-only / both / hidden) and icon style
       (gauge needle / ring fill / dot).
@@ -41,18 +41,21 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
   dedup means the same crossing won't fire twice in one window.
 - **CSV export.** Daily totals, daily by model, or project totals to a
   spreadsheet — File menu, ⌘⇧E for the most common.
-- **App Group SwiftData.** App, daemon, and widgets share one on-disk
-  store; no IPC plumbing for read paths.
+- **App Group SwiftData.** Pacer.app and the widget extension share
+  one on-disk store; no IPC plumbing for read paths.
 
 ## Components
 
 | Component | Role |
 | --- | --- |
-| `Pacer.app` | Main UI, MenuBarExtra |
-| `PacerDaemon` | LaunchAgent — polling, IPC, notifications |
-| `PacerWidgets` | WidgetKit extension |
-| `PacerCore` | Shared Swift package — parsers, models, IPC schema |
+| `Pacer.app` | Main UI + MenuBarExtra. Data collection (FSEvents JSONL scan + OAuth poll) runs in-process inside this binary. |
+| `PacerWidgets` | WidgetKit extension — reads the shared App Group store directly. |
+| `PacerCore` | Shared Swift package — parsers, models, scan coordinator, recomputers. |
 | `pacertap` | Optional statusline tap binary (deferred to v1.1) |
+
+There is intentionally no separate daemon binary — `Pacer.app` runs
+LSUIElement-hidden when no window is open and keeps collecting in
+the background.
 
 ## Quick start (running Pacer on your own Mac)
 
@@ -61,24 +64,23 @@ to develop:
 
 ```sh
 brew install xcodegen     # one-time
-make install              # build, sign, copy to /Applications, start daemon
+make install              # build, sign, copy to /Applications, run Pacer.app
 make open                 # launch the dashboard
 ```
 
 `make install` is **idempotent** — re-run it after any code change. It
-quits the running Pacer.app GUI, stops the daemon, replaces
-`/Applications/Pacer.app`, re-registers the LaunchAgent, and re-opens
-Pacer.app if it was running before. No manual quit/reopen needed; the
-new binary is what you'll see when the dashboard reappears. This is
-the canonical way to update your local install.
+quits the running Pacer.app GUI, replaces `/Applications/Pacer.app`,
+and re-opens Pacer.app if it was running before. No manual
+quit/reopen needed; the new binary is what you'll see when the
+dashboard reappears.
 
 ```sh
 make status               # quick health check
-make logs                 # tail -F the daemon's stderr log
-make uninstall            # stop daemon, remove app (keeps your data)
+make logs                 # tail -F Pacer's stderr log
+make uninstall            # remove app (keeps your data)
 ```
 
-Logs land at `~/Library/Logs/Pacer/PacerDaemon.err.log`. SwiftData
+Logs land at `~/Library/Logs/Pacer/Pacer.err.log`. SwiftData
 store at `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
 Both persist across reinstalls; `make clean-data` is the only thing
 that wipes them, and it prompts for confirmation.
@@ -95,10 +97,9 @@ open Pacer.xcodeproj
 ```
 
 The Xcode project is regenerated from `project.yml` — never edit the
-`.xcodeproj` directly. After Xcode-running, you may want to
-`make install` again to put a clean signed copy back in /Applications
-and re-establish the launchd daemon (Xcode's run terminates the
-process when you close the run session).
+`.xcodeproj` directly. After running from Xcode, run `make install`
+again to put a clean signed copy back in /Applications (Xcode's run
+terminates the process when you close the run session).
 
 ### Build verification (no install)
 

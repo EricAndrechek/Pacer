@@ -1,15 +1,17 @@
 import SwiftUI
 
-/// Top-level shell. The Dashboard tab is what most users will see;
-/// Debug is preserved as a developer/QA aid (sample counts, raw meta
-/// keys, LaunchAgent buttons, recent JSONL rows). The split keeps
-/// each view focused — `DashboardView` doesn't carry @State for
-/// LaunchAgent buttons it doesn't render.
+/// Top-level shell. Five tabs: Dashboard / History / Projects / Models /
+/// Settings. ⌘1..5 switches between them; ⌘, jumps to Settings.
+///
+/// Settings lives in the main window (this tab) rather than as the
+/// macOS-standard separate Settings scene — the user wanted everything
+/// in one window. The standard `Cmd+,` shortcut still works because
+/// `PacerApp` posts a notification we observe here to flip the tab.
 struct ContentView: View {
     /// Tab identifier kept as enum so `Cmd+1..5` keyboard shortcuts
     /// can target it directly via `selection`.
     enum Tab: Hashable {
-        case dashboard, history, projects, models, debug
+        case dashboard, history, projects, models, settings
     }
     @State private var selection: Tab = .dashboard
 
@@ -35,11 +37,22 @@ struct ContentView: View {
                 .tag(Tab.models)
                 .keyboardShortcut("4", modifiers: .command)
 
-            DebugView()
-                .tabItem { Label("Debug", systemImage: "terminal") }
-                .tag(Tab.debug)
+            SettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(Tab.settings)
                 .keyboardShortcut("5", modifiers: .command)
         }
         .frame(minWidth: 720, minHeight: 600)
+        .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
+            selection = .settings
+        }
     }
+}
+
+extension Notification.Name {
+    /// Fired by the Cmd+, command and the menu-bar Settings button. The
+    /// main `ContentView` observes it and flips its tab selection to
+    /// Settings — single source of truth for "show settings" without a
+    /// separate Settings scene.
+    static let pacerOpenSettings = Notification.Name("PacerOpenSettings")
 }

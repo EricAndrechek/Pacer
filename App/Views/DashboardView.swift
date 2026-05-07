@@ -76,7 +76,7 @@ private struct DashboardHeader: View {
         return d
     }()
 
-    private var lastDaemonScan: Date? {
+    private var lastScanAt: Date? {
         guard let raw = scanMeta.first?.value else { return nil }
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -89,7 +89,7 @@ private struct DashboardHeader: View {
         let candidates = [
             tokens.first?.sampledAt,
             rateLimits.first?.sampledAt,
-            lastDaemonScan,
+            lastScanAt,
         ].compactMap { $0 }
         return candidates.max()
     }
@@ -127,7 +127,7 @@ private struct DashboardHeader: View {
                 Circle()
                     .fill(.secondary)
                     .frame(width: 6, height: 6)
-                Text("no data yet — start the daemon to begin tracking")
+                Text("no data yet — Pacer will pick up activity as soon as you run Claude Code")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

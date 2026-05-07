@@ -11,9 +11,9 @@ import PacerCore
 ///   - Recent sessions list (sessionId, last seen, model)
 ///
 /// Reads `ProjectDailyAggregate` and `SessionInfo` directly — both are
-/// precomputed by the daemon's recomputers, so the view never iterates
-/// raw `TokenSample`s. The same range picker as the parent list is
-/// honored by the caller via `since`.
+/// precomputed by the in-process scan's recomputers, so the view
+/// never iterates raw `TokenSample`s. The same range picker as the
+/// parent list is honored by the caller via `since`.
 struct ProjectDetailView: View {
     let projectPath: String
     let displayName: String

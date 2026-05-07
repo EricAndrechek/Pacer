@@ -3,18 +3,18 @@ import SwiftUI
 import PacerCore
 
 /// User-facing preferences. Stored in the App Group's shared
-/// `UserDefaults` so future daemon/widget reads can pick up the same
-/// values without an IPC round-trip. SwiftUI views bind with
+/// `UserDefaults` so the app, widget extension, and any future
+/// statusline tap can all read the same values without an IPC
+/// round-trip. SwiftUI views bind with
 /// `@AppStorage(key, store: PacerSettings.store)`.
 ///
 /// Additive only — never remove or rename keys. If a key needs to
 /// change semantics, add a new key alongside and migrate.
 public enum PacerSettings {
-    /// App Group-suite UserDefaults so the daemon, the app, the widget
-    /// extension, and any future statusline tap can all read the same
-    /// values. Delegates to `PacerCore.PacerPreferences.store` so the
-    /// daemon and the app share one resolved suite — there's no chance
-    /// of "app reads defaults from suite X, daemon reads from suite Y."
+    /// App Group-suite UserDefaults so every Pacer surface shares one
+    /// resolved suite — there's no chance of "app reads defaults from
+    /// suite X, widget reads from suite Y." Delegates to
+    /// `PacerCore.PacerPreferences.store`.
     public static var store: UserDefaults { PacerPreferences.store }
 
     /// What the menu bar item shows. Hiding it entirely is a real
@@ -58,9 +58,10 @@ public enum PacerSettings {
 
     // MARK: - Storage keys
     //
-    // Delegated to PacerCore.PacerPreferenceKeys so the daemon can
-    // read these without linking App-target code. Anything new should
-    // also live there if a non-app surface needs to read it.
+    // Delegated to PacerCore.PacerPreferenceKeys so the in-process
+    // scan code (which lives in PacerCore) can read these without
+    // linking App-target code. Anything new should also live there
+    // if a non-app surface needs to read it.
 
     public enum Key {
         public static let menuBarStyle           = PacerPreferenceKeys.menuBarStyle

@@ -114,7 +114,7 @@ struct PaceChartCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Polling /api/oauth/usage on a 5-minute cadence.")
                 .font(.system(.body))
-            Text("If you're signed into Claude Code, values will appear within 5 minutes of the daemon starting.")
+            Text("If you're signed into Claude Code, values will appear within 5 minutes of Pacer starting.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
