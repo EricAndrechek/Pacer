@@ -1,0 +1,236 @@
+import Foundation
+import SwiftData
+import Testing
+@testable import PacerCore
+
+private func makeInMemoryContainer() throws -> ModelContainer {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    return try ModelContainer(
+        for: Heartbeat.self,
+        TokenSample.self,
+        DailyAggregate.self,
+        RateLimitSample.self,
+        SessionInfo.self,
+        ClaudeCodeMeta.self,
+        configurations: config
+    )
+}
+
+/// Builds a tmpdir mimicking `~/.claude/projects/` shape with a single
+/// JSONL file. Returns the tmpdir root (which has a `projects/` subdir,
+/// matching what ClaudePathResolver expects via CLAUDE_CONFIG_DIR override).
+private func makeFixtureRoot(
+    withLines lines: [String],
+    sessionId: String = "fixture-session"
+) throws -> URL {
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pacer-fixture-\(UUID().uuidString)")
+    let projectsDir = root.appendingPathComponent("projects/-tmp-fixture")
+    try FileManager.default.createDirectory(at: projectsDir, withIntermediateDirectories: true)
+    let jsonlURL = projectsDir.appendingPathComponent("\(sessionId).jsonl")
+    let body = lines.joined(separator: "\n") + "\n"
+    try body.write(to: jsonlURL, atomically: true, encoding: .utf8)
+    return root
+}
+
+private func makeAssistantLine(
+    timestamp: String,
+    model: String = "claude-opus-4-7",
+    inputTokens: Int = 100,
+    outputTokens: Int = 200,
+    cacheRead: Int = 0,
+    cache5m: Int = 0,
+    cache1h: Int = 0,
+    storedCost: Double? = nil,
+    messageId: String? = nil,
+    requestId: String? = nil
+) -> String {
+    var fields: [String: Any] = [
+        "type": "assistant",
+        "timestamp": timestamp,
+        "message": [
+            "model": model,
+            "id": messageId as Any?,
+            "usage": [
+                "input_tokens": inputTokens,
+                "output_tokens": outputTokens,
+                "cache_read_input_tokens": cacheRead,
+                "cache_creation": [
+                    "ephemeral_5m_input_tokens": cache5m,
+                    "ephemeral_1h_input_tokens": cache1h,
+                ],
+            ],
+        ] as [String: Any?]
+    ]
+    if let storedCost { fields["costUSD"] = storedCost }
+    if let requestId { fields["requestId"] = requestId }
+    let cleaned = fields.compactMapValues { $0 is NSNull ? nil : $0 }
+    return String(data: try! JSONSerialization.data(withJSONObject: cleaned), encoding: .utf8)!
+}
+
+@MainActor
+@Test func coordinatorRunOnceFullScanInsertsAndAggregates() async throws {
+    let line1 = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        inputTokens: 100, outputTokens: 50,
+        storedCost: 0.10,
+        messageId: "msg1", requestId: "req1"
+    )
+    let line2 = makeAssistantLine(
+        timestamp: "2026-04-30T12:05:00.000Z",
+        inputTokens: 200, outputTokens: 80,
+        storedCost: 0.20,
+        messageId: "msg2", requestId: "req2"
+    )
+    let root = try makeFixtureRoot(withLines: [line1, line2])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(
+            costMode: .display, // avoid network for pricing
+            watcherMode: .manual,
+            probeStatsCache: false
+        ),
+        resolver: resolver
+    )
+    let report = try await coordinator.runOnce()
+
+    #expect(report.wasFullScan == true)
+    #expect(report.scanProgress.entriesAccepted == 2)
+    #expect(report.persisterStats.inserted == 2)
+    #expect(report.recomputeStats.aggregatesUpserted == 1)
+
+    let context = ModelContext(container)
+    #expect(try context.fetchCount(FetchDescriptor<TokenSample>()) == 2)
+
+    let aggs = try context.fetch(FetchDescriptor<DailyAggregate>())
+    #expect(aggs.count == 1)
+    #expect(aggs[0].inputTokens == 300)
+    #expect(aggs[0].outputTokens == 130)
+    #expect(abs(aggs[0].totalCostUSD - 0.30) < 0.0001)
+}
+
+@MainActor
+@Test func coordinatorSecondRunIsIncremental() async throws {
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "msg-only", requestId: "req-only"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+
+    let first = try await coordinator.runOnce()
+    #expect(first.wasFullScan == true)
+
+    // Second invocation: scanVersion key in ClaudeCodeMeta now matches.
+    let second = try await coordinator.runOnce()
+    #expect(second.wasFullScan == false)
+}
+
+@MainActor
+@Test func coordinatorDedupesAcrossRuns() async throws {
+    // The full scan inserts one row; a second full scan (which would
+    // happen after a parser version bump) should NOT duplicate it
+    // because SamplePersister pre-loads existing dedupKeys.
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        inputTokens: 1, outputTokens: 1,
+        messageId: "m", requestId: "r"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator1 = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+    _ = try await coordinator1.runOnce()
+    #expect(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()) == 1)
+
+    // Force a "full scan" path: clear scanVersion meta and instantiate a
+    // fresh coordinator (simulating a binary upgrade with parser bump).
+    let context = ModelContext(container)
+    if let meta = try context.fetch(
+        FetchDescriptor<ClaudeCodeMeta>(predicate: #Predicate { $0.key == "scan_version" })
+    ).first {
+        context.delete(meta)
+        try context.save()
+    }
+
+    let coordinator2 = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+    let report = try await coordinator2.runOnce()
+    #expect(report.wasFullScan == true)
+    #expect(report.persisterStats.skippedAsDuplicate == 1)
+    // Critical assertion: still ONE row, not two.
+    #expect(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()) == 1)
+}
+
+@MainActor
+@Test func coordinatorWritesScanMetaFields() async throws {
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "a", requestId: "b"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+    _ = try await coordinator.runOnce()
+
+    let context = ModelContext(container)
+    let metas = try context.fetch(FetchDescriptor<ClaudeCodeMeta>())
+    let byKey = Dictionary(uniqueKeysWithValues: metas.map { ($0.key, $0.value) })
+    #expect(byKey[ClaudeCodeMetaKey.scanVersion] == ScanCoordinator.currentScanVersion)
+    #expect(byKey[ClaudeCodeMetaKey.lastFullScanAt] != nil)
+    #expect(byKey[ClaudeCodeMetaKey.lastIncrementalScanAt] != nil)
+}
+
+@MainActor
+@Test func coordinatorSkipsSyntheticAndUnparseable() async throws {
+    let assistant = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "ok", requestId: "ok"
+    )
+    let synthetic = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        model: "<synthetic>", messageId: "syn", requestId: "syn"
+    )
+    let garbage = "this is not json at all"
+    let root = try makeFixtureRoot(withLines: [assistant, synthetic, garbage])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+    let report = try await coordinator.runOnce()
+    // Only the assistant line landed.
+    #expect(report.persisterStats.inserted == 1)
+}
