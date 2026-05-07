@@ -76,6 +76,15 @@ public final class ScanCoordinator {
     /// Lazily constructed on the first scan cycle so tests that never
     /// scan don't pay the preload cost.
     private var persister: SamplePersister?
+    /// Last time we emitted a routine "incremental scan" log line.
+    /// Used to throttle logging — without it, a chatty Claude Code
+    /// session generates ~1 log entry per second, multi-MB log files
+    /// per day. Unusual scans (slow, with dups, with errors) bypass
+    /// this throttle and always log.
+    private var lastRoutineLogAt: Date?
+    /// Minimum gap between routine log lines. Unusual scans always
+    /// log regardless.
+    private static let routineLogInterval: TimeInterval = 60
 
     public init(
         container: ModelContainer,
@@ -152,9 +161,7 @@ public final class ScanCoordinator {
             }
             do {
                 let report = try await runScanCycle()
-                if report.persisterStats.inserted > 0 {
-                    log("incremental scan: \(formatReport(report))")
-                }
+                logIfInteresting(report)
             } catch {
                 log("incremental scan failed: \(error)")
             }
@@ -326,6 +333,31 @@ public final class ScanCoordinator {
 
     private func log(_ message: String) {
         FileHandle.standardError.write(Data("[ScanCoordinator] \(message)\n".utf8))
+    }
+
+    /// Emit a log line for "interesting" scans only:
+    /// - any scan with dups > 0 (potential cross-file dedup activity)
+    /// - any scan slower than 1 second (unusual; pre-cursor scans were ~10s)
+    /// - the first scan after each `routineLogInterval` window (so the
+    ///   log shows the daemon is alive without spamming)
+    /// Routine fast scans with no dups stay silent.
+    private func logIfInteresting(_ report: ScanReport) {
+        let now = Date()
+        let isSlow = report.durationSeconds > 1.0
+        let hasDups = report.persisterStats.skippedAsDuplicate > 0
+        let hasInserts = report.persisterStats.inserted > 0
+        let throttleExpired: Bool = {
+            guard let last = lastRoutineLogAt else { return true }
+            return now.timeIntervalSince(last) >= Self.routineLogInterval
+        }()
+
+        if isSlow || hasDups {
+            log("incremental scan: \(formatReport(report))")
+            lastRoutineLogAt = now
+        } else if hasInserts && throttleExpired {
+            log("incremental scan: \(formatReport(report))")
+            lastRoutineLogAt = now
+        }
     }
 
     private func formatReport(_ r: ScanReport) -> String {
