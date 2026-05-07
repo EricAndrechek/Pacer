@@ -12,6 +12,10 @@ the full v1 design.
   pricing source. Read before touching parsing or cost code.
 - `docs/research/realtime-mechanisms.md` — analysis of statusline, hooks,
   OTel, MCP for live Claude Code data.
+- `docs/research/tcc-app-management.md` — investigation of the
+  every-launch "would like to access data from other apps" prompt,
+  what was tried, current signing/notarization state, and the
+  open SMAppService verification question for v1 release.
 - `docs/research/ccusage-outputs/` — captured `bun x ccusage` JSON outputs
   for the local dataset. **Use these as ground-truth in tests** — every
   metric Pacer surfaces should match `ccusage`'s number for the same
