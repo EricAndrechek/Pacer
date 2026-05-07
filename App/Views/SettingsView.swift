@@ -84,6 +84,20 @@ private struct NotificationSettingsTab: View {
         Form {
             Section("Rate-limit warnings") {
                 Toggle("Enable rate-limit notifications", isOn: $enabled)
+                    .onChange(of: enabled) { _, newValue in
+                        if newValue {
+                            // Pre-warm system permission as soon as
+                            // the user opts in; the system shows the
+                            // grant prompt at most once across these
+                            // calls, and otherwise we'd silently swallow
+                            // every threshold crossing until they
+                            // happened to send a test notification.
+                            Task {
+                                await NotificationCoordinator.shared
+                                    .requestAuthorizationIfNeeded()
+                            }
+                        }
+                    }
                 Picker("5-hour window crosses…", selection: $fiveHourPct) {
                     Text("50%").tag(50)
                     Text("75%").tag(75)
