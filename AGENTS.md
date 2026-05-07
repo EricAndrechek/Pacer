@@ -171,12 +171,16 @@ you've made changes the user will want to actually run:
 make install
 ```
 
-`make install` is idempotent: it stops any running daemon, regenerates
+`make install` is idempotent: it quits the running Pacer.app GUI (so
+the in-memory binary releases the bundle), stops every PacerDaemon
+(launchctl-managed AND any orphan foreground process), regenerates
 the Xcode project from `project.yml`, builds with signing, replaces
 `/Applications/Pacer.app`, writes a fresh dev LaunchAgent plist at
-`~/Library/LaunchAgents/com.ericandrechek.pacer.daemon.dev.plist`, and
-boots the daemon via `launchctl bootstrap`. After it returns, the user
-can `make open` to see your changes in the running app.
+`~/Library/LaunchAgents/com.ericandrechek.pacer.daemon.dev.plist`,
+boots the daemon via `launchctl bootstrap`, and re-opens Pacer.app if
+it was running before — so the user lands back on the new binary
+without a manual quit/reopen. `make reinstall` preserves GUI state
+across the uninstall→install boundary the same way.
 
 `make help` lists every target. The ones you'll reach for most often:
 

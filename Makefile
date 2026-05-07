@@ -74,21 +74,34 @@ app:  ## Signed Debug build of Pacer.app (output: Build/Products/Debug/Pacer.app
 # Install / uninstall
 # ------------------------------------------------------------------
 
-install:  ## Build + sign + copy to /Applications + register daemon. Idempotent.
+install:  ## Build + sign + copy to /Applications + register daemon. Quits and re-opens Pacer.app if it was running. Idempotent.
 	@$(REPO_ROOT)/bin/dev-install.sh
 
-uninstall:  ## Stop daemon + remove /Applications/Pacer.app. Preserves SwiftData and logs.
+uninstall:  ## Stop daemon + quit GUI + remove /Applications/Pacer.app. Preserves SwiftData and logs.
 	@$(REPO_ROOT)/bin/dev-uninstall.sh
 
-reinstall: uninstall install  ## Uninstall and reinstall. Use when something feels wedged.
+# `reinstall` captures whether Pacer.app is currently running BEFORE
+# either step touches it, then asks dev-install.sh to restore the GUI
+# at the end — otherwise the user's app would silently disappear
+# across the uninstall→install boundary. The check has to happen here
+# (not inside dev-install.sh) because dev-uninstall.sh quits the GUI
+# first, so by the time install runs there's nothing to detect.
+reinstall:  ## Uninstall and reinstall (preserves GUI state). Use when something feels wedged.
+	@app_was_running=0; \
+	if pgrep -f '/Pacer\.app/Contents/MacOS/Pacer$$' >/dev/null 2>&1; then app_was_running=1; fi; \
+	$(MAKE) uninstall && \
+	if [ "$$app_was_running" = "1" ]; then \
+		"$(REPO_ROOT)/bin/dev-install.sh" --restore-app; \
+	else \
+		"$(REPO_ROOT)/bin/dev-install.sh"; \
+	fi
 
 # ------------------------------------------------------------------
 # Daemon lifecycle
 # ------------------------------------------------------------------
 
-daemon-stop:  ## Stop the running daemon (both dev and SMAppService labels).
-	@launchctl bootout "gui/$$(id -u)/$(DEV_LABEL)"   2>/dev/null || true
-	@launchctl bootout "gui/$$(id -u)/$(SMAPP_LABEL)" 2>/dev/null || true
+daemon-stop:  ## Stop the running daemon (launchctl labels + orphan PacerDaemon processes).
+	@$(REPO_ROOT)/bin/dev-stop-daemon.sh
 	@echo "Daemon stopped (or was not running)."
 
 daemon-start:  ## Start the daemon via launchctl. Requires `make install` first.

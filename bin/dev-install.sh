@@ -3,13 +3,25 @@
 #
 # Idempotent: safe to run on a fresh checkout (first install) AND on a
 # repo with an older Pacer.app already at /Applications (upgrade). On
-# upgrade, it stops the running daemon, replaces the bundle, and
-# re-registers — the LaunchAgent path stays the same so re-registering
-# is what picks up the new binary signature.
+# upgrade we:
+#   1. Quit any running Pacer.app GUI (so the in-memory binary releases
+#      the bundle — replacing /Applications/Pacer.app while it's
+#      running leaves the user staring at the old code).
+#   2. Stop every PacerDaemon — both launchctl-managed and any orphan
+#      foreground processes — so they release the SwiftData store.
+#   3. Replace the bundle and re-register the LaunchAgent.
+#   4. Re-open Pacer.app if it was running before the install, so the
+#      user lands back exactly where they were on the new binary.
 #
 # Designed to be runnable by AI without user interaction. Surfaces all
 # state-changing operations as visible commands so the transcript is
 # debuggable.
+#
+# Flags:
+#   --restore-app   Force re-opening Pacer.app at the end even if no
+#                   GUI was running when the script started. Used by
+#                   `make reinstall` to preserve the user's running
+#                   app across the uninstall→install boundary.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,14 +30,14 @@ INSTALL_DIR="/Applications"
 INSTALLED_APP="${INSTALL_DIR}/${APP_NAME}"
 BUILD_OUTPUT="${REPO_ROOT}/Build/Products/Debug/${APP_NAME}"
 
-# Two LaunchAgent labels to clean up: the dev one we own, plus the
-# bundled SMAppService one in case the user previously clicked Register
-# in the Debug tab. We don't want two daemons racing the SwiftData
-# container.
 DEV_LABEL="com.ericandrechek.pacer.daemon.dev"
-SMAPP_LABEL="com.ericandrechek.pacer.daemon"
 DEV_PLIST="$HOME/Library/LaunchAgents/${DEV_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/Pacer"
+
+RESTORE_APP=0
+if [ "${1:-}" = "--restore-app" ]; then
+    RESTORE_APP=1
+fi
 
 echo "==> Pacer dev install"
 echo "    repo:      ${REPO_ROOT}"
@@ -61,33 +73,22 @@ if [ ! -d "${BUILD_OUTPUT}" ]; then
     exit 1
 fi
 
-# 3. Stop any running daemon. We bootout both possible labels to handle
-#    the case where the user has the bundled plist registered via
-#    SMAppService AND the dev plist registered via launchctl. `|| true`
-#    swallows "service not loaded" exit codes.
-#
-#    `launchctl bootout` returns before the daemon's signal handler has
-#    finished cleanup. If we hit `bootstrap` before launchd has fully
-#    torn down the previous registration we get EIO. So we poll
-#    `launchctl list` until the label disappears (bounded ~10s).
+# 3a. Quit Pacer.app if running, capturing whether it was so we can
+#     re-open at the end. Doing this BEFORE the daemon stop matters
+#     for two reasons: (a) the GUI holds the SwiftData container open
+#     too, and (b) AppleScript quit cleanup is faster on a healthy
+#     daemon than on a missing one.
+echo
+echo "==> Quitting any running Pacer.app GUI"
+APP_WAS_RUNNING="$("${REPO_ROOT}/bin/dev-quit-app.sh")"
+
+# 3b. Stop every PacerDaemon — launchctl-managed AND orphan foreground
+#     processes (e.g. one started via `make daemon-fg` or directly by
+#     a previous AI session). Two daemons racing the SwiftData store
+#     causes the SX-zombie failure mode documented in AGENTS.md.
 echo
 echo "==> Stopping any running daemon"
-
-bootout_and_wait() {
-    local label="$1"
-    launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if ! launchctl list "${label}" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 1
-    done
-    echo "    WARNING: ${label} still loaded after 10s, continuing anyway"
-    return 0
-}
-
-bootout_and_wait "${DEV_LABEL}"
-bootout_and_wait "${SMAPP_LABEL}"
+"${REPO_ROOT}/bin/dev-stop-daemon.sh"
 
 # 4. Replace the installed app. `rm -rf` is safe here because /Applications
 #    is user-owned on macOS for non-system apps, and this script
@@ -130,6 +131,12 @@ if launchctl print "gui/$(id -u)/${DEV_LABEL}" >/dev/null 2>&1; then
     echo "    daemon PID: ${pid:-not running yet}"
 else
     echo "    WARNING: launchctl print did not find the service"
+fi
+
+if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
+    echo
+    echo "==> Re-opening Pacer.app (was running before install)"
+    open "${INSTALLED_APP}"
 fi
 
 echo

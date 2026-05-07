@@ -65,10 +65,12 @@ make install              # build, sign, copy to /Applications, start daemon
 make open                 # launch the dashboard
 ```
 
-`make install` is **idempotent** — re-run it after any code change and
-it will stop the running daemon, replace `/Applications/Pacer.app`, and
-re-register the LaunchAgent so the daemon picks up the new binary. This
-is the canonical way to update your local install.
+`make install` is **idempotent** — re-run it after any code change. It
+quits the running Pacer.app GUI, stops the daemon, replaces
+`/Applications/Pacer.app`, re-registers the LaunchAgent, and re-opens
+Pacer.app if it was running before. No manual quit/reopen needed; the
+new binary is what you'll see when the dashboard reappears. This is
+the canonical way to update your local install.
 
 ```sh
 make status               # quick health check
