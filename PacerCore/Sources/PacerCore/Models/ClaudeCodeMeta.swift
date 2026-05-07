@@ -52,4 +52,16 @@ public enum ClaudeCodeMetaKey {
     public static let statsCacheVersion = "stats_cache_version"
     public static let statsCacheLastComputedDate = "stats_cache_last_computed_date"
     public static let statsCacheTotalMessages = "stats_cache_total_messages"
+
+    // MARK: - Daemon heartbeat
+    //
+    // JSON-encoded `DaemonStats` written every few seconds by the
+    // running PacerDaemon. The Debug tab reads this row instead of
+    // shelling out to `pgrep`/`ps`, which on macOS Sequoia trigger the
+    // "would like to access data from other apps" TCC prompt every
+    // time they enumerate processes. The daemon is the only legitimate
+    // writer; if the value is missing or the timestamp is older than
+    // ~30 seconds the GUI shows "—" for the resource columns.
+
+    public static let daemonStats = "daemon_stats"
 }

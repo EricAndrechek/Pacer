@@ -86,6 +86,12 @@ public final class ScanCoordinator {
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
 
+    /// Previous self-resource snapshot, used to compute delta-CPU% on
+    /// the next heartbeat. nil before the first call to
+    /// `recordHeartbeat()` and reset implicitly after the daemon
+    /// restarts.
+    private var lastSelfSnapshot: SelfResourceProbe.Snapshot?
+
     public init(
         container: ModelContainer,
         configuration: Configuration = Configuration(),
@@ -173,6 +179,27 @@ public final class ScanCoordinator {
         if let oauthPoller {
             await oauthPoller.stop()
         }
+    }
+
+    /// Capture this process's PID/RSS/CPU and write a JSON-encoded
+    /// `DaemonStats` into `ClaudeCodeMeta`. Called every few seconds by
+    /// the daemon so the GUI's Debug tab can read resource info from
+    /// SwiftData instead of shelling out to `pgrep`/`ps` (which on
+    /// Sequoia would re-prompt the TCC App Management permission).
+    public func recordHeartbeat() throws {
+        guard let snap = SelfResourceProbe.capture() else { return }
+        let cpuPercent = lastSelfSnapshot.flatMap {
+            SelfResourceProbe.cpuPercent(from: $0, to: snap)
+        }
+        lastSelfSnapshot = snap
+        let stats = DaemonStats(
+            pid: snap.pid,
+            rssBytes: snap.rssBytes,
+            cpuPercent: cpuPercent,
+            timestamp: snap.timestamp
+        )
+        try writeMeta(ClaudeCodeMetaKey.daemonStats, value: stats.encoded())
+        try context.save()
     }
 
     // MARK: - Internal

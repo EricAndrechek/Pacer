@@ -89,6 +89,26 @@ struct PacerDaemonMain {
             sigintSource.cancel()
         }
 
+        // Heartbeat task: every 5 seconds, write the daemon's own
+        // PID/RSS/CPU into `ClaudeCodeMeta` so the GUI's Debug tab can
+        // read resource info from SwiftData. This replaces the previous
+        // pgrep/ps shellout (which on macOS Sequoia 15+ trips the
+        // App Management TCC prompt — "Pacer.app would like to access
+        // data from other apps" — every time the GUI enumerates
+        // processes). Self-introspection via `proc_pidinfo(getpid())`
+        // is allowed without any TCC grant.
+        let heartbeatTask = Task { @MainActor in
+            // Write one immediately so the GUI doesn't have to wait
+            // five seconds for the first reading after daemon start.
+            try? coordinator.recordHeartbeat()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if Task.isCancelled { break }
+                try? coordinator.recordHeartbeat()
+            }
+        }
+        defer { heartbeatTask.cancel() }
+
         try await coordinator.runForever()
         log("event loop exited; daemon shutting down")
     }

@@ -18,10 +18,9 @@ struct DebugView: View {
         devLaunchctl: .notLoaded
     )
     @State private var lastActionMessage: String?
-    @State private var resourceSnapshot: DaemonResourceProbe.Snapshot = .init()
-    /// Drives the resource panel's auto-refresh ticker. Replaced with a
-    /// fresh Date on each tick so the @State change re-renders the
-    /// section.
+    /// Replaced on each timer tick so the resource panel re-renders
+    /// even when the underlying meta row's value hasn't changed (the
+    /// "age since heartbeat" string ticks forward without a new write).
     @State private var resourceTick = Date()
 
     var body: some View {
@@ -47,14 +46,25 @@ struct DebugView: View {
         .frame(minWidth: 640, minHeight: 600)
         .onAppear {
             refreshStatus()
-            refreshResources()
         }
-        // Refresh resource snapshot every 5s while this tab is visible.
-        // The TimelineView would be more idiomatic but this is debug
-        // chrome, not load-bearing UI; a Timer keeps the view simple.
-        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            refreshResources()
+        // Tick once a second so the "heartbeat age" string updates
+        // even when the daemon isn't writing new values. The actual
+        // PID/CPU/RSS numbers come from the @Query<ClaudeCodeMeta>
+        // subscription, which fires reactively when the daemon writes.
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+            resourceTick = now
         }
+    }
+
+    private var resourceSnapshot: DaemonResourceProbe.Snapshot {
+        let storeURL = (try? PacerStore.storeURL().path) ?? nil
+        let walPath = storeURL.map { $0 + "-wal" }
+        return DaemonResourceProbe.snapshot(
+            metaRows: meta,
+            storePath: storeURL,
+            walPath: walPath,
+            now: resourceTick
+        )
     }
 
     private var resourceSection: some View {
@@ -67,12 +77,37 @@ struct DebugView: View {
                 stat("Store", resourceSnapshot.storeSizeBytes.map(formatBytes) ?? "—")
                 stat("WAL", resourceSnapshot.walSizeBytes.map(formatBytes) ?? "—")
                 Spacer()
-                Button("Refresh") { refreshResources() }
             }
-            Text("Auto-refresh every 5 seconds while this tab is visible.")
+            heartbeatLine
+        }
+    }
+
+    @ViewBuilder
+    private var heartbeatLine: some View {
+        let snap = resourceSnapshot
+        if let age = snap.heartbeatAgeSeconds {
+            let isFresh = age <= DaemonResourceProbe.stalenessThreshold
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isFresh ? Color.green : Color.orange)
+                    .frame(width: 6, height: 6)
+                Text(isFresh
+                     ? "Daemon heartbeat \(formatAge(age)) ago — values self-reported, no process inspection."
+                     : "No daemon heartbeat for \(formatAge(age)). Last seen \(formatDate(snap.heartbeatAt ?? Date())).")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text("Awaiting first daemon heartbeat…")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    private func formatAge(_ seconds: Double) -> String {
+        if seconds < 60 { return String(format: "%.0fs", seconds) }
+        if seconds < 3_600 { return String(format: "%.0fm", seconds / 60) }
+        return String(format: "%.1fh", seconds / 3_600)
     }
 
     // MARK: - Sections
@@ -304,15 +339,6 @@ struct DebugView: View {
         case 1_000...:         return String(format: "%.0f KB", n / 1_000)
         default:               return "\(count) B"
         }
-    }
-
-    private func refreshResources() {
-        let storeURL = (try? PacerStore.storeURL().path) ?? nil
-        let walPath = storeURL.map { $0 + "-wal" }
-        resourceSnapshot = DaemonResourceProbe.capture(
-            storePath: storeURL,
-            walPath: walPath
-        )
     }
 
     private func formatDate(_ date: Date) -> String {

@@ -1,100 +1,70 @@
 import Foundation
+import PacerCore
 
-/// Probes external state about the daemon — its current CPU/RSS via
-/// `ps`, plus the on-disk SwiftData store size — for the Debug tab's
-/// resource panel. Pure-function helpers so the view layer stays
-/// declarative and testable.
+/// Resource panel snapshot derived from daemon-written state instead
+/// of subprocess inspection. Earlier versions of this file shelled out
+/// to `/usr/bin/pgrep` and `/bin/ps`; on macOS Sequoia those calls
+/// re-trigger the "Pacer.app would like to access data from other
+/// apps" TCC prompt every time, since enumerating other processes
+/// requires the App Management permission. Reading the daemon's own
+/// JSON-encoded heartbeat row is permission-free and gives the same
+/// information sourced authoritatively from the daemon itself.
 ///
-/// Pacer.app is not sandboxed (the App Group + Keychain access design
-/// requires Developer ID distribution rather than Mac App Store), so
-/// shelling out to `/bin/ps` is allowed. If we ever sandbox, this
-/// fails open and the resource panel just shows "—".
+/// The store/WAL file sizes are measured by the GUI directly — those
+/// are reads inside the App Group container we already own, no
+/// permission needed.
 enum DaemonResourceProbe {
 
     struct Snapshot {
         var pid: Int?
-        var cpuPercent: Double?    // as reported by ps; ratio of one core (>100% on multi-core saturating loops)
+        var cpuPercent: Double?
         var rssBytes: Int64?
         var storeSizeBytes: Int64?
         var walSizeBytes: Int64?
-        var capturedAt: Date = .init()
+        /// When the daemon last wrote its heartbeat. nil if no row has
+        /// ever been written (fresh install before the first daemon
+        /// tick) or if the JSON failed to decode.
+        var heartbeatAt: Date?
+        /// Wall-clock seconds since the heartbeat. Anything beyond ~30s
+        /// is treated as "daemon not running" — pid/cpu/rss render as
+        /// "—" rather than reporting potentially stale numbers.
+        var heartbeatAgeSeconds: Double?
     }
 
-    /// Find the running PacerDaemon (if any) and read its CPU/RSS.
-    /// Filters by argv[0] containing `PacerDaemon` so a
-    /// `Build/Products/Debug/PacerDaemon` (Xcode-launched) and
-    /// `/Applications/Pacer.app/.../PacerDaemon` (production-installed)
-    /// both match.
-    static func capture(storePath: String?, walPath: String?) -> Snapshot {
+    /// Maximum age of the heartbeat row before we consider the daemon
+    /// unresponsive. The daemon writes every 5s under normal load; 30s
+    /// gives ample slack for a slow scan cycle without showing values
+    /// that are no longer true.
+    static let stalenessThreshold: TimeInterval = 30
+
+    /// Build a snapshot from the meta rows the GUI already queries via
+    /// `@Query`, plus on-disk file sizes. Pure function so it's safe to
+    /// call inside a view's body.
+    static func snapshot(metaRows: [ClaudeCodeMeta], storePath: String?, walPath: String?, now: Date = Date()) -> Snapshot {
         var snap = Snapshot()
-        if let pid = pidOfDaemon() {
-            snap.pid = pid
-            if let (cpu, rss) = readPsStats(pid: pid) {
-                snap.cpuPercent = cpu
-                snap.rssBytes = rss
-            }
-        }
         if let path = storePath {
             snap.storeSizeBytes = sizeOfFile(at: path)
         }
         if let path = walPath {
             snap.walSizeBytes = sizeOfFile(at: path)
         }
+        let json = metaRows.first(where: { $0.key == ClaudeCodeMetaKey.daemonStats })?.value
+        guard let json, let stats = DaemonStats.decode(from: json) else {
+            return snap
+        }
+        snap.heartbeatAt = stats.timestamp
+        let age = now.timeIntervalSince(stats.timestamp)
+        snap.heartbeatAgeSeconds = age
+        // Show numbers only if the daemon is still actively writing.
+        // Beyond the staleness threshold the "live" fields render as
+        // "—" while the heartbeat timestamp itself stays visible so a
+        // user troubleshooting a dead daemon sees the last known time.
+        if age <= stalenessThreshold {
+            snap.pid = Int(stats.pid)
+            snap.cpuPercent = stats.cpuPercent
+            snap.rssBytes = stats.rssBytes
+        }
         return snap
-    }
-
-    private static func pidOfDaemon() -> Int? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-f", "PacerDaemon$"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        // pgrep can return multiple PIDs separated by newlines; pick
-        // the smallest (oldest)? No — pick the first that's actually
-        // a PacerDaemon, not a Pacer.app process. We already filtered
-        // with $-anchored regex so any of them is a daemon. Take first.
-        for line in text.split(separator: "\n") {
-            if let pid = Int(line.trimmingCharacters(in: .whitespaces)) {
-                return pid
-            }
-        }
-        return nil
-    }
-
-    private static func readPsStats(pid: Int) -> (cpu: Double, rss: Int64)? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-o", "%cpu=,rss=", "-p", "\(pid)"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
-        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = line.split(separator: " ").filter { !$0.isEmpty }
-        guard parts.count >= 2,
-              let cpu = Double(parts[0]),
-              let rssKB = Int64(parts[1])
-        else { return nil }
-        // ps reports RSS in kilobytes on macOS.
-        return (cpu, rssKB * 1024)
     }
 
     private static func sizeOfFile(at path: String) -> Int64? {
