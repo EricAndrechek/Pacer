@@ -64,12 +64,26 @@ targets:
           mkdir -p "$APP/Contents/Library/LaunchAgents"
           cp -f "$BUILT_PRODUCTS_DIR/PacerDaemon" "$APP/Contents/Library/LaunchServices/PacerDaemon"
           cp -f "$SRCROOT/Resources/com.ericandrechek.pacer.daemon.plist" "$APP/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist"
+          # PacerCore is a Swift package with a resource bundle
+          # (litellm-pricing.json). Bundle.module resolves the bundle
+          # by looking next to the executable; for the .app target
+          # Xcode auto-copies it to Contents/Resources/, but tool
+          # targets like PacerDaemon get nothing. Without this copy,
+          # the daemon crashes on first PricingTable access with
+          # "unable to find bundle named PacerCore_PacerCore". Copy
+          # alongside the daemon binary so its Bundle.module lookup
+          # succeeds.
+          if [ -d "$BUILT_PRODUCTS_DIR/PacerCore_PacerCore.bundle" ]; then
+            rm -rf "$APP/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle"
+            cp -R "$BUILT_PRODUCTS_DIR/PacerCore_PacerCore.bundle" "$APP/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle"
+          fi
         inputFiles:
           - $(BUILT_PRODUCTS_DIR)/PacerDaemon
           - $(SRCROOT)/Resources/com.ericandrechek.pacer.daemon.plist
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchServices/PacerDaemon
           - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist
+          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle
 
   PacerDaemon:
     type: tool

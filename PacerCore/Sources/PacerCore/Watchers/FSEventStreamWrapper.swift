@@ -58,6 +58,14 @@ public final class FSEventStreamWrapper: @unchecked Sendable {
         )
 
         // Flags:
+        //   - UseCFTypes: receive event paths as CFArray<CFString>
+        //     in the callback, not the legacy `char**`. Without this,
+        //     FSEvents passes raw C strings — a Swift `NSArray` cast
+        //     compiles fine but crashes inside fast-enumeration.
+        //     Tests use `.manual` mode so this only surfaced when the
+        //     real daemon ran on live files. (Documented behavior;
+        //     `unsafeBitCast(rawPointer, to: NSArray.self)` requires
+        //     this flag.)
         //   - FileEvents: get per-file events, not coarse per-directory.
         //     Required because Claude Code writes JSONL line-by-line and
         //     we want to know which transcript changed, not just "the
@@ -71,7 +79,8 @@ public final class FSEventStreamWrapper: @unchecked Sendable {
         //     deleted. Cheap insurance against `~/.claude/projects/`
         //     getting renamed out from under us.
         let flags: UInt32 = UInt32(
-            kFSEventStreamCreateFlagFileEvents
+            kFSEventStreamCreateFlagUseCFTypes
+            | kFSEventStreamCreateFlagFileEvents
             | kFSEventStreamCreateFlagNoDefer
             | kFSEventStreamCreateFlagWatchRoot
         )
