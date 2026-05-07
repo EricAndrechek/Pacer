@@ -7,6 +7,7 @@ struct ContentView: View {
     @Query(sort: \TokenSample.sampledAt, order: .reverse) private var samples: [TokenSample]
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
     @Query(sort: \ClaudeCodeMeta.key) private var meta: [ClaudeCodeMeta]
+    @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimitSamples: [RateLimitSample]
 
     @State private var launchAgentStatus: LaunchAgentInstaller.Status = .unknown
     @State private var lastActionMessage: String?
@@ -14,10 +15,12 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("Pacer — M3 daemon + scan")
+                Text("Pacer — M5 daemon + scan + OAuth")
                     .font(.title)
 
                 statsSection
+                Divider()
+                rateLimitsSection
                 Divider()
                 metaSection
                 Divider()
@@ -43,6 +46,67 @@ struct ContentView: View {
                 stat("Models seen", Set(samples.map(\.model)).count)
             }
         }
+    }
+
+    private var rateLimitsSection: some View {
+        // Pull the latest sample for each window from the @Query
+        // results (already sorted descending by sampledAt). One pass
+        // stops as soon as we have both — at most ~10 rows of work.
+        let latestFiveHour = rateLimitSamples.first { $0.window == "five_hour" }
+        let latestSevenDay = rateLimitSamples.first { $0.window == "seven_day" }
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Rate limits (Tier 3 — OAuth)").font(.headline)
+            if rateLimitSamples.isEmpty {
+                Text("No rate-limit data yet. Daemon will poll within 5 minutes of starting; if signed-into Claude Code with valid credentials, values will appear here.")
+                    .foregroundStyle(.secondary)
+                    .font(.system(.caption, design: .monospaced))
+            } else {
+                rateLimitRow(label: "5h",  sample: latestFiveHour)
+                rateLimitRow(label: "7d",  sample: latestSevenDay)
+                Text("\(rateLimitSamples.count) total samples in store")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rateLimitRow(label: String, sample: RateLimitSample?) -> some View {
+        HStack(alignment: .top) {
+            Text(label)
+                .font(.system(.body, design: .monospaced).weight(.semibold))
+                .frame(width: 50, alignment: .leading)
+            if let s = sample {
+                Text(String(format: "%5.1f%%", s.usedPercentage))
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 80, alignment: .leading)
+                    .foregroundStyle(s.usedPercentage >= 80 ? .orange : .primary)
+                Text(resetsText(for: s.resetsAt))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("via \(s.source) · \(ageText(for: s.sampledAt))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("—  no samples for this window yet")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func resetsText(for date: Date?) -> String {
+        guard let date else { return "resets: unknown" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return "resets \(formatter.localizedString(for: date, relativeTo: Date()))"
+    }
+
+    private func ageText(for date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private var metaSection: some View {
