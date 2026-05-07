@@ -1,0 +1,147 @@
+import SwiftUI
+import SwiftData
+import PacerCore
+
+/// Today's totals, computed from `DailyAggregate` rows for the local
+/// `YYYY-MM-DD`. Reads only — no work that touches the daemon's write
+/// path. Intentionally independent of the rate-limit OAuth poll: this
+/// card surfaces what we know from JSONL, the gauges card surfaces
+/// what we know from the OAuth endpoint.
+struct TodaySummaryCard: View {
+    /// Filter aggregates down to today's date string. The daemon
+    /// formats `DailyAggregate.date` with `TokenSample.formatDate(_:)`,
+    /// pinned to the user's current local timezone, so we use the same
+    /// helper here — keeps the comparison string-equality and avoids a
+    /// timezone mismatch where the dashboard would briefly show "no
+    /// data today" right after midnight.
+    @Query private var aggregates: [DailyAggregate]
+
+    init() {
+        let todayString = TokenSample.formatDate(Date())
+        _aggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date == todayString }
+        )
+    }
+
+    private var totals: Totals {
+        Totals(rows: aggregates)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Today")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Text(TokenSample.formatDate(Date()))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            if totals.isEmpty {
+                emptyState
+            } else {
+                metricRow
+                if totals.cacheHitRatio > 0 {
+                    Text("Cache hit ratio: \(Int(totals.cacheHitRatio * 100))%")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var metricRow: some View {
+        HStack(alignment: .top, spacing: 32) {
+            metric(label: "cost",      value: formatCost(totals.totalCostUSD))
+            metric(label: "input",     value: formatTokens(totals.inputTokens))
+            metric(label: "output",    value: formatTokens(totals.outputTokens))
+            metric(label: "cache read", value: formatTokens(totals.cacheReadTokens))
+            metric(label: "models",    value: "\(totals.distinctModels)")
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func metric(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(value)
+                .font(.system(size: 26, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var emptyState: some View {
+        Text("No usage logged today yet. The daemon writes within seconds of any Claude Code activity.")
+            .foregroundStyle(.secondary)
+            .font(.system(.body, design: .monospaced))
+    }
+
+    // MARK: - Formatting
+
+    private func formatCost(_ usd: Double) -> String {
+        if usd >= 100 {
+            return String(format: "$%.0f", usd)
+        }
+        return String(format: "$%.2f", usd)
+    }
+
+    /// Tokens are big; show K/M suffixes the same way ccusage's CLI
+    /// does (and what users see in `/stats`). Keeps the card readable.
+    private func formatTokens(_ count: Int64) -> String {
+        let n = Double(count)
+        switch n {
+        case 1_000_000_000...:
+            return String(format: "%.2fB", n / 1_000_000_000)
+        case 1_000_000...:
+            return String(format: "%.2fM", n / 1_000_000)
+        case 10_000...:
+            return String(format: "%.1fK", n / 1_000)
+        case 1_000...:
+            return String(format: "%.2fK", n / 1_000)
+        default:
+            return "\(count)"
+        }
+    }
+}
+
+/// Sums across the day's per-model aggregate rows. Pulled out so the
+/// view body stays declarative — and so the same struct can power
+/// per-day rows in the 30-day chart later (M6.3) without re-deriving.
+private struct Totals {
+    let inputTokens: Int64
+    let outputTokens: Int64
+    let cacheReadTokens: Int64
+    let cacheCreation5mTokens: Int64
+    let cacheCreation1hTokens: Int64
+    let totalCostUSD: Double
+    let distinctModels: Int
+
+    init(rows: [DailyAggregate]) {
+        self.inputTokens = rows.reduce(0) { $0 + $1.inputTokens }
+        self.outputTokens = rows.reduce(0) { $0 + $1.outputTokens }
+        self.cacheReadTokens = rows.reduce(0) { $0 + $1.cacheReadTokens }
+        self.cacheCreation5mTokens = rows.reduce(0) { $0 + $1.cacheCreation5mTokens }
+        self.cacheCreation1hTokens = rows.reduce(0) { $0 + $1.cacheCreation1hTokens }
+        self.totalCostUSD = rows.reduce(0) { $0 + $1.totalCostUSD }
+        self.distinctModels = Set(rows.map(\.model)).count
+    }
+
+    var isEmpty: Bool { inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 }
+
+    /// Cache reads / (cache reads + non-cache input). High ratios mean
+    /// the prompt-caching is doing its job. Anthropic-rate cost
+    /// calculation reduces with cache hits, so this is a useful
+    /// "are we using caching well" gauge.
+    var cacheHitRatio: Double {
+        let denom = Double(cacheReadTokens + inputTokens)
+        guard denom > 0 else { return 0 }
+        return Double(cacheReadTokens) / denom
+    }
+}
