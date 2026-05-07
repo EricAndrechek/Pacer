@@ -12,12 +12,10 @@ import PacerCore
 public enum PacerSettings {
     /// App Group-suite UserDefaults so the daemon, the app, the widget
     /// extension, and any future statusline tap can all read the same
-    /// values. Falls back to `.standard` if the suite can't open
-    /// (test contexts where the app group entitlement isn't present).
-    /// `UserDefaults` is documented thread-safe, so the Swift 6
-    /// non-Sendable concern is a false-positive here.
-    nonisolated(unsafe) public static let store: UserDefaults =
-        UserDefaults(suiteName: PacerStore.appGroupIdentifier) ?? .standard
+    /// values. Delegates to `PacerCore.PacerPreferences.store` so the
+    /// daemon and the app share one resolved suite — there's no chance
+    /// of "app reads defaults from suite X, daemon reads from suite Y."
+    public static var store: UserDefaults { PacerPreferences.store }
 
     /// What the menu bar item shows. Hiding it entirely is a real
     /// use case for users who want the dashboard but not the
@@ -58,17 +56,21 @@ public enum PacerSettings {
         }
     }
 
-    // MARK: - Storage keys (centralized so we never typo at call sites)
+    // MARK: - Storage keys
+    //
+    // Delegated to PacerCore.PacerPreferenceKeys so the daemon can
+    // read these without linking App-target code. Anything new should
+    // also live there if a non-app surface needs to read it.
 
     public enum Key {
-        public static let menuBarStyle           = "pacer.menuBarStyle"
-        public static let menuBarIconStyle       = "pacer.menuBarIconStyle"
-        public static let notificationsEnabled   = "pacer.notifications.enabled"
-        public static let fiveHourThresholdPct   = "pacer.notifications.fiveHourThreshold"
-        public static let sevenDayThresholdPct   = "pacer.notifications.sevenDayThreshold"
-        public static let notifyOnDailyCost      = "pacer.notifications.dailyCost"
-        public static let dailyCostThresholdUSD  = "pacer.notifications.dailyCostThreshold"
-        public static let costMode               = "pacer.display.costMode"
+        public static let menuBarStyle           = PacerPreferenceKeys.menuBarStyle
+        public static let menuBarIconStyle       = PacerPreferenceKeys.menuBarIconStyle
+        public static let notificationsEnabled   = PacerPreferenceKeys.notificationsEnabled
+        public static let fiveHourThresholdPct   = PacerPreferenceKeys.fiveHourThresholdPct
+        public static let sevenDayThresholdPct   = PacerPreferenceKeys.sevenDayThresholdPct
+        public static let notifyOnDailyCost      = PacerPreferenceKeys.notifyOnDailyCost
+        public static let dailyCostThresholdUSD  = PacerPreferenceKeys.dailyCostThresholdUSD
+        public static let costMode               = PacerPreferenceKeys.costMode
     }
 
     // MARK: - Defaults

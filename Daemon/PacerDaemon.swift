@@ -54,8 +54,16 @@ struct PacerDaemonMain {
         let oauthEnabled = env["PACER_DISABLE_OAUTH"] != "1" && !runOnce
         let oauthClient: OAuthClient? = oauthEnabled ? OAuthClient() : nil
 
+        // Read user prefs from the App Group store so the Settings →
+        // Data → Cost-mode picker actually takes effect on the daemon.
+        // Falls back to `.auto` if the user has never opened the app
+        // (no defaults registered yet).
+        let costMode = PacerPreferences.costMode()
+        log("cost mode: \(costMode)")
+
         let coordinator = ScanCoordinator(
             container: container,
+            configuration: ScanCoordinator.Configuration(costMode: costMode),
             oauthClient: oauthClient
         )
 
