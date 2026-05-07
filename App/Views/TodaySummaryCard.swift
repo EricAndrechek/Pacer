@@ -16,11 +16,53 @@ struct TodaySummaryCard: View {
     /// data today" right after midnight.
     @Query private var aggregates: [DailyAggregate]
 
+    /// Last 7 calendar days (today + previous 6). Used to compute the
+    /// "vs 7-day average" comparison chip — gives the user a quick read
+    /// on whether today is a heavier or lighter day relative to recent
+    /// activity. Querying as a date-string range (lexicographic) works
+    /// because YYYY-MM-DD sorts cleanly.
+    @Query private var lastWeekAggregates: [DailyAggregate]
+
     init() {
         let todayString = TokenSample.formatDate(Date())
+        let weekAgo = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+        )
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == todayString }
         )
+        _lastWeekAggregates = Query(
+            filter: #Predicate<DailyAggregate> {
+                $0.date >= weekAgo && $0.date <= todayString
+            }
+        )
+    }
+
+    private struct WeekComparison {
+        let todayCost: Double
+        let priorAvgCost: Double
+        let activeDays: Int
+        var ratio: Double? {
+            guard priorAvgCost > 0.01 else { return nil }
+            return todayCost / priorAvgCost
+        }
+    }
+
+    private var weekComparison: WeekComparison {
+        let todayString = TokenSample.formatDate(Date())
+        var todayCost: Double = 0
+        var priorByDate: [String: Double] = [:]
+        for row in lastWeekAggregates {
+            if row.date == todayString {
+                todayCost += row.totalCostUSD
+            } else {
+                priorByDate[row.date, default: 0] += row.totalCostUSD
+            }
+        }
+        let activeDays = priorByDate.values.filter { $0 > 0.01 }.count
+        let totalPrior = priorByDate.values.reduce(0, +)
+        let avg = activeDays > 0 ? totalPrior / Double(activeDays) : 0
+        return WeekComparison(todayCost: todayCost, priorAvgCost: avg, activeDays: activeDays)
     }
 
     private var totals: Totals {
@@ -41,10 +83,14 @@ struct TodaySummaryCard: View {
                 emptyState
             } else {
                 metricRow
-                if totals.cacheHitRatio > 0 {
-                    Text("Cache hit ratio: \(Int(totals.cacheHitRatio * 100))%")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    if totals.cacheHitRatio > 0 {
+                        Text("Cache hit ratio: \(Int(totals.cacheHitRatio * 100))%")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    weekTrendChip
+                    Spacer()
                 }
             }
         }
@@ -81,6 +127,50 @@ struct TodaySummaryCard: View {
         Text("No usage logged today yet. The daemon writes within seconds of any Claude Code activity.")
             .foregroundStyle(.secondary)
             .font(.system(.body, design: .monospaced))
+    }
+
+    @ViewBuilder
+    private var weekTrendChip: some View {
+        let cmp = weekComparison
+        if let ratio = cmp.ratio {
+            HStack(spacing: 3) {
+                Image(systemName: trendIcon(ratio))
+                    .font(.caption)
+                Text(ratioText(ratio))
+                    .font(.caption.weight(.medium))
+                    .monospacedDigit()
+                Text("vs \(cmp.activeDays)-day avg")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(trendColor(ratio))
+        } else if cmp.todayCost > 0 {
+            Text("first day with cost in the last 7")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// "1.4×" / "0.6×" — keeps it concise and prefix-free.
+    private func ratioText(_ ratio: Double) -> String {
+        if ratio >= 10 { return String(format: "%.0f×", ratio) }
+        return String(format: "%.1f×", ratio)
+    }
+
+    private func trendIcon(_ ratio: Double) -> String {
+        switch ratio {
+        case ..<0.8:  return "arrow.down.right"
+        case ..<1.2:  return "equal"
+        default:      return "arrow.up.right"
+        }
+    }
+
+    private func trendColor(_ ratio: Double) -> Color {
+        switch ratio {
+        case ..<0.8:  return .green
+        case ..<1.5:  return .secondary
+        default:      return .orange
+        }
     }
 
     // MARK: - Formatting
