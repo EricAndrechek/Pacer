@@ -21,7 +21,8 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
   (always price from tokens × LiteLLM rates), `display` (only show
   server-supplied numbers). Selectable in Settings → Data.
 - **Multiple surfaces.**
-    - Main app with four tabs: Dashboard, History, Projects, Debug.
+    - Main app with five tabs: Dashboard, History, Projects, Models,
+      Debug. ⌘1..5 to switch.
     - `MenuBarExtra` status item with configurable display
       (icon-only / percent-only / both / hidden) and icon style
       (gauge needle / ring fill / dot).
