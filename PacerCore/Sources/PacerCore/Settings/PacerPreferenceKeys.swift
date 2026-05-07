@@ -29,7 +29,11 @@ public enum PacerPreferences {
     /// `registerDefaults` writes "auto" on first launch, so this
     /// fallback is mostly for fresh-install daemons that ran before
     /// the app ever opened.
-    public static func costMode() -> CostMode {
+    ///
+    /// The `store` parameter lets tests inject an isolated suite so
+    /// they don't race the live App Group store. Defaults to the
+    /// shared store for production callers.
+    public static func costMode(from store: UserDefaults = store) -> CostMode {
         let raw = store.string(forKey: PacerPreferenceKeys.costMode) ?? "auto"
         switch raw {
         case "calculate": return .calculate
