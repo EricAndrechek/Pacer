@@ -13,7 +13,10 @@ struct DebugView: View {
     @Query(sort: \ClaudeCodeMeta.key) private var meta: [ClaudeCodeMeta]
     @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimitSamples: [RateLimitSample]
 
-    @State private var launchAgentStatus: LaunchAgentInstaller.Status = .unknown
+    @State private var launchAgentStatus: LaunchAgentInstaller.CombinedStatus = .init(
+        smAppService: .unknown,
+        devLaunchctl: .notLoaded
+    )
     @State private var lastActionMessage: String?
 
     var body: some View {
@@ -107,16 +110,32 @@ struct DebugView: View {
 
     @ViewBuilder
     private var launchAgentSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("LaunchAgent (PacerDaemon)").font(.headline)
+
+            // Dev launchctl state — typically what's running for daily-
+            // driver use (set up by `make install`). Surfacing it here
+            // means the UI never shows "notFound" while a daemon is
+            // plainly running and writing to the store.
             HStack(spacing: 12) {
-                Text("Status:")
-                Text(launchAgentStatus.rawValue)
+                Text("Dev daemon:")
+                Text(devDaemonText)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(launchAgentStatus == .enabled ? .green : .secondary)
+                    .foregroundStyle(devDaemonColor)
                 Spacer()
                 Button("Refresh") { refreshStatus() }
             }
+
+            // SMAppService state — production registration path. The
+            // Register/Unregister buttons toggle THIS, not the dev
+            // launchctl daemon.
+            HStack(spacing: 12) {
+                Text("SMAppService:")
+                Text(launchAgentStatus.smAppService.rawValue)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(launchAgentStatus.smAppService == .enabled ? .green : .secondary)
+            }
+
             HStack(spacing: 12) {
                 Button("Register") {
                     do {
@@ -147,9 +166,28 @@ struct DebugView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Pacer never auto-registers. Click Register to opt in.")
+            Text("Dev daemon is set up by `make install`; SMAppService is the production path. Pacer never auto-registers either.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var devDaemonText: String {
+        switch launchAgentStatus.devLaunchctl {
+        case .running(let pid):
+            return pid.map { "running (PID \($0))" } ?? "running"
+        case .loadedNotRunning:
+            return "loaded, not running"
+        case .notLoaded:
+            return "not loaded"
+        }
+    }
+
+    private var devDaemonColor: Color {
+        switch launchAgentStatus.devLaunchctl {
+        case .running:           return .green
+        case .loadedNotRunning:  return .yellow
+        case .notLoaded:         return .secondary
         }
     }
 
@@ -195,6 +233,6 @@ struct DebugView: View {
     }
 
     private func refreshStatus() {
-        launchAgentStatus = LaunchAgentInstaller.currentStatus()
+        launchAgentStatus = LaunchAgentInstaller.combinedStatus()
     }
 }

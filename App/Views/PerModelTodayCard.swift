@@ -117,14 +117,16 @@ struct PerModelTodayCard: View {
 
     /// Map model name → a stable color. We don't fight Charts'
     /// auto-assigned colors for the donut, but the table swatches
-    /// should approximate them so the visual link is clear. Using a
-    /// hashed-into-palette approach gives stable colors across launches
-    /// without persistence.
+    /// should approximate them so the visual link is clear.
+    ///
+    /// Uses a sum-of-unicode-scalars hash rather than `Hasher` because
+    /// `Hasher` is randomized per process — the same model would get
+    /// different colors across app launches, defeating the "stable"
+    /// promise.
     private func swatchColor(for model: String) -> Color {
         let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .yellow, .red]
-        var hasher = Hasher()
-        hasher.combine(model)
-        let idx = abs(hasher.finalize()) % palette.count
+        let scalarSum = model.unicodeScalars.reduce(0) { $0 + UInt32($1.value) }
+        let idx = Int(scalarSum % UInt32(palette.count))
         return palette[idx]
     }
 
