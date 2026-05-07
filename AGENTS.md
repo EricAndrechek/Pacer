@@ -308,6 +308,18 @@ of them. Mentioned here so future agents don't repeat them:
    and `DebugView` all use a static `FetchDescriptor` with
    `fetchLimit` set; follow that pattern for any new card that just
    needs a recent sample or "is the table non-empty" probe.
+
+   For views that legitimately need to *aggregate* across many
+   TokenSamples (Projects, ProjectDetail, History), don't iterate
+   raw samples in body — even off-main-thread iteration of 30k rows
+   is hundreds of ms of wall-clock latency on every scan tick. The
+   pattern is: precompute a view-ready rollup table, maintained by
+   the daemon's recomputer in the write path, keyed by the dimension
+   the view groups on. `DailyAggregate` (date × model) and
+   `ProjectDailyAggregate` (project × date) are the two we have;
+   add another if a future view needs a new grouping. Views then
+   just `@Query` the small precomputed table and group in the body
+   — sub-10ms over hundreds of rows.
 5. **macOS Sequoia 15+ prompts `kTCCServiceSystemPolicyAppData`
    on every launch for any app accessing a Group Container at
    `~/Library/Group Containers/<group-id>/`** — and split-bundle

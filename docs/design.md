@@ -178,6 +178,24 @@ Confirmed against this machine: only `~/.claude/` is currently active
     var totalCostUSD: Double
 }
 
+@Model class ProjectDailyAggregate {
+    @Attribute(.unique) var projectDateKey: String  // "${projectPath}|${date}"
+    var projectPath: String
+    var date: String
+    var inputTokens: Int64
+    var outputTokens: Int64
+    var cacheReadTokens: Int64
+    var cacheCreation5mTokens: Int64
+    var cacheCreation1hTokens: Int64
+    var totalCostUSD: Double
+    var sessionCount: Int
+    var modelCount: Int
+    var lastActive: Date
+    var sessionIdsJSON: Data       // [String]
+    var modelTokensJSON: Data      // [String: Int64]
+    var modelCostJSON: Data        // [String: Double]
+}
+
 @Model class RateLimitSample {
     var sampledAt: Date
     var window: String            // "five_hour" | "seven_day"
@@ -206,8 +224,17 @@ Confirmed against this machine: only `~/.claude/` is currently active
 ```
 
 `TokenSample` is append-only with the dedup key as the uniqueness
-guard. `DailyAggregate` is materialized by background recompute on
-relevant `TokenSample` writes.
+guard. `DailyAggregate` and `ProjectDailyAggregate` are materialized
+by their respective recomputers in the daemon's write path —
+`SamplePersister` tracks dirty `(date, model)` and `(project, date)`
+pairs from inserts, and `AggregateRecomputer` /
+`ProjectAggregateRecomputer` upsert just those buckets after the
+scan flushes. Views never iterate `TokenSample` for rollups; they
+read the precomputed aggregate tables directly. On schema bumps
+that introduce a new aggregate, the persister's
+`consumeMissing*Pairs()` recovery path flags every existing bucket
+as dirty so a one-time bulk backfill rebuilds the table on the
+first scan after upgrade.
 
 ## Statusline integration UX
 

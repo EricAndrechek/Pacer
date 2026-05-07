@@ -16,57 +16,6 @@ import PacerCore
 /// supported way to push that work to a background context.
 @ModelActor
 actor RollupWorker {
-    func projectRows(rangeSince: Date?) -> [ProjectRollupRow] {
-        let descriptor: FetchDescriptor<TokenSample>
-        if let cutoff = rangeSince {
-            descriptor = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.sampledAt >= cutoff },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-        } else {
-            descriptor = FetchDescriptor<TokenSample>(
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-        }
-        guard let samples = try? modelContext.fetch(descriptor) else { return [] }
-
-        struct Acc {
-            var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
-            var sessions: Set<String> = []
-            var models: Set<String> = []
-            var lastActive: Date = .distantPast
-        }
-        var byProject: [String: Acc] = [:]
-        for s in samples {
-            let key = s.projectPath ?? "(unknown)"
-            var a = byProject[key] ?? Acc()
-            a.cost += s.sourceCostUSD ?? 0
-            a.input += s.inputTokens
-            a.output += s.outputTokens
-            a.cacheRead += s.cacheReadTokens
-            if let sid = s.sessionId { a.sessions.insert(sid) }
-            a.models.insert(s.model)
-            if s.sampledAt > a.lastActive { a.lastActive = s.sampledAt }
-            byProject[key] = a
-        }
-        return byProject.map { (key, a) in
-            ProjectRollupRow(
-                path: key,
-                cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
-                sessionCount: a.sessions.count,
-                lastActive: a.lastActive,
-                modelCount: a.models.count
-            )
-        }.sorted { $0.cost > $1.cost }
-    }
-
     func projectDetail(projectPath: String, since: Date?) -> ProjectDetailRollup {
         let descriptor: FetchDescriptor<TokenSample>
         let path = projectPath
@@ -246,19 +195,6 @@ actor RollupWorker {
 // (which add display-only computed fields like `displayName`) on the
 // main thread — that mapping is over a small list (tens of rows) and
 // is cheap.
-
-struct ProjectRollupRow: Sendable, Identifiable {
-    let path: String
-    let cost: Double
-    let inputTokens: Int64
-    let outputTokens: Int64
-    let cacheReadTokens: Int64
-    let totalTokens: Int64
-    let sessionCount: Int
-    let lastActive: Date
-    let modelCount: Int
-    var id: String { path }
-}
 
 struct ProjectDetailRollup: Sendable {
     struct Totals: Sendable {
