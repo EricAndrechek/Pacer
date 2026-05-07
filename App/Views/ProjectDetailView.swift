@@ -18,27 +18,41 @@ struct ProjectDetailView: View {
     let since: Date?
 
     @Environment(\.dismiss) private var dismiss
-    /// Container handle for the rollup actor. Skips @Query for the
-    /// project's TokenSamples — even one project can be thousands of
-    /// rows, and SwiftData materializes them on every save while the
-    /// sheet is open.
+    /// Pre-computed `(project, date)` rollup filtered to this project
+    /// and (optionally) range. Totals, daily series, and per-model
+    /// breakdown come from this — instant; no sample iteration.
+    @Query private var aggregates: [ProjectDailyAggregate]
+    /// Sessions list still comes from a worker pass over raw samples
+    /// because we don't yet maintain a per-session aggregate. The
+    /// data is small (one project's samples in the range) and the
+    /// summary cards above render instantly from `aggregates` while
+    /// this loads in the background.
     @Environment(\.modelContext) private var modelContext
     @Query(ProjectDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    @State private var cached: ProjectDetailRollup = .init(
-        totals: .init(),
-        dailySeries: [],
-        modelSlices: [],
-        sessions: [],
-        sampleCount: 0
-    )
-    @State private var hasLoaded = false
+    @State private var sessions: [ProjectDetailRollup.SessionRow] = []
+    @State private var sessionsLoaded = false
     @State private var refreshGen: Int = 0
 
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
+        let path = projectPath
+        if let cutoffDate = since {
+            let cutoffString = TokenSample.formatDate(cutoffDate)
+            _aggregates = Query(
+                filter: #Predicate<ProjectDailyAggregate> {
+                    $0.projectPath == path && $0.date >= cutoffString
+                },
+                sort: \.date
+            )
+        } else {
+            _aggregates = Query(
+                filter: #Predicate<ProjectDailyAggregate> { $0.projectPath == path },
+                sort: \.date
+            )
+        }
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -48,12 +62,74 @@ struct ProjectDetailView: View {
         )
     }()
 
-    private var totals: ProjectDetailRollup.Totals { cached.totals }
-    private var dailySeries: [ProjectDetailRollup.DayPoint] { cached.dailySeries }
-    private var modelSlices: [ProjectDetailRollup.ModelSlice] { cached.modelSlices }
-    private var sessions: [ProjectDetailRollup.SessionRow] { cached.sessions }
+    private struct Totals {
+        var cost: Double = 0
+        var input: Int64 = 0
+        var output: Int64 = 0
+        var cacheRead: Int64 = 0
+    }
 
-    private func refreshCache() {
+    /// Sum across the project's rollup rows. One pass, ≤90 rows per
+    /// 90-day range — sub-millisecond on the main thread.
+    private var totals: Totals {
+        var t = Totals()
+        for r in aggregates {
+            t.cost += r.totalCostUSD
+            t.input += r.inputTokens
+            t.output += r.outputTokens
+            t.cacheRead += r.cacheReadTokens
+        }
+        return t
+    }
+
+    private struct DayPoint: Identifiable {
+        let date: String
+        let cost: Double
+        let tokens: Int64
+        var id: String { date }
+    }
+
+    private var dailySeries: [DayPoint] {
+        aggregates.map { r in
+            DayPoint(
+                date: r.date,
+                cost: r.totalCostUSD,
+                tokens: r.inputTokens + r.outputTokens + r.cacheReadTokens
+            )
+        }
+    }
+
+    private struct ModelSlice: Identifiable {
+        let model: String
+        let tokens: Int64
+        let cost: Double
+        var id: String { model }
+    }
+
+    /// Decode and union per-day per-model JSON across the project's
+    /// rollup rows. JSON decode happens N times (N = days in range)
+    /// but each blob is tiny — <1KB. Total work ≪ iterating samples.
+    private var modelSlices: [ModelSlice] {
+        var byModel: [String: (tokens: Int64, cost: Double)] = [:]
+        let decoder = JSONDecoder()
+        for r in aggregates {
+            if let tokens = try? decoder.decode([String: Int64].self, from: r.modelTokensJSON) {
+                for (model, t) in tokens {
+                    byModel[model, default: (0, 0)].tokens += t
+                }
+            }
+            if let costs = try? decoder.decode([String: Double].self, from: r.modelCostJSON) {
+                for (model, c) in costs {
+                    byModel[model, default: (0, 0)].cost += c
+                }
+            }
+        }
+        return byModel.map { (model, v) in
+            ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
+        }.sorted { $0.tokens > $1.tokens }
+    }
+
+    private func refreshSessions() {
         let container = modelContext.container
         let path = projectPath
         let cutoff = since
@@ -63,8 +139,8 @@ struct ProjectDetailView: View {
             let worker = RollupWorker(modelContainer: container)
             let result = await worker.projectDetail(projectPath: path, since: cutoff)
             guard myGen == refreshGen else { return }
-            cached = result
-            hasLoaded = true
+            sessions = result.sessions
+            sessionsLoaded = true
         }
     }
 
@@ -72,32 +148,30 @@ struct ProjectDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                if hasLoaded {
-                    summaryCard
-                    if !dailySeries.isEmpty {
-                        dailyChartCard
-                    }
-                    if !modelSlices.isEmpty {
-                        modelsCard
-                    }
-                    if !sessions.isEmpty {
-                        sessionsCard
-                    }
-                } else {
-                    loadingCard
+                summaryCard
+                if !dailySeries.isEmpty {
+                    dailyChartCard
+                }
+                if !modelSlices.isEmpty {
+                    modelsCard
+                }
+                if sessionsLoaded && !sessions.isEmpty {
+                    sessionsCard
+                } else if !sessionsLoaded {
+                    sessionsLoadingCard
                 }
             }
             .padding(24)
         }
         .frame(minWidth: 640, idealWidth: 720, minHeight: 540, idealHeight: 700)
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        .onAppear { refreshSessions() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshSessions() }
     }
 
-    private var loadingCard: some View {
+    private var sessionsLoadingCard: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text("Rolling up project…")
+            Text("Loading sessions…")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
@@ -134,7 +208,7 @@ struct ProjectDetailView: View {
                 metric("input", formatTokens(t.input))
                 metric("output", formatTokens(t.output))
                 metric("cache read", formatTokens(t.cacheRead))
-                metric("samples", "\(cached.sampleCount)")
+                metric("active days", "\(aggregates.count)")
                 Spacer()
             }
         }

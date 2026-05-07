@@ -95,24 +95,15 @@ enum ProjectRange: String, CaseIterable, Identifiable {
 }
 
 private struct ProjectsContent: View {
-    /// Container handle for spinning up a background `ModelContext`
-    /// inside the rollup actor. We deliberately do NOT use `@Query`
-    /// for `TokenSample` — a populated 90-day query is ~30k rows and
-    /// SwiftData materializes it on every save. Iteration on the main
-    /// thread froze the UI on every scan cycle (~30s), even when this
-    /// tab wasn't visible.
-    @Environment(\.modelContext) private var modelContext
-    /// Cheap single-row probe — `last_incremental_scan_at` is rewritten
-    /// once per scan cycle. Drives cache refresh without subscribing
-    /// to the heavy TokenSample table.
-    @Query(ProjectsContent.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    /// Pre-computed `(project, date)` rollup. Two thousand rows tops
+    /// on a populated install (vs ~30k raw TokenSamples) and grouping
+    /// by project for the table is a single in-memory pass over those
+    /// rows. The daemon maintains this table via
+    /// `ProjectAggregateRecomputer`; the view never iterates raw
+    /// samples.
+    @Query private var aggregates: [ProjectDailyAggregate]
 
-    @State private var cached = Cached()
     @State private var selected: SelectedProject?
-    /// Generation counter for in-flight rollup tasks. A scan-meta
-    /// flicker can spawn a second task before the first finishes; we
-    /// only commit the result of the latest one.
-    @State private var refreshGen: Int = 0
 
     /// Sheet's `item:` binding requires Identifiable; wrap the path
     /// plus our display-friendly fields so the detail view doesn't
@@ -129,21 +120,25 @@ private struct ProjectsContent: View {
 
     init(range: ProjectRange, searchText: String = "") {
         let since: Date?
+        let cutoffString: String?
         if let days = range.days {
-            since = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+            let cutoffDate = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+            since = cutoffDate
+            cutoffString = TokenSample.formatDate(cutoffDate)
         } else {
             since = nil
+            cutoffString = nil
         }
         self.rangeSince = since
         self.searchText = searchText
+        if let cutoffString {
+            _aggregates = Query(
+                filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
+            )
+        } else {
+            _aggregates = Query()
+        }
     }
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private struct ProjectRow: Identifiable {
         let path: String
@@ -159,59 +154,65 @@ private struct ProjectsContent: View {
         var id: String { path }
     }
 
-    /// Pre-grouped, pre-sorted rows. searchText filtering is applied
-    /// downstream cheaply over this small list (~tens of projects),
-    /// so typing in the search field doesn't cost a full regroup.
-    private struct Cached {
-        var allProjects: [ProjectRow] = []
-        var hasLoaded: Bool = false
+    /// One in-memory pass over the precomputed daily rollup, grouped
+    /// by `projectPath`. With ~2k rows max this is sub-10ms even on
+    /// the main thread, so we don't bother with a worker hop.
+    private var allRows: [ProjectRow] {
+        struct Acc {
+            var cost: Double = 0
+            var input: Int64 = 0
+            var output: Int64 = 0
+            var cacheRead: Int64 = 0
+            // Aggregating sessions/models across days slightly
+            // overcounts (a session that crossed midnight gets
+            // double-counted). For the list view we accept it; the
+            // detail view unions sessionIdsJSON for accuracy.
+            var sessionCount: Int = 0
+            var modelCount: Int = 0
+            var lastActive: Date = .distantPast
+        }
+        var byProject: [String: Acc] = [:]
+        for r in aggregates {
+            var a = byProject[r.projectPath] ?? Acc()
+            a.cost += r.totalCostUSD
+            a.input += r.inputTokens
+            a.output += r.outputTokens
+            a.cacheRead += r.cacheReadTokens
+            a.sessionCount += r.sessionCount
+            a.modelCount += r.modelCount
+            if r.lastActive > a.lastActive { a.lastActive = r.lastActive }
+            byProject[r.projectPath] = a
+        }
+        return byProject.map { (key, a) in
+            ProjectRow(
+                path: key,
+                displayName: shortPath(key),
+                cost: a.cost,
+                inputTokens: a.input,
+                outputTokens: a.output,
+                cacheReadTokens: a.cacheRead,
+                totalTokens: a.input + a.output + a.cacheRead,
+                sessionCount: a.sessionCount,
+                lastActive: a.lastActive,
+                modelCount: a.modelCount
+            )
+        }.sorted { $0.cost > $1.cost }
     }
 
     private var rows: [ProjectRow] {
         let needle = searchText.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return cached.allProjects }
+        let base = allRows
+        guard !needle.isEmpty else { return base }
         let lower = needle.lowercased()
-        return cached.allProjects.filter {
+        return base.filter {
             $0.path.lowercased().contains(lower) ||
             $0.displayName.lowercased().contains(lower)
         }
     }
 
-    private func refreshCache() {
-        let container = modelContext.container
-        let cutoff = rangeSince
-        refreshGen &+= 1
-        let myGen = refreshGen
-        Task {
-            let worker = RollupWorker(modelContainer: container)
-            let rollup = await worker.projectRows(rangeSince: cutoff)
-            // Drop late-arriving results if a newer refresh has been
-            // queued in the meantime — keeps the cache from flickering
-            // back to a stale snapshot.
-            guard myGen == refreshGen else { return }
-            let mapped = rollup.map { dto in
-                ProjectRow(
-                    path: dto.path,
-                    displayName: shortPath(dto.path),
-                    cost: dto.cost,
-                    inputTokens: dto.inputTokens,
-                    outputTokens: dto.outputTokens,
-                    cacheReadTokens: dto.cacheReadTokens,
-                    totalTokens: dto.totalTokens,
-                    sessionCount: dto.sessionCount,
-                    lastActive: dto.lastActive,
-                    modelCount: dto.modelCount
-                )
-            }
-            cached = Cached(allProjects: mapped, hasLoaded: true)
-        }
-    }
-
     var body: some View {
         Group {
-            if !cached.hasLoaded {
-                loadingState
-            } else if rows.isEmpty && !searchText.isEmpty {
+            if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState
             } else if rows.isEmpty {
                 emptyState
@@ -229,21 +230,6 @@ private struct ProjectsContent: View {
                 since: sel.since
             )
         }
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
-    }
-
-    private var loadingState: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Rolling up projects…")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var noSearchMatchesState: some View {

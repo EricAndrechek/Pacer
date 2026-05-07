@@ -13,6 +13,7 @@ import Testing
             for: Heartbeat.self,
             TokenSample.self,
             DailyAggregate.self,
+            ProjectDailyAggregate.self,
             RateLimitSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,

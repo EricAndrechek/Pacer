@@ -9,6 +9,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         for: Heartbeat.self,
         TokenSample.self,
         DailyAggregate.self,
+        ProjectDailyAggregate.self,
         RateLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
@@ -25,7 +26,9 @@ private func makeEntry(
     cache5m: Int64 = 0,
     cache1h: Int64 = 0,
     storedCost: Double? = nil,
-    dedup: String? = nil
+    dedup: String? = nil,
+    sessionId: String? = nil,
+    projectPath: String? = nil
 ) -> ParsedUsageEntry {
     ParsedUsageEntry(
         timestamp: timestamp,
@@ -39,8 +42,8 @@ private func makeEntry(
         ),
         storedCostUSD: storedCost,
         dedupKey: dedup,
-        sessionId: nil,
-        projectPath: nil,
+        sessionId: sessionId,
+        projectPath: projectPath,
         claudeCodeVersion: nil,
         isApiErrorMessage: false
     )
@@ -348,4 +351,129 @@ private func makeEntry(
     let stats = try await recomputer.recompute(pairs: [DateModelPair(date: date, model: model)])
     #expect(stats.aggregatesDeleted == 1)
     #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 0)
+}
+
+// MARK: - ProjectAggregateRecomputer
+
+@MainActor
+@Test func projectAggregateRecomputerUpsertsBucket() throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    let dayStr = TokenSample.formatDate(day)
+    _ = try persister.insert(makeEntry(
+        timestamp: day, model: "claude-opus-4-7",
+        storedCost: 0.10, dedup: "a:1",
+        sessionId: "sess-1", projectPath: "/Users/eric/repo-a"))
+    _ = try persister.insert(makeEntry(
+        timestamp: day, model: "claude-sonnet-4-6",
+        storedCost: 0.05, dedup: "b:1",
+        sessionId: "sess-2", projectPath: "/Users/eric/repo-a"))
+    _ = try persister.insert(makeEntry(
+        timestamp: day, model: "claude-opus-4-7",
+        storedCost: 0.20, dedup: "c:1",
+        sessionId: "sess-3", projectPath: "/Users/eric/repo-b"))
+    try persister.flush()
+
+    let recomputer = ProjectAggregateRecomputer(context: context)
+    let stats = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+    #expect(stats.pairsRecomputed == 2)
+    #expect(stats.aggregatesUpserted == 2)
+
+    let aggregates = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+    #expect(aggregates.count == 2)
+
+    let repoA = aggregates.first { $0.projectPath == "/Users/eric/repo-a" }!
+    #expect(repoA.date == dayStr)
+    #expect(abs(repoA.totalCostUSD - 0.15) < 0.0001)
+    #expect(repoA.sessionCount == 2)
+    #expect(repoA.modelCount == 2)
+
+    let repoB = aggregates.first { $0.projectPath == "/Users/eric/repo-b" }!
+    #expect(repoB.sessionCount == 1)
+    #expect(repoB.modelCount == 1)
+    #expect(abs(repoB.totalCostUSD - 0.20) < 0.0001)
+}
+
+@MainActor
+@Test func projectAggregateRecomputerHandlesMissingProjectPath() throws {
+    // Samples with `projectPath == nil` land in the "(unknown)" bucket
+    // so they still show up in the Projects list.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    _ = try persister.insert(makeEntry(timestamp: day, dedup: "a:1", projectPath: nil))
+    _ = try persister.insert(makeEntry(timestamp: day, dedup: "b:1", projectPath: nil))
+    try persister.flush()
+
+    let recomputer = ProjectAggregateRecomputer(context: context)
+    _ = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+
+    let aggregates = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+    #expect(aggregates.count == 1)
+    #expect(aggregates.first?.projectPath == ProjectDailyAggregate.unknownProjectPath)
+}
+
+@MainActor
+@Test func projectAggregateRecomputerBulkPathBackfill() throws {
+    // 64+ dirty pairs should take the bulk path: one fetch + group
+    // instead of N small fetches. Verify it produces the same rows
+    // either way.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let baseDay = Date(timeIntervalSince1970: 1_756_800_000)
+    // 70 distinct (project, date) buckets, one sample each.
+    for i in 0..<70 {
+        let day = baseDay.addingTimeInterval(Double(i) * 86_400)
+        _ = try persister.insert(makeEntry(
+            timestamp: day,
+            storedCost: 0.01,
+            dedup: "row-\(i)",
+            sessionId: "sess-\(i)",
+            projectPath: "/p\(i % 5)"))  // 5 projects, 14 days each
+    }
+    try persister.flush()
+
+    let recomputer = ProjectAggregateRecomputer(context: context)
+    let stats = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+    #expect(stats.pairsRecomputed == 70)
+    #expect(stats.aggregatesUpserted == 70)
+    #expect(try context.fetchCount(FetchDescriptor<ProjectDailyAggregate>()) == 70)
+}
+
+@MainActor
+@Test func samplePersisterRecoversMissingProjectAggregatePairs() throws {
+    // Backfill check: when ProjectDailyAggregate is empty but
+    // TokenSamples already exist (the upgrade case), the persister
+    // should surface every (project, date) pair in
+    // missingProjectAggregatePairs so ScanCoordinator can rebuild.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    let dayStr = TokenSample.formatDate(day)
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "a:1", projectPath: "/p1")))
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "b:1", projectPath: "/p2")))
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "c:1", projectPath: nil)))
+    try context.save()
+
+    let persister = try SamplePersister(context: context)
+    let recovered = persister.consumeMissingProjectAggregatePairs()
+    #expect(recovered.count == 3)
+    #expect(recovered.contains(ProjectDatePair(projectPath: "/p1", date: dayStr)))
+    #expect(recovered.contains(ProjectDatePair(projectPath: "/p2", date: dayStr)))
+    #expect(recovered.contains(ProjectDatePair(
+        projectPath: ProjectDailyAggregate.unknownProjectPath, date: dayStr)))
+
+    // One-shot — second consume returns empty.
+    #expect(persister.consumeMissingProjectAggregatePairs().isEmpty)
 }

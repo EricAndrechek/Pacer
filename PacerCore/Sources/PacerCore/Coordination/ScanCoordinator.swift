@@ -55,6 +55,7 @@ public final class ScanCoordinator {
         public let scanProgress: JSONLScanner.ScanProgress
         public let persisterStats: SamplePersister.Stats
         public let recomputeStats: AggregateRecomputer.Stats
+        public let projectRecomputeStats: ProjectAggregateRecomputer.Stats
         public let probeResult: StatsCacheProbe.ProbeResult?
         public let durationSeconds: Double
     }
@@ -227,7 +228,7 @@ public final class ScanCoordinator {
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
         // Each cycle starts with a clean dirty-pairs slate so the
-        // recomputer only touches buckets the cycle actually changed.
+        // recomputers only touch buckets the cycle actually changed.
         activePersister.clearDirtyPairs()
         // Integrity recovery: on the first cycle of a persister's
         // lifetime, fold any (date, model) pairs that have TokenSamples
@@ -240,6 +241,17 @@ public final class ScanCoordinator {
         if !recoveryPairs.isEmpty {
             activePersister.addDirtyPairs(recoveryPairs)
             log("integrity: \(recoveryPairs.count) (date,model) bucket(s) missing aggregates - rebuilding")
+        }
+        // Same recovery path for ProjectDailyAggregate. This is what
+        // backfills the new project rollup table for users upgrading
+        // from a build that didn't have it: every existing
+        // (project, date) bucket lands in the dirty set on first scan,
+        // recomputed once, and from then on incremental scans only
+        // touch the buckets they actually wrote into.
+        let recoveryProjectPairs = activePersister.consumeMissingProjectAggregatePairs()
+        if !recoveryProjectPairs.isEmpty {
+            activePersister.addDirtyProjectDates(recoveryProjectPairs)
+            log("integrity: \(recoveryProjectPairs.count) (project,date) bucket(s) missing project aggregates - rebuilding")
         }
         let beforeStats = activePersister.stats
 
@@ -264,6 +276,9 @@ public final class ScanCoordinator {
 
         let recomputer = AggregateRecomputer(context: context, mode: configuration.costMode)
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
+
+        let projectRecomputer = ProjectAggregateRecomputer(context: context)
+        let projectRecomputeStats = try projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
 
         var probeResult: StatsCacheProbe.ProbeResult?
         if let probe {
@@ -298,6 +313,7 @@ public final class ScanCoordinator {
             scanProgress: result.progress,
             persisterStats: cycleStats,
             recomputeStats: recomputeStats,
+            projectRecomputeStats: projectRecomputeStats,
             probeResult: probeResult,
             durationSeconds: Date().timeIntervalSince(started)
         )
@@ -404,7 +420,7 @@ public final class ScanCoordinator {
     /// twice (duplication was a cosmetic bug in earlier versions).
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
     }
 }
 
