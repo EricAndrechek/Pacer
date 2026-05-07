@@ -308,19 +308,31 @@ of them. Mentioned here so future agents don't repeat them:
    and `DebugView` all use a static `FetchDescriptor` with
    `fetchLimit` set; follow that pattern for any new card that just
    needs a recent sample or "is the table non-empty" probe.
-5. **macOS Sequoia 15+ used to re-prompt `kTCCServiceSystemPolicyAppData`
-   on every launch when Pacer had a separate `PacerDaemon` bundle ID
-   sharing the App Group container with the GUI app.** Sequoia's "App
-   Management" framework treats split-identity access to a shared
-   group container as cross-app data access and won't write a stable
-   csreq. The single-binary architecture eliminates the trigger:
-   `com.ericandrechek.pacer` is the only thing accessing the App
-   Group container, so TCC writes a populated csreq (160+ bytes) on
-   the first Allow click and the grant survives quit+reopen
-   indefinitely. If you ever reintroduce a separate-bundle helper,
-   expect this prompt to come back unless the helper is hosted as an
-   XPC service inside the app bundle (which inherits the parent's
-   TCC identity).
+5. **macOS Sequoia 15+ prompts `kTCCServiceSystemPolicyAppData`
+   on every launch for any app accessing a Group Container at
+   `~/Library/Group Containers/<group-id>/`** — and split-bundle
+   architecture is a *contributing* cause but not the only one. The
+   single-binary refactor eliminated the daemon-side prompt (which
+   the daemon's bundle-style `--identifier=` codesign flag had
+   already mostly fixed). The app-side prompt still fires because
+   Sequoia's App Management Service Policy gates Group Container
+   access regardless of who the accessor is. tccd logs show the
+   smoking gun: `ReqResult(Auth Right: Unknown (Service Policy),
+   promptType: 1)` even with a matching csreq from a previous
+   Allow click. Apps that DON'T prompt (iTerm, Docker, OrbStack,
+   Stats) keep their data in regular bundle containers
+   (`~/Library/Application Support/<bundle>/`), not Group
+   Containers — that's the real differentiator.
+
+   To eliminate the prompt entirely, the SwiftData store has to
+   move out of the Group Container. The widget extension is the
+   only reason we use a Group Container in the first place
+   (extensions need shared App Group access to read store data),
+   so the choice is: drop widgets and move data to App Support
+   (no prompt, no widgets), or keep widgets and accept the prompt
+   (one Allow click per launch). XPC service-mediated widget
+   reads with data in App Support is a third option but a much
+   bigger refactor.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
