@@ -93,3 +93,94 @@ build trips on missing provisioning profiles, the user should open the
 project in Xcode and let it auto-resolve, or manually flip the team in
 the Signing & Capabilities tab. Distribution (M8 Sparkle release) will
 use `YZXWMJ5VBY` explicitly with the Developer ID cert.
+
+## Build, test, and verification commands
+
+Fast inner loop while iterating on PacerCore:
+```sh
+cd PacerCore && swift build && swift test
+```
+
+Full project regen + verification build (run after `project.yml` edits):
+```sh
+xcodegen generate
+xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+  build
+```
+
+The no-sign flags exist because the user's paid Developer ID team
+requires device registration for development profiles, which is
+friction we sidestep for verification builds. Runnable builds happen
+via Xcode where signing is automatic.
+
+**Trust `swift build` and `swift test`, not SourceKit diagnostics.**
+Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
+diagnostics frequently complain "Cannot find type X in scope" right
+after writing new files — these are stale indexing artifacts and
+resolve on the next build. Don't chase ghost errors.
+
+## Swift 6 patterns proven during M1/M2
+
+These caught us during the build; document so the next agent doesn't
+relearn:
+
+1. **`ISO8601DateFormatter` is not Sendable.** Apple documents
+   `.date(from:)` as thread-safe, so using a static instance is fine —
+   declare it `nonisolated(unsafe) private static let formatter = ...`
+   to silence the strict-concurrency error. Don't allocate per call;
+   the historical scan parses hundreds of thousands of timestamps.
+
+2. **`FileManager.DirectoryEnumerator.makeIterator()` is unavailable
+   from async contexts.** Drain to an array synchronously in a
+   `nonisolated` helper before the async loop:
+   ```swift
+   while let next = enumerator.nextObject() as? URL { urls.append(next) }
+   ```
+   `for case let url as URL in enumerator` from an async function
+   won't compile.
+
+3. **`Dictionary(uniqueKeysWithValues:)` crashes on duplicate keys.**
+   When deriving lookup tables from external data (LiteLLM has
+   case-collisions like `together_ai/baai/bge-base-en-v1.5` appearing
+   twice), use `Dictionary(_:uniquingKeysWith:)` or just don't
+   pre-build the dict — at 2700 entries, a linear scan is fast enough.
+
+4. **Per-entry decoding for messy JSON dictionaries.** LiteLLM's
+   pricing JSON has a `sample_spec` doc entry where numeric fields are
+   strings ("LEGACY parameter..."). A whole-dict `JSONDecoder.decode`
+   would reject every model. Pattern: `JSONSerialization.jsonObject`
+   for the top-level shape, then re-encode each value to `Data` and
+   try-decode with `JSONDecoder` per entry, dropping failures
+   silently. ccusage does the same.
+
+5. **Closures passed to `@Sendable` async APIs can't mutate captured
+   locals under strict concurrency.** Either accumulate in an actor or
+   refactor the API to return values (or stream via `AsyncStream`).
+   We may want to give `JSONLScanner` an `AsyncThrowingStream` API in
+   addition to the callback form so consumers can iterate naturally.
+
+## Engineering standard
+
+The level of paranoia in M1/M2 sets the bar — keep it or raise it:
+
+- **Catch what ccusage missed.** Cache 5m/1h split, deterministic
+  dedup ordering, path-union over both legacy + XDG locations,
+  defensive parse-or-skip on every line. The `docs/research/` notes
+  call out specific things ccusage flattens or skips that we don't —
+  preserve those deltas; the comments in code mark them.
+- **Validate against ground truth.** `bun x ccusage daily --json` is
+  the canonical reference. Whenever a feature surfaces a number, add
+  a test that compares to ccusage's output for the same range
+  (modulo the cache-tier split deviation).
+- **Comments explain *why*, not *what*.** Especially load-bearing on
+  decisions where Pacer deviates from ccusage — leave a "we keep this,
+  ccusage doesn't, here's why" comment so future readers don't "fix"
+  it back.
+- **Defensive over clever.** A single bad line in a 10MB transcript
+  must never break the scan. Active sessions write concurrently;
+  partial last lines are normal. Always skip-and-log, never throw.
+- **No backwards-compatibility hacks.** This is a fresh project; if
+  a refactor is right, do the refactor cleanly. Don't leave
+  `// removed` comments or rename-shim layers.
