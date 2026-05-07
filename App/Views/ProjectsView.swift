@@ -69,9 +69,29 @@ enum ProjectRange: String, CaseIterable, Identifiable {
 private struct ProjectsContent: View {
     @Query private var samples: [TokenSample]
 
+    @State private var selected: SelectedProject?
+
+    /// Sheet's `item:` binding requires Identifiable; wrap the path
+    /// plus our display-friendly fields so the detail view doesn't
+    /// need to re-derive them.
+    struct SelectedProject: Identifiable {
+        let path: String
+        let displayName: String
+        let since: Date?
+        var id: String { path }
+    }
+
+    let rangeSince: Date?
+
     init(range: ProjectRange) {
+        let since: Date?
         if let days = range.days {
-            let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+            since = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+        } else {
+            since = nil
+        }
+        self.rangeSince = since
+        if let cutoff = since {
             _samples = Query(
                 filter: #Predicate<TokenSample> { $0.sampledAt >= cutoff },
                 sort: \.sampledAt,
@@ -140,13 +160,22 @@ private struct ProjectsContent: View {
     }
 
     var body: some View {
-        if rows.isEmpty {
-            emptyState
-        } else {
-            VStack(alignment: .leading, spacing: 16) {
-                overviewCard
-                projectListCard
+        Group {
+            if rows.isEmpty {
+                emptyState
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    overviewCard
+                    projectListCard
+                }
             }
+        }
+        .sheet(item: $selected) { sel in
+            ProjectDetailView(
+                projectPath: sel.path,
+                displayName: sel.displayName,
+                since: sel.since
+            )
         }
     }
 
@@ -248,7 +277,16 @@ private struct ProjectsContent: View {
             }
             Divider()
             ForEach(rows) { row in
-                projectRow(row)
+                Button {
+                    selected = SelectedProject(
+                        path: row.path,
+                        displayName: row.displayName,
+                        since: rangeSince
+                    )
+                } label: {
+                    projectRow(row)
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(20)

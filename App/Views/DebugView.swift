@@ -18,6 +18,11 @@ struct DebugView: View {
         devLaunchctl: .notLoaded
     )
     @State private var lastActionMessage: String?
+    @State private var resourceSnapshot: DaemonResourceProbe.Snapshot = .init()
+    /// Drives the resource panel's auto-refresh ticker. Replaced with a
+    /// fresh Date on each tick so the @State change re-renders the
+    /// section.
+    @State private var resourceTick = Date()
 
     var body: some View {
         ScrollView {
@@ -25,6 +30,8 @@ struct DebugView: View {
                 Text("Debug")
                     .font(.title)
 
+                resourceSection
+                Divider()
                 statsSection
                 Divider()
                 rateLimitsRawSection
@@ -38,7 +45,34 @@ struct DebugView: View {
             .padding(24)
         }
         .frame(minWidth: 640, minHeight: 600)
-        .onAppear { refreshStatus() }
+        .onAppear {
+            refreshStatus()
+            refreshResources()
+        }
+        // Refresh resource snapshot every 5s while this tab is visible.
+        // The TimelineView would be more idiomatic but this is debug
+        // chrome, not load-bearing UI; a Timer keeps the view simple.
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            refreshResources()
+        }
+    }
+
+    private var resourceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Daemon resources").font(.headline)
+            HStack(spacing: 24) {
+                stat("PID", resourceSnapshot.pid.map(String.init) ?? "—")
+                stat("CPU", resourceSnapshot.cpuPercent.map { String(format: "%.1f%%", $0) } ?? "—")
+                stat("RSS", resourceSnapshot.rssBytes.map(formatBytes) ?? "—")
+                stat("Store", resourceSnapshot.storeSizeBytes.map(formatBytes) ?? "—")
+                stat("WAL", resourceSnapshot.walSizeBytes.map(formatBytes) ?? "—")
+                Spacer()
+                Button("Refresh") { refreshResources() }
+            }
+            Text("Auto-refresh every 5 seconds while this tab is visible.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
     }
 
     // MARK: - Sections
@@ -223,6 +257,38 @@ struct DebugView: View {
             Text("\(value)").font(.system(size: 24, weight: .semibold, design: .rounded))
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    @ViewBuilder
+    private func stat(_ label: String, _ value: String) -> some View {
+        VStack {
+            Text(value)
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(label).font(.caption).foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 70)
+    }
+
+    private func formatBytes(_ count: Int64) -> String {
+        let n = Double(count)
+        switch n {
+        case 1_000_000_000...: return String(format: "%.1f GB", n / 1_000_000_000)
+        case 1_000_000...:     return String(format: "%.0f MB", n / 1_000_000)
+        case 1_000...:         return String(format: "%.0f KB", n / 1_000)
+        default:               return "\(count) B"
+        }
+    }
+
+    private func refreshResources() {
+        let storeURL = (try? PacerStore.storeURL().path) ?? nil
+        let walPath = storeURL.map { $0 + "-wal" }
+        resourceSnapshot = DaemonResourceProbe.capture(
+            storePath: storeURL,
+            walPath: walPath
+        )
     }
 
     private func formatDate(_ date: Date) -> String {
