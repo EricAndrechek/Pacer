@@ -39,19 +39,36 @@ struct DashboardView: View {
 private struct DashboardHeader: View {
     @Query(sort: \TokenSample.sampledAt, order: .reverse) private var tokens: [TokenSample]
     @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimits: [RateLimitSample]
+    /// `last_incremental_scan_at` is updated on every daemon scan
+    /// cycle whether or not new data was inserted, so it's the
+    /// authoritative "daemon is alive" signal. Reading it as a Query
+    /// (vs a one-shot fetch) means the indicator updates the moment
+    /// the daemon writes a scan-meta row.
+    @Query private var scanMeta: [ClaudeCodeMeta]
 
     init() {
-        // Cap the @Query to the most-recent row only — we only need
-        // .first. fetchLimit on the SortDescriptor approach won't apply
-        // here, so just drop the underlying SwiftData query if the
-        // result set ever became surprisingly large. For RateLimitSamples
-        // this is at most a few thousand rows; for TokenSamples ~1M
-        // rows for a heavy user. The sort + .first short-circuits in
-        // practice but we should evaluate with Instruments at v1.1.
+        // Filter `scanMeta` to the single ClaudeCodeMeta row whose
+        // key is `last_incremental_scan_at`. Filter at the predicate
+        // level so we don't materialize every row just to find one.
+        let scanKey = ClaudeCodeMetaKey.lastIncrementalScanAt
+        _scanMeta = Query(filter: #Predicate<ClaudeCodeMeta> { $0.key == scanKey })
+    }
+
+    private var lastDaemonScan: Date? {
+        guard let raw = scanMeta.first?.value else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: raw) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: raw)
     }
 
     private var lastActivity: Date? {
-        let candidates = [tokens.first?.sampledAt, rateLimits.first?.sampledAt].compactMap { $0 }
+        let candidates = [
+            tokens.first?.sampledAt,
+            rateLimits.first?.sampledAt,
+            lastDaemonScan,
+        ].compactMap { $0 }
         return candidates.max()
     }
 
