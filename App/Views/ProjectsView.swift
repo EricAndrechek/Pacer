@@ -95,21 +95,24 @@ enum ProjectRange: String, CaseIterable, Identifiable {
 }
 
 private struct ProjectsContent: View {
-    /// Filtered TokenSample query. Never read from `body` — see
-    /// `refreshCache()`. The body reads only `cached.allProjects`,
-    /// because TabView keeps inactive tabs in the eval tree, so a
-    /// SwiftData save fires this view's body even when Projects isn't
-    /// the visible tab. With ~30k samples in the 90-day window,
-    /// recomputing the per-project grouping in body kept Pacer pegged.
-    @Query private var samples: [TokenSample]
+    /// Container handle for spinning up a background `ModelContext`
+    /// inside the rollup actor. We deliberately do NOT use `@Query`
+    /// for `TokenSample` — a populated 90-day query is ~30k rows and
+    /// SwiftData materializes it on every save. Iteration on the main
+    /// thread froze the UI on every scan cycle (~30s), even when this
+    /// tab wasn't visible.
+    @Environment(\.modelContext) private var modelContext
     /// Cheap single-row probe — `last_incremental_scan_at` is rewritten
-    /// once per scan cycle. Watching it gives us a coarse-grained
-    /// "data probably changed" tick without materializing the
-    /// TokenSample table.
+    /// once per scan cycle. Drives cache refresh without subscribing
+    /// to the heavy TokenSample table.
     @Query(ProjectsContent.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @State private var cached = Cached()
     @State private var selected: SelectedProject?
+    /// Generation counter for in-flight rollup tasks. A scan-meta
+    /// flicker can spawn a second task before the first finishes; we
+    /// only commit the result of the latest one.
+    @State private var refreshGen: Int = 0
 
     /// Sheet's `item:` binding requires Identifiable; wrap the path
     /// plus our display-friendly fields so the detail view doesn't
@@ -133,15 +136,6 @@ private struct ProjectsContent: View {
         }
         self.rangeSince = since
         self.searchText = searchText
-        if let cutoff = since {
-            _samples = Query(
-                filter: #Predicate<TokenSample> { $0.sampledAt >= cutoff },
-                sort: \.sampledAt,
-                order: .reverse
-            )
-        } else {
-            _samples = Query(sort: \.sampledAt, order: .reverse)
-        }
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -170,6 +164,7 @@ private struct ProjectsContent: View {
     /// so typing in the search field doesn't cost a full regroup.
     private struct Cached {
         var allProjects: [ProjectRow] = []
+        var hasLoaded: Bool = false
     }
 
     private var rows: [ProjectRow] {
@@ -183,51 +178,40 @@ private struct ProjectsContent: View {
     }
 
     private func refreshCache() {
-        struct Acc {
-            var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
-            var sessions: Set<String> = []
-            var models: Set<String> = []
-            var lastActive: Date = .distantPast
+        let container = modelContext.container
+        let cutoff = rangeSince
+        refreshGen &+= 1
+        let myGen = refreshGen
+        Task {
+            let worker = RollupWorker(modelContainer: container)
+            let rollup = await worker.projectRows(rangeSince: cutoff)
+            // Drop late-arriving results if a newer refresh has been
+            // queued in the meantime — keeps the cache from flickering
+            // back to a stale snapshot.
+            guard myGen == refreshGen else { return }
+            let mapped = rollup.map { dto in
+                ProjectRow(
+                    path: dto.path,
+                    displayName: shortPath(dto.path),
+                    cost: dto.cost,
+                    inputTokens: dto.inputTokens,
+                    outputTokens: dto.outputTokens,
+                    cacheReadTokens: dto.cacheReadTokens,
+                    totalTokens: dto.totalTokens,
+                    sessionCount: dto.sessionCount,
+                    lastActive: dto.lastActive,
+                    modelCount: dto.modelCount
+                )
+            }
+            cached = Cached(allProjects: mapped, hasLoaded: true)
         }
-        var byProject: [String: Acc] = [:]
-        for s in samples {
-            let key = s.projectPath ?? "(unknown)"
-            var a = byProject[key] ?? Acc()
-            // Use stored cost when present (display-mode); falls back
-            // to 0 when missing. For per-project this is fine — full
-            // cost rebuild would re-apply pricing on every render.
-            a.cost += s.sourceCostUSD ?? 0
-            a.input += s.inputTokens
-            a.output += s.outputTokens
-            a.cacheRead += s.cacheReadTokens
-            if let sid = s.sessionId { a.sessions.insert(sid) }
-            a.models.insert(s.model)
-            if s.sampledAt > a.lastActive { a.lastActive = s.sampledAt }
-            byProject[key] = a
-        }
-        let computed = byProject.map { (key, a) in
-            ProjectRow(
-                path: key,
-                displayName: shortPath(key),
-                cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
-                sessionCount: a.sessions.count,
-                lastActive: a.lastActive,
-                modelCount: a.models.count
-            )
-        }.sorted { $0.cost > $1.cost }
-        cached = Cached(allProjects: computed)
     }
 
     var body: some View {
         Group {
-            if rows.isEmpty && !searchText.isEmpty {
+            if !cached.hasLoaded {
+                loadingState
+            } else if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState
             } else if rows.isEmpty {
                 emptyState
@@ -247,6 +231,19 @@ private struct ProjectsContent: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+    }
+
+    private var loadingState: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Rolling up projects…")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var noSearchMatchesState: some View {

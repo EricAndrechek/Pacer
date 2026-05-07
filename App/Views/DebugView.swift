@@ -158,30 +158,19 @@ struct DebugView: View {
     }
 
     /// Refresh the aggregate stats (count, distinct dates/models, CC
-    /// versions). Called from `onAppear` so the values are populated
-    /// without materializing every TokenSample on every body update.
-    /// Called again whenever the count of recent samples changes,
-    /// which is a cheap proxy for "data has likely changed."
+    /// versions). The fetch + iteration runs on a background
+    /// `RollupWorker` so opening the Debug tab doesn't freeze the UI
+    /// while SwiftData materializes 30k+ TokenSamples — that was the
+    /// ~1s click lag the user was seeing.
     private func refreshAggregateStats() {
-        let descriptor = FetchDescriptor<TokenSample>()
-        totalSampleCount = (try? modelContext.fetchCount(descriptor)) ?? 0
-        // Distinct date/model/version values — fetch once into a set.
-        // Cheaper than @Query because we're not subscribing; the
-        // refresh is gated on samples.count delta below.
-        if let all = try? modelContext.fetch(descriptor) {
-            var dates = Set<String>()
-            var models = Set<String>()
-            var versions = Set<String>()
-            for s in all {
-                dates.insert(s.date)
-                models.insert(s.model)
-                if let v = s.ccVersion, !v.isEmpty {
-                    versions.insert(v)
-                }
-            }
-            distinctDates = dates.count
-            distinctModels = models.count
-            distinctCCVersions = versions.sorted(by: >)
+        let container = modelContext.container
+        Task {
+            let worker = RollupWorker(modelContainer: container)
+            let stats = await worker.debugAggregateStats()
+            totalSampleCount = stats.totalSampleCount
+            distinctDates = stats.distinctDates
+            distinctModels = stats.distinctModels
+            distinctCCVersions = stats.distinctVersions
         }
     }
 

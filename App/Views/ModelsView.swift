@@ -61,27 +61,28 @@ enum ModelsRange: String, CaseIterable, Identifiable {
 }
 
 private struct ModelsContent: View {
-    /// Range-filtered aggregates. Same caching rationale as
-    /// ProjectsView: TabView keeps inactive tab bodies alive, so saves
-    /// invalidate every tab. DailyAggregate is much smaller than
-    /// TokenSample, but body computed `rows` and `dailyMix` on every
-    /// re-eval — wasted work.
-    @Query private var aggregates: [DailyAggregate]
+    /// Container handle for the rollup actor. We bypass @Query for
+    /// DailyAggregate too — even though the table is small, having
+    /// the rollup live on the actor keeps the iteration off the
+    /// main thread on every scan-meta tick (consistent with
+    /// ProjectsView; matters less in absolute terms but eliminates a
+    /// recurring main-thread blocker).
+    @Environment(\.modelContext) private var modelContext
     @Query(ModelsContent.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @State private var cached = Cached()
+    @State private var hasLoaded = false
+    @State private var refreshGen: Int = 0
+
+    private let rangeCutoff: String?
 
     init(range: ModelsRange) {
         if let days = range.days {
-            let cutoff = TokenSample.formatDate(
+            self.rangeCutoff = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
             )
-            _aggregates = Query(
-                filter: #Predicate<DailyAggregate> { $0.date >= cutoff },
-                sort: \.date
-            )
         } else {
-            _aggregates = Query(sort: \.date)
+            self.rangeCutoff = nil
         }
     }
 
@@ -123,55 +124,47 @@ private struct ModelsContent: View {
     private var dailyMix: [DailyMix] { cached.dailyMix }
 
     private func refreshCache() {
-        struct Acc {
-            var cost: Double = 0
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
-            var dates: Set<String> = []
-            var firstSeen: String = "9999-99-99"
-            var lastSeen: String = "0000-00-00"
-        }
-        var byModel: [String: Acc] = [:]
-        var mix: [DailyMix] = []
-        mix.reserveCapacity(aggregates.count)
-        for r in aggregates {
-            var a = byModel[r.model] ?? Acc()
-            a.cost += r.totalCostUSD
-            a.input += r.inputTokens
-            a.output += r.outputTokens
-            a.cacheRead += r.cacheReadTokens
-            a.dates.insert(r.date)
-            if r.date < a.firstSeen { a.firstSeen = r.date }
-            if r.date > a.lastSeen { a.lastSeen = r.date }
-            byModel[r.model] = a
-            mix.append(DailyMix(
-                date: r.date,
-                model: r.model,
-                displayName: shortModel(r.model),
-                tokens: r.inputTokens + r.outputTokens + r.cacheReadTokens
-            ))
-        }
-        let computedRows = byModel.map { (model, a) in
-            ModelRow(
-                model: model,
-                displayName: shortModel(model),
-                cost: a.cost,
-                inputTokens: a.input,
-                outputTokens: a.output,
-                cacheReadTokens: a.cacheRead,
-                totalTokens: a.input + a.output + a.cacheRead,
-                activeDays: a.dates.count,
-                firstSeen: a.firstSeen,
-                lastSeen: a.lastSeen
+        let container = modelContext.container
+        let cutoff = rangeCutoff
+        refreshGen &+= 1
+        let myGen = refreshGen
+        Task {
+            let worker = RollupWorker(modelContainer: container)
+            let result = await worker.modelRollups(rangeSince: cutoff)
+            guard myGen == refreshGen else { return }
+            cached = Cached(
+                rows: result.rows.map { dto in
+                    ModelRow(
+                        model: dto.model,
+                        displayName: shortModel(dto.model),
+                        cost: dto.cost,
+                        inputTokens: dto.inputTokens,
+                        outputTokens: dto.outputTokens,
+                        cacheReadTokens: dto.cacheReadTokens,
+                        totalTokens: dto.totalTokens,
+                        activeDays: dto.activeDays,
+                        firstSeen: dto.firstSeen,
+                        lastSeen: dto.lastSeen
+                    )
+                },
+                dailyMix: result.dailyMix.map { dto in
+                    DailyMix(
+                        date: dto.date,
+                        model: dto.model,
+                        displayName: shortModel(dto.model),
+                        tokens: dto.tokens
+                    )
+                }
             )
-        }.sorted { $0.cost > $1.cost }
-        cached = Cached(rows: computedRows, dailyMix: mix)
+            hasLoaded = true
+        }
     }
 
     var body: some View {
         Group {
-            if rows.isEmpty {
+            if !hasLoaded {
+                loadingState
+            } else if rows.isEmpty {
                 emptyState
             } else {
                 VStack(alignment: .leading, spacing: 16) {
@@ -183,6 +176,19 @@ private struct ModelsContent: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+    }
+
+    private var loadingState: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Rolling up models…")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var emptyState: some View {

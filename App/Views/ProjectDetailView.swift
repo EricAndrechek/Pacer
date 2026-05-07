@@ -18,40 +18,27 @@ struct ProjectDetailView: View {
     let since: Date?
 
     @Environment(\.dismiss) private var dismiss
-    /// Predicate-filtered to this project (and optional since-date).
-    /// Read only from `refreshCache()` — the body never touches it,
-    /// so SwiftData saves don't trigger a re-iteration of every
-    /// sample for this project on every refresh tick.
-    @Query private var samples: [TokenSample]
-    /// Cheap single-row scan-meta probe; the value changes once per
-    /// scan cycle. Drives cache refresh while the sheet is open.
+    /// Container handle for the rollup actor. Skips @Query for the
+    /// project's TokenSamples — even one project can be thousands of
+    /// rows, and SwiftData materializes them on every save while the
+    /// sheet is open.
+    @Environment(\.modelContext) private var modelContext
     @Query(ProjectDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    @State private var cached = Cached()
+    @State private var cached: ProjectDetailRollup = .init(
+        totals: .init(),
+        dailySeries: [],
+        modelSlices: [],
+        sessions: [],
+        sampleCount: 0
+    )
+    @State private var hasLoaded = false
+    @State private var refreshGen: Int = 0
 
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
-        // Build a predicate: project path matches AND sampledAt >= since.
-        // SwiftData predicates don't support "$0.field == capture && $0.field >= capture"
-        // when capture is optional, so we conditionally branch on `since`.
-        let path = projectPath
-        if let cutoff = since {
-            _samples = Query(
-                filter: #Predicate<TokenSample> {
-                    $0.projectPath == path && $0.sampledAt >= cutoff
-                },
-                sort: \.sampledAt,
-                order: .reverse
-            )
-        } else {
-            _samples = Query(
-                filter: #Predicate<TokenSample> { $0.projectPath == path },
-                sort: \.sampledAt,
-                order: .reverse
-            )
-        }
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -61,133 +48,43 @@ struct ProjectDetailView: View {
         )
     }()
 
-    private struct DayPoint: Identifiable {
-        let date: String
-        let cost: Double
-        let tokens: Int64
-        var id: String { date }
-    }
-
-    private struct ModelSlice: Identifiable {
-        let model: String
-        let tokens: Int64
-        var id: String { model }
-    }
-
-    private struct SessionRow: Identifiable {
-        let sessionId: String
-        let lastSeen: Date
-        let totalTokens: Int64
-        let cost: Double
-        let topModel: String
-        var id: String { sessionId }
-    }
-
-    /// All four derived collections built in a single pass over
-    /// `samples`. Body reads these via `cached.*` so a refresh is the
-    /// only thing that re-iterates the predicate's rows.
-    private struct Cached {
-        var totals: (cost: Double, input: Int64, output: Int64, cacheRead: Int64) = (0, 0, 0, 0)
-        var dailySeries: [DayPoint] = []
-        var modelSlices: [ModelSlice] = []
-        var sessions: [SessionRow] = []
-        var sampleCount: Int = 0
-    }
-
-    private var totals: (cost: Double, input: Int64, output: Int64, cacheRead: Int64) { cached.totals }
-    private var dailySeries: [DayPoint] { cached.dailySeries }
-    private var modelSlices: [ModelSlice] { cached.modelSlices }
-    private var sessions: [SessionRow] { cached.sessions }
+    private var totals: ProjectDetailRollup.Totals { cached.totals }
+    private var dailySeries: [ProjectDetailRollup.DayPoint] { cached.dailySeries }
+    private var modelSlices: [ProjectDetailRollup.ModelSlice] { cached.modelSlices }
+    private var sessions: [ProjectDetailRollup.SessionRow] { cached.sessions }
 
     private func refreshCache() {
-        // One pass over `samples`, building all four output collections
-        // simultaneously. Previously each was its own computed property
-        // and ran an independent for-loop over samples — body called
-        // them all, so a save fired four full iterations.
-        var cost: Double = 0
-        var input: Int64 = 0
-        var output: Int64 = 0
-        var cacheRead: Int64 = 0
-
-        var byDate: [String: (cost: Double, tokens: Int64)] = [:]
-        var byModel: [String: Int64] = [:]
-
-        struct SessionAcc {
-            var lastSeen: Date = .distantPast
-            var input: Int64 = 0
-            var output: Int64 = 0
-            var cacheRead: Int64 = 0
-            var cost: Double = 0
-            var modelTokens: [String: Int64] = [:]
+        let container = modelContext.container
+        let path = projectPath
+        let cutoff = since
+        refreshGen &+= 1
+        let myGen = refreshGen
+        Task {
+            let worker = RollupWorker(modelContainer: container)
+            let result = await worker.projectDetail(projectPath: path, since: cutoff)
+            guard myGen == refreshGen else { return }
+            cached = result
+            hasLoaded = true
         }
-        var bySession: [String: SessionAcc] = [:]
-
-        for s in samples {
-            let sCost = s.sourceCostUSD ?? 0
-            let sTokens = s.inputTokens + s.outputTokens + s.cacheReadTokens
-
-            cost += sCost
-            input += s.inputTokens
-            output += s.outputTokens
-            cacheRead += s.cacheReadTokens
-
-            var d = byDate[s.date] ?? (0, 0)
-            d.cost += sCost
-            d.tokens += sTokens
-            byDate[s.date] = d
-
-            byModel[s.model, default: 0] += sTokens
-
-            if let sid = s.sessionId {
-                var a = bySession[sid] ?? SessionAcc()
-                a.input += s.inputTokens
-                a.output += s.outputTokens
-                a.cacheRead += s.cacheReadTokens
-                a.cost += sCost
-                a.modelTokens[s.model, default: 0] += sTokens
-                if s.sampledAt > a.lastSeen { a.lastSeen = s.sampledAt }
-                bySession[sid] = a
-            }
-        }
-
-        let dailySeries = byDate.keys.sorted().map { date in
-            DayPoint(date: date, cost: byDate[date]?.cost ?? 0, tokens: byDate[date]?.tokens ?? 0)
-        }
-        let modelSlices = byModel.map { ModelSlice(model: $0.key, tokens: $0.value) }
-            .sorted { $0.tokens > $1.tokens }
-        let sessions = bySession.map { (sid, a) in
-            let topModel = a.modelTokens.max(by: { $0.value < $1.value })?.key ?? "—"
-            return SessionRow(
-                sessionId: sid,
-                lastSeen: a.lastSeen,
-                totalTokens: a.input + a.output + a.cacheRead,
-                cost: a.cost,
-                topModel: topModel
-            )
-        }.sorted { $0.lastSeen > $1.lastSeen }
-
-        cached = Cached(
-            totals: (cost, input, output, cacheRead),
-            dailySeries: dailySeries,
-            modelSlices: modelSlices,
-            sessions: sessions,
-            sampleCount: samples.count
-        )
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-                summaryCard
-                if !dailySeries.isEmpty {
-                    dailyChartCard
-                }
-                if !modelSlices.isEmpty {
-                    modelsCard
-                }
-                if !sessions.isEmpty {
-                    sessionsCard
+                if hasLoaded {
+                    summaryCard
+                    if !dailySeries.isEmpty {
+                        dailyChartCard
+                    }
+                    if !modelSlices.isEmpty {
+                        modelsCard
+                    }
+                    if !sessions.isEmpty {
+                        sessionsCard
+                    }
+                } else {
+                    loadingCard
                 }
             }
             .padding(24)
@@ -195,6 +92,19 @@ struct ProjectDetailView: View {
         .frame(minWidth: 640, idealWidth: 720, minHeight: 540, idealHeight: 700)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+    }
+
+    private var loadingCard: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Rolling up project…")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var header: some View {
