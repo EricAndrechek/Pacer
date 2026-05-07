@@ -156,6 +156,29 @@ private func makeInMemoryContainer() throws -> ModelContainer {
 }
 
 @MainActor
+@Test func rateLimitSampleRoundTripsNullableResetsAt() throws {
+    // Server occasionally returns `resets_at: null`; the model field
+    // is `Date?` so the row preserves nil rather than synthesizing a
+    // sentinel date. This test guards against accidental migration
+    // back to a non-optional column or a defaulting-init.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    context.insert(RateLimitSample(
+        sampledAt: Date(timeIntervalSince1970: 1_750_000_000),
+        window: "seven_day",
+        usedPercentage: 5.5,
+        resetsAt: nil,
+        source: "oauth"
+    ))
+    try context.save()
+
+    let row = try context.fetch(FetchDescriptor<RateLimitSample>()).first
+    #expect(row != nil)
+    #expect(row?.resetsAt == nil)
+    #expect(row?.usedPercentage == 5.5)
+}
+
+@MainActor
 @Test func claudeCodeMetaUniqueOnKey() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
