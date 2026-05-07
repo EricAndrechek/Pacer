@@ -12,15 +12,17 @@ import PacerCore
 /// large datasets users will care about recent activity anyway.
 struct ProjectsView: View {
     @State private var range: ProjectRange = .ninetyDays
+    @State private var searchText: String = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                searchField
                 // Inner view re-inits whenever `range` changes so its
                 // @Query rebuilds with a fresh predicate. `id(range)`
                 // makes the structural identity update explicit.
-                ProjectsContent(range: range)
+                ProjectsContent(range: range, searchText: searchText)
                     .id(range)
             }
             .padding(24)
@@ -42,6 +44,32 @@ struct ProjectsView: View {
             .frame(maxWidth: 260)
         }
         .padding(.bottom, 4)
+    }
+
+    private var searchField: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Filter projects by path", text: $searchText)
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        )
     }
 }
 
@@ -82,8 +110,9 @@ private struct ProjectsContent: View {
     }
 
     let rangeSince: Date?
+    let searchText: String
 
-    init(range: ProjectRange) {
+    init(range: ProjectRange, searchText: String = "") {
         let since: Date?
         if let days = range.days {
             since = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
@@ -91,6 +120,7 @@ private struct ProjectsContent: View {
             since = nil
         }
         self.rangeSince = since
+        self.searchText = searchText
         if let cutoff = since {
             _samples = Query(
                 filter: #Predicate<TokenSample> { $0.sampledAt >= cutoff },
@@ -143,7 +173,7 @@ private struct ProjectsContent: View {
             if s.sampledAt > a.lastActive { a.lastActive = s.sampledAt }
             byProject[key] = a
         }
-        return byProject.map { (key, a) in
+        let unfiltered = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
                 displayName: shortPath(key),
@@ -157,6 +187,15 @@ private struct ProjectsContent: View {
                 modelCount: a.models.count
             )
         }.sorted { $0.cost > $1.cost }
+        // Substring filter by path or displayName, case-insensitive.
+        // Empty searchText returns all rows unchanged.
+        let needle = searchText.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return unfiltered }
+        let lower = needle.lowercased()
+        return unfiltered.filter {
+            $0.path.lowercased().contains(lower) ||
+            $0.displayName.lowercased().contains(lower)
+        }
     }
 
     var body: some View {
