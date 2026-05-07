@@ -98,22 +98,84 @@ use `YZXWMJ5VBY` explicitly with the Developer ID cert.
 
 Fast inner loop while iterating on PacerCore:
 ```sh
-cd PacerCore && swift build && swift test
+cd PacerCore && swift build && swift test     # or: make test
 ```
 
-Full project regen + verification build (run after `project.yml` edits):
+Verification build (regenerates Xcode project, unsigned compile-only):
 ```sh
-xcodegen generate
-xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
-  -destination 'platform=macOS' \
-  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-  build
+make verify
 ```
 
-The no-sign flags exist because the user's paid Developer ID team
-requires device registration for development profiles, which is
-friction we sidestep for verification builds. Runnable builds happen
-via Xcode where signing is automatic.
+Full signed install — the user's daily-driver path. Use this whenever
+you've made changes the user will want to actually run:
+```sh
+make install
+```
+
+`make install` is idempotent: it stops any running daemon, regenerates
+the Xcode project from `project.yml`, builds with signing, replaces
+`/Applications/Pacer.app`, writes a fresh dev LaunchAgent plist at
+`~/Library/LaunchAgents/com.ericandrechek.pacer.daemon.dev.plist`, and
+boots the daemon via `launchctl bootstrap`. After it returns, the user
+can `make open` to see your changes in the running app.
+
+`make help` lists every target. The ones you'll reach for most often:
+
+| Target | When to use |
+| --- | --- |
+| `make install` | After code changes that should reach the user. |
+| `make logs-tail` | First check when something feels off — last 100 daemon log lines. |
+| `make status` | Full diagnostic snapshot (app present, daemon PID, store size, recent logs). |
+| `make daemon-fg` | Live debug — runs daemon in your terminal so you see crashes/output as they happen. |
+| `make reinstall` | When something feels wedged (uninstall + install). |
+| `make verify` | Fastest "does this compile" — no signing, no install. |
+| `make test` | PacerCore Swift Testing run. |
+
+Logs at `~/Library/Logs/Pacer/PacerDaemon.err.log` — read this directly
+when debugging. SwiftData store at
+`~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+Both survive `make uninstall`; only `make clean-data` removes them
+(and it prompts).
+
+### When `make install` is wrong
+
+- **Pure PacerCore work** (parser, persister, calculator) — `make test`
+  is faster feedback. Only run `make install` when you're done.
+- **UI-only work in `App/Views/`** — `make verify` confirms it
+  compiles; the user will see the change next time they run
+  `make install` (which you should run before claiming the change is
+  done, since the App Group entitlement matters).
+
+### Why we do not use the Xcode project's signing flags from CLI directly
+
+The user's project.yml has `DEVELOPMENT_TEAM: YZXWMJ5VBY` (Developer ID
+team for distribution) but the Apple Development cert that's actually
+present in the keychain is under a different cert team
+(`<REDACTED_DEV_TEAM_ID>`). `xcodebuild` resolves this through Xcode's
+`-allowProvisioningUpdates` flag, which the install scripts pass.
+Don't try to work around signing with `CODE_SIGN_IDENTITY=""` for the
+install flow — that produces an unsigned bundle that macOS refuses to
+launch and that can't access the App Group container.
+
+### Two real-run bugs the test suite cannot catch
+
+These came up the first time the daemon actually ran from
+`/Applications` under launchd; the test suite stayed green through
+both. Mentioned here so future agents don't repeat them:
+
+1. **FSEventStream needs `kFSEventStreamCreateFlagUseCFTypes`.** The
+   callback's path data is a `char**` by default; treating it as an
+   NSArray crashes inside fast-enumeration. Tests use `.manual`
+   watcher mode so they never see this. The flag is set in
+   `FSEventStreamWrapper.start`; don't remove it.
+2. **`Bundle.module` requires the resource bundle next to the
+   executable.** Xcode auto-copies `PacerCore_PacerCore.bundle` into
+   `Pacer.app/Contents/Resources/` for the .app target, but tool
+   targets like `PacerDaemon` get nothing. The
+   `Pacer.app`-target postBuildScript copies it next to the daemon
+   binary at `Contents/Library/LaunchServices/`. If you add another
+   tool target that links PacerCore, do the same copy or
+   `Bundle.module` will fatalError on first pricing access.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE

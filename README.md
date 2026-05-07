@@ -32,31 +32,56 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
 | `PacerCore` | Shared Swift package — parsers, models, IPC schema |
 | `pacertap` | Optional statusline tap binary (deferred to v1.1) |
 
-## Building
+## Quick start (running Pacer on your own Mac)
 
-The Xcode project is generated from `project.yml` via [XcodeGen](https://github.com/yonaskolb/XcodeGen).
-
-```sh
-brew install xcodegen   # one-time
-xcodegen generate       # produces Pacer.xcodeproj (gitignored)
-open Pacer.xcodeproj    # build and run from Xcode
-```
-
-`Pacer.xcodeproj` is regenerated whenever `project.yml` changes — never
-edit the `.xcodeproj` directly. PacerCore is a local Swift package
-(`PacerCore/`) consumed by all targets.
-
-To build from CLI without code signing (verification only):
+Pacer is pre-release. To use it as your daily driver while continuing
+to develop:
 
 ```sh
-xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
-  -destination 'platform=macOS' \
-  CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-  build
+brew install xcodegen     # one-time
+make install              # build, sign, copy to /Applications, start daemon
+make open                 # launch the dashboard
 ```
 
-For a runnable build, open the project in Xcode and let Xcode handle
-provisioning under your Apple ID.
+`make install` is **idempotent** — re-run it after any code change and
+it will stop the running daemon, replace `/Applications/Pacer.app`, and
+re-register the LaunchAgent so the daemon picks up the new binary. This
+is the canonical way to update your local install.
+
+```sh
+make status               # quick health check
+make logs                 # tail -F the daemon's stderr log
+make uninstall            # stop daemon, remove app (keeps your data)
+```
+
+Logs land at `~/Library/Logs/Pacer/PacerDaemon.err.log`. SwiftData
+store at `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+Both persist across reinstalls; `make clean-data` is the only thing
+that wipes them, and it prompts for confirmation.
+
+`make help` lists every target.
+
+### When you'd open the project in Xcode instead
+
+For interactive debugging with breakpoints, view debugging, etc.:
+
+```sh
+xcodegen generate
+open Pacer.xcodeproj
+```
+
+The Xcode project is regenerated from `project.yml` — never edit the
+`.xcodeproj` directly. After Xcode-running, you may want to
+`make install` again to put a clean signed copy back in /Applications
+and re-establish the launchd daemon (Xcode's run terminates the
+process when you close the run session).
+
+### Build verification (no install)
+
+```sh
+make verify               # unsigned compile-only check, fastest
+make test                 # run the PacerCore unit + ground-truth tests
+```
 
 ## License
 
