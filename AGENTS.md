@@ -146,6 +146,43 @@ Both survive `make uninstall`; only `make clean-data` removes them
   `make install` (which you should run before claiming the change is
   done, since the App Group entitlement matters).
 
+### Why two LaunchAgent paths exist
+
+Pacer has two parallel ways to run the daemon at login:
+
+1. **Dev launchctl** — label `com.ericandrechek.pacer.daemon.dev`, plist
+   at `~/Library/LaunchAgents/`, registered via `launchctl bootstrap`
+   from `bin/dev-install.sh`. This is what `make install` sets up.
+2. **SMAppService** — label `com.ericandrechek.pacer.daemon`, plist
+   embedded at `Pacer.app/Contents/Library/LaunchAgents/`, registered
+   via `SMAppService.agent(plistName:).register()` from inside the
+   running app (Debug tab → Register button).
+
+`SMAppService` is the modern Apple-blessed path and is what shipped
+builds will use. It can't be the dev path because:
+
+- `SMAppService.agent.register()` must be called from inside the
+  running app process — not invokable from a shell script.
+- First-time registration triggers a System Settings → Login Items
+  approval prompt. Fine for end users, friction for an AI dev loop
+  that runs `make install` repeatedly.
+- The state machine has a `requiresApproval` failure mode after
+  signature drift, requiring an explicit unregister + re-approve.
+
+The `.dev` suffix on the launchctl label means the two registrations
+can coexist without racing the same launchd slot. `bin/dev-install.sh`
+boots out BOTH labels before bootstrapping the dev one, so a user who
+has clicked Register in the Debug tab and then runs `make install`
+ends up with only the dev daemon running. The Debug tab's
+`LaunchAgentInstaller.combinedStatus()` surfaces both states so it
+never shows "notFound" while a daemon is plainly running.
+
+When the project ships through Sparkle, the dev path becomes
+unnecessary; production users will register via SMAppService once and
+upgrades silently re-register against the same identity. Until then,
+keep the dual path documented and don't try to "simplify" by removing
+the dev variant — `make install` depends on it.
+
 ### Why we do not use the Xcode project's signing flags from CLI directly
 
 The user's project.yml has `DEVELOPMENT_TEAM: YZXWMJ5VBY` (Developer ID
@@ -157,11 +194,11 @@ Don't try to work around signing with `CODE_SIGN_IDENTITY=""` for the
 install flow — that produces an unsigned bundle that macOS refuses to
 launch and that can't access the App Group container.
 
-### Two real-run bugs the test suite cannot catch
+### Real-run bugs the test suite cannot catch
 
 These came up the first time the daemon actually ran from
 `/Applications` under launchd; the test suite stayed green through
-both. Mentioned here so future agents don't repeat them:
+all of them. Mentioned here so future agents don't repeat them:
 
 1. **FSEventStream needs `kFSEventStreamCreateFlagUseCFTypes`.** The
    callback's path data is a `char**` by default; treating it as an
@@ -176,6 +213,25 @@ both. Mentioned here so future agents don't repeat them:
    binary at `Contents/Library/LaunchServices/`. If you add another
    tool target that links PacerCore, do the same copy or
    `Bundle.module` will fatalError on first pricing access.
+3. **A daemon that re-reads the active JSONL on every FSEvent will
+   peg CPU and silently fail to write new data.** Without per-file
+   byte-offset cursors (`JSONLFileCursor`), every line Claude Code
+   writes triggered a ~10s rescan that re-parsed hundreds of existing
+   lines and re-loaded every TokenSample dedup key. Tests scan static
+   fixtures once each, so they never see the loop. The fix is in
+   `JSONLScanner` (chunked reads from a saved offset) plus a hoisted
+   long-lived `SamplePersister` in `ScanCoordinator`. Don't reintroduce
+   per-cycle persister construction or whole-file re-reads.
+4. **A `PacerDaemon` killed via SIGKILL while inside a SwiftData scan
+   can land in `STAT SX` (kernel-stuck) and keep its guarded SQLite fd
+   open indefinitely.** This blocks every subsequent
+   `makeModelContainer()` at `__guarded_open_np` — the new daemon
+   silently hangs with no log output. SIGTERM/SIGKILL won't dislodge an
+   SX zombie; only a reboot clears them. `PacerDaemon.runDaemon()`
+   logs a 30s watchdog warning when container creation stalls. If you
+   see a launchctl-managed daemon at 0% CPU with no log output, run
+   `lsof "$HOME/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite"`
+   — any SX-state daemon listed there is the culprit.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE

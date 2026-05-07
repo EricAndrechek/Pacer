@@ -40,6 +40,7 @@ public enum PacerStore {
             RateLimitSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,
+            JSONLFileCursor.self,
             configurations: configuration
         )
     }

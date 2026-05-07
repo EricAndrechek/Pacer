@@ -95,7 +95,7 @@ private func locateCcusageSnapshot() -> URL? {
     var pacerByDate: [String: TokenBreakdown] = [:]
     let collector = DateCollector()
     let scanner = JSONLScanner()
-    _ = try await scanner.scan(roots: roots, mtimeAfter: nil) { entry in
+    _ = try await scanner.scan(roots: roots) { entry in
         await collector.add(entry)
     }
     pacerByDate = await collector.byDate()
@@ -184,7 +184,7 @@ private func locateCcusageSnapshot() -> URL? {
 
     let collector = DateCollector()
     let scanner = JSONLScanner()
-    _ = try await scanner.scan(roots: roots, mtimeAfter: nil) { entry in
+    _ = try await scanner.scan(roots: roots) { entry in
         await collector.add(entry)
     }
     let pacerByDate = await collector.byDate()
@@ -342,7 +342,7 @@ private actor CostCollector {
 
     let collector = CostCollector(mode: .auto)
     let scanner = JSONLScanner()
-    _ = try await scanner.scan(roots: roots, mtimeAfter: nil) { entry in
+    _ = try await scanner.scan(roots: roots) { entry in
         await collector.add(entry)
     }
     let pacerCostByDate = await collector.byDate()
@@ -420,7 +420,7 @@ private actor CostCollector {
     let dmCollector = DateModelCollector()
     let costCollector = PerModelCostCollector(mode: .auto)
     let scanner = JSONLScanner()
-    _ = try await scanner.scan(roots: roots, mtimeAfter: nil) { entry in
+    _ = try await scanner.scan(roots: roots) { entry in
         await dmCollector.add(entry)
         await costCollector.add(entry)
     }

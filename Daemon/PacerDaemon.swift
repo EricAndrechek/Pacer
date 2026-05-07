@@ -15,7 +15,28 @@ struct PacerDaemonMain {
 
     @MainActor
     static func runDaemon() async throws {
-        let container = try PacerStore.makeModelContainer()
+        // SwiftData / SQLite uses guarded file descriptors. A zombie
+        // daemon holding a guarded fd on `pacer.sqlite` will block
+        // `makeModelContainer()` indefinitely inside `__guarded_open_np`
+        // — the syscall doesn't honor signals. Without this watchdog
+        // the daemon would silently hang at startup with no log output.
+        // The cancel-or-fire pattern only logs when container creation
+        // takes longer than the threshold; a healthy startup is silent.
+        let watchdog = Task.detached(priority: .background) {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            if Task.isCancelled { return }
+            FileHandle.standardError.write(Data(
+                "[PacerDaemon] WARNING: SwiftData container creation has not completed after 30s. Likely a stuck SQLite lock — check `lsof <store-path>` for orphan PacerDaemon processes (especially in SX 'kernel-stuck' state). A reboot clears them.\n".utf8
+            ))
+        }
+        let container: ModelContainer
+        do {
+            container = try PacerStore.makeModelContainer()
+            watchdog.cancel()
+        } catch {
+            watchdog.cancel()
+            throw error
+        }
         let storeURL = try PacerStore.storeURL()
         log("starting; SwiftData container at \(storeURL.path)")
 

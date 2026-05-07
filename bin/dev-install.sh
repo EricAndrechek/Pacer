@@ -65,10 +65,29 @@ fi
 #    the case where the user has the bundled plist registered via
 #    SMAppService AND the dev plist registered via launchctl. `|| true`
 #    swallows "service not loaded" exit codes.
+#
+#    `launchctl bootout` returns before the daemon's signal handler has
+#    finished cleanup. If we hit `bootstrap` before launchd has fully
+#    torn down the previous registration we get EIO. So we poll
+#    `launchctl list` until the label disappears (bounded ~10s).
 echo
 echo "==> Stopping any running daemon"
-launchctl bootout "gui/$(id -u)/${DEV_LABEL}" 2>/dev/null || true
-launchctl bootout "gui/$(id -u)/${SMAPP_LABEL}" 2>/dev/null || true
+
+bootout_and_wait() {
+    local label="$1"
+    launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if ! launchctl list "${label}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "    WARNING: ${label} still loaded after 10s, continuing anyway"
+    return 0
+}
+
+bootout_and_wait "${DEV_LABEL}"
+bootout_and_wait "${SMAPP_LABEL}"
 
 # 4. Replace the installed app. `rm -rf` is safe here because /Applications
 #    is user-owned on macOS for non-system apps, and this script
@@ -92,10 +111,16 @@ mkdir -p "$HOME/Library/LaunchAgents"
 "${REPO_ROOT}/bin/dev-launchagent-plist.sh" > "${DEV_PLIST}"
 
 # 7. Register and start. `bootstrap` loads the plist and (because
-#    RunAtLoad=true) immediately starts the daemon.
+#    RunAtLoad=true) immediately starts the daemon. Retry once on EIO:
+#    even with the bootout-and-wait, launchd occasionally needs an
+#    extra moment to release the label.
 echo
 echo "==> Registering daemon with launchd"
-launchctl bootstrap "gui/$(id -u)" "${DEV_PLIST}"
+if ! launchctl bootstrap "gui/$(id -u)" "${DEV_PLIST}"; then
+    echo "    bootstrap failed; waiting 2s and retrying once"
+    sleep 2
+    launchctl bootstrap "gui/$(id -u)" "${DEV_PLIST}"
+fi
 
 echo
 echo "==> Verifying"

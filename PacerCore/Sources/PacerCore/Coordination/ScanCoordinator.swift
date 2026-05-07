@@ -5,19 +5,23 @@ import SwiftData
 /// FSEvents triggers. Owns no parsing logic — just glues together the
 /// resolver, scanner, persister, recomputer, probe, and watcher.
 ///
+/// **Cursor + persister hoisting:** Each cycle loads per-file byte-offset
+/// cursors from the SwiftData store, hands them to the scanner, and
+/// persists the updates afterwards. The `SamplePersister` is constructed
+/// once per coordinator lifetime — its in-memory dedup Set is the
+/// performance-critical state and rebuilding it every cycle (the original
+/// design) was loading every `TokenSample` from disk on every FSEvent.
+///
 /// The full-vs-incremental decision keys off `ClaudeCodeMetaKey.scanVersion`:
 /// when the on-disk version doesn't match this binary's
-/// `currentScanVersion`, every JSONL gets re-read so a parser change
-/// (e.g. we start tracking a new field) re-classifies historical data.
-/// Otherwise the scanner uses the previous scan's start time as an
-/// `mtimeAfter` cutoff so files that haven't been touched aren't
-/// reopened.
+/// `currentScanVersion`, we wipe cursors so every JSONL gets re-read
+/// (the persister still rejects existing rows by dedupKey).
 @MainActor
 public final class ScanCoordinator {
 
     /// Bump this constant when a parser/aggregation change requires
     /// re-reading historical JSONL. The daemon will detect the version
-    /// drift on next launch and do a full historical scan.
+    /// drift on next launch and wipe cursors so every file is re-read.
     public static let currentScanVersion = "1"
 
     public struct Configuration: Sendable {
@@ -68,6 +72,10 @@ public final class ScanCoordinator {
 
     private var resolvedRoots: [ClaudePathResolver.ResolvedRoot] = []
     private var scanInFlight = false
+    /// Long-lived persister so its in-memory dedup Set is built once.
+    /// Lazily constructed on the first scan cycle so tests that never
+    /// scan don't pay the preload cost.
+    private var persister: SamplePersister?
 
     public init(
         container: ModelContainer,
@@ -138,9 +146,7 @@ public final class ScanCoordinator {
             // both on FSEvents (debounced 500ms) and the 60s backstop
             // — they CAN overlap during a long scan. Skipping is
             // correct: anything new since the in-flight scan started
-            // will be picked up by the next trigger (the watcher fires
-            // on every modification batch), or at the latest by the
-            // next 60s backstop.
+            // will be picked up by the next trigger.
             if scanInFlight {
                 continue
             }
@@ -171,25 +177,47 @@ public final class ScanCoordinator {
 
         let lastVersion = try fetchMeta(ClaudeCodeMetaKey.scanVersion)
         let isFullScan = (lastVersion != Self.currentScanVersion)
-        let cutoff: Date? = isFullScan ? nil : try fetchMetaDate(ClaudeCodeMetaKey.lastIncrementalScanAt)
 
-        let persister = try SamplePersister(context: context, saveBatchSize: configuration.saveBatchSize)
+        // On a full re-scan we wipe all cursors so every JSONL is
+        // read from offset 0. The hoisted persister still rejects
+        // pre-existing rows by dedupKey, so the DB ends up
+        // effectively re-validated without inflating row counts.
+        let cursors: [String: JSONLScanner.CursorState]
+        if isFullScan {
+            try deleteAllCursors()
+            cursors = [:]
+        } else {
+            cursors = try loadCursors()
+        }
+
+        let activePersister = try persister ?? makePersister()
+        if persister == nil { persister = activePersister }
+        // Each cycle starts with a clean dirty-pairs slate so the
+        // recomputer only touches buckets the cycle actually changed.
+        activePersister.clearDirtyPairs()
+        let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
         // back into MainActor land to touch SwiftData. The InsertSink
         // wraps this hop and surfaces the first error so we don't
         // silently swallow disk-full / migration-failed conditions.
-        let sink = InsertSink(persister: persister)
-        let progress = try await scanner.scan(
+        let sink = InsertSink(persister: activePersister)
+        let result = try await scanner.scan(
             roots: resolvedRoots,
-            mtimeAfter: cutoff,
+            cursors: cursors,
             emit: { entry in await sink.consume(entry) }
         )
         try sink.throwIfError()
-        try persister.flush()
+        try activePersister.flush()
+        try saveCursors(result.updatedCursors)
+
+        let cycleStats = SamplePersister.Stats(
+            inserted: activePersister.stats.inserted - beforeStats.inserted,
+            skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate
+        )
 
         let recomputer = AggregateRecomputer(context: context, mode: configuration.costMode)
-        let recomputeStats = try await recomputer.recompute(pairs: persister.dirtyPairs)
+        let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
 
         var probeResult: StatsCacheProbe.ProbeResult?
         if let probe {
@@ -221,12 +249,61 @@ public final class ScanCoordinator {
 
         return ScanReport(
             wasFullScan: isFullScan,
-            scanProgress: progress,
-            persisterStats: persister.stats,
+            scanProgress: result.progress,
+            persisterStats: cycleStats,
             recomputeStats: recomputeStats,
             probeResult: probeResult,
             durationSeconds: Date().timeIntervalSince(started)
         )
+    }
+
+    private func makePersister() throws -> SamplePersister {
+        try SamplePersister(context: context, saveBatchSize: configuration.saveBatchSize)
+    }
+
+    private func loadCursors() throws -> [String: JSONLScanner.CursorState] {
+        let descriptor = FetchDescriptor<JSONLFileCursor>()
+        let rows = try context.fetch(descriptor)
+        var out: [String: JSONLScanner.CursorState] = [:]
+        out.reserveCapacity(rows.count)
+        for row in rows {
+            out[row.path] = JSONLScanner.CursorState(
+                byteOffset: row.byteOffset,
+                lastSeenMtime: row.lastSeenMtime
+            )
+        }
+        return out
+    }
+
+    private func saveCursors(_ updates: [String: JSONLScanner.CursorState]) throws {
+        guard !updates.isEmpty else { return }
+        let descriptor = FetchDescriptor<JSONLFileCursor>()
+        let existingRows = try context.fetch(descriptor)
+        var byPath: [String: JSONLFileCursor] = [:]
+        byPath.reserveCapacity(existingRows.count)
+        for row in existingRows {
+            byPath[row.path] = row
+        }
+        for (path, state) in updates {
+            if let row = byPath[path] {
+                row.byteOffset = state.byteOffset
+                row.lastSeenMtime = state.lastSeenMtime
+            } else {
+                context.insert(JSONLFileCursor(
+                    path: path,
+                    byteOffset: state.byteOffset,
+                    lastSeenMtime: state.lastSeenMtime
+                ))
+            }
+        }
+    }
+
+    private func deleteAllCursors() throws {
+        let descriptor = FetchDescriptor<JSONLFileCursor>()
+        let rows = try context.fetch(descriptor)
+        for row in rows {
+            context.delete(row)
+        }
     }
 
     private func fetchMeta(_ key: String) throws -> String? {
@@ -234,11 +311,6 @@ public final class ScanCoordinator {
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
         )
         return try context.fetch(descriptor).first?.value
-    }
-
-    private func fetchMetaDate(_ key: String) throws -> Date? {
-        guard let raw = try fetchMeta(key) else { return nil }
-        return ISO8601DateFormatter.shared.date(from: raw)
     }
 
     private func writeMeta(_ key: String, value: String) throws {
@@ -258,7 +330,7 @@ public final class ScanCoordinator {
 
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) | files=\(r.scanProgress.filesScanned) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        return "\(kind) | files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
     }
 }
 
