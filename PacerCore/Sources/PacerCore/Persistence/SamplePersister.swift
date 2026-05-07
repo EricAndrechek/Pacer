@@ -37,6 +37,16 @@ public final class SamplePersister {
     private var seenDedupKeys: Set<String>
     /// Buckets touched this session — the recomputer's input.
     public private(set) var dirtyPairs: Set<DateModelPair>
+    /// (date, model) pairs that have TokenSamples in the DB but no
+    /// matching DailyAggregate at persister-init time. These are
+    /// integrity gaps that the dirty-pair tracking will not catch: a
+    /// re-scan of historical JSONL hits dedup on every entry and never
+    /// marks the pair dirty, so the recomputer never rebuilds the
+    /// missing aggregate. ScanCoordinator drains this set on its first
+    /// scan cycle and feeds the pairs to the recomputer, fixing the
+    /// gap automatically. One-shot: `consumeMissingAggregatePairs()`
+    /// returns and clears.
+    private var missingAggregatePairs: Set<DateModelPair>
     /// Inserts since last save. Capped to keep WAL size bounded during
     /// long historical scans.
     private var pendingInsertCount: Int
@@ -54,9 +64,10 @@ public final class SamplePersister {
         self.saveBatchSize = saveBatchSize
         self.seenDedupKeys = []
         self.dirtyPairs = []
+        self.missingAggregatePairs = []
         self.pendingInsertCount = 0
         self.stats = Stats(inserted: 0, skippedAsDuplicate: 0)
-        try preloadDedupKeys()
+        try preloadFromStore()
     }
 
     /// Returns true if the entry was inserted, false if it was a
@@ -100,19 +111,50 @@ public final class SamplePersister {
         dirtyPairs.removeAll()
     }
 
-    private func preloadDedupKeys() throws {
+    /// Drain and return the (date, model) pairs that have TokenSamples
+    /// but no DailyAggregate. ScanCoordinator calls this once per
+    /// persister lifetime and folds the pairs into `dirtyPairs` so the
+    /// recomputer rebuilds them. Subsequent calls return an empty set.
+    public func consumeMissingAggregatePairs() -> Set<DateModelPair> {
+        let pairs = missingAggregatePairs
+        missingAggregatePairs.removeAll()
+        return pairs
+    }
+
+    /// Merge external pairs into the dirty set. Only used to fold
+    /// `missingAggregatePairs` into `dirtyPairs` from ScanCoordinator;
+    /// in normal operation pairs are added by `insert(_:)`.
+    public func addDirtyPairs(_ pairs: Set<DateModelPair>) {
+        dirtyPairs.formUnion(pairs)
+    }
+
+    private func preloadFromStore() throws {
         // SwiftData doesn't expose partial-attribute fetch (CD's
         // NSDictionaryResultType has no equivalent), so we materialize
         // every TokenSample to read its dedupKey. On a 500K-row store
         // this allocates ~500K @Model objects but they're discarded as
         // soon as we've extracted the key — autoreleasepool keeps peak
-        // memory bounded.
-        let descriptor = FetchDescriptor<TokenSample>()
-        let samples = try context.fetch(descriptor)
+        // memory bounded. We also collect the (date, model) pair for
+        // each sample in the same pass — it's free given we already
+        // have the row in hand, and it lets us detect missing-aggregate
+        // gaps below.
+        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        var samplePairs: Set<DateModelPair> = []
         for sample in samples {
             if let key = sample.dedupKey {
                 seenDedupKeys.insert(key)
             }
+            samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
         }
+
+        // Pairs that have aggregate rows already are *not* gaps; only
+        // the difference needs recompute. Aggregate count is per
+        // (date, model) so this fetch is small (≤ days × models).
+        let aggregates = try context.fetch(FetchDescriptor<DailyAggregate>())
+        var aggregatePairs: Set<DateModelPair> = []
+        for agg in aggregates {
+            aggregatePairs.insert(DateModelPair(date: agg.date, model: agg.model))
+        }
+        missingAggregatePairs = samplePairs.subtracting(aggregatePairs)
     }
 }

@@ -117,6 +117,73 @@ private func makeEntry(
 }
 
 @MainActor
+@Test func samplePersisterRecoversMissingAggregatePairs() async throws {
+    // Reproduces the bug where a re-scan after a DailyAggregate-loss
+    // event (clean wipe of just the aggregate table, partial recompute
+    // crash, scanVersion bump that triggered re-read but every entry
+    // dedup-skipped, etc.) would never re-create the missing aggregate
+    // rows because the dedup path never marks (date, model) dirty.
+    //
+    // The persister now scans for (date, model) pairs with samples but
+    // no aggregate at init time and exposes them via
+    // consumeMissingAggregatePairs() so ScanCoordinator can feed them
+    // to the recomputer on first cycle.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+
+    let day1 = Date(timeIntervalSince1970: 1_756_800_000)
+    let day2 = day1.addingTimeInterval(86_400 * 5)
+    let day1Str = TokenSample.formatDate(day1)
+    let day2Str = TokenSample.formatDate(day2)
+
+    // Three samples: two on day1 (different models), one on day2.
+    context.insert(TokenSample(from: makeEntry(timestamp: day1, model: "claude-opus-4-7", dedup: "a:1")))
+    context.insert(TokenSample(from: makeEntry(timestamp: day1, model: "claude-sonnet-4-6", dedup: "b:1")))
+    context.insert(TokenSample(from: makeEntry(timestamp: day2, model: "claude-opus-4-7", dedup: "c:1")))
+    // One DailyAggregate already exists for (day1, opus) — partial
+    // recovery state. The other two pairs should be flagged as missing.
+    context.insert(DailyAggregate(date: day1Str, model: "claude-opus-4-7", inputTokens: 100))
+    try context.save()
+
+    let persister = try SamplePersister(context: context)
+    let recovered = persister.consumeMissingAggregatePairs()
+
+    #expect(recovered.count == 2)
+    #expect(recovered.contains(DateModelPair(date: day1Str, model: "claude-sonnet-4-6")))
+    #expect(recovered.contains(DateModelPair(date: day2Str, model: "claude-opus-4-7")))
+
+    // One-shot: a second consume returns empty.
+    #expect(persister.consumeMissingAggregatePairs().isEmpty)
+
+    // End-to-end check: feeding the recovered pairs into the recomputer
+    // actually creates the missing aggregates.
+    persister.addDirtyPairs(recovered)
+    let recomputer = AggregateRecomputer(context: context, mode: .display)
+    _ = try await recomputer.recompute(pairs: persister.dirtyPairs)
+
+    // Three aggregates total: the pre-existing (day1, opus) + the two
+    // recovered ones.
+    #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 3)
+}
+
+@MainActor
+@Test func samplePersisterRecoveryEmptyOnHealthyStore() throws {
+    // Healthy store: every (date, model) pair already has an aggregate.
+    // Recovery set should be empty so the first scan cycle is a no-op.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    let dayStr = TokenSample.formatDate(day)
+    context.insert(TokenSample(from: makeEntry(timestamp: day, dedup: "a:1")))
+    context.insert(DailyAggregate(date: dayStr, model: "claude-opus-4-7", inputTokens: 100))
+    try context.save()
+
+    let persister = try SamplePersister(context: context)
+    #expect(persister.consumeMissingAggregatePairs().isEmpty)
+}
+
+@MainActor
 @Test func samplePersisterTracksDirtyPairs() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)

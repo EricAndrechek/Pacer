@@ -229,6 +229,18 @@ public final class ScanCoordinator {
         // Each cycle starts with a clean dirty-pairs slate so the
         // recomputer only touches buckets the cycle actually changed.
         activePersister.clearDirtyPairs()
+        // Integrity recovery: on the first cycle of a persister's
+        // lifetime, fold any (date, model) pairs that have TokenSamples
+        // but no DailyAggregate into the dirty set. Without this the
+        // dedup-skip path during a re-scan would never mark these pairs
+        // dirty (every entry hits seenDedupKeys), so missing aggregates
+        // would stay missing forever. Subsequent cycles get an empty
+        // set back.
+        let recoveryPairs = activePersister.consumeMissingAggregatePairs()
+        if !recoveryPairs.isEmpty {
+            activePersister.addDirtyPairs(recoveryPairs)
+            log("integrity: \(recoveryPairs.count) (date,model) bucket(s) missing aggregates - rebuilding")
+        }
         let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
