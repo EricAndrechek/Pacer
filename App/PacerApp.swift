@@ -39,6 +39,24 @@ struct PacerApp: App {
                 .background(NotificationsHost())
         }
         .modelContainer(container)
+        .commands {
+            CommandGroup(after: .importExport) {
+                Divider()
+                Button("Export Daily Totals…") {
+                    let context = ModelContext(container)
+                    CSVExporter.dailyTotals(context: context)
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                Button("Export Daily by Model…") {
+                    let context = ModelContext(container)
+                    CSVExporter.dailyByModel(context: context)
+                }
+                Button("Export Project Totals…") {
+                    let context = ModelContext(container)
+                    CSVExporter.projectTotals(context: context)
+                }
+            }
+        }
 
         // Standard macOS Settings scene — opened via Cmd+, or the
         // app menu's "Settings..." item. Lives in its own window.
