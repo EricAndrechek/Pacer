@@ -87,7 +87,31 @@ struct DebugView: View {
                 stat("Models seen", Set(samples.map(\.model)).count)
                 stat("RateLimitSamples", rateLimitSamples.count)
             }
+            if !ccVersions.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Text("Claude Code versions seen:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(ccVersions.joined(separator: ", "))
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
         }
+    }
+
+    /// Distinct, sort-descending list of `TokenSample.ccVersion`
+    /// values. Useful when troubleshooting "why does this user have a
+    /// weird parsing edge case" — we can see which Claude Code
+    /// versions are in their history.
+    private var ccVersions: [String] {
+        var seen = Set<String>()
+        for s in samples {
+            if let v = s.ccVersion, !v.isEmpty {
+                seen.insert(v)
+            }
+        }
+        return seen.sorted(by: >)
     }
 
     private var rateLimitsRawSection: some View {
