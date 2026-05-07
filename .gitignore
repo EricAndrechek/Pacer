@@ -46,3 +46,6 @@ updates/
 .vscode/
 .idea/
 *.swp
+
+# Loop runtime state — local only
+.claude/
