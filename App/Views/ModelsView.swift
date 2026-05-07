@@ -4,38 +4,26 @@ import Charts
 import PacerCore
 
 /// Per-model breakdown — analogous to ProjectsView but keyed on model
-/// name. Shows which models you actually use, how heavily, and over
-/// what timeframe. Useful for "is sonnet doing the bulk of work or am
-/// I always reaching for opus?" / "did I switch off haiku 3 months ago?"
+/// name. Useful for "is sonnet doing the bulk of work or am I always
+/// reaching for opus?" / "did I switch off haiku 3 months ago?"
 struct ModelsView: View {
     @State private var range: ModelsRange = .ninetyDays
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                ModelsContent(range: range)
-                    .id(range)
-            }
-            .padding(24)
-        }
-        .frame(minWidth: 720, minHeight: 600)
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Models")
-                .font(.largeTitle.weight(.semibold))
-            Spacer()
+        PageScaffold("Models", subtitle: "How traffic splits across Claude models.", trailing: {
             Picker("", selection: $range) {
                 ForEach(ModelsRange.allCases) { r in
                     Text(r.label).tag(r)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 260)
+            .frame(maxWidth: 280)
+            .controlSize(.small)
+            .labelsHidden()
+        }) {
+            ModelsContent(range: range)
+                .id(range)
         }
-        .padding(.bottom, 4)
     }
 }
 
@@ -46,8 +34,8 @@ enum ModelsRange: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .thirtyDays: return "Last 30 days"
-        case .ninetyDays: return "Last 90 days"
+        case .thirtyDays: return "30 days"
+        case .ninetyDays: return "90 days"
         case .all:        return "All time"
         }
     }
@@ -61,11 +49,6 @@ enum ModelsRange: String, CaseIterable, Identifiable {
 }
 
 private struct ModelsContent: View {
-    /// `DailyAggregate` is the precomputed (date, model) rollup. With ≤
-    /// a few hundred rows even on `all` ranges, grouping by model in
-    /// the body is sub-10ms on the main thread — the worker hop
-    /// previous versions used was unnecessary indirection per the
-    /// "precomputed-aggregate views read directly" rule.
     @Query private var aggregates: [DailyAggregate]
 
     init(range: ModelsRange) {
@@ -104,9 +87,6 @@ private struct ModelsContent: View {
         var id: String { "\(date)|\(model)" }
     }
 
-    /// Group precomputed daily rows by model. One pass over a few
-    /// hundred rows max — cheap on every body re-eval, no caching
-    /// needed.
     private var rows: [ModelRow] {
         struct Acc {
             var cost: Double = 0
@@ -132,7 +112,7 @@ private struct ModelsContent: View {
         return byModel.map { (model, a) in
             ModelRow(
                 model: model,
-                displayName: shortModel(model),
+                displayName: pacerShortModel(model),
                 cost: a.cost,
                 inputTokens: a.input,
                 outputTokens: a.output,
@@ -150,7 +130,7 @@ private struct ModelsContent: View {
             DailyMix(
                 date: $0.date,
                 model: $0.model,
-                displayName: shortModel($0.model),
+                displayName: pacerShortModel($0.model),
                 tokens: $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
             )
         }
@@ -161,7 +141,7 @@ private struct ModelsContent: View {
             if rows.isEmpty {
                 emptyState
             } else {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
                     shareCard
                     trendCard
                     listCard
@@ -171,18 +151,15 @@ private struct ModelsContent: View {
     }
 
     private var emptyState: some View {
-        Text("No model activity in the selected range.")
-            .foregroundStyle(.secondary)
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+        PacerCard {
+            Text("No model activity in the selected range.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var shareCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Token share")
-                .font(.title2.weight(.semibold))
+        PacerCard("Token share") {
             HStack(alignment: .top, spacing: 24) {
                 Chart(rows) { r in
                     SectorMark(
@@ -200,40 +177,37 @@ private struct ModelsContent: View {
                     ForEach(rows.prefix(8)) { row in
                         HStack(alignment: .firstTextBaseline) {
                             Text(row.displayName)
-                                .font(.system(.body, design: .monospaced))
+                                .font(.system(size: 13, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Text(formatTokens(row.totalTokens))
-                                .font(.system(.caption, design: .monospaced))
+                            Text(pacerTokens(row.totalTokens))
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
+                                .monospacedDigit()
                                 .frame(width: 90, alignment: .trailing)
                             if total > 0 {
                                 Text("\(Int(Double(row.totalTokens) / Double(total) * 100))%")
-                                    .font(.system(.caption2, design: .monospaced))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
-                                    .frame(width: 36, alignment: .trailing)
+                                    .monospacedDigit()
+                                    .frame(width: 40, alignment: .trailing)
                             }
                         }
                     }
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var trendCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Trend")
-                .font(.title2.weight(.semibold))
+        PacerCard("Trend") {
             Chart(dailyMix) { d in
                 BarMark(
                     x: .value("Date", d.date),
                     y: .value("Tokens", d.tokens)
                 )
                 .foregroundStyle(by: .value("Model", d.displayName))
+                .cornerRadius(1.5)
             }
             .frame(height: 200)
             .chartYAxis {
@@ -241,99 +215,79 @@ private struct ModelsContent: View {
                     AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                     AxisValueLabel {
                         if let v = value.as(Double.self) {
-                            Text(formatTokens(Int64(v)))
-                                .font(.system(size: 9, design: .monospaced))
+                            Text(pacerTokens(Int64(v)))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 }
             }
             .chartXAxis(.hidden)
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var listCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("All models")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("Model").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer()
-                Text("Tokens").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .frame(width: 100, alignment: .trailing)
-                Text("Days").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .frame(width: 60, alignment: .trailing)
-                Text("Last seen").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .frame(width: 100, alignment: .trailing)
-                Text("Cost").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    .frame(width: 80, alignment: .trailing)
-            }
-            Divider()
-            ForEach(rows) { row in
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.displayName)
-                            .font(.system(.body, design: .monospaced))
-                        Text(row.model)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    Text(formatTokens(row.totalTokens))
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(width: 100, alignment: .trailing)
-                    Text("\(row.activeDays)")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 60, alignment: .trailing)
-                    Text(row.lastSeen)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 100, alignment: .trailing)
-                    Text(formatCost(row.cost))
-                        .font(.system(.body, design: .monospaced).weight(.semibold))
-                        .frame(width: 80, alignment: .trailing)
+        PacerCard("All models", trailing: {
+            Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableHeader
+                Divider().padding(.vertical, 4)
+                ForEach(rows) { row in
+                    modelRow(row)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
                 }
-                .padding(.vertical, 2)
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func shortModel(_ name: String) -> String {
-        if let lastSlash = name.lastIndex(of: "/") {
-            return String(name[name.index(after: lastSlash)...])
+    private var tableHeader: some View {
+        HStack {
+            Eyebrow(text: "Model")
+                .padding(.leading, 8)
+            Spacer()
+            Eyebrow(text: "Tokens").frame(width: 100, alignment: .trailing)
+            Eyebrow(text: "Days").frame(width: 60, alignment: .trailing)
+            Eyebrow(text: "Last seen").frame(width: 100, alignment: .trailing)
+            Eyebrow(text: "Cost").frame(width: 84, alignment: .trailing)
         }
-        return name
+        .padding(.trailing, 8)
+        .padding(.bottom, 4)
     }
 
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 1_000 { return String(format: "$%.0f", usd) }
-        if usd >= 100   { return String(format: "$%.0f", usd) }
-        if usd >= 10    { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    private func formatTokens(_ count: Int64) -> String {
-        let n = Double(count)
-        switch n {
-        case 1_000_000_000...: return String(format: "%.2fB", n / 1_000_000_000)
-        case 1_000_000...:     return String(format: "%.1fM", n / 1_000_000)
-        case 1_000...:         return String(format: "%.1fK", n / 1_000)
-        default:               return "\(count)"
+    @ViewBuilder
+    private func modelRow(_ row: ModelRow) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                Text(row.model)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            Text(pacerTokens(row.totalTokens))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 100, alignment: .trailing)
+            Text("\(row.activeDays)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 60, alignment: .trailing)
+            Text(row.lastSeen)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 100, alignment: .trailing)
+            Text(pacerCost(row.cost))
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 84, alignment: .trailing)
         }
     }
 }

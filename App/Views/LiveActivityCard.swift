@@ -3,19 +3,19 @@ import SwiftData
 import PacerCore
 
 /// "What's happening right now" — token & cost burn rate over the last
-/// hour, plus a projection for end-of-day. Helps you catch a runaway
+/// hour, plus a projection for end-of-day. Helps catch a runaway
 /// session early ("oh I just burned through $5 in 20 minutes").
 ///
 /// Reads `TokenSample` rows from the last hour. With cursor-based
 /// scanning Pacer writes near-realtime, so this card moves visibly
-/// as Claude Code is actively running.
+/// while Claude Code is actively running.
 struct LiveActivityCard: View {
     @Query private var recentSamples: [TokenSample]
     @Query private var todayAggregates: [DailyAggregate]
     /// Most-recent sample (any age). When the last-hour set is empty
-    /// we use this to show "last activity: Xh ago" instead of a flat
-    /// "no samples" message — much more useful when the user comes
-    /// back to the dashboard after a break.
+    /// this lets us say "last activity 3h ago" instead of a flat
+    /// "no samples" — much more useful when the user comes back to
+    /// the dashboard after a break.
     @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
     /// Lightweight signal that the scan loop just ran; drives cache
     /// invalidation without forcing a fetch of recentSamples on every
@@ -43,9 +43,6 @@ struct LiveActivityCard: View {
         )
     }()
 
-    /// Single-row "what was the last sample, ever" probe — capped at
-    /// 1 row so SwiftData doesn't materialize the full table on every
-    /// save. Same fetchLimit pattern as DashboardHeader.
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
@@ -59,13 +56,11 @@ struct LiveActivityCard: View {
         var costLastHour: Double = 0
         var sampleCount: Int = 0
         var lastSampleAt: Date?
-        var hasFreshActivity: Bool { lastSampleAt.map { Date().timeIntervalSince($0) < 600 } ?? false }
+        var hasFreshActivity: Bool {
+            lastSampleAt.map { Date().timeIntervalSince($0) < 600 } ?? false
+        }
     }
 
-    /// Cached read of `recentSamples`. Recomputed only when the
-    /// sample count changes — without caching, the body re-iterates
-    /// hundreds of last-hour samples on every SwiftData save, and
-    /// scans save many times per second when Claude Code is writing.
     private var stats: LiveStats { cachedStats }
 
     private func refreshStats() {
@@ -85,10 +80,9 @@ struct LiveActivityCard: View {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
 
-    /// "If you maintain this hourly rate, end-of-day will land at X."
-    /// Bounded by the wall-clock fraction of the day already elapsed —
-    /// the cleaner alternative would be "(hourly rate) × (hours left
-    /// in day)", which we use here.
+    /// "(hourly rate) × (hours left in day)" projection. Bounded by
+    /// wall-clock so a 10-minute spike at midnight doesn't extrapolate
+    /// to nonsense.
     private var projectedEndOfDay: Double {
         let now = Date()
         let cal = Calendar.current
@@ -98,31 +92,28 @@ struct LiveActivityCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: stats.hasFreshActivity ? "bolt.fill" : "bolt.slash")
-                    .foregroundStyle(stats.hasFreshActivity ? .yellow : .secondary)
-                Text("Live activity")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                if let last = stats.lastSampleAt {
-                    Text("last sample \(relative(last))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+        PacerCard("Live activity", trailing: { freshnessChip }) {
             if stats.sampleCount == 0 {
                 emptyState
             } else {
-                row
+                metricGrid
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear { refreshStats() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshStats() }
+    }
+
+    @ViewBuilder
+    private var freshnessChip: some View {
+        if stats.hasFreshActivity {
+            Chip(text: "live", systemImage: "bolt.fill", tint: .yellow, size: .compact)
+        } else if let last = stats.lastSampleAt {
+            Text("last sample \(pacerRelative(last))")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        } else {
+            EmptyView()
+        }
     }
 
     @ViewBuilder
@@ -130,89 +121,46 @@ struct LiveActivityCard: View {
         if let latest = latestSamples.first {
             VStack(alignment: .leading, spacing: 4) {
                 Text("No traffic in the last hour.")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                Text("Last sample \(relative(latest.sampledAt)) — \(shortModel(latest.model)).")
-                    .font(.caption2)
+                Text("Last sample \(pacerRelative(latest.sampledAt)) — \(pacerShortModel(latest.model)).")
+                    .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
         } else {
             Text("No samples yet. This card will light up as Claude Code activity hits the store.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
     }
 
-    private func shortModel(_ name: String) -> String {
-        if let lastSlash = name.lastIndex(of: "/") {
-            return String(name[name.index(after: lastSlash)...])
-        }
-        return name
-    }
-
-    private var row: some View {
-        HStack(alignment: .top, spacing: 32) {
-            metric(
+    private var metricGrid: some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                count: 4
+            ),
+            alignment: .leading,
+            spacing: 12
+        ) {
+            MetricTile(
+                value: pacerCost(stats.costLastHour),
                 label: "last hour cost",
-                value: formatCost(stats.costLastHour),
                 hint: "\(stats.sampleCount) sample\(stats.sampleCount == 1 ? "" : "s")"
             )
-            metric(
-                label: "last hour tokens",
-                value: formatTokens(stats.tokensLastHour),
-                hint: nil
+            MetricTile(
+                value: pacerTokens(stats.tokensLastHour),
+                label: "last hour tokens"
             )
-            metric(
-                label: "today so far",
-                value: formatCost(todayCostSoFar),
-                hint: nil
+            MetricTile(
+                value: pacerCost(todayCostSoFar),
+                label: "today so far"
             )
-            metric(
-                label: "projected end-of-day",
-                value: formatCost(projectedEndOfDay),
+            MetricTile(
+                value: pacerCost(projectedEndOfDay),
+                label: "projected EOD",
                 hint: "if rate holds"
             )
-            Spacer()
-        }
-    }
-
-    @ViewBuilder
-    private func metric(label: String, value: String, hint: String?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(value)
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let hint {
-                Text(hint)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    private func relative(_ date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
-    }
-
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 1_000 { return String(format: "$%.0f", usd) }
-        if usd >= 100   { return String(format: "$%.0f", usd) }
-        if usd >= 10    { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    private func formatTokens(_ count: Int64) -> String {
-        let n = Double(count)
-        switch n {
-        case 1_000_000_000...: return String(format: "%.2fB", n / 1_000_000_000)
-        case 1_000_000...:     return String(format: "%.1fM", n / 1_000_000)
-        case 1_000...:         return String(format: "%.1fK", n / 1_000)
-        default:               return "\(count)"
         }
     }
 }

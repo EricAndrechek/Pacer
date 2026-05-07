@@ -3,38 +3,22 @@ import SwiftData
 import Charts
 import PacerCore
 
-/// Pace charts for the 5-hour and 7-day rate-limit windows. Replaces the
-/// simpler RateLimitGaugesCard with the reference-impl-plugin-style
-/// "cycle-anchored curve + pace line" visualization.
+/// Pace charts for the 5-hour and 7-day rate-limit windows. Cycle-
+/// anchored visualization: dashed pace line from cycleStart→resetsAt
+/// (linear 0→100%) and the actual usage curve drawn solid up to "now."
 ///
-/// For each window, the chart spans the full current cycle:
-///   X axis: cycleStart (= resetsAt − duration) ... resetsAt
-///   Y axis: 0 ... 100 (% of window cap consumed)
-///
-/// Two series are drawn:
-///   - Pace line: dashed, secondary color, linear from (cycleStart, 0)
-///     to (resetsAt, 100). "If you keep using at exactly the rate the
-///     window allows, you land on 100% at reset."
-///   - Actual usage curve: solid, colored by PaceBand, from cycleStart
-///     through "now". The right portion of the chart (now..resetsAt) is
-///     intentionally empty — that's the time you have left.
-///
-/// Hero text is `usedPct/pacePct` (e.g. "47% / 35%"), colored by the
-/// 4-band PaceBand policy. Behind pace = green, on track = primary,
-/// ahead = yellow, danger = red.
+/// Hero text inside each column repeats `usedPct/pacePct` for the user
+/// who came in cold and didn't see the hero strip — and gives the chart
+/// a label even when the bars are tiny.
 struct PaceChartCard: View {
-    /// 8-day window of rate-limit samples. We never read this from
-    /// `body` — the columns get pre-split sample arrays out of the
-    /// cache. Body would otherwise filter+sort the full window twice
-    /// (once per column) on every SwiftData save.
+    /// 8-day window of rate-limit samples. Body never reads the array
+    /// — pre-bucketed by window in `cached` so neither column does its
+    /// own filter pass.
     @Query private var samples: [RateLimitSample]
     @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
 
     init() {
-        // 8 days covers the longest active window (7d) plus a small
-        // grace period. Anything older isn't part of the current cycle
-        // for either window.
         let cutoff = Date().addingTimeInterval(-8 * 86400)
         _samples = Query(
             filter: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
@@ -50,8 +34,6 @@ struct PaceChartCard: View {
         )
     }()
 
-    /// Pre-bucketed by window. The header reads `latest`; each column
-    /// reads `fiveHour`/`sevenDay`. No body-time filter/sort.
     private struct Cached {
         var fiveHour: [RateLimitSample] = []
         var sevenDay: [RateLimitSample] = []
@@ -67,33 +49,22 @@ struct PaceChartCard: View {
             else if s.window == "seven_day" { sd.append(s) }
             if newest == nil || s.sampledAt > newest!.sampledAt { newest = s }
         }
-        // Samples come in reverse-chronological from the @Query; the
-        // PaceChartColumn body assumes `windowSamples.first` is the
-        // newest. Append-in-iteration preserves that order.
         cached = Cached(fiveHour: fh, sevenDay: sd, latest: newest)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Rate-limit pace")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                if let latest = cached.latest {
-                    Text("via \(latest.source) · \(ageText(for: latest.sampledAt))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+        PacerCard("Rate-limit pace", trailing: { trailingChip }) {
             if cached.latest == nil {
                 emptyState
             } else {
-                HStack(alignment: .top, spacing: 20) {
+                HStack(alignment: .top, spacing: 24) {
                     PaceChartColumn(
                         title: "5-hour",
                         duration: 5 * 3600,
                         windowSamples: cached.fiveHour
                     )
+                    Divider()
+                        .frame(height: 110)
                     PaceChartColumn(
                         title: "7-day",
                         duration: 7 * 86400,
@@ -102,47 +73,45 @@ struct PaceChartCard: View {
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+    }
+
+    @ViewBuilder
+    private var trailingChip: some View {
+        if let latest = cached.latest {
+            Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Polling /api/oauth/usage on a 5-minute cadence.")
-                .font(.system(.body))
+                .font(.system(size: 12))
             Text("If you're signed into Claude Code, values will appear within 5 minutes of Pacer starting.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
-
-    private func ageText(for date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
-    }
 }
 
-/// One window's column inside `PaceChartCard`. Pulled out as its own
-/// struct mostly so the heavy `body` reads cleanly — and so the same
-/// primitive can be reused later in MenuBarExtra detail or a
-/// stand-alone widget.
+/// One window's column inside `PaceChartCard`. Pulled out so the body
+/// reads cleanly and the same primitive can be reused later in widgets
+/// or a stand-alone window.
 private struct PaceChartColumn: View {
     let title: String
     let duration: TimeInterval
-    /// Already filtered to this column's window and pre-sorted
-    /// reverse-chronological by the parent. Avoids per-body filter/sort
-    /// passes over the full 8-day sample set.
+    /// Already filtered to this column's window and pre-sorted reverse-
+    /// chronological by the parent. Avoids per-body filter/sort passes
+    /// over the full 8-day sample set.
     let windowSamples: [RateLimitSample]
 
     private var latest: RateLimitSample? { windowSamples.first }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             header
             heroLine
             chartArea
@@ -152,16 +121,15 @@ private struct PaceChartColumn: View {
 
     private var header: some View {
         HStack {
-            Text(title)
-                .font(.caption.weight(.semibold))
+            Eyebrow(text: title)
             Spacer()
             if let resets = latest?.resetsAt {
-                Text("resets \(relative(resets))")
-                    .font(.caption2)
+                Text("resets \(pacerRelative(resets, style: .short))")
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {
                 Text("resets unknown")
-                    .font(.caption2)
+                    .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -183,10 +151,10 @@ private struct PaceChartColumn: View {
                     .monospacedDigit()
                     .foregroundStyle(color(for: band))
                 Text("/")
-                    .font(.system(size: 18, design: .rounded))
+                    .font(.system(size: 16))
                     .foregroundStyle(.tertiary)
                 Text("\(Int(paceEndPct.rounded()))%")
-                    .font(.system(size: 18, weight: .medium, design: .rounded))
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
@@ -210,15 +178,11 @@ private struct PaceChartColumn: View {
             )
             let band = PaceBand(usedPct: latest.usedPercentage, paceEndPct: paceFraction * 100)
             let curveColor = color(for: band)
-            // Append a synthesized "now" point so the curve always ends
-            // at the current %, even when the most recent sample is a
-            // few minutes stale.
             let curvePoints: [PacePoint] =
                 inCycle.map { PacePoint(time: $0.sampledAt, value: $0.usedPercentage) }
                 + [PacePoint(time: now, value: latest.usedPercentage)]
 
             Chart {
-                // Dashed pace line: cycleStart..resetsAt linear 0..100.
                 LineMark(
                     x: .value("time", cycleStart),
                     y: .value("pct", 0.0),
@@ -232,7 +196,6 @@ private struct PaceChartColumn: View {
                 .foregroundStyle(.secondary.opacity(0.4))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-                // Solid usage curve up to now.
                 ForEach(curvePoints) { p in
                     LineMark(
                         x: .value("time", p.time),
@@ -242,8 +205,13 @@ private struct PaceChartColumn: View {
                     .foregroundStyle(curveColor)
                     .interpolationMethod(.monotone)
                 }
+                AreaMark(
+                    x: .value("time", curvePoints.last?.time ?? now),
+                    yStart: .value("pct", 0.0),
+                    yEnd: .value("pct", curvePoints.last?.value ?? 0)
+                )
+                .opacity(0)
 
-                // "now" point so the curve doesn't dangle.
                 PointMark(
                     x: .value("time", now),
                     y: .value("pct", latest.usedPercentage)
@@ -258,18 +226,20 @@ private struct PaceChartColumn: View {
                 AxisMarks(values: [0, 50, 100]) { value in
                     AxisValueLabel {
                         if let v = value.as(Int.self) {
-                            Text("\(v)%").font(.system(size: 8, design: .monospaced))
+                            Text("\(v)%")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.2))
+                    AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 }
             }
-            .frame(height: 80)
+            .frame(height: 90)
         } else {
             Text("collecting…")
-                .font(.system(size: 8, design: .monospaced))
+                .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-                .frame(height: 80)
+                .frame(height: 90)
         }
     }
 
@@ -281,17 +251,8 @@ private struct PaceChartColumn: View {
         case .red:    return .red
         }
     }
-
-    private func relative(_ date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
-    }
 }
 
-/// Identifiable wrapper for ForEach over Charts marks. The PersistentModelID
-/// of a `RateLimitSample` would work but the synthesized "now" point has
-/// none — easier to use our own type for both.
 private struct PacePoint: Identifiable {
     let time: Date
     let value: Double

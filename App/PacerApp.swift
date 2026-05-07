@@ -60,6 +60,49 @@ struct PacerApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
+            // ⌘1..⌘5 jump between sidebar destinations. Live in
+            // `.commands` so they're part of the menu-bar responder
+            // chain and reliably fire even when sidebar items don't
+            // have keyboard focus. Each posts a notification that
+            // ContentView observes to flip its `selection`.
+            CommandGroup(after: .windowArrangement) {
+                Divider()
+                Button("Dashboard") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.dashboard
+                    )
+                }
+                .keyboardShortcut("1", modifiers: .command)
+                Button("History") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.history
+                    )
+                }
+                .keyboardShortcut("2", modifiers: .command)
+                Button("Projects") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.projects
+                    )
+                }
+                .keyboardShortcut("3", modifiers: .command)
+                Button("Models") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.models
+                    )
+                }
+                .keyboardShortcut("4", modifiers: .command)
+                Button("Settings") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.settings
+                    )
+                }
+                .keyboardShortcut("5", modifiers: .command)
+            }
         }
 
         // Menu bar status item. We use `isInserted` so the user can

@@ -1,0 +1,227 @@
+import SwiftUI
+import SwiftData
+import PacerCore
+
+/// "Show me everything important without scrolling" — the topmost card
+/// on the Dashboard. Three side-by-side tiles that answer the three
+/// questions the user opens Pacer to ask:
+///
+///   1. How much have I spent today?
+///   2. Am I going to hit the 5-hour limit?
+///   3. Am I going to hit the 7-day limit?
+///
+/// Replaces the prior dashboard pattern of stacking TodaySummaryCard +
+/// the gauges card on top of each other. Surfaces the same numbers with
+/// stronger visual hierarchy: the hero number per tile, the "/ pace"
+/// secondary number, a small chip that says behind/on/ahead/danger.
+struct HeroStripCard: View {
+    /// All today's per-model rollups. ≤ a handful of rows; iterating in
+    /// body is sub-millisecond.
+    @Query private var todayAggregates: [DailyAggregate]
+    /// Last 7 calendar days for the "vs avg" trend chip on the cost
+    /// tile. ≤ 50 rows.
+    @Query private var weekAggregates: [DailyAggregate]
+    /// Latest rate-limit samples per window. We only ever look at
+    /// `.first { $0.window == ... }`, so cap the fetch at the most
+    /// recent few rows — without this the OAuth poller's growing
+    /// history would force a full materialization on every save.
+    @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
+
+    init() {
+        let todayString = TokenSample.formatDate(Date())
+        let weekAgoString = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+        )
+        _todayAggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date == todayString }
+        )
+        _weekAggregates = Query(
+            filter: #Predicate<DailyAggregate> {
+                $0.date >= weekAgoString && $0.date <= todayString
+            }
+        )
+    }
+
+    private static let recentRateLimits: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
+
+    private var todayCost: Double {
+        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+    }
+
+    private var todayTokens: Int64 {
+        todayAggregates.reduce(0) {
+            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+        }
+    }
+
+    /// Today vs the last 6 days' average (only counting active days, so
+    /// a vacation week doesn't dilute the average to zero). Returns nil
+    /// when prior context is too thin to be meaningful.
+    private var weekDelta: (ratio: Double, activeDays: Int)? {
+        let todayString = TokenSample.formatDate(Date())
+        var todayCost = 0.0
+        var priorByDate: [String: Double] = [:]
+        for r in weekAggregates {
+            if r.date == todayString {
+                todayCost += r.totalCostUSD
+            } else {
+                priorByDate[r.date, default: 0] += r.totalCostUSD
+            }
+        }
+        let active = priorByDate.values.filter { $0 > 0.01 }
+        guard !active.isEmpty else { return nil }
+        let avg = active.reduce(0, +) / Double(active.count)
+        guard avg > 0.01 else { return nil }
+        return (todayCost / avg, active.count)
+    }
+
+    private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
+    private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            costTile
+            paceTile(
+                label: "5-hour pace",
+                sample: fiveHour,
+                duration: 5 * 3600
+            )
+            paceTile(
+                label: "7-day pace",
+                sample: sevenDay,
+                duration: 7 * 86400
+            )
+        }
+    }
+
+    // MARK: - Cost tile
+
+    private var costTile: some View {
+        HeroTile(label: "Today") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(pacerCost(todayCost))
+                        .font(.system(size: 32, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    if let (ratio, _) = weekDelta {
+                        trendChip(ratio: ratio)
+                    }
+                }
+                Text("\(pacerTokens(todayTokens)) tokens")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func trendChip(ratio: Double) -> some View {
+        let icon: String = ratio < 0.8 ? "arrow.down.right"
+            : ratio < 1.2 ? "equal"
+            : "arrow.up.right"
+        let tint: Color = ratio < 0.8 ? .green
+            : ratio < 1.5 ? .secondary
+            : .orange
+        let label: String = ratio >= 10 ? String(format: "%.0f×", ratio)
+            : String(format: "%.1f×", ratio)
+        Chip(text: label, systemImage: icon, tint: tint, size: .compact)
+    }
+
+    // MARK: - Pace tile
+
+    @ViewBuilder
+    private func paceTile(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
+        HeroTile(label: label) {
+            if let s = sample, let resets = s.resetsAt {
+                let pacePct = PaceMath.paceFraction(
+                    now: Date(), resetsAt: resets, windowDuration: duration
+                ) * 100
+                let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("\(Int(s.usedPercentage.rounded()))%")
+                            .font(.system(size: 32, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(color(for: band))
+                        Text("/")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.tertiary)
+                        Text("\(Int(pacePct.rounded()))%")
+                            .font(.system(size: 18, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 0)
+                        paceChip(band: band)
+                    }
+                    Text("resets \(pacerRelative(resets))")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("—")
+                        .font(.system(size: 32, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                    Text("collecting…")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paceChip(band: PaceBand) -> some View {
+        switch band {
+        case .green:
+            Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
+        case .white:
+            Chip(text: "on pace", tint: .secondary, size: .compact)
+        case .yellow:
+            Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
+        case .red:
+            Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
+        }
+    }
+
+    private func color(for band: PaceBand) -> Color {
+        switch band {
+        case .green:  return .green
+        case .white:  return .primary
+        case .yellow: return .yellow
+        case .red:    return .red
+        }
+    }
+}
+
+/// One tile in the hero strip. Cards-of-cards: each tile reuses the
+/// app's standard PacerCard surface so spacing/radius/stroke stay
+/// consistent with the rest of the dashboard.
+private struct HeroTile<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Eyebrow(text: label)
+            content()
+            Spacer(minLength: 0)
+        }
+        .padding(PacerDesign.cardPadding)
+        .frame(maxWidth: .infinity, minHeight: 116, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: PacerDesign.cardCornerRadius, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: PacerDesign.cardCornerRadius, style: .continuous)
+                .stroke(PacerDesign.cardStroke, lineWidth: 1)
+        )
+    }
+}

@@ -12,14 +12,8 @@ struct DailyCostChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
 
-    /// Hover/selection target. macOS Charts binds the X-value on
-    /// pointer move; we look it up in `dailyTotals` to render the
-    /// callout. Nil → no hover, hide overlay.
     @State private var selectedDate: String?
 
-    /// Last-30-days totals + the top-3 annotation set, derived from
-    /// the precomputed daily aggregate. `aggregates` is hundreds of
-    /// rows max; one pass per body re-eval is sub-ms.
     private struct Derived {
         let dailyTotals: [DailyTotal]
         let annotateDates: Set<String>
@@ -46,61 +40,49 @@ struct DailyCostChartCard: View {
         )
     }
 
-    private var dailyTotals: [DailyTotal] { derived.dailyTotals }
-
     var body: some View {
         let d = derived
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("30-day cost")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                if d.totalCost > 0 {
-                    Text("total: \(formatCost(d.totalCost))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
+        PacerCard("Last 30 days", trailing: {
+            if d.totalCost > 0 {
+                Text("total \(pacerCost(d.totalCost))")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
-
+        }) {
             if d.dailyTotals.isEmpty {
                 Text("No daily aggregates yet.")
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .font(.system(.caption, design: .monospaced))
                     .frame(height: 200)
             } else {
-                chart(annotateDates: d.annotateDates)
+                chart(annotateDates: d.annotateDates, totals: d.dailyTotals)
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func chart(annotateDates: Set<String>) -> some View {
+    private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
         Chart {
-            ForEach(dailyTotals) { d in
+            ForEach(totals) { d in
                 BarMark(
                     x: .value("Date", d.date),
                     y: .value("Cost", d.cost)
                 )
                 .foregroundStyle(barColor(for: d.cost))
+                .cornerRadius(2)
                 .annotation(position: .top, alignment: .center, spacing: 2) {
                     if annotateDates.contains(d.date) {
-                        Text(formatCost(d.cost))
-                            .font(.system(size: 9, design: .monospaced))
+                        Text(pacerCost(d.cost))
+                            .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            // Highlight the hovered bar with a subtle outline rule so
-            // the callout has something to point at.
-            if let selectedDate, dailyTotals.contains(where: { $0.date == selectedDate }) {
+            if let selectedDate, totals.contains(where: { $0.date == selectedDate }) {
                 RuleMark(x: .value("Selected", selectedDate))
                     .foregroundStyle(.secondary.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
                     .annotation(position: .top, alignment: .center, spacing: 4) {
-                        if let row = dailyTotals.first(where: { $0.date == selectedDate }) {
+                        if let row = totals.first(where: { $0.date == selectedDate }) {
                             calloutView(row)
                         }
                     }
@@ -109,22 +91,23 @@ struct DailyCostChartCard: View {
         .frame(height: 200)
         .chartYAxis {
             AxisMarks(position: .leading) { value in
-                AxisGridLine()
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 AxisValueLabel {
                     if let dollars = value.as(Double.self) {
-                        Text(formatCost(dollars))
-                            .font(.system(size: 9, design: .monospaced))
+                        Text(pacerCost(dollars))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
         }
         .chartXAxis {
-            // Showing every 5th label keeps the axis readable at 30 days.
-            AxisMarks(values: stridedDates(every: 5)) { value in
+            AxisMarks(values: stridedDates(every: 5, totals: totals)) { value in
                 AxisValueLabel {
                     if let date = value.as(String.self) {
                         Text(shortDate(date))
-                            .font(.system(size: 9, design: .monospaced))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -136,45 +119,37 @@ struct DailyCostChartCard: View {
     private func calloutView(_ row: DailyTotal) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(row.date)
-                .font(.system(size: 9, design: .monospaced))
+                .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
-            Text(formatCost(row.cost))
-                .font(.system(.caption, design: .rounded).weight(.semibold))
+            Text(pacerCost(row.cost))
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(PacerDesign.cardStroke, lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
     }
 
-    /// Pick every Nth date from the rendered set so the x-axis isn't
-    /// crowded. We read indices off `dailyTotals`, not a date math
-    /// expression, so a partial-data window (e.g. only 7 days) still
-    /// renders sensible labels.
-    private func stridedDates(every n: Int) -> [String] {
-        guard !dailyTotals.isEmpty else { return [] }
-        return stride(from: 0, to: dailyTotals.count, by: n)
-            .map { dailyTotals[$0].date }
+    private func stridedDates(every n: Int, totals: [DailyTotal]) -> [String] {
+        guard !totals.isEmpty else { return [] }
+        return stride(from: 0, to: totals.count, by: n)
+            .map { totals[$0].date }
     }
 
     private func barColor(for cost: Double) -> Color {
-        // Keep the visual story simple: any data is the same accent.
-        // Color-by-magnitude can come later once notification thresholds
-        // (M7) are wired and we want the chart to reinforce them.
         cost > 0 ? .accentColor : .accentColor.opacity(0.3)
     }
 
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 100 { return String(format: "$%.0f", usd) }
-        if usd >= 10  { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    /// `2026-04-30` → `04-30`. Keeps year out of the axis labels at
-    /// this density; the user knows which month-year they're looking
-    /// at from context.
+    /// `2026-04-30` → `04-30`. Year out of axis labels at this density
+    /// since the user knows their context.
     private func shortDate(_ ymd: String) -> String {
         guard ymd.count == 10 else { return ymd }
         return String(ymd.suffix(5))

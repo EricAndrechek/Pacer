@@ -13,12 +13,9 @@ import PacerCore
 ///
 /// Falls back to a neutral icon when no rate-limit samples exist yet.
 struct MenuBarLabel: View {
-    /// Cap the fetch — the OAuth poller writes 2 rows per 5-minute
-    /// cycle, so a 7-day history can be ~4k rows. We only ever look at
-    /// `samples.first { $0.window == "five_hour" }`, which the most
-    /// recent two samples will always satisfy. Without the cap, every
-    /// SwiftData save materialized the full history just to fire the
-    /// menu-bar label re-render.
+    /// Cap the fetch — we only ever look at the most-recent sample per
+    /// window. Without the cap, every SwiftData save materialized the
+    /// full ~4k-row history just to fire the menu-bar label re-render.
     @Query(MenuBarLabel.recentDescriptor)
     private var samples: [RateLimitSample]
 
@@ -90,13 +87,11 @@ struct MenuBarLabel: View {
 }
 
 /// What renders inside the popover when the menu bar item is clicked.
-/// Compact view of both rate-limit windows + today's totals + an
-/// "Open Pacer" affordance. Deliberately spare — the dashboard is the
-/// detail view; this is the at-a-glance read.
+/// Compact view of both rate-limit windows, today's totals, and quick
+/// actions. Deliberately spare — the dashboard is the detail view; this
+/// is the at-a-glance read.
 struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
-    /// Same fetchLimit rationale as MenuBarLabel — we only need the
-    /// latest sample per window, and 8 rows is a safe upper bound.
     @Query(MenuBarContent.recentDescriptor)
     private var rateLimits: [RateLimitSample]
     @Query private var todayAggregates: [DailyAggregate]
@@ -130,118 +125,149 @@ struct MenuBarContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Image(systemName: "speedometer")
-                Text("Pacer").font(.headline)
-                Spacer()
-                if let latest = rateLimits.first {
-                    Text(ageText(latest.sampledAt))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Divider()
-
-            HStack(spacing: 16) {
-                gaugeColumn(label: "5-hour", sample: fiveHour, duration: 5 * 3600)
-                gaugeColumn(label: "7-day", sample: sevenDay, duration: 7 * 86400)
-            }
-
-            Divider()
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Today").font(.caption.weight(.medium))
-                    Text(formatCost(todayCost))
-                        .font(.system(.body, design: .rounded).weight(.semibold))
-                        .monospacedDigit()
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Tokens").font(.caption.weight(.medium))
-                    Text(formatTokens(todayTokens))
-                        .font(.system(.body, design: .rounded).weight(.semibold))
-                        .monospacedDigit()
-                }
-            }
-
-            Divider()
-
-            HStack {
-                Button("Open Pacer") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    openWindow(id: "main")
-                }
-                Button("Settings…") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    openWindow(id: "main")
-                    // Settings is a tab inside the main window now,
-                    // not a separate Settings scene. Posting the
-                    // notification flips the TabView selection.
-                    NotificationCenter.default.post(
-                        name: .pacerOpenSettings, object: nil)
-                }
-                Spacer()
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .keyboardShortcut("q")
-            }
-            .buttonStyle(.borderless)
-            .font(.caption)
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider().opacity(0.4)
+            paceRow
+                .padding(.vertical, 14)
+            Divider().opacity(0.4)
+            todayRow
+                .padding(.vertical, 12)
+            Divider().opacity(0.4)
+            footer
+                .padding(.top, 10)
         }
-        .padding(14)
-        .frame(width: 280)
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .frame(width: 300)
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "speedometer")
+                .font(.system(size: 16))
+                .foregroundStyle(.tint)
+            Text("Pacer")
+                .font(.system(size: 14, weight: .semibold))
+            Spacer()
+            if let latest = rateLimits.first {
+                Text(pacerRelative(latest.sampledAt, style: .short))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.bottom, 12)
+    }
+
+    // MARK: - Pace row
+
+    private var paceRow: some View {
+        HStack(spacing: 12) {
+            paceColumn(label: "5-hour", sample: fiveHour, duration: 5 * 3600)
+            Divider().frame(height: 70)
+            paceColumn(label: "7-day", sample: sevenDay, duration: 7 * 86400)
+        }
     }
 
     @ViewBuilder
-    private func gaugeColumn(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
-        VStack(spacing: 4) {
-            CircularGauge(
-                percentage: sample?.usedPercentage ?? 0,
-                lineWidth: 6,
-                labelFont: .system(size: 14, weight: .semibold, design: .rounded)
-            )
-            .frame(width: 56, height: 56)
-            .opacity(sample == nil ? 0.4 : 1.0)
-            Text(label)
-                .font(.caption.weight(.semibold))
-            Text(resetText(sample?.resetsAt))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private func paceColumn(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Eyebrow(text: label)
+            if let s = sample, let resets = s.resetsAt {
+                let pacePct = PaceMath.paceFraction(
+                    now: Date(), resetsAt: resets, windowDuration: duration
+                ) * 100
+                let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                HStack(alignment: .firstTextBaseline, spacing: 3) {
+                    Text("\(Int(s.usedPercentage.rounded()))%")
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(color(for: band))
+                    Text("/")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.tertiary)
+                    Text("\(Int(pacePct.rounded()))%")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Text("resets \(pacerRelative(resets, style: .short))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("—")
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                Text("collecting…")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func resetText(_ date: Date?) -> String {
-        guard let date else { return "—" }
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return "resets \(f.localizedString(for: date, relativeTo: Date()))"
-    }
-
-    private func ageText(_ date: Date) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: Date())
-    }
-
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 100 { return String(format: "$%.0f", usd) }
-        if usd >= 10  { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    private func formatTokens(_ count: Int64) -> String {
-        let n = Double(count)
-        switch n {
-        case 1_000_000_000...:  return String(format: "%.2fB", n / 1_000_000_000)
-        case 1_000_000...:      return String(format: "%.2fM", n / 1_000_000)
-        case 10_000...:         return String(format: "%.1fK", n / 1_000)
-        case 1_000...:          return String(format: "%.2fK", n / 1_000)
-        default:                return "\(count)"
+    private func color(for band: PaceBand) -> Color {
+        switch band {
+        case .green:  return .green
+        case .white:  return .primary
+        case .yellow: return .yellow
+        case .red:    return .red
         }
+    }
+
+    // MARK: - Today row
+
+    private var todayRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Eyebrow(text: "Today's spend")
+                Text(pacerCost(todayCost))
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Eyebrow(text: "Tokens")
+                Text(pacerTokens(todayTokens))
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    // MARK: - Footer
+
+    private var footer: some View {
+        HStack(spacing: 14) {
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+            } label: {
+                Label("Open Pacer", systemImage: "macwindow")
+                    .font(.system(size: 12))
+            }
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "main")
+                NotificationCenter.default.post(
+                    name: .pacerOpenSettings, object: nil
+                )
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+                    .font(.system(size: 12))
+            }
+            Spacer()
+            Button {
+                NSApplication.shared.terminate(nil)
+            } label: {
+                Text("Quit")
+                    .font(.system(size: 12))
+            }
+            .keyboardShortcut("q")
+        }
+        .buttonStyle(.borderless)
     }
 }

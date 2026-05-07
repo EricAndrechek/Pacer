@@ -11,12 +11,7 @@ struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
     @Environment(\.dismiss) private var dismiss
-    /// Aggregates for the day — small (≤ a handful of models) so we
-    /// keep reading them directly. Used for the donut and the row
-    /// list, where we need the live items for ForEach identity.
     @Query private var aggregates: [DailyAggregate]
-    /// Samples for the day — can be a few thousand on a busy day.
-    /// Read only via `refreshCache()`; body looks at cached fields.
     @Query private var samples: [TokenSample]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
@@ -27,10 +22,6 @@ struct DayDetailView: View {
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == date }
         )
-        // Pull samples that fall on this calendar day for project
-        // and session detail. We compare by the pre-formatted date
-        // string column so the predicate matches what the daemon
-        // wrote — no timezone math here.
         _samples = Query(
             filter: #Predicate<TokenSample> { $0.date == date }
         )
@@ -92,7 +83,7 @@ struct DayDetailView: View {
         let rows = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
-                displayName: shortPath(key),
+                displayName: pacerShortPath(key),
                 cost: a.cost,
                 tokens: a.tokens
             )
@@ -103,19 +94,15 @@ struct DayDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
                 header
                 summaryCard
-                if !aggregates.isEmpty {
-                    modelsCard
-                }
-                if !projectRows.isEmpty {
-                    projectsCard
-                }
+                if !aggregates.isEmpty { modelsCard }
+                if !projectRows.isEmpty { projectsCard }
             }
             .padding(24)
         }
-        .frame(minWidth: 560, idealWidth: 640, minHeight: 480, idealHeight: 600)
+        .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
@@ -124,9 +111,9 @@ struct DayDetailView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(prettyDate)
-                    .font(.title.weight(.semibold))
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
                 Text(date)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -135,8 +122,8 @@ struct DayDetailView: View {
         }
     }
 
-    /// `2026-04-30` → `Thursday, April 30, 2026`. Falls back to the
-    /// raw key on parse failure.
+    /// `2026-04-30` → `Thursday, April 30, 2026`. Falls back to the raw
+    /// key on parse failure.
     private var prettyDate: String {
         let inputFmt = DateFormatter()
         inputFmt.dateFormat = "yyyy-MM-dd"
@@ -150,34 +137,32 @@ struct DayDetailView: View {
 
     private var summaryCard: some View {
         let t = totals
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Summary").font(.headline)
-                Spacer()
-                if aggregates.isEmpty {
-                    Text("no data")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+        return PacerCard("Summary", trailing: {
+            if aggregates.isEmpty {
+                Text("no data")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
-            HStack(alignment: .top, spacing: 32) {
-                metric("cost", formatCost(t.cost))
-                metric("input", formatTokens(t.input))
-                metric("output", formatTokens(t.output))
-                metric("cache read", formatTokens(t.cacheRead))
-                metric("cache write", formatTokens(t.cacheCreation))
-                Spacer()
+        }) {
+            LazyVGrid(
+                columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                    count: 5
+                ),
+                alignment: .leading,
+                spacing: 12
+            ) {
+                MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
+                MetricTile(value: pacerTokens(t.input), label: "input")
+                MetricTile(value: pacerTokens(t.output), label: "output")
+                MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
+                MetricTile(value: pacerTokens(t.cacheCreation), label: "cache write")
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var modelsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Models").font(.headline)
+        PacerCard("Models") {
             HStack(alignment: .top, spacing: 24) {
                 Chart(aggregates, id: \.dateModelKey) { agg in
                     SectorMark(
@@ -185,7 +170,7 @@ struct DayDetailView: View {
                         innerRadius: .ratio(0.6),
                         angularInset: 1.5
                     )
-                    .foregroundStyle(by: .value("Model", shortModel(agg.model)))
+                    .foregroundStyle(by: .value("Model", pacerShortModel(agg.model)))
                     .cornerRadius(2)
                 }
                 .frame(width: 160, height: 160)
@@ -194,17 +179,19 @@ struct DayDetailView: View {
                     let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
                     ForEach(aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }, id: \.dateModelKey) { agg in
                         HStack(alignment: .firstTextBaseline) {
-                            Text(shortModel(agg.model))
-                                .font(.system(.body, design: .monospaced))
+                            Text(pacerShortModel(agg.model))
+                                .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Text(formatCost(agg.totalCostUSD))
-                                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                            Text(pacerCost(agg.totalCostUSD))
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
                             if total > 0 {
                                 Text("\(Int(agg.totalCostUSD / total * 100))%")
-                                    .font(.system(.caption2, design: .monospaced))
+                                    .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
                                     .frame(width: 36, alignment: .trailing)
                             }
                         }
@@ -212,82 +199,37 @@ struct DayDetailView: View {
                 }
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var projectsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Projects").font(.headline)
-            ForEach(projectRows) { row in
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.displayName)
-                            .font(.system(.body, design: .monospaced))
-                            .lineLimit(1)
-                        Text(row.path)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
+        PacerCard("Projects") {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(projectRows) { row in
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.displayName)
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
+                            Text(row.path)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer(minLength: 8)
+                        Text(pacerTokens(row.tokens))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 90, alignment: .trailing)
+                        Text(pacerCost(row.cost))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .frame(width: 70, alignment: .trailing)
                     }
-                    Spacer(minLength: 8)
-                    Text(formatTokens(row.tokens))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 90, alignment: .trailing)
-                    Text(formatCost(row.cost))
-                        .font(.system(.caption, design: .monospaced).weight(.semibold))
-                        .frame(width: 70, alignment: .trailing)
+                    .padding(.vertical, 2)
                 }
             }
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    @ViewBuilder
-    private func metric(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(value)
-                .font(.system(size: 22, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func shortPath(_ path: String) -> String {
-        if path == "(unknown)" { return path }
-        let last = (path as NSString).lastPathComponent
-        return last.isEmpty ? path : last
-    }
-
-    private func shortModel(_ name: String) -> String {
-        if let lastSlash = name.lastIndex(of: "/") {
-            return String(name[name.index(after: lastSlash)...])
-        }
-        return name
-    }
-
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 1_000 { return String(format: "$%.0f", usd) }
-        if usd >= 100   { return String(format: "$%.0f", usd) }
-        if usd >= 10    { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    private func formatTokens(_ count: Int64) -> String {
-        let n = Double(count)
-        switch n {
-        case 1_000_000_000...: return String(format: "%.2fB", n / 1_000_000_000)
-        case 1_000_000...:     return String(format: "%.1fM", n / 1_000_000)
-        case 1_000...:         return String(format: "%.1fK", n / 1_000)
-        default:               return "\(count)"
         }
     }
 }

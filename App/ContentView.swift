@@ -1,58 +1,305 @@
 import SwiftUI
+import SwiftData
+import PacerCore
 
-/// Top-level shell. Five tabs: Dashboard / History / Projects / Models /
-/// Settings. ⌘1..5 switches between them; ⌘, jumps to Settings.
+/// Top-level shell. Sidebar-driven NavigationSplitView with five
+/// destinations: Dashboard / History / Projects / Models / Settings.
+/// ⌘1..5 jumps between them; ⌘, jumps to Settings (the standard macOS
+/// shortcut, which `PacerApp` translates into a `.pacerOpenSettings`
+/// notification we observe here).
 ///
-/// Settings lives in the main window (this tab) rather than as the
-/// macOS-standard separate Settings scene — the user wanted everything
-/// in one window. The standard `Cmd+,` shortcut still works because
-/// `PacerApp` posts a notification we observe here to flip the tab.
+/// Why a sidebar instead of the macOS-native TabView the previous
+/// version used: pro Mac apps the user reaches for daily — Linear,
+/// Things, Reeder, MoneyMoney, Apple's own System Settings — all use a
+/// sidebar layout. It scales better when we want to add destinations,
+/// gives us room for a freshness/status indicator at the top of the
+/// chrome, and avoids the "settings panel" feel that top tabs bring.
 struct ContentView: View {
-    /// Tab identifier kept as enum so `Cmd+1..5` keyboard shortcuts
-    /// can target it directly via `selection`.
-    enum Tab: Hashable {
+    /// One concrete destination. The `keyboardShortcut` modifier needs
+    /// its own enum value per row, so we keep these as cases (not
+    /// configurable strings).
+    enum Destination: Hashable, Identifiable {
         case dashboard, history, projects, models, settings
-    }
-    @State private var selection: Tab = .dashboard
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .dashboard: return "Dashboard"
+            case .history:   return "History"
+            case .projects:  return "Projects"
+            case .models:    return "Models"
+            case .settings:  return "Settings"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .dashboard: return "gauge.with.dots.needle.bottom.50percent"
+            case .history:   return "calendar"
+            case .projects:  return "folder.fill"
+            case .models:    return "cpu.fill"
+            case .settings:  return "gearshape.fill"
+            }
+        }
+
+        }
+
+    @State private var selection: Destination = .dashboard
 
     var body: some View {
-        TabView(selection: $selection) {
-            DashboardView()
-                .tabItem { Label("Dashboard", systemImage: "chart.bar.xaxis") }
-                .tag(Tab.dashboard)
-                .keyboardShortcut("1", modifiers: .command)
-
-            HistoryView()
-                .tabItem { Label("History", systemImage: "calendar") }
-                .tag(Tab.history)
-                .keyboardShortcut("2", modifiers: .command)
-
-            ProjectsView()
-                .tabItem { Label("Projects", systemImage: "folder") }
-                .tag(Tab.projects)
-                .keyboardShortcut("3", modifiers: .command)
-
-            ModelsView()
-                .tabItem { Label("Models", systemImage: "cpu") }
-                .tag(Tab.models)
-                .keyboardShortcut("4", modifiers: .command)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(Tab.settings)
-                .keyboardShortcut("5", modifiers: .command)
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            detail
         }
-        .frame(minWidth: 720, minHeight: 600)
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 940, minHeight: 660)
+        // ⌘1..⌘5 are wired through PacerApp's CommandGroup so they live
+        // in the menu-bar responder chain — more reliable than hidden
+        // Buttons inside .background, which were missing keystrokes.
+        // The notification carries the destination as its `object`.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerSelectDestination)) { note in
+            if let dest = note.object as? Destination {
+                selection = dest
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selection = .settings
         }
     }
+
+    // MARK: - Sidebar
+
+    /// Left pane. Custom-rendered list (rather than the default
+    /// `List`/`Section` pair) so we can place the app brand at top and
+    /// pin Settings to the bottom — both common macOS sidebar idioms
+    /// that `List` makes awkward.
+    @ViewBuilder
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sidebarBrand
+                .padding(.horizontal, 12)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    SidebarSection(title: "Overview") {
+                        SidebarItem(
+                            destination: .dashboard,
+                            selection: $selection
+                        )
+                    }
+
+                    SidebarSection(title: "Activity") {
+                        SidebarItem(destination: .history, selection: $selection)
+                        SidebarItem(destination: .projects, selection: $selection)
+                        SidebarItem(destination: .models, selection: $selection)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+
+            Spacer(minLength: 0)
+
+            Divider().opacity(0.4)
+            VStack(alignment: .leading, spacing: 0) {
+                SidebarItem(
+                    destination: .settings,
+                    selection: $selection
+                )
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+        }
+        .frame(minWidth: 200, idealWidth: 220, maxWidth: 260)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        .toolbar(removing: .sidebarToggle)
+    }
+
+    /// Top-of-sidebar brand block: app glyph, name, and a freshness
+    /// indicator that tells the user data is currently flowing without
+    /// having to click into the dashboard.
+    private var sidebarBrand: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speedometer")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Pacer")
+                    .font(.system(size: 15, weight: .semibold))
+                SidebarFreshness()
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: - Detail
+
+    @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .dashboard: DashboardView()
+        case .history:   HistoryView()
+        case .projects:  ProjectsView()
+        case .models:    ModelsView()
+        case .settings:  SettingsView()
+        }
+    }
 }
+
+// MARK: - Sidebar building blocks
+
+private struct SidebarSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 10)
+                .padding(.bottom, 2)
+            content()
+        }
+    }
+}
+
+private struct SidebarItem: View {
+    let destination: ContentView.Destination
+    @Binding var selection: ContentView.Destination
+    @State private var hovering: Bool = false
+
+    private var isSelected: Bool { selection == destination }
+
+    var body: some View {
+        Button {
+            selection = destination
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: destination.systemImage)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18, alignment: .center)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Text(destination.title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(background)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+
+    private var background: Color {
+        if isSelected {
+            return Color.accentColor
+        }
+        if hovering {
+            return Color.primary.opacity(0.06)
+        }
+        return Color.clear
+    }
+}
+
+// MARK: - Sidebar freshness sub-line
+
+/// Mini "● live" / "● 3m ago" line under the app name in the sidebar.
+/// Reads the same most-recent activity sources the dashboard header
+/// uses, capped to 1-row fetches so it never materializes the full
+/// SwiftData store on save.
+private struct SidebarFreshness: View {
+    @Query(SidebarFreshness.tokenProbe) private var tokens: [TokenSample]
+    @Query(SidebarFreshness.rateLimitProbe) private var rateLimits: [RateLimitSample]
+    @Query private var scanMeta: [ClaudeCodeMeta]
+
+    init() {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        _scanMeta = Query(filter: #Predicate<ClaudeCodeMeta> { $0.key == key })
+    }
+
+    private static let tokenProbe: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private static let rateLimitProbe: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private var lastActivity: Date? {
+        let candidates: [Date?] = [
+            tokens.first?.sampledAt,
+            rateLimits.first?.sampledAt,
+            parseScanMeta(),
+        ]
+        return candidates.compactMap { $0 }.max()
+    }
+
+    private func parseScanMeta() -> Date? {
+        guard let raw = scanMeta.first?.value else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: raw) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: raw)
+    }
+
+    private var freshness: FreshnessPulse.Freshness {
+        guard let last = lastActivity else { return .none }
+        let age = Date().timeIntervalSince(last)
+        if age < 120 { return .live }
+        if age < 600 { return .recent }
+        return .stale
+    }
+
+    private var label: String {
+        switch freshness {
+        case .live:        return "live"
+        case .recent, .stale:
+            if let last = lastActivity { return pacerRelative(last) }
+            return "—"
+        case .none:        return "no data yet"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            FreshnessPulse(state: freshness)
+            Text(label)
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+extension ContentView.Destination: CaseIterable {}
 
 extension Notification.Name {
     /// Fired by the Cmd+, command and the menu-bar Settings button. The
-    /// main `ContentView` observes it and flips its tab selection to
-    /// Settings — single source of truth for "show settings" without a
-    /// separate Settings scene.
+    /// main `ContentView` observes it and flips its sidebar selection
+    /// to Settings — single source of truth for "show settings" without
+    /// a separate Settings scene.
     static let pacerOpenSettings = Notification.Name("PacerOpenSettings")
+
+    /// Fired by the ⌘1..⌘5 menu commands in `PacerApp`. The notification's
+    /// `object` is a `ContentView.Destination`. Posting from the menu-bar
+    /// command group keeps the shortcuts in the responder chain (a hidden
+    /// Button inside .background turned out to miss keystrokes) while
+    /// keeping `selection` private to ContentView.
+    static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
 }

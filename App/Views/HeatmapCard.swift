@@ -110,13 +110,7 @@ struct HeatmapCard: View {
     private static let weekdayLabels = ["M", "T", "W", "T", "F", "S", "S"]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Activity heatmap")
-                    .font(.title2.weight(.semibold))
-                Spacer()
-                legend
-            }
+        PacerCard("Activity heatmap", trailing: { legend }) {
             ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 2) {
                     monthLabelRow
@@ -130,10 +124,6 @@ struct HeatmapCard: View {
                 .padding(.vertical, 4)
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
