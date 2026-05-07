@@ -200,7 +200,9 @@ private struct ProjectsContent: View {
 
     var body: some View {
         Group {
-            if rows.isEmpty {
+            if rows.isEmpty && !searchText.isEmpty {
+                noSearchMatchesState
+            } else if rows.isEmpty {
                 emptyState
             } else {
                 VStack(alignment: .leading, spacing: 16) {
@@ -216,6 +218,25 @@ private struct ProjectsContent: View {
                 since: sel.since
             )
         }
+    }
+
+    private var noSearchMatchesState: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                Text("No projects match \u{201C}\(searchText)\u{201D}")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Try clearing the filter or widening the time range.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var emptyState: some View {
