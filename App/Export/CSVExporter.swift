@@ -122,19 +122,14 @@ enum CSVExporter {
 
     // MARK: - Plumbing
 
-    /// CSV-escape a value: wrap in quotes if it contains a comma,
-    /// newline, or quote; double up internal quotes per RFC 4180.
+    /// CSV-escape a value. Delegates to the tested PacerCore helper
+    /// so the escaping rules stay in one place.
     private static func escape(_ value: String) -> String {
-        if value.contains(",") || value.contains("\"") || value.contains("\n") {
-            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-        }
-        return value
+        CSVField.escape(value)
     }
 
     private static func format(_ usd: Double) -> String {
-        // Six decimals matches ccusage's JSON shape and avoids losing
-        // pennies on per-day rollups before users open the file.
-        String(format: "%.6f", usd)
+        CSVField.formatUSD(usd)
     }
 
     @MainActor
