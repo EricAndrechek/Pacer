@@ -8,5 +8,15 @@
 	<array>
 		<string>group.com.ericandrechek.pacer</string>
 	</array>
+	<!--
+	  team-identifier is required for macOS Sequoia 15+ to recognize
+	  PacerDaemon as same-team as the parent Pacer.app and waive the
+	  "Pacer would like to access data from other apps" prompt that
+	  fires every launch when the daemon opens the shared App Group
+	  container. Without this key TCC treats the daemon as a separate
+	  third-party app reaching into com.ericandrechek.pacer's data.
+	-->
+	<key>com.apple.developer.team-identifier</key>
+	<string>YZXWMJ5VBY</string>
 </dict>
 </plist>

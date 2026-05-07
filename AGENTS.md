@@ -295,6 +295,26 @@ all of them. Mentioned here so future agents don't repeat them:
    see a launchctl-managed daemon at 0% CPU with no log output, run
    `lsof "$HOME/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite"`
    — any SX-state daemon listed there is the culprit.
+5. **PacerDaemon must be signed with a bundle-style identifier and
+   carry the team-identifier entitlement, or macOS Sequoia 15+ prompts
+   "Pacer would like to access data from other apps" on every launch.**
+   Tool targets get codesign `Identifier=PacerDaemon` (the binary name)
+   by default and don't pick up `com.apple.developer.team-identifier`
+   automatically. With those missing, TCC sees the daemon as a separate
+   third-party app reaching into `com.ericandrechek.pacer`'s App Group
+   container and prompts `kTCCServiceSystemPolicyAppData` every time
+   the daemon opens `~/Library/Group Containers/group.com.ericandrechek.pacer/`.
+   Two settings make TCC waive the prompt:
+     - `OTHER_CODE_SIGN_FLAGS = "--identifier=com.ericandrechek.pacer.daemon"`
+       in the daemon target (so codesign records a bundle-style ID).
+     - `com.apple.developer.team-identifier = YZXWMJ5VBY` in
+       `Daemon/PacerDaemon.entitlements`.
+   Diagnose with `codesign -dvv` (look for `Identifier=`) and
+   `codesign -d --entitlements -` (look for the team-identifier key).
+   Confirm via `log show --predicate 'process == "tccd"' --info --last 5m | grep AUTHREQ_PROMPTING`
+   — a clean run produces no `kTCCServiceSystemPolicyAppData` prompt
+   for the daemon. Don't drop these settings; the test suite can't
+   catch this because it never installs to /Applications.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE
