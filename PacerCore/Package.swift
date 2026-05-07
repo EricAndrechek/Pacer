@@ -8,7 +8,15 @@ let package = Package(
         .library(name: "PacerCore", targets: ["PacerCore"]),
     ],
     targets: [
-        .target(name: "PacerCore"),
-        .testTarget(name: "PacerCoreTests", dependencies: ["PacerCore"]),
+        .target(
+            name: "PacerCore",
+            resources: [
+                .copy("Resources/litellm-pricing.json"),
+            ]
+        ),
+        .testTarget(
+            name: "PacerCoreTests",
+            dependencies: ["PacerCore"]
+        ),
     ]
 )
