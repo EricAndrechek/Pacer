@@ -12,7 +12,20 @@ import PacerCore
 /// peak hour is highlighted. Skips rendering past hours that have no
 /// usage AND haven't yet been reached on the wall clock.
 struct TodayTimelineCard: View {
+    /// Today's samples. We deliberately don't read the array itself
+    /// from `body` — even reading `.count` for an `.onChange` modifier
+    /// forces SwiftData to re-evaluate the fetch on every body
+    /// refresh, and the body refreshes on every SwiftData save in
+    /// the same process. Cache invalidation is driven by a separate
+    /// scan-meta query below.
     @Query private var samples: [TokenSample]
+    /// Lightweight signal: the `last_incremental_scan_at` meta row
+    /// is rewritten on every successful scan cycle. Subscribing to
+    /// just this one row gives us a cheap "data probably changed"
+    /// trigger for the cache without materializing the whole
+    /// TokenSample table.
+    @Query(TodayTimelineCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached = Cached()
 
     init() {
         let today = TokenSample.formatDate(Date())
@@ -22,6 +35,13 @@ struct TodayTimelineCard: View {
         )
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct Hour: Identifiable {
         let hour: Int
         let tokens: Int64
@@ -29,31 +49,48 @@ struct TodayTimelineCard: View {
         var id: Int { hour }
     }
 
-    private var hours: [Hour] {
-        // Bucket by hour-of-day in current locale.
+    /// Bucketed today-by-hour state. Recomputed via `.task(id:)` only
+    /// when the underlying samples count actually changes — without
+    /// this cache, every SwiftData save would re-iterate ~3000 of
+    /// today's samples three times in the body computation (hours,
+    /// peakHour, totalTokens), and saves fire frequently when Claude
+    /// Code is actively writing. With caching, the body is cheap even
+    /// when refreshes happen many times per second.
+    private struct Cached {
+        var hours: [Hour] = (0..<24).map { Hour(hour: $0, tokens: 0, cost: 0) }
+        var peakHour: Int?
+        var totalTokens: Int64 = 0
+        var sampleCount: Int = -1   // sentinel; first refresh always fires
+    }
+
+    private var hours: [Hour] { cached.hours }
+    private var peakHour: Int? { cached.peakHour }
+    private var totalTokens: Int64 { cached.totalTokens }
+
+    private func refreshCache() {
         let cal = Calendar.current
         var byHour: [Int: (tokens: Int64, cost: Double)] = [:]
+        var total: Int64 = 0
         for s in samples {
             let h = cal.component(.hour, from: s.sampledAt)
             var v = byHour[h] ?? (0, 0)
-            v.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
+            let t = s.inputTokens + s.outputTokens + s.cacheReadTokens
+            v.tokens += t
             v.cost += s.sourceCostUSD ?? 0
             byHour[h] = v
+            total += t
         }
-        return (0..<24).map { h in
+        let bucketed = (0..<24).map { h -> Hour in
             let v = byHour[h] ?? (0, 0)
             return Hour(hour: h, tokens: v.tokens, cost: v.cost)
         }
-    }
-
-    private var peakHour: Int? {
-        let h = hours.max { $0.tokens < $1.tokens }
-        guard let h, h.tokens > 0 else { return nil }
-        return h.hour
-    }
-
-    private var totalTokens: Int64 {
-        hours.reduce(0) { $0 + $1.tokens }
+        let peak = bucketed.max { $0.tokens < $1.tokens }
+        cached = Cached(
+            hours: bucketed,
+            peakHour: (peak?.tokens ?? 0) > 0 ? peak?.hour : nil,
+            totalTokens: total,
+            sampleCount: samples.count
+        )
     }
 
     var body: some View {
@@ -78,6 +115,13 @@ struct TodayTimelineCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshCache() }
+        // Cache invalidation via the lastIncrementalScanAt meta row —
+        // the value changes once per scan cycle, which is the granularity
+        // we care about for "did samples change". Reading samples.count
+        // here would force a 3000-row materialization on every body
+        // refresh (and body refreshes on every save).
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var emptyState: some View {

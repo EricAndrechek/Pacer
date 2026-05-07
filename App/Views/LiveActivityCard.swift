@@ -12,6 +12,11 @@ import PacerCore
 struct LiveActivityCard: View {
     @Query private var recentSamples: [TokenSample]
     @Query private var todayAggregates: [DailyAggregate]
+    /// Lightweight signal that the scan loop just ran; drives cache
+    /// invalidation without forcing a fetch of recentSamples on every
+    /// body refresh.
+    @Query(LiveActivityCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cachedStats = LiveStats()
 
     init() {
         let cutoff = Date().addingTimeInterval(-3600)  // 1h
@@ -26,6 +31,13 @@ struct LiveActivityCard: View {
         )
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct LiveStats {
         var tokensLastHour: Int64 = 0
         var costLastHour: Double = 0
@@ -34,7 +46,13 @@ struct LiveActivityCard: View {
         var hasFreshActivity: Bool { lastSampleAt.map { Date().timeIntervalSince($0) < 600 } ?? false }
     }
 
-    private var stats: LiveStats {
+    /// Cached read of `recentSamples`. Recomputed only when the
+    /// sample count changes — without caching, the body re-iterates
+    /// hundreds of last-hour samples on every SwiftData save, and
+    /// scans save many times per second when Claude Code is writing.
+    private var stats: LiveStats { cachedStats }
+
+    private func refreshStats() {
         var s = LiveStats()
         for sample in recentSamples {
             s.tokensLastHour += sample.inputTokens + sample.outputTokens + sample.cacheReadTokens
@@ -44,7 +62,7 @@ struct LiveActivityCard: View {
                 s.lastSampleAt = sample.sampledAt
             }
         }
-        return s
+        cachedStats = s
     }
 
     private var todayCostSoFar: Double {
@@ -87,6 +105,8 @@ struct LiveActivityCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshStats() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshStats() }
     }
 
     private var emptyState: some View {
