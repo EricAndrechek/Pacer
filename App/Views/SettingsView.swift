@@ -75,6 +75,11 @@ private struct NotificationSettingsTab: View {
     @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
     private var dailyCostThreshold: Double = 50
 
+    @State private var testStatus: TestStatus = .idle
+    enum TestStatus {
+        case idle, sending, sent, denied, failed(String)
+    }
+
     var body: some View {
         Form {
             Section("Rate-limit warnings") {
@@ -103,14 +108,68 @@ private struct NotificationSettingsTab: View {
                 }
                 .disabled(!dailyCostEnabled)
             }
+            Section("Verify") {
+                HStack {
+                    Button("Send test notification") {
+                        Task { await sendTestNotification() }
+                    }
+                    .disabled(testStatus == .sending)
+                    if let label = testLabel {
+                        Text(label)
+                            .font(.caption)
+                            .foregroundStyle(testColor)
+                    }
+                }
+            }
             Section {
-                Text("Notifications fire at most once per cycle. Approve the system prompt the first time a notification posts.")
+                Text("Notifications fire at most once per cycle. The first banner triggers the system permission prompt; if you click Don't Allow you can re-enable in System Settings → Notifications → Pacer.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private var testLabel: String? {
+        switch testStatus {
+        case .idle:        return nil
+        case .sending:     return "sending…"
+        case .sent:        return "sent ✓"
+        case .denied:      return "system denied; check System Settings → Notifications → Pacer"
+        case .failed(let m): return "failed: \(m)"
+        }
+    }
+
+    private var testColor: Color {
+        switch testStatus {
+        case .sent:    return .green
+        case .denied, .failed: return .orange
+        default:       return .secondary
+        }
+    }
+
+    private func sendTestNotification() async {
+        testStatus = .sending
+        let outcome = await NotificationCoordinator.shared.sendTestNotification()
+        await MainActor.run {
+            switch outcome {
+            case .delivered:        testStatus = .sent
+            case .denied:           testStatus = .denied
+            case .failed(let msg):  testStatus = .failed(msg)
+            }
+        }
+    }
+}
+
+extension NotificationSettingsTab.TestStatus: Equatable {
+    fileprivate static func == (lhs: NotificationSettingsTab.TestStatus, rhs: NotificationSettingsTab.TestStatus) -> Bool {
+        switch (lhs, rhs) {
+        case (.idle, .idle), (.sending, .sending), (.sent, .sent), (.denied, .denied):
+            return true
+        case (.failed, .failed): return true
+        default: return false
+        }
     }
 }
 

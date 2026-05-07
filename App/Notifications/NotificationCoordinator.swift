@@ -34,6 +34,48 @@ public final class NotificationCoordinator {
         _ = try? await center.requestAuthorization(options: [.alert, .sound])
     }
 
+    public enum TestOutcome: Sendable {
+        case delivered
+        case denied
+        case failed(String)
+    }
+
+    /// User-initiated dry-run from Settings. Posts a one-shot banner
+    /// labeled "test" so the user can verify the auth flow + delivery
+    /// without waiting for a real threshold crossing. Returns a typed
+    /// outcome so the UI can render the right state.
+    public func sendTestNotification() async -> TestOutcome {
+        // Force-request auth even if we asked before — covers the
+        // "user denied last time, then changed mind in System
+        // Settings, now wants to retest" path.
+        let granted: Bool
+        do {
+            granted = try await center.requestAuthorization(options: [.alert, .sound])
+            authorizationRequested = true
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        if !granted {
+            return .denied
+        }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer test notification"
+        content.body = "Notifications are working. Real warnings fire when a window crosses your threshold."
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "pacer.test.\(Int(Date().timeIntervalSince1970))",
+            content: content,
+            trigger: nil
+        )
+        do {
+            try await center.add(request)
+            return .delivered
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+    }
+
     /// Inspect the latest `RateLimitSample` for a window and post a
     /// notification if it crossed the user's threshold this cycle.
     /// `previousPct` is the percentage we observed last time we
