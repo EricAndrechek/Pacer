@@ -136,6 +136,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         backgroundService.start()
         installWindowObservers()
+        // Warm the shared sample-cost cache so views (LiveActivity,
+        // DayDetail, TodayTimeline) can compute per-sample cost
+        // synchronously without each having to async-load its own
+        // PricingTable snapshot.
+        Task { await SampleCostCache.reload() }
         // Reflect whatever state SwiftUI has put us in by the time
         // we get here — typically zero windows on a login launch,
         // one window on an interactive launch.

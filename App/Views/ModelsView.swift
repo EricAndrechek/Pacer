@@ -153,24 +153,41 @@ private struct ModelsContent: View {
                 lastSeen: a.lastSeen
             )
         }
-        let sorted: [ModelRow]
+        let primary: (ModelRow, ModelRow) -> Bool
         switch sort {
         case .name:
-            sorted = unsorted.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         case .tokens:
-            sorted = unsorted.sorted { $0.totalTokens < $1.totalTokens }
+            primary = { $0.totalTokens < $1.totalTokens }
         case .days:
-            sorted = unsorted.sorted { $0.activeDays < $1.activeDays }
+            primary = { $0.activeDays < $1.activeDays }
         case .lastSeen:
-            sorted = unsorted.sorted { $0.lastSeen < $1.lastSeen }
+            primary = { $0.lastSeen < $1.lastSeen }
         case .cost:
-            sorted = unsorted.sorted { $0.cost < $1.cost }
+            primary = { $0.cost < $1.cost }
+        }
+        // Stable tiebreaker on the model identifier so rows with equal
+        // primary values don't reshuffle each refresh.
+        let sorted = unsorted.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.model < rhs.model
         }
         return descending ? sorted.reversed() : sorted
     }
 
-    private var dailyMix: [DailyMix] {
-        aggregates.map {
+    /// Cached `dailyMix` materialization. Re-mapping `aggregates` on
+    /// every body render allocated a new array each chart-hover tick;
+    /// caching keyed on (aggregate count + scanMeta) means the hover
+    /// path only walks an already-built array.
+    @State private var cachedDailyMix: [DailyMix] = []
+    @State private var cachedDailyMixCount: Int = -1
+
+    private var dailyMix: [DailyMix] { cachedDailyMix }
+
+    @MainActor
+    private func refreshDailyMix() {
+        cachedDailyMix = aggregates.map {
             DailyMix(
                 date: $0.date,
                 model: $0.model,
@@ -178,6 +195,7 @@ private struct ModelsContent: View {
                 tokens: $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
             )
         }
+        cachedDailyMixCount = aggregates.count
     }
 
     var body: some View {
@@ -192,6 +210,16 @@ private struct ModelsContent: View {
                 }
             }
         }
+        .onAppear {
+            if cachedDailyMixCount != aggregates.count {
+                refreshDailyMix()
+            }
+            refreshShareCumulative()
+        }
+        .onChange(of: aggregates.count) { _, _ in
+            refreshDailyMix()
+            refreshShareCumulative()
+        }
     }
 
     private var emptyState: some View {
@@ -203,19 +231,43 @@ private struct ModelsContent: View {
     }
 
     @State private var hoveredShareAngle: Double?
+    /// Sorted-by-cumulative-angle table for the share donut. Recomputed
+    /// when `rows` change; consulted on every hover tick. Without this
+    /// the hover path walked the full row array AND summed angles each
+    /// time — N steps per pixel move.
+    @State private var shareCumulative: [(row: ModelRow, max: Double)] = []
+    @State private var shareTotalTokens: Int64 = 0
+
+    @MainActor
+    private func refreshShareCumulative() {
+        var running = 0.0
+        var built: [(row: ModelRow, max: Double)] = []
+        built.reserveCapacity(rows.count)
+        var totalTokens: Int64 = 0
+        for r in rows {
+            running += Double(r.totalTokens)
+            totalTokens += r.totalTokens
+            built.append((r, running))
+        }
+        shareCumulative = built
+        shareTotalTokens = totalTokens
+    }
 
     private var hoveredShareRow: ModelRow? {
-        guard let angle = hoveredShareAngle, !rows.isEmpty else { return nil }
-        var cumulative = 0.0
-        for row in rows {
-            cumulative += Double(row.totalTokens)
-            if angle <= cumulative { return row }
+        guard let angle = hoveredShareAngle, !shareCumulative.isEmpty else { return nil }
+        // Linear scan over a precomputed table; cheap because N is
+        // small (handful of models). Could binary-search but the
+        // wins don't show up at this size.
+        for entry in shareCumulative where angle <= entry.max {
+            return entry.row
         }
-        return rows.last
+        return shareCumulative.last?.row
     }
 
     private var shareCard: some View {
-        let total = rows.reduce(Int64(0)) { $0 + $1.totalTokens }
+        // Read pre-computed total from the cache instead of doing a
+        // fresh `reduce` on every body refresh.
+        let total = shareTotalTokens
         return PacerCard("Token share", trailing: {
             if let r = hoveredShareRow {
                 let pct = total > 0 ? Int(Double(r.totalTokens) / Double(total) * 100) : 0

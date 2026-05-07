@@ -92,13 +92,19 @@ enum CSVExporter {
                 var lastSeen: Date = .distantPast
             }
             var byProject: [String: Acc] = [:]
+            // CSVs are exports of what the app shows the user; using
+            // the same shared sample-cost helper means the totals in
+            // the CSV match the dashboard exactly. (Previously this
+            // exporter used `sourceCostUSD ?? 0` and silently produced
+            // CSVs with $0 costs for any line CC didn't pre-cost.)
+            let mode = PacerPreferences.costMode()
             for s in rows {
                 let key = s.projectPath ?? "(unknown)"
                 var a = byProject[key] ?? Acc()
                 a.input += s.inputTokens
                 a.output += s.outputTokens
                 a.cacheRead += s.cacheReadTokens
-                a.cost += s.sourceCostUSD ?? 0
+                a.cost += s.effectiveCostUSD(mode: mode)
                 if let sid = s.sessionId { a.sessions.insert(sid) }
                 if s.sampledAt > a.lastSeen { a.lastSeen = s.sampledAt }
                 byProject[key] = a

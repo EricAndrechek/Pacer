@@ -349,18 +349,24 @@ struct ProjectDetailView: View {
     }
 
     private var sortedSessions: [SessionInfo] {
-        let sorted: [SessionInfo]
+        let primary: (SessionInfo, SessionInfo) -> Bool
         switch sessionsSort {
         case .id:
-            sorted = sessionRows.sorted { $0.sessionId < $1.sessionId }
+            primary = { $0.sessionId < $1.sessionId }
         case .model:
-            sorted = sessionRows.sorted { $0.topModel < $1.topModel }
+            primary = { $0.topModel < $1.topModel }
         case .tokens:
-            sorted = sessionRows.sorted { $0.totalTokens < $1.totalTokens }
+            primary = { $0.totalTokens < $1.totalTokens }
         case .cost:
-            sorted = sessionRows.sorted { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
+            primary = { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
         case .lastSeen:
-            sorted = sessionRows.sorted { $0.lastSeenAt < $1.lastSeenAt }
+            primary = { $0.lastSeenAt < $1.lastSeenAt }
+        }
+        // Stable tiebreaker: session id (always unique).
+        let sorted = sessionRows.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.sessionId < rhs.sessionId
         }
         return sessionsSortDescending ? sorted.reversed() : sorted
     }
@@ -453,11 +459,16 @@ struct ProjectDetailView: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .leading)
-            Text(pacerShortModel(row.topModel))
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: 220, alignment: .leading)
+            // Session "name" — best-effort: the first real user
+            // prompt from the JSONL file (Claude Code doesn't emit a
+            // dedicated summary field on this user's install). Falls
+            // back to the model name if nothing usable is found, which
+            // is what we previously displayed unconditionally.
+            SessionTitleLabel(
+                sessionId: row.sessionId,
+                fallback: pacerShortModel(row.topModel)
+            )
+            .frame(maxWidth: 280, alignment: .leading)
             Spacer(minLength: 8)
             Text(pacerTokens(row.totalTokens))
                 .font(.system(size: 11))
@@ -509,5 +520,31 @@ struct ProjectDetailView: View {
                 return
             }
         }
+    }
+}
+
+/// Resolves the session "name" from the JSONL on disk and renders it.
+/// Async-loaded at appear; falls back to a caller-provided string
+/// (typically the top model name) until the resolver returns.
+///
+/// Pulled into its own SwiftUI view so the parent's body doesn't have
+/// to manage Task lifecycle for ~20 sessions per project.
+private struct SessionTitleLabel: View {
+    let sessionId: String
+    let fallback: String
+    @State private var title: String?
+
+    var body: some View {
+        Text(title ?? fallback)
+            .font(.system(size: 12, weight: title == nil ? .regular : .medium))
+            .foregroundStyle(title == nil ? .secondary : .primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .help(title ?? fallback)
+            .task(id: sessionId) {
+                let resolved = await SessionTitleResolver.shared.title(for: sessionId)
+                if Task.isCancelled { return }
+                title = resolved
+            }
     }
 }

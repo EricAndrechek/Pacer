@@ -70,6 +70,15 @@ struct ProjectsView: View {
                 since: sel.since
             )
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerOpenProject)) { note in
+            // DayDetailView posts this when the user clicks a project
+            // row inside the day modal. We open the project modal
+            // immediately; the day modal is responsible for dismissing
+            // itself before posting.
+            if let req = note.object as? SelectedProject {
+                selectedProject = req
+            }
+        }
     }
 
     /// Identifies the project the user clicked into. Lives at this
@@ -245,18 +254,30 @@ private struct ProjectsContent: View {
     }
 
     private func apply(sort: ProjectSort, descending: Bool, to rows: [ProjectRow]) -> [ProjectRow] {
-        let sorted: [ProjectRow]
+        // Closures take an `(lhs, rhs)` and return ascending order. We
+        // chain a deterministic tiebreaker (path) into every primary
+        // comparison so rows with equal primary values don't shuffle
+        // when SwiftData refreshes — concretely, before the
+        // tiebreaker, all-$0 day-detail / 0-token projects swapped
+        // positions on every scan tick.
+        let primary: (ProjectRow, ProjectRow) -> Bool
         switch sort {
         case .cost:
-            sorted = rows.sorted { $0.cost < $1.cost }
+            primary = { $0.cost < $1.cost }
         case .tokens:
-            sorted = rows.sorted { $0.totalTokens < $1.totalTokens }
+            primary = { $0.totalTokens < $1.totalTokens }
         case .sessions:
-            sorted = rows.sorted { $0.sessionCount < $1.sessionCount }
+            primary = { $0.sessionCount < $1.sessionCount }
         case .lastActive:
-            sorted = rows.sorted { $0.lastActive < $1.lastActive }
+            primary = { $0.lastActive < $1.lastActive }
         case .name:
-            sorted = rows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        }
+        let sorted = rows.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            // Deterministic tiebreaker: path (always unique per row).
+            return lhs.path < rhs.path
         }
         return descending ? sorted.reversed() : sorted
     }
@@ -289,6 +310,21 @@ private struct ProjectsContent: View {
                     projectListCard
                 }
             }
+        }
+        .onAppear { ensureOverviewIndex() }
+        .onChange(of: aggregates.count) { _, _ in ensureOverviewIndex() }
+        .onChange(of: overviewMetric) { _, _ in ensureOverviewIndex() }
+    }
+
+    /// Refresh the cumulative-angle index iff the input set changed.
+    /// The cache key encodes both (top rows by id) and (metric) so a
+    /// re-render that changed neither doesn't pay the rebuild cost.
+    @MainActor
+    private func ensureOverviewIndex() {
+        let top = Array(rows.prefix(5))
+        let key = "\(overviewMetric.rawValue)|\(top.map(\.id).joined(separator: ","))"
+        if key != overviewIndexKey {
+            refreshOverviewIndex(top: top, metric: overviewMetric)
         }
     }
 
@@ -327,22 +363,42 @@ private struct ProjectsContent: View {
     /// in the card header — mirrors the heatmap's metric picker so the
     /// app feels consistent.
     @State private var hoveredOverviewAngle: Double?
+    /// Pre-computed cumulative-angle index keyed on (rows, metric). The
+    /// hover handler reads it without re-summing — important for chart
+    /// hover tick frequency.
+    @State private var overviewCumulative: [(row: ProjectRow, max: Double)] = []
+    @State private var overviewTotalForMetric: Double = 0
+    @State private var overviewIndexKey: String = ""
+
+    @MainActor
+    private func refreshOverviewIndex(top: [ProjectRow], metric: ProjectMetric) {
+        var running = 0.0
+        var built: [(row: ProjectRow, max: Double)] = []
+        built.reserveCapacity(top.count)
+        for row in top {
+            running += value(for: metric, in: row)
+            built.append((row, running))
+        }
+        overviewCumulative = built
+        overviewTotalForMetric = running
+        // Cache key changes when the input set changes — body checks
+        // this before triggering a refresh.
+        overviewIndexKey = "\(metric.rawValue)|\(top.map(\.id).joined(separator: ","))"
+    }
 
     private func hoveredOverviewProject(top: [ProjectRow]) -> ProjectRow? {
-        guard let angle = hoveredOverviewAngle else { return nil }
-        let totalForMetric = top.reduce(0.0) { $0 + value(for: overviewMetric, in: $1) }
-        guard totalForMetric > 0 else { return nil }
-        var cumulative = 0.0
-        for row in top {
-            cumulative += value(for: overviewMetric, in: row)
-            if angle <= cumulative { return row }
+        guard let angle = hoveredOverviewAngle, !overviewCumulative.isEmpty else { return nil }
+        for entry in overviewCumulative where angle <= entry.max {
+            return entry.row
         }
-        return top.last
+        return overviewCumulative.last?.row
     }
 
     private var overviewCard: some View {
         let top = Array(rows.prefix(5))
-        let totalForMetric = rows.reduce(0.0) { $0 + value(for: overviewMetric, in: $1) }
+        // Total over the same top set as the donut renders. Read from
+        // the cache; refreshed only when (rows, metric) change.
+        let totalForMetric = overviewTotalForMetric
         let hovered = hoveredOverviewProject(top: top)
         return PacerCard("Top projects", trailing: {
             HStack(spacing: 12) {

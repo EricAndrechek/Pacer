@@ -58,6 +58,7 @@ struct DayDetailView: View {
     private var totals: Totals { cached.totals }
     private var projectRows: [ProjectRow] { cached.projectRows }
 
+    @MainActor
     private func refreshCache() {
         var t = Totals()
         for r in aggregates {
@@ -72,14 +73,21 @@ struct DayDetailView: View {
             var cost: Double = 0
             var tokens: Int64 = 0
         }
+        let mode = PacerPreferences.costMode()
         var byProject: [String: Acc] = [:]
         for s in samples {
             let key = s.projectPath ?? "(unknown)"
             var a = byProject[key] ?? Acc()
-            a.cost += s.sourceCostUSD ?? 0
+            // Single source of truth: TokenSample.effectiveCostUSD(mode:)
+            // applies the same calculate/auto/display logic the
+            // recomputers use, so the day modal shows the same number
+            // as Projects/Models/Dashboard for the same data.
+            a.cost += s.effectiveCostUSD(mode: mode)
             a.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
             byProject[key] = a
         }
+        // Stable sort: by cost desc, with displayName as a deterministic
+        // tiebreaker so $0 rows don't shuffle on every scan tick.
         let rows = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
@@ -87,9 +95,26 @@ struct DayDetailView: View {
                 cost: a.cost,
                 tokens: a.tokens
             )
-        }.sorted { $0.cost > $1.cost }
+        }.sorted { lhs, rhs in
+            if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
 
         cached = Cached(totals: t, projectRows: rows)
+
+        // Refresh the donut hover index. Pre-sorts by cost desc and
+        // builds the cumulative-angle table in one pass so hover
+        // ticks are O(rows) over an already-built array.
+        let sorted = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
+        var running = 0.0
+        var built: [(agg: DailyAggregate, max: Double)] = []
+        built.reserveCapacity(sorted.count)
+        for agg in sorted {
+            running += agg.totalCostUSD
+            built.append((agg, running))
+        }
+        sortedAggsByCost = sorted
+        aggCumulative = built
     }
 
     var body: some View {
@@ -185,43 +210,81 @@ struct DayDetailView: View {
     }
 
     private var sortedAggregates: [DailyAggregate] {
-        let sorted: [DailyAggregate]
+        // All sorts pin a deterministic tiebreaker (the model name) so
+        // a column of equal values doesn't reshuffle each scan tick.
+        let primary: (DailyAggregate, DailyAggregate) -> Bool
         switch modelsSort {
         case .name:
-            sorted = aggregates.sorted { $0.model < $1.model }
+            primary = { $0.model < $1.model }
         case .tokens:
-            let totalTokens: (DailyAggregate) -> Int64 = { $0.inputTokens + $0.outputTokens + $0.cacheReadTokens }
-            sorted = aggregates.sorted { totalTokens($0) < totalTokens($1) }
+            let totalTokens: (DailyAggregate) -> Int64 = {
+                $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
+            }
+            primary = { totalTokens($0) < totalTokens($1) }
         case .cost:
-            sorted = aggregates.sorted { $0.totalCostUSD < $1.totalCostUSD }
+            primary = { $0.totalCostUSD < $1.totalCostUSD }
+        }
+        let sorted = aggregates.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.model < rhs.model
         }
         return modelsSortDescending ? sorted.reversed() : sorted
     }
 
+    /// Tap handler on a day-detail project row: dismiss this modal,
+    /// flip the sidebar to Projects, and post the open-project
+    /// notification ProjectsView listens for. Skip the synthetic
+    /// "(unknown)" path — there's no project to open.
+    private func openProject(_ row: ProjectRow) {
+        guard row.path != ProjectDailyAggregate.unknownProjectPath else { return }
+        let request = ProjectsView.SelectedProject(
+            path: row.path,
+            displayName: row.displayName,
+            since: nil  // day detail had no time-range scope, so go all-time
+        )
+        // Close this modal first so the project modal opens cleanly
+        // on top of the Projects view (rather than stacking modals).
+        dismissModal()
+        NotificationCenter.default.post(
+            name: .pacerOpenProject,
+            object: request
+        )
+    }
+
     private var sortedProjectRows: [ProjectRow] {
-        let sorted: [ProjectRow]
+        let primary: (ProjectRow, ProjectRow) -> Bool
         switch projectsSort {
         case .name:
-            sorted = projectRows.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         case .tokens:
-            sorted = projectRows.sorted { $0.tokens < $1.tokens }
+            primary = { $0.tokens < $1.tokens }
         case .cost:
-            sorted = projectRows.sorted { $0.cost < $1.cost }
+            primary = { $0.cost < $1.cost }
+        }
+        let sorted = projectRows.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.path < rhs.path
         }
         return projectsSortDescending ? sorted.reversed() : sorted
     }
 
     @State private var hoveredAggAngle: Double?
 
+    /// Pre-sorted aggregates + cumulative-angle table for the donut.
+    /// Recomputed in `refreshCache()`; hover lookups walk the table
+    /// without re-sorting. Without this every hover tick was an
+    /// N·log(N) sort + a fresh `cumulative += ...` loop.
+    @State private var sortedAggsByCost: [DailyAggregate] = []
+    @State private var aggCumulative: [(agg: DailyAggregate, max: Double)] = []
+
     private var hoveredAgg: DailyAggregate? {
-        guard let angle = hoveredAggAngle else { return nil }
-        let sorted = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
-        var cumulative = 0.0
-        for agg in sorted {
-            cumulative += agg.totalCostUSD
-            if angle <= cumulative { return agg }
+        guard let angle = hoveredAggAngle, !aggCumulative.isEmpty else { return nil }
+        for entry in aggCumulative where angle <= entry.max {
+            return entry.agg
         }
-        return sorted.last
+        return aggCumulative.last?.agg
     }
 
     private var modelsCard: some View {
@@ -243,7 +306,10 @@ struct DayDetailView: View {
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
-                Chart(aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }, id: \.dateModelKey) { agg in
+                // Use pre-sorted aggregates from the cache so we don't
+                // re-sort the array on every body render (which fired
+                // on every hover tick before).
+                Chart(sortedAggsByCost, id: \.dateModelKey) { agg in
                     SectorMark(
                         angle: .value("Cost", agg.totalCostUSD),
                         innerRadius: .ratio(0.6),
@@ -347,29 +413,34 @@ struct DayDetailView: View {
                 }
                 Divider().padding(.vertical, 2)
                 ForEach(sortedProjectRows) { row in
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(row.displayName)
-                                .font(.system(size: 13, weight: .medium))
-                                .lineLimit(1)
-                            Text(row.path)
-                                .font(.system(size: 10, design: .monospaced))
+                    HoverRow(action: { openProject(row) }) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.displayName)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                Text(row.path)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer(minLength: 8)
+                            Text(pacerTokens(row.tokens))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .frame(width: 90, alignment: .trailing)
+                            Text(pacerCost(row.cost))
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .frame(width: 70, alignment: .trailing)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                                .frame(width: 16, alignment: .trailing)
                         }
-                        Spacer(minLength: 8)
-                        Text(pacerTokens(row.tokens))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 90, alignment: .trailing)
-                        Text(pacerCost(row.cost))
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .frame(width: 70, alignment: .trailing)
                     }
-                    .padding(.vertical, 2)
                 }
             }
         }

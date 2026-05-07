@@ -66,6 +66,14 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selection = .settings
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerOpenProject)) { _ in
+            // ProjectsView observes the same notification to actually
+            // open the modal — this side just brings it into view if
+            // we're not already there.
+            if selection != .projects {
+                selection = .projects
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -302,4 +310,11 @@ extension Notification.Name {
     /// Button inside .background turned out to miss keystrokes) while
     /// keeping `selection` private to ContentView.
     static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
+
+    /// Fired when one view (e.g. DayDetailView) wants the Projects tab
+    /// to open the project-detail modal for a specific project. The
+    /// notification's `object` carries the path; ContentView flips the
+    /// sidebar to Projects and ProjectsView observes the same
+    /// notification to trigger its modal.
+    static let pacerOpenProject = Notification.Name("PacerOpenProject")
 }

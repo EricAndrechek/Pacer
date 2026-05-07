@@ -46,16 +46,22 @@ struct TodayTimelineCard: View {
         var sampleCount: Int = -1
     }
 
+    @MainActor
     private func refreshCache() {
         let cal = Calendar.current
         var byHour: [Int: (tokens: Int64, cost: Double)] = [:]
         var total: Int64 = 0
+        let mode = PacerPreferences.costMode()
         for s in samples {
             let h = cal.component(.hour, from: s.sampledAt)
             var v = byHour[h] ?? (0, 0)
             let t = s.inputTokens + s.outputTokens + s.cacheReadTokens
             v.tokens += t
-            v.cost += s.sourceCostUSD ?? 0
+            // Use the shared sample-cost helper. Bug parity with
+            // DayDetail / LiveActivity: prior `sourceCostUSD ?? 0`
+            // hand-roll silently dropped the calculate/auto-mode
+            // fallback to tokens × pricing.
+            v.cost += s.effectiveCostUSD(mode: mode)
             byHour[h] = v
             total += t
         }

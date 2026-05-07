@@ -57,24 +57,44 @@ struct PerModelTodayCard: View {
     /// a row by accumulating slice widths.
     @State private var hoveredAngle: Double?
 
-    private var hoveredRow: ModelRow? {
-        guard let angle = hoveredAngle, !rows.isEmpty else { return nil }
-        let total = rows.reduce(0.0) { $0 + Double($1.inputTokens + $1.outputTokens + $1.cacheReadTokens) }
-        guard total > 0 else { return nil }
-        var cumulative: Double = 0
-        for row in rows {
-            cumulative += Double(row.inputTokens + row.outputTokens + row.cacheReadTokens)
-            if angle <= cumulative { return row }
+    /// Pre-computed cumulative-angle table for hover lookups + total
+    /// for the percent calculation. Refreshed when `cached` changes
+    /// (which only happens on a scan tick), so per-pixel hover work
+    /// is O(rows) over an already-built array — no `reduce` per move.
+    @State private var hoverCumulative: [(row: ModelRow, max: Double)] = []
+    @State private var hoverTotalTokens: Int64 = 0
+
+    @MainActor
+    private func refreshHoverIndex() {
+        var running = 0.0
+        var built: [(row: ModelRow, max: Double)] = []
+        built.reserveCapacity(rows.count)
+        var totalTokens: Int64 = 0
+        for r in rows {
+            let t = Int64(r.inputTokens + r.outputTokens + r.cacheReadTokens)
+            running += Double(t)
+            totalTokens += t
+            built.append((r, running))
         }
-        return rows.last
+        hoverCumulative = built
+        hoverTotalTokens = totalTokens
+    }
+
+    private var hoveredRow: ModelRow? {
+        guard let angle = hoveredAngle, !hoverCumulative.isEmpty else { return nil }
+        for entry in hoverCumulative where angle <= entry.max {
+            return entry.row
+        }
+        return hoverCumulative.last?.row
     }
 
     var body: some View {
         PacerCard("Today by model", trailing: {
-            // Hover-reveal of the selected wedge — overlays the
-            // hovered model + its share of today's tokens.
+            // Hover-reveal of the selected wedge. Reads pre-computed
+            // total from `hoverTotalTokens` instead of doing a fresh
+            // `reduce` on every hover tick.
             if let r = hoveredRow {
-                let total = rows.reduce(Int64(0)) { $0 + ($1.inputTokens + $1.outputTokens + $1.cacheReadTokens) }
+                let total = hoverTotalTokens
                 let myTotal = r.inputTokens + r.outputTokens + r.cacheReadTokens
                 let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
                 HStack(spacing: 8) {
@@ -99,8 +119,14 @@ struct PerModelTodayCard: View {
                 }
             }
         }
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        .onAppear {
+            refreshCache()
+            refreshHoverIndex()
+        }
+        .onChange(of: scanMeta.first?.value) { _, _ in
+            refreshCache()
+            refreshHoverIndex()
+        }
     }
 
     private var donut: some View {

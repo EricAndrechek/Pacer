@@ -64,51 +64,24 @@ struct LiveActivityCard: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
-    /// Sync pricing snapshot loaded once per appear (and on cost-mode
-    /// change) so refreshStats can compute per-sample cost without an
-    /// `await` per row. Without this the card showed $0 last-hour cost
-    /// for any window where Claude Code didn't write a stored costUSD.
-    @State private var pricingSnapshot: PricingTable.Snapshot = PricingTable.Snapshot(pricingByModel: [:])
-
     private var stats: LiveStats { cachedStats }
 
+    @MainActor
     private func refreshStats() {
         var s = LiveStats()
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         for sample in recentSamples {
             s.tokensLastHour += sample.inputTokens + sample.outputTokens + sample.cacheReadTokens
-            let breakdown = TokenBreakdown(
-                inputTokens: sample.inputTokens,
-                outputTokens: sample.outputTokens,
-                cacheReadTokens: sample.cacheReadTokens,
-                cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                cacheCreation1hTokens: sample.cacheCreation1hTokens
-            )
-            s.costLastHour += CostCalculator.cost(
-                storedCostUSD: sample.sourceCostUSD,
-                model: sample.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: pricingSnapshot
-            )
+            // Single shared helper — same one DayDetail / TodayTimeline
+            // / CSVExporter use. Replaces the per-card pricing-snapshot
+            // dance with a process-wide cache warmed at app launch.
+            s.costLastHour += sample.effectiveCostUSD(mode: mode)
             s.sampleCount += 1
             if s.lastSampleAt == nil || sample.sampledAt > s.lastSampleAt! {
                 s.lastSampleAt = sample.sampledAt
             }
         }
         cachedStats = s
-    }
-
-    /// Pull a fresh pricing snapshot from the actor. Called on appear
-    /// and when the cost mode toggles. Cheap: actor hop + dictionary
-    /// copy. The snapshot is small (~200 entries × few hundred bytes).
-    private func reloadPricingSnapshot() async {
-        try? await PricingTable.shared.ensureLoaded()
-        let snap = await PricingTable.shared.snapshot()
-        await MainActor.run {
-            pricingSnapshot = snap
-            refreshStats()
-        }
     }
 
     private var todayCostSoFar: Double {
@@ -134,13 +107,15 @@ struct LiveActivityCard: View {
                 metricGrid
             }
         }
-        .onAppear {
-            refreshStats()
-            Task { await reloadPricingSnapshot() }
-        }
+        .onAppear { refreshStats() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshStats() }
+        // When cost mode changes the cache needs to refresh too —
+        // ensureLoaded is cheap if pricing is already in memory.
         .onChange(of: costModeRaw) { _, _ in
-            Task { await reloadPricingSnapshot() }
+            Task {
+                await SampleCostCache.reload()
+                await MainActor.run { refreshStats() }
+            }
         }
     }
 
