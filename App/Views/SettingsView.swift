@@ -179,6 +179,15 @@ private struct DataSettingsTab: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costMode: String = "auto"
 
+    private var storeURL: URL? {
+        try? PacerStore.storeURL()
+    }
+
+    private var logsDirURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Pacer")
+    }
+
     var body: some View {
         Form {
             Section("Cost calculation") {
@@ -193,6 +202,32 @@ private struct DataSettingsTab: View {
                 Text("`Auto` matches `bun x ccusage`. `Calculate` is what you want when older Claude Code lines lack `costUSD`. `Display` only shows server-supplied numbers and ignores tokens that didn't come with one.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Section("Storage") {
+                if let url = storeURL {
+                    HStack {
+                        Text(url.path)
+                            .font(.system(.caption, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                    }
+                } else {
+                    Text("App Group container unavailable.")
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Daemon logs")
+                        .font(.caption)
+                    Spacer()
+                    Button("Open Logs Folder") {
+                        NSWorkspace.shared.open(logsDirURL)
+                    }
+                }
             }
         }
         .formStyle(.grouped)
@@ -211,21 +246,23 @@ private struct AboutTab: View {
     }()
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Image(systemName: "speedometer")
-                .font(.system(size: 64))
+                .font(.system(size: 56))
                 .foregroundStyle(.tint)
             Text("Pacer")
                 .font(.largeTitle.weight(.semibold))
             Text("Version \(buildVersion) (build \(buildNumber))")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+                .monospacedDigit()
             Text("Tracks Claude Code usage, costs, and rate-limit pacing.")
                 .font(.body)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+            shortcutHints
             Spacer()
-            Text("Storage is local to this Mac. Nothing leaves your machine except the OAuth poll to api.anthropic.com.")
+            Text("Storage is local to this Mac. Nothing leaves your machine except the 5-minute OAuth poll to api.anthropic.com.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -233,5 +270,30 @@ private struct AboutTab: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var shortcutHints: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Shortcuts")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            shortcutLine("⌘1 / ⌘2 / ⌘3 / ⌘4", "Switch tabs")
+            shortcutLine("⌘,", "Open Settings")
+            shortcutLine("⌘⇧E", "Export today's daily totals")
+        }
+        .font(.caption)
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private func shortcutLine(_ shortcut: String, _ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text(shortcut)
+                .font(.system(.caption, design: .monospaced))
+                .frame(width: 130, alignment: .leading)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .foregroundStyle(.secondary)
+        }
     }
 }
