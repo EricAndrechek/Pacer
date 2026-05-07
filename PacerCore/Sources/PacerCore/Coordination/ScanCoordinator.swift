@@ -134,7 +134,7 @@ public final class ScanCoordinator {
         // can't double-process the same files.
         do {
             let report = try await runScanCycle()
-            log("startup scan complete: \(formatReport(report))")
+            log("startup: \(formatReport(report))")
         } catch {
             log("startup scan failed: \(error)")
         }
@@ -352,17 +352,20 @@ public final class ScanCoordinator {
         }()
 
         if isSlow || hasDups {
-            log("incremental scan: \(formatReport(report))")
+            log("scan: \(formatReport(report))")
             lastRoutineLogAt = now
         } else if hasInserts && throttleExpired {
-            log("incremental scan: \(formatReport(report))")
+            log("scan: \(formatReport(report))")
             lastRoutineLogAt = now
         }
     }
 
+    /// Compact one-line summary for the daemon log. Caller adds the
+    /// "scan: " or "startup: " prefix; we don't include the kind here
+    /// twice (duplication was a cosmetic bug in earlier versions).
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) | files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
     }
 }
 
