@@ -277,7 +277,7 @@ private struct AboutTab: View {
             Text("Shortcuts")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            shortcutLine("⌘1 / ⌘2 / ⌘3 / ⌘4", "Switch tabs")
+            shortcutLine("⌘1 / ⌘2 / ⌘3 / ⌘4 / ⌘5", "Switch tabs")
             shortcutLine("⌘,", "Open Settings")
             shortcutLine("⌘⇧E", "Export today's daily totals")
         }

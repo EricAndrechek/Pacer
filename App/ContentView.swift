@@ -6,10 +6,10 @@ import SwiftUI
 /// each view focused — `DashboardView` doesn't carry @State for
 /// LaunchAgent buttons it doesn't render.
 struct ContentView: View {
-    /// Tab identifier kept as enum so `Cmd+1..4` keyboard shortcuts
+    /// Tab identifier kept as enum so `Cmd+1..5` keyboard shortcuts
     /// can target it directly via `selection`.
     enum Tab: Hashable {
-        case dashboard, history, projects, debug
+        case dashboard, history, projects, models, debug
     }
     @State private var selection: Tab = .dashboard
 
@@ -30,10 +30,15 @@ struct ContentView: View {
                 .tag(Tab.projects)
                 .keyboardShortcut("3", modifiers: .command)
 
+            ModelsView()
+                .tabItem { Label("Models", systemImage: "cpu") }
+                .tag(Tab.models)
+                .keyboardShortcut("4", modifiers: .command)
+
             DebugView()
                 .tabItem { Label("Debug", systemImage: "terminal") }
                 .tag(Tab.debug)
-                .keyboardShortcut("4", modifiers: .command)
+                .keyboardShortcut("5", modifiers: .command)
         }
         .frame(minWidth: 720, minHeight: 600)
     }
