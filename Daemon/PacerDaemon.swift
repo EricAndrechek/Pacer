@@ -22,8 +22,21 @@ struct PacerDaemonMain {
         // Honor `PACER_RUN_ONCE=1` for one-shot CLI use (manual scan,
         // CI test runs). Production LaunchAgent invocation runs the
         // forever loop.
-        let runOnce = ProcessInfo.processInfo.environment["PACER_RUN_ONCE"] == "1"
-        let coordinator = ScanCoordinator(container: container)
+        let env = ProcessInfo.processInfo.environment
+        let runOnce = env["PACER_RUN_ONCE"] == "1"
+
+        // OAuth polling on by default; opt-out via env for ops contexts
+        // that don't want network calls (sandboxed CI, JSONL-only runs).
+        // The first poll from this binary may surface a Keychain ACL
+        // prompt; the poller treats `accessDenied` as a soft failure
+        // and keeps running, so the JSONL pipeline is never blocked.
+        let oauthEnabled = env["PACER_DISABLE_OAUTH"] != "1" && !runOnce
+        let oauthClient: OAuthClient? = oauthEnabled ? OAuthClient() : nil
+
+        let coordinator = ScanCoordinator(
+            container: container,
+            oauthClient: oauthClient
+        )
 
         if runOnce {
             let report = try await coordinator.runOnce()

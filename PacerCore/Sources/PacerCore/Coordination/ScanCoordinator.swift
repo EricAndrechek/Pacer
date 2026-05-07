@@ -25,17 +25,24 @@ public final class ScanCoordinator {
         public var watcherMode: JSONLWatcher.Mode
         public var probeStatsCache: Bool
         public var saveBatchSize: Int
+        /// Cadence/jitter/backoff knobs for OAuth polling. The poller
+        /// only runs when `oauthClient` is non-nil at coordinator
+        /// init; passing a configuration here without a client is a
+        /// no-op (matches the test default — no network calls).
+        public var oauthPolling: OAuthPoller.Configuration
 
         public init(
             costMode: CostMode = .auto,
             watcherMode: JSONLWatcher.Mode = .live(latencySeconds: 0.5, backstopInterval: 60),
             probeStatsCache: Bool = true,
-            saveBatchSize: Int = 1_000
+            saveBatchSize: Int = 1_000,
+            oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration()
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
             self.probeStatsCache = probeStatsCache
             self.saveBatchSize = saveBatchSize
+            self.oauthPolling = oauthPolling
         }
     }
 
@@ -54,6 +61,10 @@ public final class ScanCoordinator {
     private let watcher: JSONLWatcher
     private let resolver: ClaudePathResolver
     private let probe: StatsCacheProbe?
+    /// nil disables OAuth polling. Tests leave this nil so no network
+    /// or keychain access happens; the daemon constructs a default
+    /// `OAuthClient()` to enable Tier 3 rate-limit windowing.
+    private let oauthPoller: OAuthPoller?
 
     private var resolvedRoots: [ClaudePathResolver.ResolvedRoot] = []
     private var scanInFlight = false
@@ -62,7 +73,8 @@ public final class ScanCoordinator {
         container: ModelContainer,
         configuration: Configuration = Configuration(),
         statsCacheURL: URL? = nil,
-        resolver: ClaudePathResolver = ClaudePathResolver()
+        resolver: ClaudePathResolver = ClaudePathResolver(),
+        oauthClient: OAuthClient? = nil
     ) {
         self.context = ModelContext(container)
         self.configuration = configuration
@@ -73,6 +85,15 @@ public final class ScanCoordinator {
             self.probe = StatsCacheProbe(fileURL: statsCacheURL ?? StatsCacheProbe.defaultLocation())
         } else {
             self.probe = nil
+        }
+        if let oauthClient {
+            self.oauthPoller = OAuthPoller(
+                client: oauthClient,
+                container: container,
+                configuration: configuration.oauthPolling
+            )
+        } else {
+            self.oauthPoller = nil
         }
     }
 
@@ -102,6 +123,16 @@ public final class ScanCoordinator {
         }
         await watcher.start(roots: resolvedRoots)
 
+        // OAuth poller runs independently from the JSONL watcher loop.
+        // Each subsystem owns its own cadence; if the network is down
+        // the JSONL pipeline keeps working, and if the user has no
+        // Claude Code login the poller silently sleeps without
+        // disturbing scans. Both shut down via `stop()`.
+        if let oauthPoller {
+            await oauthPoller.start()
+            log("oauth poller started")
+        }
+
         for await _ in stream {
             // Skip if a scan is already underway. The watcher fires
             // both on FSEvents (debounced 500ms) and the 60s backstop
@@ -126,6 +157,9 @@ public final class ScanCoordinator {
 
     public func stop() async {
         await watcher.stop()
+        if let oauthPoller {
+            await oauthPoller.stop()
+        }
     }
 
     // MARK: - Internal

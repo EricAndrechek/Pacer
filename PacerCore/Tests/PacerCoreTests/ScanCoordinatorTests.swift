@@ -234,3 +234,97 @@ private func makeAssistantLine(
     // Only the assistant line landed.
     #expect(report.persisterStats.inserted == 1)
 }
+
+@MainActor
+@Test func coordinatorRunForeverStartsAndStopsOAuthPoller() async throws {
+    // Wire-in test: when an OAuthClient is provided, runForever() should
+    // start the poller alongside the watcher and writes will accumulate
+    // until stop(). Use .manual watcher so the for-await loop blocks
+    // exactly until we call stop.
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "x", requestId: "x"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    // Stub keychain (good token) + transport that returns a known
+    // 200 response. Each fetch produces 2 RateLimitSamples.
+    let blob = try JSONSerialization.data(withJSONObject: [
+        "claudeAiOauth": [
+            "accessToken": "stub",
+            "expiresAt": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970) * 1000,
+        ]
+    ])
+    let kc = KeychainOAuth(rawReader: { .success(blob) })
+    let body = #"{"five_hour":{"utilization":11,"resets_at":"2026-05-06T17:00:00Z"},"seven_day":{"utilization":22,"resets_at":"2026-05-13T00:00:00Z"}}"#
+    let transport: OAuthClient.Transport = { _ in
+        let response = HTTPURLResponse(
+            url: OAuthClient.endpoint,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [:]
+        )!
+        return (Data(body.utf8), response)
+    }
+    let client = OAuthClient(keychain: kc, transport: transport)
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(
+            costMode: .display,
+            watcherMode: .manual,
+            probeStatsCache: false,
+            // Tight timing so the poller fires at least once before
+            // stop() — but no real sleep because the loop's first
+            // cycle runs immediately.
+            oauthPolling: .init(baseInterval: 60, jitterSeconds: 0)
+        ),
+        resolver: resolver,
+        oauthClient: client
+    )
+
+    let runTask = Task { try await coordinator.runForever() }
+    // Yield enough times for the poller's first cycle to complete.
+    // The cycle is fully synchronous in test mode (stubbed transport,
+    // immediate persistence hop) so a few yields suffice.
+    for _ in 0..<10 { await Task.yield() }
+    // Give the main-actor persist hop a moment to flush.
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    await coordinator.stop()
+    try await runTask.value
+
+    let context = ModelContext(container)
+    let count = try context.fetchCount(FetchDescriptor<RateLimitSample>())
+    #expect(count >= 2, "expected the poller to insert at least one snapshot's worth of rows")
+}
+
+@MainActor
+@Test func coordinatorWithoutOAuthClientDoesNotPoll() async throws {
+    // Without an oauthClient the poller is never constructed — verify
+    // by running a simple manual cycle and checking no
+    // RateLimitSamples appear.
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "y", requestId: "y"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+        // no oauthClient → no polling
+    )
+    _ = try await coordinator.runOnce()
+
+    let context = ModelContext(container)
+    let count = try context.fetchCount(FetchDescriptor<RateLimitSample>())
+    #expect(count == 0)
+}
