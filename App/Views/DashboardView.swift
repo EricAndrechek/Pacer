@@ -19,7 +19,7 @@ struct DashboardView: View {
                     .padding(.bottom, 4)
 
                 TodaySummaryCard()
-                RateLimitGaugesCard()
+                PaceChartCard()
                 DailyCostChartCard()
                 PerModelTodayCard()
             }
