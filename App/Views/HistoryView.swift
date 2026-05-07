@@ -150,6 +150,8 @@ private struct LifetimeSummaryCard: View {
 private struct MonthlyChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
 
+    @State private var selectedMonth: String?
+
     private struct MonthBucket: Identifiable {
         let month: String  // YYYY-MM
         let cost: Double
@@ -189,21 +191,44 @@ private struct MonthlyChartCard: View {
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 200)
             } else {
-                Chart(monthly) { m in
-                    BarMark(
-                        x: .value("Month", m.month),
-                        y: .value("Cost", m.cost)
-                    )
-                    .foregroundStyle(.tint)
-                    .annotation(position: .top, alignment: .center, spacing: 2) {
-                        if m.cost > 0 {
-                            Text(formatCost(m.cost))
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                Chart {
+                    ForEach(monthly) { m in
+                        BarMark(
+                            x: .value("Month", m.month),
+                            y: .value("Cost", m.cost)
+                        )
+                        .foregroundStyle(.tint)
+                        .annotation(position: .top, alignment: .center, spacing: 2) {
+                            if m.cost > 0 && m.month != selectedMonth {
+                                Text(formatCost(m.cost))
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+                    }
+                    if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
+                        RuleMark(x: .value("Selected", selectedMonth))
+                            .foregroundStyle(.secondary.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                            .annotation(position: .top, alignment: .center, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(longMonth(row.month))
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text(formatCost(row.cost))
+                                        .font(.system(.caption, design: .rounded).weight(.semibold))
+                                        .monospacedDigit()
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
+                            }
                     }
                 }
                 .frame(height: 220)
+                .chartXSelection(value: $selectedMonth)
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
                         AxisGridLine()
@@ -242,6 +267,18 @@ private struct MonthlyChartCard: View {
         let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
         guard monthInt >= 1 && monthInt <= 12 else { return ym }
         return "\(names[monthInt - 1]) \(yearInt % 100)"
+    }
+
+    /// `2026-04` → `April 2026`. Used for hover callouts where there's
+    /// room for a longer label.
+    private func longMonth(_ ym: String) -> String {
+        guard ym.count == 7,
+              let yearInt = Int(ym.prefix(4)),
+              let monthInt = Int(ym.suffix(2))
+        else { return ym }
+        let names = ["January","February","March","April","May","June","July","August","September","October","November","December"]
+        guard monthInt >= 1 && monthInt <= 12 else { return ym }
+        return "\(names[monthInt - 1]) \(yearInt)"
     }
 
     private func formatCost(_ usd: Double) -> String {

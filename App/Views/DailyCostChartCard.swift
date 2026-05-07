@@ -12,6 +12,11 @@ struct DailyCostChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
 
+    /// Hover/selection target. macOS Charts binds the X-value on
+    /// pointer move; we look it up in `dailyTotals` to render the
+    /// callout. Nil → no hover, hide overlay.
+    @State private var selectedDate: String?
+
     private var dailyTotals: [DailyTotal] {
         // Group by date (trim model dimension), sort ascending so the
         // chart reads left-to-right oldest → today.
@@ -81,6 +86,18 @@ struct DailyCostChartCard: View {
     private var chart: some View {
         Chart {
             chartContent
+            // Highlight the hovered bar with a subtle outline rule so
+            // the callout has something to point at.
+            if let selectedDate, dailyTotals.contains(where: { $0.date == selectedDate }) {
+                RuleMark(x: .value("Selected", selectedDate))
+                    .foregroundStyle(.secondary.opacity(0.5))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    .annotation(position: .top, alignment: .center, spacing: 4) {
+                        if let row = dailyTotals.first(where: { $0.date == selectedDate }) {
+                            calloutView(row)
+                        }
+                    }
+            }
         }
         .frame(height: 200)
         .chartYAxis {
@@ -105,6 +122,24 @@ struct DailyCostChartCard: View {
                 }
             }
         }
+        .chartXSelection(value: $selectedDate)
+    }
+
+    @ViewBuilder
+    private func calloutView(_ row: DailyTotal) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(row.date)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Text(formatCost(row.cost))
+                .font(.system(.caption, design: .rounded).weight(.semibold))
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
     }
 
     /// Pick every Nth date from the rendered set so the x-axis isn't
