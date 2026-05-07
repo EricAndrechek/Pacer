@@ -20,6 +20,7 @@ struct DashboardView: View {
                 WelcomeCard()
                 TodaySummaryCard()
                 LiveActivityCard()
+                TodayTimelineCard()
                 PaceChartCard()
                 DailyCostChartCard()
                 PerModelTodayCard()
