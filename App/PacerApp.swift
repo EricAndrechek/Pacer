@@ -31,6 +31,12 @@ struct PacerApp: App {
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView()
+                // NotificationsHost is invisible (zero size) but holds
+                // @Query subscriptions that fire when new RateLimit
+                // samples or DailyAggregate updates arrive. Living
+                // alongside ContentView keeps it scoped to the app's
+                // foreground lifetime.
+                .background(NotificationsHost())
         }
         .modelContainer(container)
 
