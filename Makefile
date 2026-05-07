@@ -1,5 +1,9 @@
 # Pacer dev workflow.
 #
+# Single-binary architecture: data collection runs inside the app
+# process (FSEvents + OAuth poller live in `App/Background/`). There
+# is no separate daemon binary anymore.
+#
 # This Makefile is the single entry point for AI and humans alike.
 # All non-trivial logic lives in `bin/dev-*.sh` so each step is
 # inspectable and individually runnable.
@@ -10,7 +14,6 @@
 #   After AI changes  : make install        (idempotent — handles upgrade)
 #   Watch logs        : make logs
 #   Quick health check: make status
-#   Foreground debug  : make daemon-fg      (kills launchctl daemon first)
 #   Tear down         : make uninstall
 #
 # `make help` lists everything with one-line descriptions.
@@ -22,17 +25,13 @@ SHELL := /bin/bash
 REPO_ROOT      := $(shell pwd)
 BUILD_OUTPUT   := $(REPO_ROOT)/Build/Products/Debug/Pacer.app
 INSTALLED_APP  := /Applications/Pacer.app
-DEV_LABEL      := com.ericandrechek.pacer.daemon.dev
-SMAPP_LABEL    := com.ericandrechek.pacer.daemon
-DEV_PLIST      := $(HOME)/Library/LaunchAgents/$(DEV_LABEL).plist
 LOG_DIR        := $(HOME)/Library/Logs/Pacer
-LOG_ERR        := $(LOG_DIR)/PacerDaemon.err.log
+LOG_ERR        := $(LOG_DIR)/Pacer.err.log
 STORE_DIR      := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
-        daemon-stop daemon-start daemon-restart daemon-fg \
         logs logs-tail status open clean-data
 
 # Default target — show help so a bare `make` doesn't do something
@@ -74,18 +73,16 @@ app:  ## Signed Debug build of Pacer.app (output: Build/Products/Debug/Pacer.app
 # Install / uninstall
 # ------------------------------------------------------------------
 
-install:  ## Build + sign + copy to /Applications + register daemon. Quits and re-opens Pacer.app if it was running. Idempotent.
+install:  ## Build + sign + notarize + copy to /Applications. Cleans up legacy daemon registration. Quits and re-opens Pacer.app if it was running. Idempotent.
 	@$(REPO_ROOT)/bin/dev-install.sh
 
-uninstall:  ## Stop daemon + quit GUI + remove /Applications/Pacer.app. Preserves SwiftData and logs.
+uninstall:  ## Quit GUI + remove /Applications/Pacer.app + clean up legacy daemon plist. Preserves SwiftData and logs.
 	@$(REPO_ROOT)/bin/dev-uninstall.sh
 
 # `reinstall` captures whether Pacer.app is currently running BEFORE
 # either step touches it, then asks dev-install.sh to restore the GUI
 # at the end — otherwise the user's app would silently disappear
-# across the uninstall→install boundary. The check has to happen here
-# (not inside dev-install.sh) because dev-uninstall.sh quits the GUI
-# first, so by the time install runs there's nothing to detect.
+# across the uninstall→install boundary.
 reinstall:  ## Uninstall and reinstall (preserves GUI state). Use when something feels wedged.
 	@app_was_running=0; \
 	if pgrep -f '/Pacer\.app/Contents/MacOS/Pacer$$' >/dev/null 2>&1; then app_was_running=1; fi; \
@@ -97,50 +94,25 @@ reinstall:  ## Uninstall and reinstall (preserves GUI state). Use when something
 	fi
 
 # ------------------------------------------------------------------
-# Daemon lifecycle
-# ------------------------------------------------------------------
-
-daemon-stop:  ## Stop the running daemon (launchctl labels + orphan PacerDaemon processes).
-	@$(REPO_ROOT)/bin/dev-stop-daemon.sh
-	@echo "Daemon stopped (or was not running)."
-
-daemon-start:  ## Start the daemon via launchctl. Requires `make install` first.
-	@if [ ! -f "$(DEV_PLIST)" ]; then \
-		echo "ERROR: $(DEV_PLIST) not found. Run 'make install' first."; exit 1; \
-	fi
-	@launchctl bootstrap "gui/$$(id -u)" "$(DEV_PLIST)"
-	@echo "Daemon started."
-
-daemon-restart: daemon-stop daemon-start  ## Stop and start.
-
-daemon-fg:  ## Run the installed daemon in the foreground for live debugging.
-	@if [ ! -x "$(INSTALLED_APP)/Contents/Library/LaunchServices/PacerDaemon" ]; then \
-		echo "ERROR: $(INSTALLED_APP) not installed. Run 'make install' first."; exit 1; \
-	fi
-	@$(MAKE) daemon-stop
-	@echo "Running daemon in foreground. Ctrl-C to stop."
-	@"$(INSTALLED_APP)/Contents/Library/LaunchServices/PacerDaemon"
-
-# ------------------------------------------------------------------
 # Observation
 # ------------------------------------------------------------------
 
-logs:  ## tail -f the daemon's stderr log. Ctrl-C to exit.
+logs:  ## tail -f the app's stderr log. Ctrl-C to exit.
 	@if [ ! -f "$(LOG_ERR)" ]; then \
-		echo "Log not yet created at $(LOG_ERR). Daemon may not be running yet."; \
+		echo "Log not yet created at $(LOG_ERR). App may not be running yet."; \
 		echo "Run 'make status' for diagnosis or 'make install' to start."; \
 		exit 0; \
 	fi
 	@tail -F "$(LOG_ERR)"
 
-logs-tail:  ## Print the last 100 lines of the daemon log (for AI use).
+logs-tail:  ## Print the last 100 lines of the app log (for AI use).
 	@if [ ! -f "$(LOG_ERR)" ]; then \
 		echo "(no log yet at $(LOG_ERR))"; \
 	else \
 		tail -n 100 "$(LOG_ERR)"; \
 	fi
 
-status:  ## Show install state, daemon PID, log file sizes, recent log lines.
+status:  ## Show install state, app PID, log file sizes, recent log lines.
 	@$(REPO_ROOT)/bin/dev-status.sh
 
 open:  ## Open Pacer.app from /Applications.

@@ -1,8 +1,9 @@
 # Agent guide — Pacer
 
 Native macOS Claude Code usage tracker. SwiftUI + SwiftData + Charts.
-Five targets sharing data through an App Group. See `docs/design.md` for
-the full v1 design.
+Single-binary menu-bar agent shape (LSUIElement=true). Two targets
+(Pacer.app + PacerWidgets.appex) sharing data through an App Group.
+See `docs/design.md` for the full v1 design.
 
 ## Where to look first
 
@@ -74,11 +75,25 @@ The SwiftUI app is organized like this (under `App/`):
 
 ```
 App/
-  PacerApp.swift                — @main scene graph (WindowGroup + Settings + MenuBarExtra),
-                                  registers UserDefaults defaults at launch, plumbs the export
-                                  CommandGroup.
+  PacerApp.swift                — @main scene graph (WindowGroup + Settings + MenuBarExtra).
+                                  Wires the AppDelegate via @NSApplicationDelegateAdaptor and
+                                  reads container/exports from it.
   ContentView.swift             — top-level TabView (Dashboard / History / Projects /
                                   Models / Debug), ⌘1..5 keyboard shortcuts.
+
+  Background/
+    PacerAppDelegate.swift      — NSApplicationDelegate. Owns the SwiftData container, the
+                                  AppBackgroundService (in-process scan + OAuth poller), and
+                                  drives Dock-icon visibility (.regular when window open,
+                                  .accessory otherwise). Redirects stderr to
+                                  ~/Library/Logs/Pacer/Pacer.err.log so Log.write output
+                                  survives non-terminal launches. Posts a "Pacer paused"
+                                  banner from applicationShouldTerminate.
+    AppBackgroundService.swift  — In-process equivalent of the retired PacerDaemon CLI.
+                                  Constructs and runs ScanCoordinator (FSEvents JSONL scan +
+                                  OAuth polling + SwiftData persistence) inside the app
+                                  process. start() is idempotent; stop() is awaited from
+                                  applicationShouldTerminate so saves flush before exit.
 
   Settings/
     PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
@@ -132,13 +147,14 @@ shared SwiftData container directly — no IPC.
 - `project.yml` is the source of truth — `Pacer.xcodeproj` is generated
   by XcodeGen and gitignored. Run `xcodegen generate` after edits.
 - Targets:
-    - `App/` → `Pacer.app` (SwiftUI app, embeds widgets)
-    - `Daemon/` → `PacerDaemon` (CLI tool, LaunchAgent in M3+)
+    - `App/` → `Pacer.app` (SwiftUI app, embeds widgets, hosts the
+      in-process scan + OAuth poller via `AppBackgroundService`)
     - `Widgets/` → `PacerWidgets.appex` (widget extension)
-    - `PacerCore/` → local Swift package (models, parsers, store)
+    - `PacerCore/` → local Swift package (models, parsers, store,
+      `LoginItemController` wrapping `SMAppService.mainApp`)
 - Each non-package target has its own `.entitlements` file declaring the
   shared App Group `group.com.ericandrechek.pacer`. The App Group lets
-  the daemon, app, and widgets share a single SwiftData container at
+  the app and widgets share a single SwiftData container at
   `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
 - Local PacerCore tests: `cd PacerCore && swift test`.
 - Full build verification (no-sign): `xcodebuild ... CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build`
@@ -176,31 +192,38 @@ make install
 ```
 
 `make install` is idempotent: it quits the running Pacer.app GUI (so
-the in-memory binary releases the bundle), stops every PacerDaemon
-(launchctl-managed AND any orphan foreground process), regenerates
-the Xcode project from `project.yml`, builds with signing, replaces
-`/Applications/Pacer.app`, writes a fresh dev LaunchAgent plist at
-`~/Library/LaunchAgents/com.ericandrechek.pacer.daemon.dev.plist`,
-boots the daemon via `launchctl bootstrap`, and re-opens Pacer.app if
-it was running before — so the user lands back on the new binary
-without a manual quit/reopen. `make reinstall` preserves GUI state
-across the uninstall→install boundary the same way.
+the in-memory binary releases the bundle), regenerates the Xcode
+project from `project.yml`, builds with signing, notarizes via
+`xcrun notarytool`, staples the ticket, replaces
+`/Applications/Pacer.app`, boots out any leftover legacy daemon
+LaunchAgent (from before the single-binary refactor), and re-opens
+Pacer.app if it was running before — so the user lands back on the
+new binary without a manual quit/reopen. `make reinstall` preserves
+GUI state across the uninstall→install boundary the same way.
+
+Pacer is a single-binary agent: there is no separate daemon binary
+or LaunchAgent. Data collection runs inside the app process via
+`AppBackgroundService` and starts from
+`PacerAppDelegate.applicationDidFinishLaunching`. To run at login,
+the user toggles "Open at Login" in Settings → General, which
+registers via `SMAppService.mainApp`.
 
 `make help` lists every target. The ones you'll reach for most often:
 
 | Target | When to use |
 | --- | --- |
 | `make install` | After code changes that should reach the user. |
-| `make logs-tail` | First check when something feels off — last 100 daemon log lines. |
-| `make status` | Full diagnostic snapshot (app present, daemon PID, store size, recent logs). |
-| `make daemon-fg` | Live debug — runs daemon in your terminal so you see crashes/output as they happen. |
+| `make logs-tail` | First check when something feels off — last 100 app log lines. |
+| `make status` | Full diagnostic snapshot (app present, app PID, store size, recent logs). |
 | `make reinstall` | When something feels wedged (uninstall + install). |
 | `make verify` | Fastest "does this compile" — no signing, no install. |
 | `make test` | PacerCore Swift Testing run. |
 
-Logs at `~/Library/Logs/Pacer/PacerDaemon.err.log` — read this directly
-when debugging. SwiftData store at
-`~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+Logs at `~/Library/Logs/Pacer/Pacer.err.log` — read this directly
+when debugging. PacerCore.Log writes to stderr; the AppDelegate
+`freopen`s stderr to that file early in init so log lines survive
+non-terminal launches (Finder, SMAppService at-login). SwiftData store
+at `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
 Both survive `make uninstall`; only `make clean-data` removes them
 (and it prompts).
 
@@ -213,42 +236,26 @@ Both survive `make uninstall`; only `make clean-data` removes them
   `make install` (which you should run before claiming the change is
   done, since the App Group entitlement matters).
 
-### Why two LaunchAgent paths exist
+### Run-at-login
 
-Pacer has two parallel ways to run the daemon at login:
+Pacer registers the *app itself* for login-launch via `SMAppService.mainApp`
+(see `PacerCore/LoginItem/LoginItemController.swift`). The user
+toggles this in Settings → General → "Open Pacer at Login". Pacer
+never auto-registers; the toggle is the only path. First-time
+registration prompts the user to approve in System Settings → Login
+Items & Extensions.
 
-1. **Dev launchctl** — label `com.ericandrechek.pacer.daemon.dev`, plist
-   at `~/Library/LaunchAgents/`, registered via `launchctl bootstrap`
-   from `bin/dev-install.sh`. This is what `make install` sets up.
-2. **SMAppService** — label `com.ericandrechek.pacer.daemon`, plist
-   embedded at `Pacer.app/Contents/Library/LaunchAgents/`, registered
-   via `SMAppService.agent(plistName:).register()` from inside the
-   running app (Debug tab → Register button).
+There is intentionally no separate daemon binary or LaunchAgent.
+Data collection runs inside the app process; if the user wants
+collection while logged in but not actively using Pacer, they keep
+"Open at Login" on and let the LSUIElement-hidden agent run. The
+agent stays alive after the last window closes (see
+`applicationShouldTerminateAfterLastWindowClosed` returning false).
 
-`SMAppService` is the modern Apple-blessed path and is what shipped
-builds will use. It can't be the dev path because:
-
-- `SMAppService.agent.register()` must be called from inside the
-  running app process — not invokable from a shell script.
-- First-time registration triggers a System Settings → Login Items
-  approval prompt. Fine for end users, friction for an AI dev loop
-  that runs `make install` repeatedly.
-- The state machine has a `requiresApproval` failure mode after
-  signature drift, requiring an explicit unregister + re-approve.
-
-The `.dev` suffix on the launchctl label means the two registrations
-can coexist without racing the same launchd slot. `bin/dev-install.sh`
-boots out BOTH labels before bootstrapping the dev one, so a user who
-has clicked Register in the Debug tab and then runs `make install`
-ends up with only the dev daemon running. The Debug tab's
-`LaunchAgentInstaller.combinedStatus()` surfaces both states so it
-never shows "notFound" while a daemon is plainly running.
-
-When the project ships through Sparkle, the dev path becomes
-unnecessary; production users will register via SMAppService once and
-upgrades silently re-register against the same identity. Until then,
-keep the dual path documented and don't try to "simplify" by removing
-the dev variant — `make install` depends on it.
+`bin/dev-install.sh` boots out any leftover legacy daemon LaunchAgent
+(`com.ericandrechek.pacer.daemon.dev` or `com.ericandrechek.pacer.daemon`)
+and removes the old plist on every install — the migration is
+automatic for users coming from the prior daemon-based architecture.
 
 ### Why we do not use the Xcode project's signing flags from CLI directly
 
@@ -263,9 +270,9 @@ launch and that can't access the App Group container.
 
 ### Real-run bugs the test suite cannot catch
 
-These came up the first time the daemon actually ran from
-`/Applications` under launchd; the test suite stayed green through
-all of them. Mentioned here so future agents don't repeat them:
+These came up the first time the app actually ran from `/Applications`
+under launchd / from-Finder; the test suite stayed green through all
+of them. Mentioned here so future agents don't repeat them:
 
 1. **FSEventStream needs `kFSEventStreamCreateFlagUseCFTypes`.** The
    callback's path data is a `char**` by default; treating it as an
@@ -274,13 +281,13 @@ all of them. Mentioned here so future agents don't repeat them:
    `FSEventStreamWrapper.start`; don't remove it.
 2. **`Bundle.module` requires the resource bundle next to the
    executable.** Xcode auto-copies `PacerCore_PacerCore.bundle` into
-   `Pacer.app/Contents/Resources/` for the .app target, but tool
-   targets like `PacerDaemon` get nothing. The
-   `Pacer.app`-target postBuildScript copies it next to the daemon
-   binary at `Contents/Library/LaunchServices/`. If you add another
-   tool target that links PacerCore, do the same copy or
-   `Bundle.module` will fatalError on first pricing access.
-3. **A daemon that re-reads the active JSONL on every FSEvent will
+   `Pacer.app/Contents/Resources/` for the .app target. Tool/extension
+   targets that link PacerCore (e.g., `PacerWidgets.appex`) need the
+   bundle next to *their* binary too — Xcode handles widget extensions
+   automatically, but if you add another non-app target that links
+   PacerCore, copy the bundle yourself or `Bundle.module` will
+   fatalError on first pricing access.
+3. **A scan loop that re-reads the active JSONL on every FSEvent will
    peg CPU and silently fail to write new data.** Without per-file
    byte-offset cursors (`JSONLFileCursor`), every line Claude Code
    writes triggered a ~10s rescan that re-parsed hundreds of existing
@@ -289,127 +296,31 @@ all of them. Mentioned here so future agents don't repeat them:
    `JSONLScanner` (chunked reads from a saved offset) plus a hoisted
    long-lived `SamplePersister` in `ScanCoordinator`. Don't reintroduce
    per-cycle persister construction or whole-file re-reads.
-4. **A `PacerDaemon` killed via SIGKILL while inside a SwiftData scan
-   can land in `STAT SX` (kernel-stuck) and keep its guarded SQLite fd
-   open indefinitely.** This blocks every subsequent
-   `makeModelContainer()` at `__guarded_open_np` — the new daemon
-   silently hangs with no log output. SIGTERM/SIGKILL won't dislodge an
-   SX zombie; only a reboot clears them. `PacerDaemon.runDaemon()`
-   logs a 30s watchdog warning when container creation stalls. If you
-   see a launchctl-managed daemon at 0% CPU with no log output, run
-   `lsof "$HOME/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite"`
-   — any SX-state daemon listed there is the culprit.
-5. **PacerDaemon must be signed with a bundle-style identifier or
-   macOS Sequoia 15+ prompts "Pacer would like to access data from
-   other apps" on every launch for the daemon.** Tool targets get
-   codesign `Identifier=PacerDaemon` (the binary name) by default,
-   which TCC sees as a separate third-party app reaching into
-   `com.ericandrechek.pacer`'s App Group container — prompting
-   `kTCCServiceSystemPolicyAppData` every time. Force a bundle-style
-   ID with `OTHER_CODE_SIGN_FLAGS = "--identifier=com.ericandrechek.pacer.daemon"`
-   in the daemon target settings. Verify with `codesign -dvv` (look
-   for `Identifier=com.ericandrechek.pacer.daemon`).
-
-   **Do NOT add `com.apple.developer.team-identifier` to the daemon's
-   entitlements** — it requires a matching provisioning profile,
-   which Xcode doesn't generate for tool targets, and AMFI rejects
-   the binary at launchd start with -413 "No matching profile found".
-   The Mach-O signature already carries TeamIdentifier=YZXWMJ5VBY
-   from the development cert; that's enough to suppress the
-   daemon-side prompt once the bundle-style ID is in place.
-
-   Confirm via `log show --predicate 'process == "tccd"' --info
-   --last 5m | grep AUTHREQ_PROMPTING` — a clean daemon run produces
-   no `kTCCServiceSystemPolicyAppData` prompt with
-   `Resp:{TCCDProcess: identifier=com.ericandrechek.pacer.daemon}`.
-   The test suite can't catch this because it never installs to
-   /Applications.
-
-6. **macOS Sequoia 15+ re-prompts `kTCCServiceSystemPolicyAppData`
-   for the GUI app on every launch in the dev workflow, even after
-   Developer ID signing + notarization + stapling.** This is rooted
-   in Pacer's architecture: the App (`com.ericandrechek.pacer`) and
-   the daemon (`com.ericandrechek.pacer.daemon`) are separate
-   bundle IDs sharing the App Group container at
-   `~/Library/Group Containers/group.com.ericandrechek.pacer/`.
-   Sequoia's "App Management" framework treats split-identity access
-   to a shared group container as cross-app data access and asks the
-   user to confirm. The Allow click writes a row with
-   `auth_value=5` but `csreq` stays empty, so TCC can't validate
-   the identity on the next launch and re-prompts.
-
-   Comparison points (apps that DON'T re-prompt have a populated
-   `csreq`): iTerm and Docker both have `length(csreq)` of 160–196
-   bytes. Pacer's row has `length(csreq)=0` even after every
-   diagnostic / signing improvement we tried.
-
-   What we tried that DIDN'T fix the prompt:
-     - Developer ID Application signing (manual codesign post-build)
-     - `xcrun notarytool submit --wait` + `stapler staple` (status:
-       Accepted, ticket validated)
-     - `spctl -av` reports `accepted source=Notarized Developer ID`
-     - `com.apple.security.get-task-allow=false` on both entitlements
-     - Patching `MCMMetadataCreator` in the container metadata plist
-       so the App is recognized as the group's creator
-     - Hardened Runtime, secure timestamps, deep --strict verify
-
-   What DID help (still committed, still useful):
-     - Bundle-style codesign identifier on the daemon
-       (`OTHER_CODE_SIGN_FLAGS = --identifier=com.ericandrechek.pacer.daemon`).
-       Without this the daemon prompts AGAIN whenever launchd
-       restarts it.
-     - Notarization is the shipping requirement; we keep it in the
-       dev install path so dev-signed = release-signed.
-
-   Pragmatic stance for v1: accept the dev-time prompt. Production
-   users get a single notarized release via Sparkle and (per the
-   M8 plan) the daemon will be registered through SMAppService
-   instead of raw launchctl. SMAppService-launched helpers are
-   reported to inherit the parent app's TCC identity, which would
-   eliminate this prompt for end users — but this needs to be
-   verified on a real shipping build before the v1 release. If
-   it turns out to also affect end users, the architectural fix is
-   one of:
-     - Move the daemon under SMAppService with `BundleProgram`
-       resolved against the app bundle (verify TCC identity is
-       inherited).
-     - Replace the LaunchAgent daemon with an XPC service hosted
-       inside the app bundle (XPC helpers definitively share the
-       parent's TCC identity).
-     - Have the daemon write through the App via XPC instead of
-       touching the App Group container directly (preserves
-       LaunchAgent architecture but removes the cross-bundle-ID
-       container access).
-
-   Diagnose by inspecting the TCC row after an Allow click:
-   `sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db
-   "SELECT auth_value, length(csreq) FROM access WHERE
-   client='com.ericandrechek.pacer';"` — a populated
-   `length(csreq)` (160+) means persistence will work; `0` means
-   the prompt comes back next launch. The `tccd` log line
-   `Session scoped auth is invalid for client: <private>` right
-   before each `AUTHREQ_PROMPTING` confirms TCC is treating the
-   recorded grant as session-only.
-
-   Auxiliary one-time fix when migrating from an older daemon
-   identifier: `~/Library/Group Containers/group.com.ericandrechek.pacer/
-   .com.apple.containermanagerd.metadata.plist` records the binary
-   that first created the container in `MCMMetadataCreator`. If
-   that's the old `PacerDaemon` (binary-name) identifier, patch it
-   to `com.ericandrechek.pacer` with `plutil -replace
-   MCMMetadataCreator -string com.ericandrechek.pacer "$plist"`.
-   Doesn't suppress the prompt on its own but is a prerequisite for
-   the App to be recognized as the group's owning bundle ID.
-
-   Notarization credential setup (one-time): create an App Store
-   Connect API key at App Store Connect → Users and Access →
-   Integrations → Team Keys with the "Developer" role. Save the
-   `.p8` file, then store credentials with
-   `xcrun notarytool store-credentials pacer-notarization
-       --key /path/to/AuthKey_<KEY_ID>.p8
-       --key-id <KEY_ID> --issuer <ISSUER_UUID>`. The Key ID is in
-   the filename and on the Keys page; the Issuer UUID is at the top
-   of the Keys page. `bin/dev-install.sh` reads from this profile.
+4. **Unbounded `@Query` results murder the in-process scan loop.**
+   When data collection ran in a separate `PacerDaemon` process, an
+   unfiltered `@Query private var samples: [TokenSample]` in the GUI
+   was wasteful but isolated — the daemon's main thread was untouched.
+   In the single-binary architecture every SwiftData save fires
+   @Query refreshes on the same MainActor that the scan loop runs on;
+   a 40k-row materialization on each save turned a 200ms scan into a
+   6-minute one. Always set `fetchLimit` (or a tight predicate) on
+   `@Query<TokenSample>` reads — `WelcomeCard`, `DashboardHeader`,
+   and `DebugView` all use a static `FetchDescriptor` with
+   `fetchLimit` set; follow that pattern for any new card that just
+   needs a recent sample or "is the table non-empty" probe.
+5. **macOS Sequoia 15+ used to re-prompt `kTCCServiceSystemPolicyAppData`
+   on every launch when Pacer had a separate `PacerDaemon` bundle ID
+   sharing the App Group container with the GUI app.** Sequoia's "App
+   Management" framework treats split-identity access to a shared
+   group container as cross-app data access and won't write a stable
+   csreq. The single-binary architecture eliminates the trigger:
+   `com.ericandrechek.pacer` is the only thing accessing the App
+   Group container, so TCC writes a populated csreq (160+ bytes) on
+   the first Allow click and the grant survives quit+reopen
+   indefinitely. If you ever reintroduce a separate-bundle helper,
+   expect this prompt to come back unless the helper is hosted as an
+   XPC service inside the app bundle (which inherits the parent's
+   TCC identity).
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE

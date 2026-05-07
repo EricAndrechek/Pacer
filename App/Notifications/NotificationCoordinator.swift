@@ -124,6 +124,31 @@ public final class NotificationCoordinator {
         markNotified(key: cycleKey, in: context)
     }
 
+    /// Posts a one-shot banner when the user quits Pacer. Without it,
+    /// a user with launch-at-login on but the menu bar hidden has no
+    /// visible signal that data collection has stopped — Pacer goes
+    /// silent and the next time they open it they'd see a gap with no
+    /// idea why. Best-effort: if notifications haven't been authorized
+    /// the post is silently dropped (we don't surface a permission
+    /// prompt during quit, that'd be bad UX).
+    public func notifyCollectionPaused() async {
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized
+            || settings.authorizationStatus == .provisional else {
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer paused"
+        content.body = "Reopen Pacer to resume tracking. Historical JSONL gets re-scanned on next launch."
+        content.sound = nil // quiet — user just quit, don't be loud
+        let request = UNNotificationRequest(
+            identifier: "pacer.collection.paused",
+            content: content,
+            trigger: nil
+        )
+        try? await center.add(request)
+    }
+
     /// Today's-cost ceiling notification. Fires once per day-and-threshold
     /// pair so re-launching the app doesn't re-notify.
     public func handleDailyCostUpdate(

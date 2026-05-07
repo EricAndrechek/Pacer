@@ -1,21 +1,12 @@
 #!/bin/bash
-# Build, sign, install, and register Pacer for daily-driver dev use.
+# Build, sign, notarize, and install Pacer for daily-driver dev use.
 #
-# Idempotent: safe to run on a fresh checkout (first install) AND on a
-# repo with an older Pacer.app already at /Applications (upgrade). On
-# upgrade we:
-#   1. Quit any running Pacer.app GUI (so the in-memory binary releases
-#      the bundle — replacing /Applications/Pacer.app while it's
-#      running leaves the user staring at the old code).
-#   2. Stop every PacerDaemon — both launchctl-managed and any orphan
-#      foreground processes — so they release the SwiftData store.
-#   3. Replace the bundle and re-register the LaunchAgent.
-#   4. Re-open Pacer.app if it was running before the install, so the
-#      user lands back exactly where they were on the new binary.
-#
-# Designed to be runnable by AI without user interaction. Surfaces all
-# state-changing operations as visible commands so the transcript is
-# debuggable.
+# Single-binary architecture: the old separate `PacerDaemon` LaunchAgent
+# was retired; data collection now runs inside the app process. This
+# script builds + signs + notarizes the .app, replaces /Applications/
+# Pacer.app, and (idempotently) cleans up any leftover legacy daemon
+# launchctl registration from prior installs. Re-opens Pacer.app at the
+# end if it was running before the install.
 #
 # Flags:
 #   --restore-app   Force re-opening Pacer.app at the end even if no
@@ -30,8 +21,13 @@ INSTALL_DIR="/Applications"
 INSTALLED_APP="${INSTALL_DIR}/${APP_NAME}"
 BUILD_OUTPUT="${REPO_ROOT}/Build/Products/Debug/${APP_NAME}"
 
-DEV_LABEL="com.ericandrechek.pacer.daemon.dev"
-DEV_PLIST="$HOME/Library/LaunchAgents/${DEV_LABEL}.plist"
+# Legacy daemon labels — retired in favor of in-process collection,
+# but old installs may still have these registered. We bootout and
+# remove any leftover plist on every install so the migration is
+# automatic.
+LEGACY_DEV_LABEL="com.ericandrechek.pacer.daemon.dev"
+LEGACY_SMAPP_LABEL="com.ericandrechek.pacer.daemon"
+LEGACY_DEV_PLIST="$HOME/Library/LaunchAgents/${LEGACY_DEV_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/Pacer"
 
 RESTORE_APP=0
@@ -40,10 +36,9 @@ if [ "${1:-}" = "--restore-app" ]; then
 fi
 
 echo "==> Pacer dev install"
-echo "    repo:      ${REPO_ROOT}"
-echo "    target:    ${INSTALLED_APP}"
-echo "    dev plist: ${DEV_PLIST}"
-echo "    logs:      ${LOG_DIR}"
+echo "    repo:   ${REPO_ROOT}"
+echo "    target: ${INSTALLED_APP}"
+echo "    logs:   ${LOG_DIR}"
 
 # 1. Regenerate the Xcode project from project.yml so any source
 #    additions (new files in App/Views/, new PacerCore modules) get
@@ -75,60 +70,45 @@ fi
 # 2b. Manually sign every binary inside the .app with Developer ID
 #     Application. This is what the eventual Sparkle release will use,
 #     and matters during dev too: Apple Development-signed binaries
-#     don't get a csreq blob written into TCC.db, so the macOS Sequoia
-#     "Pacer would like to access data from other apps" prompt fires on
-#     every launch. Developer ID writes a populated csreq and the grant
-#     persists across launches. Signing inside-out (deepest first) is
-#     required so each enclosing bundle's signature seals the inner ones.
+#     don't get a csreq blob written into TCC.db. Developer ID writes a
+#     populated csreq and the grant persists across launches. Signing
+#     inside-out (deepest first) is required so each enclosing bundle's
+#     signature seals the inner ones.
 SIGN_IDENTITY="Developer ID Application: Eric Andrechek (YZXWMJ5VBY)"
 APP_ENTITLEMENTS="${REPO_ROOT}/App/Pacer.entitlements"
-DAEMON_ENTITLEMENTS="${REPO_ROOT}/Daemon/PacerDaemon.entitlements"
 WIDGETS_ENTITLEMENTS="${REPO_ROOT}/Widgets/PacerWidgets.entitlements"
 echo
 echo "==> Signing with ${SIGN_IDENTITY}"
 
 sign() {
-    # $1 = entitlements file (or empty), $2 = path, $3 = optional --identifier override
+    # $1 = entitlements file (or empty), $2 = path
     #
     # `--timestamp` (Apple's secure timestamp server) is REQUIRED for
-    # notarization — `--timestamp=none` would make `xcrun notarytool
-    # submit` reject the bundle. Same for `--options runtime` (Hardened
-    # Runtime), which is also a notarization gate.
+    # notarization. Same for `--options runtime` (Hardened Runtime).
     local entitlements="$1"
     local target="$2"
-    local identifier="${3:-}"
     local args=(--force --options runtime --timestamp --sign "${SIGN_IDENTITY}")
     [ -n "${entitlements}" ] && args+=(--entitlements "${entitlements}")
-    [ -n "${identifier}" ]  && args+=(--identifier "${identifier}")
     codesign "${args[@]}" "${target}"
 }
 
 # Debug-build dylibs (Pacer.debug.dylib, PacerWidgets.debug.dylib,
 # __preview.dylib) are produced by Xcode in Debug config and must be
 # signed by the SAME Team ID as the loading binary or dyld refuses to
-# load them — ad-hoc / unsigned dylibs trip "different Team IDs" at
-# launch. Sign these before the bundles that contain them.
+# load them. Sign these before the bundles that contain them.
 while IFS= read -r dylib; do
     [ -e "${dylib}" ] && sign "" "${dylib}"
 done < <(find "${BUILD_OUTPUT}" -name "*.dylib" -type f)
 
-# PacerCore resource bundles ride along inside the app and the daemon
-# directory; sign them so the parent seals don't break later.
+# PacerCore resource bundles ride along inside the app and the widget
+# extension; sign them so the parent seals don't break later.
 for bundle in \
-    "${BUILD_OUTPUT}/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle" \
     "${BUILD_OUTPUT}/Contents/Resources/PacerCore_PacerCore.bundle" \
     "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/Resources/PacerCore_PacerCore.bundle"; do
     [ -e "${bundle}" ] && sign "" "${bundle}"
 done
 
-# Embedded Mach-O binaries (daemon and widget extension binary) get
-# their own entitlements; the app extension bundle gets re-sealed
-# after its inner binary is signed. The daemon needs an explicit
-# --identifier override because it's a tool target with no Info.plist
-# CFBundleIdentifier — without this codesign falls back to the binary
-# name "PacerDaemon", which TCC sees as a foreign third-party app
-# accessing com.ericandrechek.pacer's data (AGENTS.md bug #5).
-sign "${DAEMON_ENTITLEMENTS}" "${BUILD_OUTPUT}/Contents/Library/LaunchServices/PacerDaemon" "com.ericandrechek.pacer.daemon"
+# Widget extension binary, then the .appex itself.
 sign "${WIDGETS_ENTITLEMENTS}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
 sign "${WIDGETS_ENTITLEMENTS}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex"
 
@@ -141,21 +121,9 @@ codesign --verify --deep --strict --verbose=2 "${BUILD_OUTPUT}" 2>&1 \
 echo "    signed."
 
 # 2c. Notarize. Apple's notary service issues a ticket the system
-#     stapler then attaches to the bundle; with the ticket present,
-#     macOS Sequoia treats Allow clicks on the App Management TCC
-#     prompt as persistent grants instead of session-scoped ones,
-#     which is the whole point of running this step on every dev
-#     install (AGENTS.md bug #6). Without a stapled ticket the
+#     stapler then attaches to the bundle. Without notarization the
 #     "would like to access data from other apps" prompt fires on
 #     every launch even with Developer ID signing.
-#
-#     The credential profile `pacer-notarization` is set up once via
-#     `xcrun notarytool store-credentials pacer-notarization \
-#         --key ~/path/to/AuthKey_*.p8 --key-id <KEY_ID> --issuer <ISSUER>`.
-#     If it's missing this script tells the user how to create it
-#     and bails — we don't fall through to an unnotarized install,
-#     because that produces the every-launch-prompt regression we're
-#     trying to fix.
 NOTARY_PROFILE="pacer-notarization"
 NOTARY_ZIP="$(mktemp -d)/Pacer.zip"
 
@@ -173,16 +141,8 @@ if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 
     exit 1
 fi
 
-# notarytool wants a flat archive, not a directory tree. ditto with
-# --keepParent preserves the .app bundle as the top-level entry,
-# which is what the notary service expects to find.
 ditto -c -k --keepParent "${BUILD_OUTPUT}" "${NOTARY_ZIP}"
 
-# `--wait` blocks until the submission reaches a terminal status
-# (Accepted / Invalid / Rejected). Typical wall time is 10-60s for
-# small apps; Apple sometimes runs slow (minutes), but failing fast
-# on a hung submission isn't useful since the dev loop is blocked
-# either way. If you need to bail out, Ctrl-C and re-run.
 NOTARY_OUTPUT="$(xcrun notarytool submit "${NOTARY_ZIP}" \
     --keychain-profile "${NOTARY_PROFILE}" \
     --wait 2>&1)"
@@ -201,72 +161,66 @@ if [ ${NOTARY_EXIT} -ne 0 ] || ! echo "${NOTARY_OUTPUT}" | grep -q 'status: Acce
     exit 1
 fi
 
-# Staple the issued ticket onto the .app so launchd / Gatekeeper /
-# TCC don't have to phone home to verify notarization on every
-# launch. `xcrun stapler staple` mutates the bundle in place;
-# `validate` confirms the ticket is correctly attached.
 xcrun stapler staple "${BUILD_OUTPUT}" 2>&1 | tail -3
 xcrun stapler validate "${BUILD_OUTPUT}" 2>&1 | tail -1
 
 # 3a. Quit Pacer.app if running, capturing whether it was so we can
-#     re-open at the end. Doing this BEFORE the daemon stop matters
-#     for two reasons: (a) the GUI holds the SwiftData container open
-#     too, and (b) AppleScript quit cleanup is faster on a healthy
-#     daemon than on a missing one.
+#     re-open at the end.
 echo
 echo "==> Quitting any running Pacer.app GUI"
 APP_WAS_RUNNING="$("${REPO_ROOT}/bin/dev-quit-app.sh")"
 
-# 3b. Stop every PacerDaemon — launchctl-managed AND orphan foreground
-#     processes (e.g. one started via `make daemon-fg` or directly by
-#     a previous AI session). Two daemons racing the SwiftData store
-#     causes the SX-zombie failure mode documented in AGENTS.md.
+# 3b. Migrate away from any leftover legacy daemon. Old installs had
+#     a `com.ericandrechek.pacer.daemon.dev` LaunchAgent that's no
+#     longer part of this architecture; bootout the label and remove
+#     the plist so we don't have a zombie daemon racing the new
+#     in-process collection.
 echo
-echo "==> Stopping any running daemon"
-"${REPO_ROOT}/bin/dev-stop-daemon.sh"
+echo "==> Cleaning up legacy daemon registration (if present)"
+bootout_label() {
+    local label="$1"
+    if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+        echo "    bootout: ${label}"
+    fi
+}
+bootout_label "${LEGACY_DEV_LABEL}"
+bootout_label "${LEGACY_SMAPP_LABEL}"
 
-# 4. Replace the installed app. `rm -rf` is safe here because /Applications
-#    is user-owned on macOS for non-system apps, and this script
-#    explicitly targets the Pacer.app inside it.
+if [ -f "${LEGACY_DEV_PLIST}" ]; then
+    rm -f "${LEGACY_DEV_PLIST}"
+    echo "    removed: ${LEGACY_DEV_PLIST}"
+fi
+
+# Kill any orphan daemon process that bootout couldn't reach (e.g. one
+# launched directly via the old `make daemon-fg` flow before this
+# refactor).
+DAEMON_PATH_REGEX='/Pacer\.app/Contents/Library/LaunchServices/PacerDaemon$'
+if pids="$(pgrep -f "${DAEMON_PATH_REGEX}" 2>/dev/null)" && [ -n "${pids}" ]; then
+    # shellcheck disable=SC2086 -- intentional word-split on PID list
+    kill -TERM ${pids} 2>/dev/null || true
+    sleep 2
+    if pids="$(pgrep -f "${DAEMON_PATH_REGEX}" 2>/dev/null)" && [ -n "${pids}" ]; then
+        # shellcheck disable=SC2086
+        kill -KILL ${pids} 2>/dev/null || true
+    fi
+    echo "    killed orphan daemon process(es)"
+fi
+
+# 4. Replace the installed app. /Applications is user-owned on macOS
+#    for non-system apps, and this script explicitly targets just the
+#    Pacer.app inside it.
 echo
 echo "==> Installing to ${INSTALLED_APP}"
 rm -rf "${INSTALLED_APP}"
 cp -R "${BUILD_OUTPUT}" "${INSTALL_DIR}/"
 
-# 5. Ensure log directory exists so launchd can open the files.
+# 5. Ensure log directory exists. The app process writes its own
+#    timestamped log lines into PacerDaemon.err.log here (the file
+#    name is kept for backwards compat with `make logs`).
 echo
 echo "==> Preparing log directory at ${LOG_DIR}"
 mkdir -p "${LOG_DIR}"
-
-# 6. Generate and install the dev LaunchAgent plist. We always
-#    overwrite — the plist content is deterministic from the script,
-#    and there's no useful customization a user would do here.
-echo
-echo "==> Writing dev LaunchAgent plist"
-mkdir -p "$HOME/Library/LaunchAgents"
-"${REPO_ROOT}/bin/dev-launchagent-plist.sh" > "${DEV_PLIST}"
-
-# 7. Register and start. `bootstrap` loads the plist and (because
-#    RunAtLoad=true) immediately starts the daemon. Retry once on EIO:
-#    even with the bootout-and-wait, launchd occasionally needs an
-#    extra moment to release the label.
-echo
-echo "==> Registering daemon with launchd"
-if ! launchctl bootstrap "gui/$(id -u)" "${DEV_PLIST}"; then
-    echo "    bootstrap failed; waiting 2s and retrying once"
-    sleep 2
-    launchctl bootstrap "gui/$(id -u)" "${DEV_PLIST}"
-fi
-
-echo
-echo "==> Verifying"
-sleep 1
-if launchctl print "gui/$(id -u)/${DEV_LABEL}" >/dev/null 2>&1; then
-    pid=$(launchctl print "gui/$(id -u)/${DEV_LABEL}" | awk '/pid =/ {print $3; exit}')
-    echo "    daemon PID: ${pid:-not running yet}"
-else
-    echo "    WARNING: launchctl print did not find the service"
-fi
 
 if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
     echo

@@ -8,6 +8,8 @@ import PacerCore
 struct SettingsView: View {
     var body: some View {
         TabView {
+            GeneralSettingsTab()
+                .tabItem { Label("General", systemImage: "gearshape") }
             MenuBarSettingsTab()
                 .tabItem { Label("Menu Bar", systemImage: "menubar.rectangle") }
             NotificationSettingsTab()
@@ -17,7 +19,82 @@ struct SettingsView: View {
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 500, height: 380)
+        .frame(width: 500, height: 420)
+    }
+}
+
+// MARK: - General tab
+
+private struct GeneralSettingsTab: View {
+    @State private var loginItemStatus: LoginItemController.Status = .unknown
+    @State private var actionError: String?
+
+    /// Toggle is bound to a derived "is the SMAppService.mainApp
+    /// currently registered" view of state, not to a UserDefaults
+    /// flag. macOS owns the source of truth (the user can toggle this
+    /// from System Settings → Login Items too), and reading it back
+    /// from SMAppService keeps Pacer's UI in sync.
+    private var isEnabled: Binding<Bool> {
+        Binding(
+            get: { loginItemStatus == .enabled },
+            set: { newValue in
+                actionError = nil
+                if newValue {
+                    do {
+                        try LoginItemController.register()
+                    } catch {
+                        actionError = "Could not register: \(error.localizedDescription)"
+                    }
+                } else {
+                    Task { @MainActor in
+                        do {
+                            try await LoginItemController.unregister()
+                        } catch {
+                            actionError = "Could not unregister: \(error.localizedDescription)"
+                        }
+                        refresh()
+                    }
+                }
+                refresh()
+            }
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section("Startup") {
+                Toggle("Open Pacer at Login", isOn: isEnabled)
+                if loginItemStatus == .requiresApproval {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Approval required.")
+                            .font(.caption)
+                        Button("Open System Settings") {
+                            LoginItemController.openSystemSettingsApproval()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                if let err = actionError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            Section {
+                Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        loginItemStatus = LoginItemController.currentStatus()
     }
 }
 
@@ -47,7 +124,7 @@ private struct MenuBarSettingsTab: View {
                           || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
             }
             Section {
-                Text("Hiding the menu bar item doesn't disable the daemon — usage is still tracked. The dashboard is always available from the dock.")
+                Text("Hiding the menu bar item doesn't stop tracking — Pacer keeps collecting in the background as long as the app process is running. Open the dashboard from Spotlight or the Dock when needed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

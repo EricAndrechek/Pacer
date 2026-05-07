@@ -4,25 +4,14 @@ import PacerCore
 
 @main
 struct PacerApp: App {
-    let container: ModelContainer
+    /// SwiftUI lifecycle adaptor. The delegate owns the SwiftData
+    /// container, the in-process background service (FSEvents scan
+    /// + OAuth poller), and the Dock-visibility logic. Scenes here
+    /// just project the container into their own environments.
+    @NSApplicationDelegateAdaptor(PacerAppDelegate.self) private var appDelegate
 
     @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
     private var menuBarStyleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
-
-    init() {
-        // Make sure the App Group UserDefaults suite has the right
-        // shape from launch one — `@AppStorage` only honors its
-        // default-value parameter when the key is totally absent;
-        // having `register(defaults:)` fire at app start means a
-        // first-run user sees the same settings as someone who
-        // already changed and reverted them.
-        PacerSettings.registerDefaults()
-        do {
-            container = try PacerStore.makeModelContainer()
-        } catch {
-            fatalError("Failed to open shared SwiftData container: \(error)")
-        }
-    }
 
     private var showMenuBar: Bool {
         menuBarStyleRaw != PacerSettings.MenuBarStyle.hidden.rawValue
@@ -38,21 +27,21 @@ struct PacerApp: App {
                 // foreground lifetime.
                 .background(NotificationsHost())
         }
-        .modelContainer(container)
+        .modelContainer(appDelegate.container)
         .commands {
             CommandGroup(after: .importExport) {
                 Divider()
                 Button("Export Daily Totals…") {
-                    let context = ModelContext(container)
+                    let context = ModelContext(appDelegate.container)
                     CSVExporter.dailyTotals(context: context)
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
                 Button("Export Daily by Model…") {
-                    let context = ModelContext(container)
+                    let context = ModelContext(appDelegate.container)
                     CSVExporter.dailyByModel(context: context)
                 }
                 Button("Export Project Totals…") {
-                    let context = ModelContext(container)
+                    let context = ModelContext(appDelegate.container)
                     CSVExporter.projectTotals(context: context)
                 }
             }
@@ -68,10 +57,10 @@ struct PacerApp: App {
         // toggle visibility from Settings without restarting.
         MenuBarExtra(isInserted: .constant(showMenuBar)) {
             MenuBarContent()
-                .modelContainer(container)
+                .modelContainer(appDelegate.container)
         } label: {
             MenuBarLabel()
-                .modelContainer(container)
+                .modelContainer(appDelegate.container)
         }
         .menuBarExtraStyle(.window)
     }

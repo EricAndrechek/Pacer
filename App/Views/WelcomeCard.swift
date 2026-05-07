@@ -12,14 +12,29 @@ import PacerCore
 /// add a "dismiss" action because the goal is to communicate state,
 /// not to be persistent UI chrome.
 struct WelcomeCard: View {
-    @Query(sort: \TokenSample.sampledAt, order: .reverse) private var tokenSamples: [TokenSample]
-    @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimits: [RateLimitSample]
+    // Existence-only probes. The init() comment used to claim "limit
+    // each query to a single row" but never actually set fetchLimit
+    // — the queries materialized every TokenSample (40k+ rows on a
+    // populated install) on every body re-evaluation, which became
+    // the dominant CPU load now that data collection is in-process
+    // and SwiftData @Query subscribers re-fire on every save. The
+    // explicit fetchLimit=1 descriptor keeps subscription semantics
+    // (the card auto-disappears when the first sample lands) while
+    // capping the fetch cost at a single row.
+    @Query(WelcomeCard.tokenProbe) private var tokenSamples: [TokenSample]
+    @Query(WelcomeCard.rateLimitProbe) private var rateLimits: [RateLimitSample]
 
-    init() {
-        // Limit each query to a single row — we only need to know
-        // whether any rows exist. Avoids materializing thousands of
-        // entities for the existence check.
-    }
+    private static let tokenProbe: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>()
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private static let rateLimitProbe: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>()
+        d.fetchLimit = 1
+        return d
+    }()
 
     private var hasAnyData: Bool {
         !tokenSamples.isEmpty || !rateLimits.isEmpty

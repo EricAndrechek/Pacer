@@ -37,13 +37,19 @@ struct DashboardView: View {
 /// user has at-a-glance confirmation that data is flowing without
 /// having to dig into the Debug tab.
 private struct DashboardHeader: View {
-    @Query(sort: \TokenSample.sampledAt, order: .reverse) private var tokens: [TokenSample]
-    @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimits: [RateLimitSample]
-    /// `last_incremental_scan_at` is updated on every daemon scan
-    /// cycle whether or not new data was inserted, so it's the
-    /// authoritative "daemon is alive" signal. Reading it as a Query
-    /// (vs a one-shot fetch) means the indicator updates the moment
-    /// the daemon writes a scan-meta row.
+    /// Most-recent token + rate-limit samples. We only ever read
+    /// `.first` of each, so cap the fetch at 1 — without the limit,
+    /// SwiftData materializes every TokenSample (40k+ on a populated
+    /// install) on every body re-evaluation, which becomes a hot
+    /// loop now that data collection runs in-process and @Query
+    /// subscribers re-fire on every save.
+    @Query(DashboardHeader.tokenProbe) private var tokens: [TokenSample]
+    @Query(DashboardHeader.rateLimitProbe) private var rateLimits: [RateLimitSample]
+    /// `last_incremental_scan_at` is updated on every scan cycle
+    /// whether or not new data was inserted, so it's the
+    /// authoritative "background service is alive" signal. Reading it
+    /// as a Query (vs a one-shot fetch) means the indicator updates
+    /// the moment a scan-meta row is written.
     @Query private var scanMeta: [ClaudeCodeMeta]
 
     init() {
@@ -53,6 +59,22 @@ private struct DashboardHeader: View {
         let scanKey = ClaudeCodeMetaKey.lastIncrementalScanAt
         _scanMeta = Query(filter: #Predicate<ClaudeCodeMeta> { $0.key == scanKey })
     }
+
+    private static let tokenProbe: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private static let rateLimitProbe: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }()
 
     private var lastDaemonScan: Date? {
         guard let raw = scanMeta.first?.value else { return nil }

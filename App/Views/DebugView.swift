@@ -8,15 +8,30 @@ import PacerCore
 /// data appearing?" questions. Lives behind the Debug tab so it
 /// doesn't clutter the dashboard but isn't lost either.
 struct DebugView: View {
-    @Query(sort: \TokenSample.sampledAt, order: .reverse) private var samples: [TokenSample]
+    // Cap the TokenSample fetch — Debug only renders the 10 most
+    // recent + a count, so materializing all 40k rows on every
+    // body update wastes the @Query refetch path that runs on every
+    // SwiftData save. We separately track the row count via a
+    // dedicated @Query that doesn't materialize the rows themselves.
+    @Query(DebugView.recentSamplesDescriptor) private var samples: [TokenSample]
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
     @Query(sort: \ClaudeCodeMeta.key) private var meta: [ClaudeCodeMeta]
     @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimitSamples: [RateLimitSample]
+    @State private var totalSampleCount: Int = 0
+    @State private var distinctDates: Int = 0
+    @State private var distinctModels: Int = 0
+    @State private var distinctCCVersions: [String] = []
+    @Environment(\.modelContext) private var modelContext
 
-    @State private var launchAgentStatus: LaunchAgentInstaller.CombinedStatus = .init(
-        smAppService: .unknown,
-        devLaunchctl: .notLoaded
-    )
+    private static let recentSamplesDescriptor: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 50
+        return d
+    }()
+
+    @State private var loginItemStatus: LoginItemController.Status = .unknown
     @State private var lastActionMessage: String?
     /// Replaced on each timer tick so the resource panel re-renders
     /// even when the underlying meta row's value hasn't changed (the
@@ -46,6 +61,7 @@ struct DebugView: View {
         .frame(minWidth: 640, minHeight: 600)
         .onAppear {
             refreshStatus()
+            refreshAggregateStats()
         }
         // Tick once a second so the "heartbeat age" string updates
         // even when the daemon isn't writing new values. The actual
@@ -53,6 +69,12 @@ struct DebugView: View {
         // subscription, which fires reactively when the daemon writes.
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
             resourceTick = now
+        }
+        // Recompute aggregate stats whenever the recent-samples query
+        // changes (the cheap proxy for "data updated"). The 50-row
+        // capped fetch is fast even on a 40k-row store.
+        .onChange(of: samples.count) { _, _ in
+            refreshAggregateStats()
         }
     }
 
@@ -116,18 +138,18 @@ struct DebugView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Storage").font(.headline)
             HStack(spacing: 24) {
-                stat("TokenSamples", samples.count)
+                stat("TokenSamples", totalSampleCount)
                 stat("DailyAggregates", aggregates.count)
-                stat("Days covered", Set(samples.map(\.date)).count)
-                stat("Models seen", Set(samples.map(\.model)).count)
+                stat("Days covered", distinctDates)
+                stat("Models seen", distinctModels)
                 stat("RateLimitSamples", rateLimitSamples.count)
             }
-            if !ccVersions.isEmpty {
+            if !distinctCCVersions.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
                     Text("Claude Code versions seen:")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(ccVersions.joined(separator: ", "))
+                    Text(distinctCCVersions.joined(separator: ", "))
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                 }
@@ -135,18 +157,32 @@ struct DebugView: View {
         }
     }
 
-    /// Distinct, sort-descending list of `TokenSample.ccVersion`
-    /// values. Useful when troubleshooting "why does this user have a
-    /// weird parsing edge case" — we can see which Claude Code
-    /// versions are in their history.
-    private var ccVersions: [String] {
-        var seen = Set<String>()
-        for s in samples {
-            if let v = s.ccVersion, !v.isEmpty {
-                seen.insert(v)
+    /// Refresh the aggregate stats (count, distinct dates/models, CC
+    /// versions). Called from `onAppear` so the values are populated
+    /// without materializing every TokenSample on every body update.
+    /// Called again whenever the count of recent samples changes,
+    /// which is a cheap proxy for "data has likely changed."
+    private func refreshAggregateStats() {
+        let descriptor = FetchDescriptor<TokenSample>()
+        totalSampleCount = (try? modelContext.fetchCount(descriptor)) ?? 0
+        // Distinct date/model/version values — fetch once into a set.
+        // Cheaper than @Query because we're not subscribing; the
+        // refresh is gated on samples.count delta below.
+        if let all = try? modelContext.fetch(descriptor) {
+            var dates = Set<String>()
+            var models = Set<String>()
+            var versions = Set<String>()
+            for s in all {
+                dates.insert(s.date)
+                models.insert(s.model)
+                if let v = s.ccVersion, !v.isEmpty {
+                    versions.insert(v)
+                }
             }
+            distinctDates = dates.count
+            distinctModels = models.count
+            distinctCCVersions = versions.sorted(by: >)
         }
-        return seen.sorted(by: >)
     }
 
     private var rateLimitsRawSection: some View {
@@ -204,36 +240,22 @@ struct DebugView: View {
     @ViewBuilder
     private var launchAgentSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("LaunchAgent (PacerDaemon)").font(.headline)
+            Text("Open at Login").font(.headline)
 
-            // Dev launchctl state — typically what's running for daily-
-            // driver use (set up by `make install`). Surfacing it here
-            // means the UI never shows "notFound" while a daemon is
-            // plainly running and writing to the store.
             HStack(spacing: 12) {
-                Text("Dev daemon:")
-                Text(devDaemonText)
+                Text("Status:")
+                Text(loginItemStatus.rawValue)
                     .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(devDaemonColor)
+                    .foregroundStyle(loginItemStatus == .enabled ? .green : .secondary)
                 Spacer()
                 Button("Refresh") { refreshStatus() }
-            }
-
-            // SMAppService state — production registration path. The
-            // Register/Unregister buttons toggle THIS, not the dev
-            // launchctl daemon.
-            HStack(spacing: 12) {
-                Text("SMAppService:")
-                Text(launchAgentStatus.smAppService.rawValue)
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(launchAgentStatus.smAppService == .enabled ? .green : .secondary)
             }
 
             HStack(spacing: 12) {
                 Button("Register") {
                     do {
-                        try LaunchAgentInstaller.register()
-                        lastActionMessage = "Registered. May require approval in System Settings."
+                        try LoginItemController.register()
+                        lastActionMessage = "Registered. May require approval in System Settings → Login Items."
                     } catch {
                         lastActionMessage = "Register failed: \(error.localizedDescription)"
                     }
@@ -242,7 +264,7 @@ struct DebugView: View {
                 Button("Unregister") {
                     Task {
                         do {
-                            try await LaunchAgentInstaller.unregister()
+                            try await LoginItemController.unregister()
                             lastActionMessage = "Unregistered."
                         } catch {
                             lastActionMessage = "Unregister failed: \(error.localizedDescription)"
@@ -251,7 +273,7 @@ struct DebugView: View {
                     }
                 }
                 Button("Open System Settings") {
-                    LaunchAgentInstaller.openSystemSettingsApproval()
+                    LoginItemController.openSystemSettingsApproval()
                 }
             }
             if let msg = lastActionMessage {
@@ -259,28 +281,9 @@ struct DebugView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text("Dev daemon is set up by `make install`; SMAppService is the production path. Pacer never auto-registers either.")
+            Text("Pacer registers the *app itself* via SMAppService.mainApp — the agent-style daemon binary was retired. Background collection runs inside the app process; Open at Login starts it without showing a window. Pacer never auto-registers; the user must flip this on explicitly here or in Settings.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-        }
-    }
-
-    private var devDaemonText: String {
-        switch launchAgentStatus.devLaunchctl {
-        case .running(let pid):
-            return pid.map { "running (PID \($0))" } ?? "running"
-        case .loadedNotRunning:
-            return "loaded, not running"
-        case .notLoaded:
-            return "not loaded"
-        }
-    }
-
-    private var devDaemonColor: Color {
-        switch launchAgentStatus.devLaunchctl {
-        case .running:           return .green
-        case .loadedNotRunning:  return .yellow
-        case .notLoaded:         return .secondary
         }
     }
 
@@ -349,6 +352,6 @@ struct DebugView: View {
     }
 
     private func refreshStatus() {
-        launchAgentStatus = LaunchAgentInstaller.combinedStatus()
+        loginItemStatus = LoginItemController.currentStatus()
     }
 }

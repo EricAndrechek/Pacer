@@ -56,79 +56,24 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Eric Andrechek"
         INFOPLIST_KEY_CFBundleDisplayName: Pacer
+        # LSUIElement=true makes Pacer launch as a macOS "agent" app
+        # by default: no Dock icon, no menu-bar app menu, but visible
+        # menu-bar status item (the SwiftUI MenuBarExtra) and visible
+        # windows when the user opens them. Pacer's AppDelegate
+        # promotes activation policy to .regular when a main window
+        # is visible (so the user has a Dock icon to Cmd+Q from) and
+        # demotes back to .accessory when the last window closes
+        # (so closed-window state is invisible but data collection
+        # continues). This is the same shape Stats/Raycast/Rectangle
+        # use — see docs/research/tcc-app-management.md for why we
+        # adopted it.
+        INFOPLIST_KEY_LSUIElement: YES
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - package: PacerCore
         product: PacerCore
       - target: PacerWidgets
-      # Build the daemon before the app so the post-build script can
-      # copy it into Pacer.app/Contents/Library/LaunchServices/. Marked
-      # link/embed false because we don't want it linked or PlugIns'd
-      # — the embed happens via the postBuildScript below.
-      - target: PacerDaemon
-        link: false
-        embed: false
-    postBuildScripts:
-      # Embed the daemon binary and its LaunchAgent plist inside the
-      # app bundle at the paths SMAppService.agent expects:
-      #   Pacer.app/Contents/Library/LaunchServices/PacerDaemon
-      #   Pacer.app/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist
-      # SMAppService keys off the plist filename and resolves
-      # BundleProgram against the embedding app bundle.
-      - name: "Embed PacerDaemon + LaunchAgent plist"
-        script: |
-          set -eu
-          APP="$TARGET_BUILD_DIR/$WRAPPER_NAME"
-          mkdir -p "$APP/Contents/Library/LaunchServices"
-          mkdir -p "$APP/Contents/Library/LaunchAgents"
-          cp -f "$BUILT_PRODUCTS_DIR/PacerDaemon" "$APP/Contents/Library/LaunchServices/PacerDaemon"
-          cp -f "$SRCROOT/Resources/com.ericandrechek.pacer.daemon.plist" "$APP/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist"
-          # PacerCore is a Swift package with a resource bundle
-          # (litellm-pricing.json). Bundle.module resolves the bundle
-          # by looking next to the executable; for the .app target
-          # Xcode auto-copies it to Contents/Resources/, but tool
-          # targets like PacerDaemon get nothing. Without this copy,
-          # the daemon crashes on first PricingTable access with
-          # "unable to find bundle named PacerCore_PacerCore". Copy
-          # alongside the daemon binary so its Bundle.module lookup
-          # succeeds.
-          if [ -d "$BUILT_PRODUCTS_DIR/PacerCore_PacerCore.bundle" ]; then
-            rm -rf "$APP/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle"
-            cp -R "$BUILT_PRODUCTS_DIR/PacerCore_PacerCore.bundle" "$APP/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle"
-          fi
-        inputFiles:
-          - $(BUILT_PRODUCTS_DIR)/PacerDaemon
-          - $(SRCROOT)/Resources/com.ericandrechek.pacer.daemon.plist
-        outputFiles:
-          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchServices/PacerDaemon
-          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist
-          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchServices/PacerCore_PacerCore.bundle
-
-  PacerDaemon:
-    type: tool
-    platform: macOS
-    sources:
-      - path: Daemon
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.daemon
-        PRODUCT_NAME: PacerDaemon
-        CODE_SIGN_ENTITLEMENTS: Daemon/PacerDaemon.entitlements
-        SKIP_INSTALL: YES
-        # Tool targets don't have an Info.plist with CFBundleIdentifier,
-        # so codesign defaults the signing identifier to the binary name
-        # ("PacerDaemon"). That makes TCC see the daemon as a separate
-        # app from com.ericandrechek.pacer, and accessing the shared App
-        # Group container at ~/Library/Group Containers/group.com.ericandrechek.pacer/
-        # triggers the "Pacer would like to access data from other apps"
-        # prompt every launch on macOS Sequoia 15+. Force the signing
-        # identifier to the bundle ID so TCC recognizes the daemon as a
-        # same-team child of the parent app and waives the prompt.
-        OTHER_CODE_SIGN_FLAGS: "--identifier=com.ericandrechek.pacer.daemon"
-    dependencies:
-      - package: PacerCore
-        product: PacerCore
 
   PacerWidgets:
     type: app-extension

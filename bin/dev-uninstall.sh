@@ -1,14 +1,16 @@
 #!/bin/bash
-# Stop the daemon and the GUI, then remove Pacer.app from /Applications.
-# Preserves the SwiftData store at
+# Quit the GUI and remove Pacer.app from /Applications. Also bootouts
+# any leftover legacy daemon LaunchAgent (from before the single-binary
+# refactor). Preserves the SwiftData store at
 # ~/Library/Group Containers/group.com.ericandrechek.pacer/ and logs
 # at ~/Library/Logs/Pacer/ — neither is touched by this script. Use
 # `make clean-data` for a full nuke.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEV_LABEL="com.ericandrechek.pacer.daemon.dev"
-DEV_PLIST="$HOME/Library/LaunchAgents/${DEV_LABEL}.plist"
+LEGACY_DEV_LABEL="com.ericandrechek.pacer.daemon.dev"
+LEGACY_SMAPP_LABEL="com.ericandrechek.pacer.daemon"
+LEGACY_DEV_PLIST="$HOME/Library/LaunchAgents/${LEGACY_DEV_LABEL}.plist"
 INSTALLED_APP="/Applications/Pacer.app"
 
 echo "==> Pacer dev uninstall"
@@ -19,12 +21,20 @@ echo "==> Pacer dev uninstall"
 echo "==> Quitting any running Pacer.app GUI"
 "${REPO_ROOT}/bin/dev-quit-app.sh" >/dev/null
 
-echo "==> Stopping any running daemon"
-"${REPO_ROOT}/bin/dev-stop-daemon.sh"
+# Migration cleanup: bootout legacy daemon labels and remove the dev
+# plist if any of them still exist. No-ops on a fresh single-binary
+# install.
+echo "==> Cleaning up legacy daemon registration (if present)"
+for label in "${LEGACY_DEV_LABEL}" "${LEGACY_SMAPP_LABEL}"; do
+    if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
+        launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+        echo "    bootout: ${label}"
+    fi
+done
 
-if [ -f "${DEV_PLIST}" ]; then
-    echo "==> Removing dev LaunchAgent plist"
-    rm "${DEV_PLIST}"
+if [ -f "${LEGACY_DEV_PLIST}" ]; then
+    echo "    removed: ${LEGACY_DEV_PLIST}"
+    rm "${LEGACY_DEV_PLIST}"
 fi
 
 if [ -d "${INSTALLED_APP}" ]; then
