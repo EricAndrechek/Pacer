@@ -10,6 +10,15 @@ import PacerCore
 /// The cards stack vertically and scroll. Order is: lifetime headline →
 /// monthly bar chart → top expensive days table.
 struct HistoryView: View {
+    @State private var selectedDay: SelectedDay?
+
+    /// Sheet's `item:` requires Identifiable. Wrapping the raw date
+    /// string keeps the heatmap → detail handoff cheap.
+    struct SelectedDay: Identifiable {
+        let date: String
+        var id: String { date }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -18,12 +27,18 @@ struct HistoryView: View {
                     .padding(.bottom, 4)
 
                 LifetimeSummaryCard()
+                HeatmapCard { dayKey in
+                    selectedDay = SelectedDay(date: dayKey)
+                }
                 MonthlyChartCard()
                 TopDaysCard()
             }
             .padding(24)
         }
         .frame(minWidth: 720, minHeight: 600)
+        .sheet(item: $selectedDay) { sel in
+            DayDetailView(date: sel.date)
+        }
     }
 }
 
