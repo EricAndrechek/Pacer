@@ -96,10 +96,13 @@ struct HeatmapCard: View {
                 legend
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 4) {
-                    weekdayColumn
-                    ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
-                        weekColumn(week)
+                VStack(alignment: .leading, spacing: 2) {
+                    monthLabelRow
+                    HStack(alignment: .top, spacing: 4) {
+                        weekdayColumn
+                        ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
+                            weekColumn(week)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -109,6 +112,50 @@ struct HeatmapCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Month label appears above the first week whose Monday falls
+    /// inside that month. Keeps consecutive duplicates suppressed so
+    /// you don't see "Apr Apr Apr" — only the transition column gets
+    /// the label.
+    @ViewBuilder
+    private var monthLabelRow: some View {
+        // Same width math as the grid below: weekdayColumn(width 12 +
+        // padding 2 = 14) → 12-wide week columns each separated by 4pt.
+        HStack(alignment: .center, spacing: 4) {
+            // weekdayColumn spacer
+            Spacer().frame(width: 14, height: 11)
+            ForEach(Array(grid.enumerated()), id: \.offset) { idx, week in
+                Group {
+                    if let label = monthLabel(for: idx) {
+                        Text(label)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: 12, height: 11, alignment: .leading)
+            }
+        }
+    }
+
+    /// Returns "Apr" / "May" / etc. for the *first* week-of-month a
+    /// new month appears in, nil otherwise. Compares the first Monday
+    /// of the column to the previous column's first Monday.
+    private func monthLabel(for index: Int) -> String? {
+        let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        let cal = Calendar(identifier: .iso8601)
+        guard let monday = grid[index].compactMap({ $0?.date }).first else { return nil }
+        let month = cal.component(.month, from: monday)
+        if index == 0 {
+            return names[month - 1]
+        }
+        guard let prevMonday = grid[index - 1].compactMap({ $0?.date }).first else {
+            return names[month - 1]
+        }
+        let prevMonth = cal.component(.month, from: prevMonday)
+        return month == prevMonth ? nil : names[month - 1]
     }
 
     private var weekdayColumn: some View {
