@@ -11,6 +11,12 @@ struct ContentView: View {
             DashboardView()
                 .tabItem { Label("Dashboard", systemImage: "chart.bar.xaxis") }
 
+            HistoryView()
+                .tabItem { Label("History", systemImage: "calendar") }
+
+            ProjectsView()
+                .tabItem { Label("Projects", systemImage: "folder") }
+
             DebugView()
                 .tabItem { Label("Debug", systemImage: "terminal") }
         }

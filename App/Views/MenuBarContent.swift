@@ -2,40 +2,74 @@ import SwiftUI
 import SwiftData
 import PacerCore
 
-/// What renders in the menu bar status item itself. We use the latest
-/// 5h percentage as the headline glyph (matches the reference-impl plugin's
-/// "rate limits" button hero) — at a glance you know whether you're
-/// near the cap. The icon is the SF Symbol `gauge.with.dots.needle.50percent`
-/// when usage is near full, falling back to `gauge.with.dots.needle.0percent`
-/// when low; the text label sits next to it.
+/// What renders in the menu bar status item. The display is governed by
+/// `PacerSettings.MenuBarStyle` (icon-only / percent-only / both, plus
+/// hidden which is handled at the scene level). The icon glyph itself
+/// is governed by `PacerSettings.MenuBarIconStyle`:
+///   - gaugeNeedle: SF Symbol `gauge.with.dots.needle.*percent` whose
+///                  fill ramps with the current band.
+///   - ringFill:    SF Symbol `circle.dotted` -> filled ring proxies.
+///   - dot:         a colored dot, smallest visual weight.
 ///
-/// Falls back to a plain icon when no rate-limit samples exist yet.
+/// Falls back to a neutral icon when no rate-limit samples exist yet.
 struct MenuBarLabel: View {
     @Query(sort: \RateLimitSample.sampledAt, order: .reverse)
     private var samples: [RateLimitSample]
+
+    @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
+    private var styleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
+
+    @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
+    private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
     private var fiveHour: RateLimitSample? {
         samples.first { $0.window == "five_hour" }
     }
 
+    private var style: PacerSettings.MenuBarStyle {
+        PacerSettings.MenuBarStyle(rawValue: styleRaw) ?? .iconAndPercent
+    }
+
+    private var iconStyle: PacerSettings.MenuBarIconStyle {
+        PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
+    }
+
+    private var band: UsageBand? {
+        fiveHour.map { UsageBand(percentage: $0.usedPercentage) }
+    }
+
     private var symbolName: String {
-        guard let pct = fiveHour?.usedPercentage else {
-            return "gauge.with.dots.needle.0percent"
-        }
-        switch UsageBand(percentage: pct) {
-        case .green:  return "gauge.with.dots.needle.0percent"
-        case .yellow: return "gauge.with.dots.needle.33percent"
-        case .orange: return "gauge.with.dots.needle.67percent"
-        case .red:    return "gauge.with.dots.needle.100percent"
+        switch iconStyle {
+        case .gaugeNeedle:
+            switch band {
+            case .green:        return "gauge.with.dots.needle.0percent"
+            case .yellow:       return "gauge.with.dots.needle.33percent"
+            case .orange:       return "gauge.with.dots.needle.67percent"
+            case .red:          return "gauge.with.dots.needle.100percent"
+            case nil:           return "gauge.with.dots.needle.0percent"
+            }
+        case .ringFill:
+            switch band {
+            case .green, nil:   return "circle.dotted"
+            case .yellow:       return "circle.lefthalf.filled"
+            case .orange:       return "circle.righthalf.filled"
+            case .red:          return "circle.fill"
+            }
+        case .dot:
+            return "circle.fill"
         }
     }
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbolName)
-            if let pct = fiveHour?.usedPercentage {
-                Text("\(Int(pct.rounded()))%")
-                    .monospacedDigit()
+            if style == .iconOnly || style == .iconAndPercent {
+                Image(systemName: symbolName)
+            }
+            if style == .percentOnly || style == .iconAndPercent {
+                if let pct = fiveHour?.usedPercentage {
+                    Text("\(Int(pct.rounded()))%")
+                        .monospacedDigit()
+                }
             }
         }
     }

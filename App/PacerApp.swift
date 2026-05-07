@@ -6,12 +6,26 @@ import PacerCore
 struct PacerApp: App {
     let container: ModelContainer
 
+    @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
+    private var menuBarStyleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
+
     init() {
+        // Make sure the App Group UserDefaults suite has the right
+        // shape from launch one — `@AppStorage` only honors its
+        // default-value parameter when the key is totally absent;
+        // having `register(defaults:)` fire at app start means a
+        // first-run user sees the same settings as someone who
+        // already changed and reverted them.
+        PacerSettings.registerDefaults()
         do {
             container = try PacerStore.makeModelContainer()
         } catch {
             fatalError("Failed to open shared SwiftData container: \(error)")
         }
+    }
+
+    private var showMenuBar: Bool {
+        menuBarStyleRaw != PacerSettings.MenuBarStyle.hidden.rawValue
     }
 
     var body: some Scene {
@@ -20,10 +34,15 @@ struct PacerApp: App {
         }
         .modelContainer(container)
 
-        // Menu bar status item — at-a-glance 5h rate-limit %, click for
-        // a compact popover with both windows and today's totals.
-        // Dashboard remains the detail view.
-        MenuBarExtra {
+        // Standard macOS Settings scene — opened via Cmd+, or the
+        // app menu's "Settings..." item. Lives in its own window.
+        Settings {
+            SettingsView()
+        }
+
+        // Menu bar status item. We use `isInserted` so the user can
+        // toggle visibility from Settings without restarting.
+        MenuBarExtra(isInserted: .constant(showMenuBar)) {
             MenuBarContent()
                 .modelContainer(container)
         } label: {
