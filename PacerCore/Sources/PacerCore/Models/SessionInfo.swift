@@ -7,8 +7,11 @@ import SwiftData
 /// cross-file `dedupKey` guard on `TokenSample`).
 ///
 /// Cumulative columns are denormalized roll-ups of this session's
-/// `TokenSample` rows. Recomputed alongside `DailyAggregate` so the
-/// "session" IPC method has constant-time reads.
+/// `TokenSample` rows. Recomputed by `SessionInfoRecomputer` whenever the
+/// session's bucket gets dirtied during a scan, just like
+/// `DailyAggregate` and `ProjectDailyAggregate`. With this table
+/// maintained, `ProjectDetailView`'s sessions list reads from a small
+/// precomputed set instead of iterating raw samples on display.
 @Model
 public final class SessionInfo {
     @Attribute(.unique) public var sessionId: String
@@ -16,15 +19,16 @@ public final class SessionInfo {
     public var lastSeenAt: Date
     public var projectPath: String
     public var ccVersion: String?
-    public var transcriptPath: String?
     public var cumulativeCostUSD: Double
     public var cumulativeInputTokens: Int64
     public var cumulativeOutputTokens: Int64
-    /// `"active"` or `"ended"`. A session is `active` while its
-    /// transcript file's mtime is fresh (within the active-window we
-    /// pick later — likely 30min) and `ended` otherwise. Stored so
-    /// queries don't have to recompute per-read.
-    public var status: String
+    public var cumulativeCacheReadTokens: Int64
+    public var cumulativeCacheCreation5mTokens: Int64
+    public var cumulativeCacheCreation1hTokens: Int64
+    /// Model that contributed the most tokens in this session — driver
+    /// for the "model" column in the sessions list. Ties broken
+    /// arbitrarily; ties at zero stay as the first-seen model.
+    public var topModel: String
 
     public init(
         sessionId: String,
@@ -32,21 +36,31 @@ public final class SessionInfo {
         lastSeenAt: Date,
         projectPath: String,
         ccVersion: String? = nil,
-        transcriptPath: String? = nil,
         cumulativeCostUSD: Double = 0,
         cumulativeInputTokens: Int64 = 0,
         cumulativeOutputTokens: Int64 = 0,
-        status: String = "active"
+        cumulativeCacheReadTokens: Int64 = 0,
+        cumulativeCacheCreation5mTokens: Int64 = 0,
+        cumulativeCacheCreation1hTokens: Int64 = 0,
+        topModel: String = ""
     ) {
         self.sessionId = sessionId
         self.firstSeenAt = firstSeenAt
         self.lastSeenAt = lastSeenAt
         self.projectPath = projectPath
         self.ccVersion = ccVersion
-        self.transcriptPath = transcriptPath
         self.cumulativeCostUSD = cumulativeCostUSD
         self.cumulativeInputTokens = cumulativeInputTokens
         self.cumulativeOutputTokens = cumulativeOutputTokens
-        self.status = status
+        self.cumulativeCacheReadTokens = cumulativeCacheReadTokens
+        self.cumulativeCacheCreation5mTokens = cumulativeCacheCreation5mTokens
+        self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
+        self.topModel = topModel
+    }
+}
+
+extension SessionInfo {
+    public var totalTokens: Int64 {
+        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
     }
 }

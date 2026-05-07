@@ -56,6 +56,7 @@ public final class ScanCoordinator {
         public let persisterStats: SamplePersister.Stats
         public let recomputeStats: AggregateRecomputer.Stats
         public let projectRecomputeStats: ProjectAggregateRecomputer.Stats
+        public let sessionRecomputeStats: SessionInfoRecomputer.Stats
         public let probeResult: StatsCacheProbe.ProbeResult?
         public let durationSeconds: Double
     }
@@ -253,6 +254,15 @@ public final class ScanCoordinator {
             activePersister.addDirtyProjectDates(recoveryProjectPairs)
             log("integrity: \(recoveryProjectPairs.count) (project,date) bucket(s) missing project aggregates - rebuilding")
         }
+        // Same recovery path for SessionInfo. Bootstraps the rollup
+        // table for users upgrading from a build that didn't maintain
+        // it; afterwards incremental scans only touch the sessions
+        // they actually wrote into.
+        let recoverySessionIds = activePersister.consumeMissingSessionIds()
+        if !recoverySessionIds.isEmpty {
+            activePersister.addDirtySessionIds(recoverySessionIds)
+            log("integrity: \(recoverySessionIds.count) session(s) missing SessionInfo rows - rebuilding")
+        }
         let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
@@ -278,7 +288,10 @@ public final class ScanCoordinator {
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
 
         let projectRecomputer = ProjectAggregateRecomputer(context: context)
-        let projectRecomputeStats = try projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
+        let projectRecomputeStats = try await projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
+
+        let sessionRecomputer = SessionInfoRecomputer(context: context)
+        let sessionRecomputeStats = try await sessionRecomputer.recompute(sessionIds: activePersister.dirtySessionIds)
 
         var probeResult: StatsCacheProbe.ProbeResult?
         if let probe {
@@ -314,6 +327,7 @@ public final class ScanCoordinator {
             persisterStats: cycleStats,
             recomputeStats: recomputeStats,
             projectRecomputeStats: projectRecomputeStats,
+            sessionRecomputeStats: sessionRecomputeStats,
             probeResult: probeResult,
             durationSeconds: Date().timeIntervalSince(started)
         )
@@ -420,7 +434,7 @@ public final class ScanCoordinator {
     /// twice (duplication was a cosmetic bug in earlier versions).
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
     }
 }
 

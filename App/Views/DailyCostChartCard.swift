@@ -11,35 +11,22 @@ import PacerCore
 struct DailyCostChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
-    @Query(DailyCostChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Hover/selection target. macOS Charts binds the X-value on
     /// pointer move; we look it up in `dailyTotals` to render the
     /// callout. Nil → no hover, hide overlay.
     @State private var selectedDate: String?
-    @State private var cached = Cached()
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
-
-    /// `dailyTotals` plus the precomputed annotation set. Without the
-    /// cached set, `shouldAnnotate` re-sorted the full series for
-    /// every bar (30 bars × O(n log n)) on every body re-eval.
-    private struct Cached {
-        var dailyTotals: [DailyTotal] = []
-        var annotateDates: Set<String> = []
-        var totalCost: Double = 0
+    /// Last-30-days totals + the top-3 annotation set, derived from
+    /// the precomputed daily aggregate. `aggregates` is hundreds of
+    /// rows max; one pass per body re-eval is sub-ms.
+    private struct Derived {
+        let dailyTotals: [DailyTotal]
+        let annotateDates: Set<String>
+        let totalCost: Double
     }
 
-    private var dailyTotals: [DailyTotal] { cached.dailyTotals }
-
-    private func refreshCache() {
-        // Group by date (trim model dimension), sort ascending so the
-        // chart reads left-to-right oldest → today.
+    private var derived: Derived {
         let grouped = Dictionary(grouping: aggregates, by: \.date)
         let sortedDates = grouped.keys.sorted()
         let lastN = sortedDates.suffix(30)
@@ -51,67 +38,61 @@ struct DailyCostChartCard: View {
                 tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens }
             )
         }
-        let topThree = Set(
-            totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date)
-        )
-        cached = Cached(
+        let topThree = Set(totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date))
+        return Derived(
             dailyTotals: totals,
             annotateDates: topThree,
             totalCost: totals.reduce(0) { $0 + $1.cost }
         )
     }
 
+    private var dailyTotals: [DailyTotal] { derived.dailyTotals }
+
     var body: some View {
+        let d = derived
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("30-day cost")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                if cached.totalCost > 0 {
-                    Text("total: \(formatCost(cached.totalCost))")
+                if d.totalCost > 0 {
+                    Text("total: \(formatCost(d.totalCost))")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if dailyTotals.isEmpty {
+            if d.dailyTotals.isEmpty {
                 Text("No daily aggregates yet.")
                     .foregroundStyle(.secondary)
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 200)
             } else {
-                chart
+                chart(annotateDates: d.annotateDates)
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
-    @ChartContentBuilder
-    private var chartContent: some ChartContent {
-        ForEach(dailyTotals) { d in
-            BarMark(
-                x: .value("Date", d.date),
-                y: .value("Cost", d.cost)
-            )
-            .foregroundStyle(barColor(for: d.cost))
-            .annotation(position: .top, alignment: .center, spacing: 2) {
-                if shouldAnnotate(d) {
-                    Text(formatCost(d.cost))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.secondary)
+    private func chart(annotateDates: Set<String>) -> some View {
+        Chart {
+            ForEach(dailyTotals) { d in
+                BarMark(
+                    x: .value("Date", d.date),
+                    y: .value("Cost", d.cost)
+                )
+                .foregroundStyle(barColor(for: d.cost))
+                .annotation(position: .top, alignment: .center, spacing: 2) {
+                    if annotateDates.contains(d.date) {
+                        Text(formatCost(d.cost))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-        }
-    }
-
-    private var chart: some View {
-        Chart {
-            chartContent
             // Highlight the hovered bar with a subtle outline rule so
             // the callout has something to point at.
             if let selectedDate, dailyTotals.contains(where: { $0.date == selectedDate }) {
@@ -176,14 +157,6 @@ struct DailyCostChartCard: View {
         guard !dailyTotals.isEmpty else { return [] }
         return stride(from: 0, to: dailyTotals.count, by: n)
             .map { dailyTotals[$0].date }
-    }
-
-    /// Annotate only the top few cost days so the chart isn't a wall
-    /// of overlapping labels. The set is precomputed in `refreshCache`
-    /// so each bar's annotation is an O(1) lookup, not an O(n log n)
-    /// re-sort per bar.
-    private func shouldAnnotate(_ d: DailyTotal) -> Bool {
-        cached.annotateDates.contains(d.date)
     }
 
     private func barColor(for cost: Double) -> Color {

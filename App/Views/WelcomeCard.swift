@@ -4,9 +4,8 @@ import PacerCore
 
 /// First-run welcome card. Rendered at the top of the dashboard
 /// whenever the SwiftData store has zero `TokenSample` and zero
-/// `RateLimitSample` rows — i.e. the daemon has never written
-/// anything. The copy explains what's happening and what they can
-/// do next.
+/// `RateLimitSample` rows — i.e. Pacer has never written anything.
+/// The copy explains what's happening and what they can do next.
 ///
 /// Disappears the moment any data lands; we deliberately don't
 /// add a "dismiss" action because the goal is to communicate state,
@@ -73,7 +72,7 @@ struct WelcomeCard: View {
                     )
                 }
                 .padding(.vertical, 4)
-                Text("If nothing appears within a minute, check the Debug tab — the daemon may need to be approved in System Settings on first launch.")
+                Text("If nothing appears within a minute, check the Debug tab — first launch may need a one-time approval in System Settings → Privacy & Security.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

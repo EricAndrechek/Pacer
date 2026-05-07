@@ -17,10 +17,15 @@ struct DebugView: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
     @Query(sort: \ClaudeCodeMeta.key) private var meta: [ClaudeCodeMeta]
     @Query(sort: \RateLimitSample.sampledAt, order: .reverse) private var rateLimitSamples: [RateLimitSample]
+    /// Per-session rollup. Used here for diagnostics — distinct
+    /// ccVersions seen across sessions, plus the total session count.
+    /// Way smaller than the underlying TokenSample table, so iterating
+    /// in body is fine.
+    @Query private var sessions: [SessionInfo]
+    /// `TokenSample` count via a no-fetch descriptor — `fetchCount`
+    /// avoids materializing rows. Refreshed via the recent-samples
+    /// query subscription, which fires whenever new tokens land.
     @State private var totalSampleCount: Int = 0
-    @State private var distinctDates: Int = 0
-    @State private var distinctModels: Int = 0
-    @State private var distinctCCVersions: [String] = []
     @Environment(\.modelContext) private var modelContext
 
     private static let recentSamplesDescriptor: FetchDescriptor<TokenSample> = {
@@ -61,7 +66,7 @@ struct DebugView: View {
         .frame(minWidth: 640, minHeight: 600)
         .onAppear {
             refreshStatus()
-            refreshAggregateStats()
+            refreshSampleCount()
         }
         // Tick once a second so the "heartbeat age" string updates
         // even when the daemon isn't writing new values. The actual
@@ -70,11 +75,11 @@ struct DebugView: View {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
             resourceTick = now
         }
-        // Recompute aggregate stats whenever the recent-samples query
-        // changes (the cheap proxy for "data updated"). The 50-row
-        // capped fetch is fast even on a 40k-row store.
+        // Refresh the row count whenever the recent-samples query
+        // fires (cheap proxy for "data updated"). `fetchCount` is a
+        // count-only SQL query, so this stays sub-ms even on 40k rows.
         .onChange(of: samples.count) { _, _ in
-            refreshAggregateStats()
+            refreshSampleCount()
         }
     }
 
@@ -142,6 +147,7 @@ struct DebugView: View {
                 stat("DailyAggregates", aggregates.count)
                 stat("Days covered", distinctDates)
                 stat("Models seen", distinctModels)
+                stat("Sessions", sessions.count)
                 stat("RateLimitSamples", rateLimitSamples.count)
             }
             if !distinctCCVersions.isEmpty {
@@ -157,21 +163,38 @@ struct DebugView: View {
         }
     }
 
-    /// Refresh the aggregate stats (count, distinct dates/models, CC
-    /// versions). The fetch + iteration runs on a background
-    /// `RollupWorker` so opening the Debug tab doesn't freeze the UI
-    /// while SwiftData materializes 30k+ TokenSamples — that was the
-    /// ~1s click lag the user was seeing.
-    private func refreshAggregateStats() {
-        let container = modelContext.container
-        Task {
-            let worker = RollupWorker(modelContainer: container)
-            let stats = await worker.debugAggregateStats()
-            totalSampleCount = stats.totalSampleCount
-            distinctDates = stats.distinctDates
-            distinctModels = stats.distinctModels
-            distinctCCVersions = stats.distinctVersions
+    /// Distinct dates seen, derived from the precomputed daily
+    /// aggregate rows. Sub-ms — DailyAggregate is a small table.
+    private var distinctDates: Int {
+        var set = Set<String>()
+        for r in aggregates { set.insert(r.date) }
+        return set.count
+    }
+
+    /// Distinct models seen across all daily aggregates.
+    private var distinctModels: Int {
+        var set = Set<String>()
+        for r in aggregates { set.insert(r.model) }
+        return set.count
+    }
+
+    /// Distinct ccVersion strings observed across SessionInfo rows.
+    /// Sessions are 1-2 orders of magnitude smaller than TokenSamples,
+    /// and we only need the version field which SessionInfo carries.
+    private var distinctCCVersions: [String] {
+        var set = Set<String>()
+        for s in sessions {
+            if let v = s.ccVersion, !v.isEmpty { set.insert(v) }
         }
+        return set.sorted(by: >)
+    }
+
+    /// `TokenSample` row count via `fetchCount` — runs as a SQL
+    /// COUNT(*) without materializing any rows, so it stays sub-ms
+    /// even on a 40k-row store.
+    private func refreshSampleCount() {
+        let count = (try? modelContext.fetchCount(FetchDescriptor<TokenSample>())) ?? 0
+        totalSampleCount = count
     }
 
     private var rateLimitsRawSection: some View {

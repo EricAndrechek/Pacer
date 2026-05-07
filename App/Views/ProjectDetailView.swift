@@ -10,8 +10,10 @@ import PacerCore
 ///   - Models-used pie chart
 ///   - Recent sessions list (sessionId, last seen, model)
 ///
-/// Reads `TokenSample` filtered to the given path. The same range
-/// picker as the parent list is honored by the caller via `since`.
+/// Reads `ProjectDailyAggregate` and `SessionInfo` directly — both are
+/// precomputed by the daemon's recomputers, so the view never iterates
+/// raw `TokenSample`s. The same range picker as the parent list is
+/// honored by the caller via `since`.
 struct ProjectDetailView: View {
     let projectPath: String
     let displayName: String
@@ -22,17 +24,12 @@ struct ProjectDetailView: View {
     /// and (optionally) range. Totals, daily series, and per-model
     /// breakdown come from this — instant; no sample iteration.
     @Query private var aggregates: [ProjectDailyAggregate]
-    /// Sessions list still comes from a worker pass over raw samples
-    /// because we don't yet maintain a per-session aggregate. The
-    /// data is small (one project's samples in the range) and the
-    /// summary cards above render instantly from `aggregates` while
-    /// this loads in the background.
-    @Environment(\.modelContext) private var modelContext
-    @Query(ProjectDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-
-    @State private var sessions: [ProjectDetailRollup.SessionRow] = []
-    @State private var sessionsLoaded = false
-    @State private var refreshGen: Int = 0
+    /// Pre-computed per-session rollup, filtered to this project and
+    /// range. SessionInfoRecomputer keeps these rows current alongside
+    /// the daily/project aggregates so the sessions list renders
+    /// instantly from a small precomputed set instead of iterating
+    /// raw TokenSamples on every open.
+    @Query private var sessionRows: [SessionInfo]
 
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
@@ -47,20 +44,25 @@ struct ProjectDetailView: View {
                 },
                 sort: \.date
             )
+            _sessionRows = Query(
+                filter: #Predicate<SessionInfo> {
+                    $0.projectPath == path && $0.lastSeenAt >= cutoffDate
+                },
+                sort: \.lastSeenAt,
+                order: .reverse
+            )
         } else {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.projectPath == path },
                 sort: \.date
             )
+            _sessionRows = Query(
+                filter: #Predicate<SessionInfo> { $0.projectPath == path },
+                sort: \.lastSeenAt,
+                order: .reverse
+            )
         }
     }
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private struct Totals {
         var cost: Double = 0
@@ -129,21 +131,6 @@ struct ProjectDetailView: View {
         }.sorted { $0.tokens > $1.tokens }
     }
 
-    private func refreshSessions() {
-        let container = modelContext.container
-        let path = projectPath
-        let cutoff = since
-        refreshGen &+= 1
-        let myGen = refreshGen
-        Task {
-            let worker = RollupWorker(modelContainer: container)
-            let result = await worker.projectDetail(projectPath: path, since: cutoff)
-            guard myGen == refreshGen else { return }
-            sessions = result.sessions
-            sessionsLoaded = true
-        }
-    }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -155,30 +142,13 @@ struct ProjectDetailView: View {
                 if !modelSlices.isEmpty {
                     modelsCard
                 }
-                if sessionsLoaded && !sessions.isEmpty {
+                if !sessionRows.isEmpty {
                     sessionsCard
-                } else if !sessionsLoaded {
-                    sessionsLoadingCard
                 }
             }
             .padding(24)
         }
         .frame(minWidth: 640, idealWidth: 720, minHeight: 540, idealHeight: 700)
-        .onAppear { refreshSessions() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshSessions() }
-    }
-
-    private var sessionsLoadingCard: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Loading sessions…")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var header: some View {
@@ -295,11 +265,11 @@ struct ProjectDetailView: View {
             HStack {
                 Text("Sessions").font(.headline)
                 Spacer()
-                Text("\(sessions.count) total")
+                Text("\(sessionRows.count) total")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ForEach(Array(sessions.prefix(20))) { row in
+            ForEach(Array(sessionRows.prefix(20)), id: \.sessionId) { row in
                 HStack(alignment: .firstTextBaseline) {
                     Text(String(row.sessionId.prefix(8)))
                         .font(.system(.caption, design: .monospaced))
@@ -313,17 +283,17 @@ struct ProjectDetailView: View {
                     Text(formatTokens(row.totalTokens))
                         .font(.system(.caption, design: .monospaced))
                         .frame(width: 80, alignment: .trailing)
-                    Text(formatCost(row.cost))
+                    Text(formatCost(row.cumulativeCostUSD))
                         .font(.system(.caption, design: .monospaced).weight(.semibold))
                         .frame(width: 70, alignment: .trailing)
-                    Text(relative(row.lastSeen))
+                    Text(relative(row.lastSeenAt))
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .frame(width: 90, alignment: .trailing)
                 }
             }
-            if sessions.count > 20 {
-                Text("…and \(sessions.count - 20) more")
+            if sessionRows.count > 20 {
+                Text("…and \(sessionRows.count - 20) more")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

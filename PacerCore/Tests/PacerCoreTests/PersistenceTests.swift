@@ -13,6 +13,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         RateLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
+        JSONLFileCursor.self,
         configurations: config
     )
 }
@@ -356,7 +357,7 @@ private func makeEntry(
 // MARK: - ProjectAggregateRecomputer
 
 @MainActor
-@Test func projectAggregateRecomputerUpsertsBucket() throws {
+@Test func projectAggregateRecomputerUpsertsBucket() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
     let persister = try SamplePersister(context: context)
@@ -378,7 +379,7 @@ private func makeEntry(
     try persister.flush()
 
     let recomputer = ProjectAggregateRecomputer(context: context)
-    let stats = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+    let stats = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
     #expect(stats.pairsRecomputed == 2)
     #expect(stats.aggregatesUpserted == 2)
 
@@ -398,7 +399,7 @@ private func makeEntry(
 }
 
 @MainActor
-@Test func projectAggregateRecomputerHandlesMissingProjectPath() throws {
+@Test func projectAggregateRecomputerHandlesMissingProjectPath() async throws {
     // Samples with `projectPath == nil` land in the "(unknown)" bucket
     // so they still show up in the Projects list.
     let container = try makeInMemoryContainer()
@@ -411,7 +412,7 @@ private func makeEntry(
     try persister.flush()
 
     let recomputer = ProjectAggregateRecomputer(context: context)
-    _ = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+    _ = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
 
     let aggregates = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
     #expect(aggregates.count == 1)
@@ -419,7 +420,7 @@ private func makeEntry(
 }
 
 @MainActor
-@Test func projectAggregateRecomputerBulkPathBackfill() throws {
+@Test func projectAggregateRecomputerBulkPathBackfill() async throws {
     // 64+ dirty pairs should take the bulk path: one fetch + group
     // instead of N small fetches. Verify it produces the same rows
     // either way.
@@ -441,11 +442,169 @@ private func makeEntry(
     try persister.flush()
 
     let recomputer = ProjectAggregateRecomputer(context: context)
-    let stats = try recomputer.recompute(pairs: persister.dirtyProjectDates)
+    let stats = try await recomputer.recompute(pairs: persister.dirtyProjectDates)
     #expect(stats.pairsRecomputed == 70)
     #expect(stats.aggregatesUpserted == 70)
     #expect(try context.fetchCount(FetchDescriptor<ProjectDailyAggregate>()) == 70)
 }
+
+// MARK: - SessionInfoRecomputer
+
+@MainActor
+@Test func sessionRecomputerRollsUpPerSession() async throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    let later = day.addingTimeInterval(3_600)
+    _ = try persister.insert(makeEntry(
+        timestamp: day, model: "claude-opus-4-7",
+        input: 100, output: 50, cacheRead: 10,
+        storedCost: 0.10, dedup: "a:1",
+        sessionId: "sess-A", projectPath: "/p1"))
+    _ = try persister.insert(makeEntry(
+        timestamp: later, model: "claude-sonnet-4-6",
+        input: 5, output: 5, cacheRead: 0,
+        storedCost: 0.02, dedup: "b:1",
+        sessionId: "sess-A", projectPath: "/p1"))
+    _ = try persister.insert(makeEntry(
+        timestamp: day, model: "claude-opus-4-7",
+        input: 1, output: 1, cacheRead: 1,
+        storedCost: 0.01, dedup: "c:1",
+        sessionId: "sess-B", projectPath: "/p2"))
+    try persister.flush()
+
+    let recomputer = SessionInfoRecomputer(context: context)
+    let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
+    #expect(stats.sessionsRecomputed == 2)
+    #expect(stats.sessionsUpserted == 2)
+
+    let sessions = try context.fetch(FetchDescriptor<SessionInfo>(
+        sortBy: [SortDescriptor(\.sessionId)]
+    ))
+    #expect(sessions.count == 2)
+
+    let a = sessions.first { $0.sessionId == "sess-A" }!
+    #expect(a.firstSeenAt == day)
+    #expect(a.lastSeenAt == later)
+    #expect(a.projectPath == "/p1")
+    #expect(a.cumulativeInputTokens == 105)
+    #expect(a.cumulativeOutputTokens == 55)
+    #expect(a.cumulativeCacheReadTokens == 10)
+    #expect(abs(a.cumulativeCostUSD - 0.12) < 0.0001)
+    // sess-A's opus turn was 160 tokens vs sonnet's 10 — opus tops.
+    #expect(a.topModel == "claude-opus-4-7")
+
+    let b = sessions.first { $0.sessionId == "sess-B" }!
+    #expect(b.totalTokens == 3)
+    #expect(b.topModel == "claude-opus-4-7")
+}
+
+@MainActor
+@Test func sessionRecomputerSkipsEntriesWithoutSessionId() async throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    _ = try persister.insert(makeEntry(timestamp: day, dedup: "a:1", sessionId: nil))
+    _ = try persister.insert(makeEntry(timestamp: day, dedup: "b:1", sessionId: ""))
+    try persister.flush()
+
+    #expect(persister.dirtySessionIds.isEmpty)
+
+    let recomputer = SessionInfoRecomputer(context: context)
+    let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
+    #expect(stats.sessionsRecomputed == 0)
+    #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 0)
+}
+
+@MainActor
+@Test func sessionRecomputerUpsertsOnSecondPass() async throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    _ = try persister.insert(makeEntry(
+        timestamp: day, input: 100, dedup: "a:1",
+        sessionId: "sess-A", projectPath: "/p1"))
+    try persister.flush()
+    let recomputer = SessionInfoRecomputer(context: context)
+    _ = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
+
+    persister.clearDirtyPairs()
+    let later = day.addingTimeInterval(60)
+    _ = try persister.insert(makeEntry(
+        timestamp: later, input: 50, dedup: "b:1",
+        sessionId: "sess-A", projectPath: "/p1"))
+    try persister.flush()
+    _ = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
+
+    let sessions = try context.fetch(FetchDescriptor<SessionInfo>())
+    #expect(sessions.count == 1)
+    #expect(sessions[0].cumulativeInputTokens == 150)
+    #expect(sessions[0].lastSeenAt == later)
+}
+
+@MainActor
+@Test func sessionRecomputerBulkPathBackfill() async throws {
+    // 64+ dirty session ids should take the bulk path: one fetch +
+    // group instead of N small fetches. Verify we still get all
+    // SessionInfo rows back.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let baseDay = Date(timeIntervalSince1970: 1_756_800_000)
+    for i in 0..<70 {
+        _ = try persister.insert(makeEntry(
+            timestamp: baseDay.addingTimeInterval(Double(i) * 60),
+            storedCost: 0.01,
+            dedup: "row-\(i)",
+            sessionId: "sess-\(i)",
+            projectPath: "/p\(i % 5)"))
+    }
+    try persister.flush()
+
+    let recomputer = SessionInfoRecomputer(context: context)
+    let stats = try await recomputer.recompute(sessionIds: persister.dirtySessionIds)
+    #expect(stats.sessionsRecomputed == 70)
+    #expect(stats.sessionsUpserted == 70)
+    #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 70)
+}
+
+@MainActor
+@Test func samplePersisterRecoversMissingSessionIds() throws {
+    // Backfill case: TokenSamples already exist with sessionIds but
+    // there are no SessionInfo rows. The persister should surface
+    // every distinct sessionId as missing.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "a:1", sessionId: "sess-A", projectPath: "/p1")))
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "b:1", sessionId: "sess-A", projectPath: "/p1")))
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "c:1", sessionId: "sess-B", projectPath: "/p2")))
+    // Session-less sample shouldn't show up in the recovery set.
+    context.insert(TokenSample(from: makeEntry(
+        timestamp: day, dedup: "d:1", sessionId: nil)))
+    try context.save()
+
+    let persister = try SamplePersister(context: context)
+    let recovered = persister.consumeMissingSessionIds()
+    #expect(recovered.count == 2)
+    #expect(recovered.contains("sess-A"))
+    #expect(recovered.contains("sess-B"))
+    // One-shot drain.
+    #expect(persister.consumeMissingSessionIds().isEmpty)
+}
+
+// MARK: - missing-project-aggregate recovery (existing test below)
 
 @MainActor
 @Test func samplePersisterRecoversMissingProjectAggregatePairs() throws {

@@ -12,6 +12,11 @@ import PacerCore
 struct LiveActivityCard: View {
     @Query private var recentSamples: [TokenSample]
     @Query private var todayAggregates: [DailyAggregate]
+    /// Most-recent sample (any age). When the last-hour set is empty
+    /// we use this to show "last activity: Xh ago" instead of a flat
+    /// "no samples" message — much more useful when the user comes
+    /// back to the dashboard after a break.
+    @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
     /// Lightweight signal that the scan loop just ran; drives cache
     /// invalidation without forcing a fetch of recentSamples on every
     /// body refresh.
@@ -36,6 +41,17 @@ struct LiveActivityCard: View {
         return FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
         )
+    }()
+
+    /// Single-row "what was the last sample, ever" probe — capped at
+    /// 1 row so SwiftData doesn't materialize the full table on every
+    /// save. Same fetchLimit pattern as DashboardHeader.
+    private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
     }()
 
     private struct LiveStats {
@@ -109,10 +125,29 @@ struct LiveActivityCard: View {
         .onChange(of: scanMeta.first?.value) { _, _ in refreshStats() }
     }
 
+    @ViewBuilder
     private var emptyState: some View {
-        Text("No samples in the last hour. The card will light up as Claude Code activity hits the store.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        if let latest = latestSamples.first {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("No traffic in the last hour.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Last sample \(relative(latest.sampledAt)) — \(shortModel(latest.model)).")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text("No samples yet. This card will light up as Claude Code activity hits the store.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func shortModel(_ name: String) -> String {
+        if let lastSlash = name.lastIndex(of: "/") {
+            return String(name[name.index(after: lastSlash)...])
+        }
+        return name
     }
 
     private var row: some View {

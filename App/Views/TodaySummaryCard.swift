@@ -8,17 +8,13 @@ import PacerCore
 /// card surfaces what we know from JSONL, the gauges card surfaces
 /// what we know from the OAuth endpoint.
 struct TodaySummaryCard: View {
-    /// Today-only aggregates. Read only via `refreshCache()`.
+    /// Today-only aggregates from the precomputed (date, model) rollup.
+    /// At most ~6 rows — direct iteration in body is sub-millisecond.
     @Query private var aggregates: [DailyAggregate]
 
-    /// Last 7 calendar days (today + previous 6). Used for the "vs 7-day
-    /// average" chip. Read only via `refreshCache()`.
+    /// Last 7 calendar days (today + previous 6) for the "vs 7-day
+    /// average" chip. ≤7 dates × 6 models ~= 42 rows max.
     @Query private var lastWeekAggregates: [DailyAggregate]
-
-    /// Cheap single-row probe — drives cache refresh.
-    @Query(TodaySummaryCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-
-    @State private var cached = Cached()
 
     init() {
         let todayString = TokenSample.formatDate(Date())
@@ -35,13 +31,6 @@ struct TodaySummaryCard: View {
         )
     }
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
-
     private struct WeekComparison {
         let todayCost: Double
         let priorAvgCost: Double
@@ -52,15 +41,9 @@ struct TodaySummaryCard: View {
         }
     }
 
-    private struct Cached {
-        var totals = Totals(rows: [])
-        var weekComparison = WeekComparison(todayCost: 0, priorAvgCost: 0, activeDays: 0)
-    }
+    private var totals: Totals { Totals(rows: aggregates) }
 
-    private var totals: Totals { cached.totals }
-    private var weekComparison: WeekComparison { cached.weekComparison }
-
-    private func refreshCache() {
+    private var weekComparison: WeekComparison {
         let todayString = TokenSample.formatDate(Date())
         var todayCost: Double = 0
         var priorByDate: [String: Double] = [:]
@@ -74,10 +57,7 @@ struct TodaySummaryCard: View {
         let activeDays = priorByDate.values.filter { $0 > 0.01 }.count
         let totalPrior = priorByDate.values.reduce(0, +)
         let avg = activeDays > 0 ? totalPrior / Double(activeDays) : 0
-        cached = Cached(
-            totals: Totals(rows: aggregates),
-            weekComparison: WeekComparison(todayCost: todayCost, priorAvgCost: avg, activeDays: activeDays)
-        )
+        return WeekComparison(todayCost: todayCost, priorAvgCost: avg, activeDays: activeDays)
     }
 
     var body: some View {
@@ -109,8 +89,6 @@ struct TodaySummaryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var metricRow: some View {

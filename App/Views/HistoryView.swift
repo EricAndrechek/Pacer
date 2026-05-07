@@ -45,21 +45,9 @@ struct HistoryView: View {
 // MARK: - Lifetime summary
 
 private struct LifetimeSummaryCard: View {
-    /// All-time aggregates. Read only from `refreshCache()`; body
-    /// reads `cached.totals` so a SwiftData save doesn't re-iterate
-    /// the whole table per tick (it's small now, but the History tab
-    /// stacks four cards that all do this and the body re-eval cost
-    /// adds up).
+    /// All-time precomputed daily aggregates. Hundreds of rows max
+    /// (one per date × model); direct iteration in body is sub-ms.
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
-    @Query(LifetimeSummaryCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached = Totals()
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private struct Totals {
         var cost: Double = 0
@@ -71,7 +59,7 @@ private struct LifetimeSummaryCard: View {
         var firstDate: String?
     }
 
-    private func refreshCache() {
+    private var totals: Totals {
         var t = Totals()
         var dates = Set<String>()
         var models = Set<String>()
@@ -88,11 +76,11 @@ private struct LifetimeSummaryCard: View {
         t.distinctDays = dates.count
         t.distinctModels = models.count
         t.firstDate = minDate
-        cached = t
+        return t
     }
 
     var body: some View {
-        let t = cached
+        let t = totals
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Lifetime")
@@ -124,8 +112,6 @@ private struct LifetimeSummaryCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ViewBuilder
@@ -165,17 +151,8 @@ private struct LifetimeSummaryCard: View {
 
 private struct MonthlyChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
-    @Query(MonthlyChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @State private var selectedMonth: String?
-    @State private var cached: [MonthBucket] = []
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private struct MonthBucket: Identifiable {
         let month: String  // YYYY-MM
@@ -183,12 +160,10 @@ private struct MonthlyChartCard: View {
         var id: String { month }
     }
 
-    private var monthly: [MonthBucket] { cached }
-
     /// Group by YYYY-MM (substring of `date` which is YYYY-MM-DD).
     /// Last 12 months only — older data is too small to be useful here
-    /// at this density.
-    private func refreshCache() {
+    /// at this density. One pass over the precomputed daily rollup.
+    private var monthly: [MonthBucket] {
         var totals: [String: Double] = [:]
         for row in aggregates {
             guard row.date.count >= 7 else { continue }
@@ -197,7 +172,7 @@ private struct MonthlyChartCard: View {
         }
         let sorted = totals.keys.sorted()
         let last12 = sorted.suffix(12)
-        cached = last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
+        return last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
     }
 
     var body: some View {
@@ -283,8 +258,6 @@ private struct MonthlyChartCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     /// `2026-04` → `Apr 26`. Compact form for the X axis at 12 months.
@@ -323,15 +296,6 @@ private struct MonthlyChartCard: View {
 
 private struct TopDaysCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
-    @Query(TopDaysCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached: [DayRow] = []
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private struct DayRow: Identifiable {
         let date: String
@@ -340,9 +304,9 @@ private struct TopDaysCard: View {
         var id: String { date }
     }
 
-    private var topRows: [DayRow] { cached }
-
-    private func refreshCache() {
+    /// Group precomputed daily rows by date, sort by cost, take top 10.
+    /// Hundreds of rows max — sub-ms in body.
+    private var topRows: [DayRow] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
         for row in aggregates {
             var v = byDate[row.date] ?? (0, 0)
@@ -351,7 +315,7 @@ private struct TopDaysCard: View {
             byDate[row.date] = v
         }
         let rows = byDate.map { DayRow(date: $0.key, cost: $0.value.cost, tokens: $0.value.tokens) }
-        cached = rows.sorted { $0.cost > $1.cost }.prefix(10).map { $0 }
+        return rows.sorted { $0.cost > $1.cost }.prefix(10).map { $0 }
     }
 
     var body: some View {
@@ -384,8 +348,6 @@ private struct TopDaysCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private func formatCost(_ usd: Double) -> String {

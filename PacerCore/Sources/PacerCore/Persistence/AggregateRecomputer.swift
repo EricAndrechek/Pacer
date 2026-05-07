@@ -59,7 +59,12 @@ public final class AggregateRecomputer {
             try await recomputeOne(pair: pair, stats: &stats)
         }
 
-        try context.save()
+        // No save here — `ScanCoordinator.runScanCycle` does one
+        // terminal save per cycle that commits this recomputer's
+        // changes alongside the project recomputer's, the session
+        // recomputer's, the cursor updates, and the meta writes.
+        // Collapsing those into a single save halves the @Query
+        // refresh fan-out on every scan tick.
         return stats
     }
 

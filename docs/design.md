@@ -210,11 +210,13 @@ Confirmed against this machine: only `~/.claude/` is currently active
     var lastSeenAt: Date
     var projectPath: String
     var ccVersion: String?
-    var transcriptPath: String?
     var cumulativeCostUSD: Double
     var cumulativeInputTokens: Int64
     var cumulativeOutputTokens: Int64
-    var status: String            // "active" | "ended"
+    var cumulativeCacheReadTokens: Int64
+    var cumulativeCacheCreation5mTokens: Int64
+    var cumulativeCacheCreation1hTokens: Int64
+    var topModel: String          // model with most tokens in this session
 }
 
 @Model class ClaudeCodeMeta {
@@ -224,17 +226,26 @@ Confirmed against this machine: only `~/.claude/` is currently active
 ```
 
 `TokenSample` is append-only with the dedup key as the uniqueness
-guard. `DailyAggregate` and `ProjectDailyAggregate` are materialized
-by their respective recomputers in the daemon's write path —
-`SamplePersister` tracks dirty `(date, model)` and `(project, date)`
-pairs from inserts, and `AggregateRecomputer` /
-`ProjectAggregateRecomputer` upsert just those buckets after the
-scan flushes. Views never iterate `TokenSample` for rollups; they
-read the precomputed aggregate tables directly. On schema bumps
-that introduce a new aggregate, the persister's
-`consumeMissing*Pairs()` recovery path flags every existing bucket
-as dirty so a one-time bulk backfill rebuilds the table on the
-first scan after upgrade.
+guard. `DailyAggregate`, `ProjectDailyAggregate`, and `SessionInfo`
+are materialized by their respective recomputers in the in-process
+scan's write path — `SamplePersister` tracks dirty `(date, model)`,
+`(project, date)`, and `sessionId` sets from inserts, and
+`AggregateRecomputer` / `ProjectAggregateRecomputer` /
+`SessionInfoRecomputer` upsert just those buckets after the scan
+flushes. Views never iterate `TokenSample` for rollups; they read
+the precomputed tables directly. On schema bumps that introduce a
+new aggregate, the persister's `consumeMissing*` recovery paths
+flag every existing bucket as dirty so a one-time bulk backfill
+rebuilds the table on the first scan after upgrade. Bulk paths
+yield to the run loop every 32 pairs/ids so the UI stays
+responsive during the backfill.
+
+None of the recomputers call `context.save()` themselves — the
+cycle's terminal save in `ScanCoordinator` commits cursor updates,
+meta writes, and every recomputer's changes in a single
+transaction. That collapses what used to be 4 saves/cycle into 2
+(one if the cycle inserts nothing), which halves the `@Query`
+re-fire fan-out across the SwiftUI view tree on every scan tick.
 
 ## Statusline integration UX
 

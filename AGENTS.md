@@ -314,12 +314,39 @@ of them. Mentioned here so future agents don't repeat them:
    raw samples in body — even off-main-thread iteration of 30k rows
    is hundreds of ms of wall-clock latency on every scan tick. The
    pattern is: precompute a view-ready rollup table, maintained by
-   the daemon's recomputer in the write path, keyed by the dimension
-   the view groups on. `DailyAggregate` (date × model) and
-   `ProjectDailyAggregate` (project × date) are the two we have;
-   add another if a future view needs a new grouping. Views then
-   just `@Query` the small precomputed table and group in the body
-   — sub-10ms over hundreds of rows.
+   the in-process scan's recomputer in the write path, keyed by the
+   dimension the view groups on. We have three:
+   `DailyAggregate` (date × model) — backs Today / DailyCost /
+   History / Models; `ProjectDailyAggregate` (project × date) —
+   backs Projects / ProjectDetail's summary, daily series, models
+   donut; and `SessionInfo` (per session) — backs ProjectDetail's
+   sessions list and the Debug tab's session count. Add another
+   `@Model` + recomputer if a future view needs a new grouping.
+   Views then just `@Query` the small precomputed table and group
+   in the body — sub-10ms over hundreds of rows. Don't add a
+   `RollupWorker`-style background actor on top of a precomputed
+   table; the actor was a transitional half-measure, removed once
+   every view had its own rollup.
+
+   Recomputers are wired into `ScanCoordinator.runScanCycle` in this
+   order: `AggregateRecomputer` → `ProjectAggregateRecomputer` →
+   `SessionInfoRecomputer`, all reading the same `dirty*` sets the
+   `SamplePersister` collected during inserts. None of them call
+   `context.save()` themselves; the cycle's terminal save in
+   `ScanCoordinator` commits everything (cursors + meta + every
+   recomputer's changes) in one shot. That collapses what used to
+   be 4 saves/cycle into 2 (one if no inserts), which halves the
+   `@Query` re-fire fan-out on every scan tick. Bulk paths in
+   `ProjectAggregateRecomputer` and `SessionInfoRecomputer` `await
+   Task.yield()` every 32 pairs/ids so the run loop services draw
+   ticks during the first-install backfill.
+
+   The `consumeMissing*` recovery paths on `SamplePersister` are
+   the bootstrap for newly-added rollup tables: on first scan after
+   a schema bump, every existing TokenSample's (date, model) /
+   (project, date) / sessionId is folded into the dirty set and
+   the recomputer rebuilds the table. One-shot; subsequent cycles
+   see no gaps.
 5. **macOS Sequoia 15+ prompts `kTCCServiceSystemPolicyAppData`
    on every launch for any app accessing a Group Container at
    `~/Library/Group Containers/<group-id>/`** — and split-bundle

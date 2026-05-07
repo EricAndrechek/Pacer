@@ -56,6 +56,11 @@ public final class SamplePersister {
     /// `ProjectAggregateRecomputer`. Same shape and semantics as
     /// `dirtyPairs`, just keyed differently.
     public private(set) var dirtyProjectDates: Set<ProjectDatePair>
+    /// Session ids touched this session. Drives `SessionInfoRecomputer`.
+    /// Only entries with a non-nil `sessionId` mark this set —
+    /// session-less entries (older Claude Code lines) don't get a
+    /// SessionInfo row.
+    public private(set) var dirtySessionIds: Set<String>
     /// (date, model) pairs that have TokenSamples in the DB but no
     /// matching DailyAggregate at persister-init time. These are
     /// integrity gaps that the dirty-pair tracking will not catch: a
@@ -73,6 +78,11 @@ public final class SamplePersister {
     /// `dirtyProjectDates`. This is the bootstrap for users upgrading
     /// from a build that didn't have `ProjectDailyAggregate`.
     private var missingProjectAggregatePairs: Set<ProjectDatePair>
+    /// Session ids with TokenSamples but no matching `SessionInfo` row
+    /// at persister-init time. Same one-shot recovery path as the other
+    /// missing-* sets. Bootstrap for users upgrading from a build that
+    /// didn't maintain `SessionInfo`.
+    private var missingSessionIds: Set<String>
     /// Inserts since last save. Capped to keep WAL size bounded during
     /// long historical scans.
     private var pendingInsertCount: Int
@@ -91,8 +101,10 @@ public final class SamplePersister {
         self.seenDedupKeys = []
         self.dirtyPairs = []
         self.dirtyProjectDates = []
+        self.dirtySessionIds = []
         self.missingAggregatePairs = []
         self.missingProjectAggregatePairs = []
+        self.missingSessionIds = []
         self.pendingInsertCount = 0
         self.stats = Stats(inserted: 0, skippedAsDuplicate: 0)
         try preloadFromStore()
@@ -115,6 +127,9 @@ public final class SamplePersister {
         dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
         dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+        }
         pendingInsertCount += 1
         stats.inserted += 1
         if pendingInsertCount >= saveBatchSize {
@@ -124,14 +139,19 @@ public final class SamplePersister {
         return true
     }
 
-    /// Flush any pending inserts. Call after the scan completes (and
-    /// before the recomputer runs) so the recomputer's fetches see
-    /// every row.
+    /// Reset the batching counter. The coordinator calls this after the
+    /// scan loop emits its last entry — it's the signal that pending
+    /// inserts will be committed by the cycle's terminal save (or by
+    /// the recomputer pass that follows). Within a single ModelContext,
+    /// fetches already see uncommitted inserts, so the recomputers
+    /// don't need a save here to read them.
+    ///
+    /// Without the reset, `pendingInsertCount` would accumulate across
+    /// cycles (the terminal save lives in the coordinator, not here)
+    /// and start tripping the saveBatchSize threshold mid-insert on
+    /// every cycle, defeating the "one save per cycle" goal.
     public func flush() throws {
-        if pendingInsertCount > 0 {
-            try context.save()
-            pendingInsertCount = 0
-        }
+        pendingInsertCount = 0
     }
 
     /// Reset the dirty-pair tracking after a recompute pass. Doesn't
@@ -141,6 +161,7 @@ public final class SamplePersister {
     public func clearDirtyPairs() {
         dirtyPairs.removeAll()
         dirtyProjectDates.removeAll()
+        dirtySessionIds.removeAll()
     }
 
     /// Drain and return the (date, model) pairs that have TokenSamples
@@ -164,6 +185,17 @@ public final class SamplePersister {
         return pairs
     }
 
+    /// Drain and return session ids with TokenSamples but no
+    /// `SessionInfo` row at persister-init time. Same one-shot semantics
+    /// as the other missing-* drains. The non-empty case fires on first
+    /// scan after the SessionInfo recomputer is wired in; subsequent
+    /// scans see no gaps and return empty.
+    public func consumeMissingSessionIds() -> Set<String> {
+        let ids = missingSessionIds
+        missingSessionIds.removeAll()
+        return ids
+    }
+
     /// Merge external pairs into the dirty set. Only used to fold
     /// `missingAggregatePairs` into `dirtyPairs` from ScanCoordinator;
     /// in normal operation pairs are added by `insert(_:)`.
@@ -175,6 +207,12 @@ public final class SamplePersister {
     /// to `addDirtyPairs(_:)` for the project rollup path.
     public func addDirtyProjectDates(_ pairs: Set<ProjectDatePair>) {
         dirtyProjectDates.formUnion(pairs)
+    }
+
+    /// Merge external session ids into the dirty set. Symmetric to
+    /// `addDirtyPairs(_:)` for the SessionInfo rollup path.
+    public func addDirtySessionIds(_ ids: Set<String>) {
+        dirtySessionIds.formUnion(ids)
     }
 
     private func preloadFromStore() throws {
@@ -190,6 +228,7 @@ public final class SamplePersister {
         let samples = try context.fetch(FetchDescriptor<TokenSample>())
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
+        var sampleSessionIds: Set<String> = []
         for sample in samples {
             if let key = sample.dedupKey {
                 seenDedupKeys.insert(key)
@@ -197,6 +236,9 @@ public final class SamplePersister {
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
             sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: sample.date))
+            if let sid = sample.sessionId, !sid.isEmpty {
+                sampleSessionIds.insert(sid)
+            }
         }
 
         // Pairs that have aggregate rows already are *not* gaps; only
@@ -215,5 +257,10 @@ public final class SamplePersister {
             projectAggregatePairs.insert(ProjectDatePair(projectPath: agg.projectPath, date: agg.date))
         }
         missingProjectAggregatePairs = sampleProjectPairs.subtracting(projectAggregatePairs)
+
+        let sessions = try context.fetch(FetchDescriptor<SessionInfo>())
+        var sessionRowIds: Set<String> = []
+        for s in sessions { sessionRowIds.insert(s.sessionId) }
+        missingSessionIds = sampleSessionIds.subtracting(sessionRowIds)
     }
 }

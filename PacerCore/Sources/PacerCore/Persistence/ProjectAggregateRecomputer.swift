@@ -33,22 +33,28 @@ public final class ProjectAggregateRecomputer {
     /// normal incremental scans (≤ a couple dozen pairs) stay on the
     /// per-pair path.
     private static let bulkRecomputeThreshold = 64
+    /// How often the bulk path yields back to the run loop. The work
+    /// stays on MainActor so it can touch SwiftData; yielding every
+    /// few dozen pairs lets SwiftUI service draw ticks and click events
+    /// during the first-install backfill instead of freezing the UI
+    /// until the whole 345-bucket pass finishes.
+    private static let yieldInterval = 32
 
     @discardableResult
-    public func recompute(pairs: Set<ProjectDatePair>) throws -> Stats {
+    public func recompute(pairs: Set<ProjectDatePair>) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
         if pairs.count >= Self.bulkRecomputeThreshold {
-            try recomputeBulk(pairs: pairs, stats: &stats)
+            try await recomputeBulk(pairs: pairs, stats: &stats)
         } else {
             for pair in pairs {
                 stats.pairsRecomputed += 1
                 try recomputeOne(pair: pair, stats: &stats)
             }
         }
-        if stats.pairsRecomputed > 0 {
-            try context.save()
-        }
+        // No save here — see comment in `AggregateRecomputer.recompute`.
+        // The cycle's terminal save in `ScanCoordinator.runScanCycle`
+        // commits every recomputer's changes in one shot.
         return stats
     }
 
@@ -57,7 +63,7 @@ public final class ProjectAggregateRecomputer {
     /// dictionaries, then update each dirty pair from in-memory data.
     /// Avoids the 2700-small-fetches storm that the per-pair path
     /// would do on first install.
-    private func recomputeBulk(pairs: Set<ProjectDatePair>, stats: inout Stats) throws {
+    private func recomputeBulk(pairs: Set<ProjectDatePair>, stats: inout Stats) async throws {
         let allSamples = try context.fetch(FetchDescriptor<TokenSample>())
         var grouped: [ProjectDatePair: [TokenSample]] = [:]
         for s in allSamples {
@@ -69,12 +75,17 @@ public final class ProjectAggregateRecomputer {
         for agg in existingAll {
             existingByKey[agg.projectDateKey] = agg
         }
+        var processed = 0
         for pair in pairs {
             stats.pairsRecomputed += 1
             let key = ProjectDailyAggregate.makeKey(projectPath: pair.projectPath, date: pair.date)
             let existing = existingByKey[key]
             let samples = grouped[pair] ?? []
             applySamples(pair: pair, samples: samples, existing: existing, stats: &stats)
+            processed += 1
+            if processed.isMultiple(of: Self.yieldInterval) {
+                await Task.yield()
+            }
         }
     }
 
