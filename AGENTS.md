@@ -73,8 +73,8 @@ App/
   PacerApp.swift                — @main scene graph (WindowGroup + Settings + MenuBarExtra),
                                   registers UserDefaults defaults at launch, plumbs the export
                                   CommandGroup.
-  ContentView.swift             — top-level TabView (Dashboard / History / Projects / Debug),
-                                  ⌘1..4 keyboard shortcuts.
+  ContentView.swift             — top-level TabView (Dashboard / History / Projects /
+                                  Models / Debug), ⌘1..5 keyboard shortcuts.
 
   Settings/
     PacerSettings.swift         — App Group UserDefaults wrapper + enum types for menu bar
@@ -99,6 +99,8 @@ App/
     HistoryView.swift           — Lifetime + Heatmap + Monthly + TopDays. Sheet to DayDetail.
     ProjectsView.swift          — range picker + search + Top-5 donut + full list. Sheet to
                                   ProjectDetail.
+    ModelsView.swift            — range picker + token-share donut + per-date stacked trend
+                                  chart + full per-model table.
     DebugView.swift             — daemon resources + storage stats + raw rate-limit samples +
                                   meta keys + LaunchAgent dual status + recent samples.
     SettingsView.swift          — TabView of Menu Bar / Notifications / Data / About.
@@ -112,8 +114,9 @@ App/
       DaemonResourceProbe.swift — PID/CPU/RSS via pgrep+ps, store size via FileManager.
 
     PaceChartCard.swift, TodaySummaryCard.swift, DailyCostChartCard.swift,
-    PerModelTodayCard.swift, LiveActivityCard.swift, HeatmapCard.swift,
-    DayDetailView.swift, ProjectDetailView.swift, WelcomeCard.swift  — dashboard cards.
+    PerModelTodayCard.swift, LiveActivityCard.swift, TodayTimelineCard.swift,
+    HeatmapCard.swift, DayDetailView.swift, ProjectDetailView.swift,
+    WelcomeCard.swift  — dashboard cards.
 ```
 
 `Widgets/` holds three real widgets (TodayCost / PaceGauges / DailyChart) bundled by
