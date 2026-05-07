@@ -42,6 +42,34 @@ targets:
       - package: PacerCore
         product: PacerCore
       - target: PacerWidgets
+      # Build the daemon before the app so the post-build script can
+      # copy it into Pacer.app/Contents/Library/LaunchServices/. Marked
+      # link/embed false because we don't want it linked or PlugIns'd
+      # — the embed happens via the postBuildScript below.
+      - target: PacerDaemon
+        link: false
+        embed: false
+    postBuildScripts:
+      # Embed the daemon binary and its LaunchAgent plist inside the
+      # app bundle at the paths SMAppService.agent expects:
+      #   Pacer.app/Contents/Library/LaunchServices/PacerDaemon
+      #   Pacer.app/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist
+      # SMAppService keys off the plist filename and resolves
+      # BundleProgram against the embedding app bundle.
+      - name: "Embed PacerDaemon + LaunchAgent plist"
+        script: |
+          set -eu
+          APP="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          mkdir -p "$APP/Contents/Library/LaunchServices"
+          mkdir -p "$APP/Contents/Library/LaunchAgents"
+          cp -f "$BUILT_PRODUCTS_DIR/PacerDaemon" "$APP/Contents/Library/LaunchServices/PacerDaemon"
+          cp -f "$SRCROOT/Resources/com.ericandrechek.pacer.daemon.plist" "$APP/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist"
+        inputFiles:
+          - $(BUILT_PRODUCTS_DIR)/PacerDaemon
+          - $(SRCROOT)/Resources/com.ericandrechek.pacer.daemon.plist
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchServices/PacerDaemon
+          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/Contents/Library/LaunchAgents/com.ericandrechek.pacer.daemon.plist
 
   PacerDaemon:
     type: tool

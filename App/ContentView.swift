@@ -4,50 +4,153 @@ import PacerCore
 
 struct ContentView: View {
     @Environment(\.modelContext) private var context
-    @Query(sort: \Heartbeat.timestamp, order: .reverse) private var heartbeats: [Heartbeat]
+    @Query(sort: \TokenSample.sampledAt, order: .reverse) private var samples: [TokenSample]
+    @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    @Query(sort: \ClaudeCodeMeta.key) private var meta: [ClaudeCodeMeta]
+
+    @State private var launchAgentStatus: LaunchAgentInstaller.Status = .unknown
+    @State private var lastActionMessage: String?
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Pacer — M1 hello world")
-                .font(.title)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Pacer — M3 daemon + scan")
+                    .font(.title)
 
+                statsSection
+                Divider()
+                metaSection
+                Divider()
+                launchAgentSection
+                Divider()
+                recentSamplesSection
+            }
+            .padding(24)
+        }
+        .frame(minWidth: 640, minHeight: 600)
+        .onAppear { refreshStatus() }
+    }
+
+    // MARK: - Sections
+
+    private var statsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Storage").font(.headline)
             HStack(spacing: 24) {
-                stat("Total", heartbeats.count)
-                stat("From app", heartbeats.lazy.filter { $0.source == "app" }.count)
-                stat("From daemon", heartbeats.lazy.filter { $0.source == "daemon" }.count)
+                stat("TokenSamples", samples.count)
+                stat("DailyAggregates", aggregates.count)
+                stat("Days covered", Set(samples.map(\.date)).count)
+                stat("Models seen", Set(samples.map(\.model)).count)
             }
+        }
+    }
 
-            Button("Add heartbeat from app") {
-                context.insert(Heartbeat(source: "app"))
-                try? context.save()
-            }
-            .keyboardShortcut(.defaultAction)
-
-            Divider()
-
-            Text("Recent heartbeats")
-                .font(.headline)
-
-            List(heartbeats.prefix(20).map { $0 }, id: \.persistentModelID) { hb in
-                HStack {
-                    Text(hb.source)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(width: 80, alignment: .leading)
-                    Text(hb.timestamp.formatted(date: .abbreviated, time: .standard))
-                        .foregroundStyle(.secondary)
+    private var metaSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Daemon state (ClaudeCodeMeta)").font(.headline)
+            if meta.isEmpty {
+                Text("No meta keys yet — daemon hasn't run.")
+                    .foregroundStyle(.secondary)
+                    .font(.system(.body, design: .monospaced))
+            } else {
+                ForEach(meta, id: \.key) { entry in
+                    HStack(alignment: .top) {
+                        Text(entry.key)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 220, alignment: .leading)
+                            .foregroundStyle(.secondary)
+                        Text(entry.value)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
                 }
             }
-            .frame(minHeight: 200)
         }
-        .padding(24)
-        .frame(minWidth: 480, minHeight: 480)
     }
+
+    @ViewBuilder
+    private var launchAgentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("LaunchAgent (PacerDaemon)").font(.headline)
+            HStack(spacing: 12) {
+                Text("Status:")
+                Text(launchAgentStatus.rawValue)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(launchAgentStatus == .enabled ? .green : .secondary)
+                Spacer()
+                Button("Refresh") { refreshStatus() }
+            }
+            HStack(spacing: 12) {
+                Button("Register") {
+                    do {
+                        try LaunchAgentInstaller.register()
+                        lastActionMessage = "Registered. May require approval in System Settings."
+                    } catch {
+                        lastActionMessage = "Register failed: \(error.localizedDescription)"
+                    }
+                    refreshStatus()
+                }
+                Button("Unregister") {
+                    Task {
+                        do {
+                            try await LaunchAgentInstaller.unregister()
+                            lastActionMessage = "Unregistered."
+                        } catch {
+                            lastActionMessage = "Unregister failed: \(error.localizedDescription)"
+                        }
+                        refreshStatus()
+                    }
+                }
+                Button("Open System Settings") {
+                    LaunchAgentInstaller.openSystemSettingsApproval()
+                }
+            }
+            if let msg = lastActionMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Pacer never auto-registers. Click Register to opt in.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var recentSamplesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent TokenSamples").font(.headline)
+            if samples.isEmpty {
+                Text("No samples yet — start the daemon (or run with PACER_RUN_ONCE=1).")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(samples.prefix(10), id: \.persistentModelID) { s in
+                    HStack(alignment: .top) {
+                        Text(s.date)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 90, alignment: .leading)
+                        Text(s.model)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(width: 200, alignment: .leading)
+                            .foregroundStyle(.secondary)
+                        Text("in:\(s.inputTokens) out:\(s.outputTokens) cR:\(s.cacheReadTokens) cC5m:\(s.cacheCreation5mTokens) cC1h:\(s.cacheCreation1hTokens)")
+                            .font(.system(.caption2, design: .monospaced))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
 
     @ViewBuilder
     private func stat(_ label: String, _ value: Int) -> some View {
         VStack {
-            Text("\(value)").font(.system(size: 28, weight: .semibold, design: .rounded))
+            Text("\(value)").font(.system(size: 24, weight: .semibold, design: .rounded))
             Text(label).font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private func refreshStatus() {
+        launchAgentStatus = LaunchAgentInstaller.currentStatus()
     }
 }
