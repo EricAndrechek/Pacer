@@ -73,6 +73,14 @@ private struct DashboardHeader: View {
                 Text("last update \(relative(last))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let model = recentModelInUse {
+                    Text("·")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Text(shortModel(model))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
             }
         } else {
             HStack(spacing: 6) {
@@ -84,6 +92,24 @@ private struct DashboardHeader: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// The model that wrote the most-recent token sample, if that
+    /// sample is fresh enough (last 2 minutes) to be considered
+    /// "currently in use." Older than that, the user has stopped, so
+    /// we omit the chip.
+    private var recentModelInUse: String? {
+        guard let latest = tokens.first,
+              Date().timeIntervalSince(latest.sampledAt) < 120
+        else { return nil }
+        return latest.model
+    }
+
+    private func shortModel(_ name: String) -> String {
+        if let lastSlash = name.lastIndex(of: "/") {
+            return String(name[name.index(after: lastSlash)...])
+        }
+        return name
     }
 
     private func relative(_ date: Date) -> String {
