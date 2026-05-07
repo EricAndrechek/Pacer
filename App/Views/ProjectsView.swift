@@ -28,6 +28,13 @@ struct ProjectsView: View {
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
     @State private var searchText: String = ""
+    /// Lifted from ProjectsContent so the dismissibleModal modifier
+    /// can attach OUTSIDE the PageScaffold's ScrollView. Without
+    /// lifting this state up, the modal overlay sat inside the
+    /// ScrollView's content frame and (a) scrolled with the page,
+    /// (b) added empty padding to the bottom of the scrollable area
+    /// equal to the modal's frame.
+    @State private var selectedProject: SelectedProject?
 
     private var range: TimeRange {
         TimeRange(rawValue: rangeRaw) ?? .ninetyDays
@@ -51,10 +58,27 @@ struct ProjectsView: View {
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
-                searchBinding: $searchText
+                searchBinding: $searchText,
+                selectedBinding: $selectedProject
             )
             .id("\(range.rawValue)")
         }
+        .dismissibleModal(item: $selectedProject) { sel in
+            ProjectDetailView(
+                projectPath: sel.path,
+                displayName: sel.displayName,
+                since: sel.since
+            )
+        }
+    }
+
+    /// Identifies the project the user clicked into. Lives at this
+    /// level so the modal stays out of the scroll content.
+    struct SelectedProject: Identifiable {
+        let path: String
+        let displayName: String
+        let since: Date?
+        var id: String { path }
     }
 
     private var rangeBinding: Binding<TimeRange> {
@@ -111,15 +135,6 @@ enum ProjectMetric: String, CaseIterable, Identifiable {
 private struct ProjectsContent: View {
     @Query private var aggregates: [ProjectDailyAggregate]
 
-    @State private var selected: SelectedProject?
-
-    struct SelectedProject: Identifiable {
-        let path: String
-        let displayName: String
-        let since: Date?
-        var id: String { path }
-    }
-
     let rangeSince: Date?
     let searchText: String
     let sort: ProjectSort
@@ -131,6 +146,7 @@ private struct ProjectsContent: View {
     let sortDescendingBinding: Binding<Bool>
     let overviewMetricBinding: Binding<ProjectMetric>
     let searchBinding: Binding<String>
+    let selectedBinding: Binding<ProjectsView.SelectedProject?>
 
     init(
         range: TimeRange,
@@ -142,7 +158,8 @@ private struct ProjectsContent: View {
         sortFieldBinding: Binding<ProjectSort>,
         sortDescendingBinding: Binding<Bool>,
         overviewMetricBinding: Binding<ProjectMetric>,
-        searchBinding: Binding<String>
+        searchBinding: Binding<String>,
+        selectedBinding: Binding<ProjectsView.SelectedProject?>
     ) {
         let since: Date?
         let cutoffString: String?
@@ -164,6 +181,7 @@ private struct ProjectsContent: View {
         self.sortDescendingBinding = sortDescendingBinding
         self.overviewMetricBinding = overviewMetricBinding
         self.searchBinding = searchBinding
+        self.selectedBinding = selectedBinding
         if let cutoffString {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -255,6 +273,11 @@ private struct ProjectsContent: View {
     }
 
     var body: some View {
+        // No more `.dismissibleModal` here — it lives on the outer
+        // ProjectsView so the overlay sits ABOVE the PageScaffold's
+        // ScrollView rather than inside its content. This view just
+        // sets the binding when the user picks a project; the parent
+        // owns the modal layer.
         Group {
             if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState
@@ -266,13 +289,6 @@ private struct ProjectsContent: View {
                     projectListCard
                 }
             }
-        }
-        .dismissibleModal(item: $selected) { sel in
-            ProjectDetailView(
-                projectPath: sel.path,
-                displayName: sel.displayName,
-                since: sel.since
-            )
         }
     }
 
@@ -310,19 +326,52 @@ private struct ProjectsContent: View {
     /// (cost, tokens, sessions) is user-selectable via segmented picker
     /// in the card header — mirrors the heatmap's metric picker so the
     /// app feels consistent.
+    @State private var hoveredOverviewAngle: Double?
+
+    private func hoveredOverviewProject(top: [ProjectRow]) -> ProjectRow? {
+        guard let angle = hoveredOverviewAngle else { return nil }
+        let totalForMetric = top.reduce(0.0) { $0 + value(for: overviewMetric, in: $1) }
+        guard totalForMetric > 0 else { return nil }
+        var cumulative = 0.0
+        for row in top {
+            cumulative += value(for: overviewMetric, in: row)
+            if angle <= cumulative { return row }
+        }
+        return top.last
+    }
+
     private var overviewCard: some View {
         let top = Array(rows.prefix(5))
         let totalForMetric = rows.reduce(0.0) { $0 + value(for: overviewMetric, in: $1) }
+        let hovered = hoveredOverviewProject(top: top)
         return PacerCard("Top projects", trailing: {
-            Picker("", selection: overviewMetricBinding) {
-                ForEach(ProjectMetric.allCases) { m in
-                    Text(m.label).tag(m)
+            HStack(spacing: 12) {
+                if let h = hovered {
+                    let v = value(for: overviewMetric, in: h)
+                    let pct = totalForMetric > 0 ? Int(v / totalForMetric * 100) : 0
+                    HStack(spacing: 6) {
+                        Text(h.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Text(formatMetric(v, kind: overviewMetric))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        Text("(\(pct)%)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
+                Picker("", selection: overviewMetricBinding) {
+                    ForEach(ProjectMetric.allCases) { m in
+                        Text(m.label).tag(m)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 240)
+                .controlSize(.small)
+                .labelsHidden()
             }
-            .pickerStyle(.segmented)
-            .frame(width: 240)
-            .controlSize(.small)
-            .labelsHidden()
         }) {
             HStack(alignment: .top, spacing: 24) {
                 Chart(top) { row in
@@ -333,9 +382,11 @@ private struct ProjectsContent: View {
                     )
                     .foregroundStyle(by: .value("Project", row.displayName))
                     .cornerRadius(2)
+                    .opacity(hovered.map { $0.id == row.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
+                .chartAngleSelection(value: $hoveredOverviewAngle)
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(top.enumerated()), id: \.offset) { idx, row in
                         let v = value(for: overviewMetric, in: row)
@@ -407,7 +458,7 @@ private struct ProjectsContent: View {
                 Divider().padding(.vertical, 4)
                 ForEach(rows) { row in
                     HoverRow(action: {
-                        selected = SelectedProject(
+                        selectedBinding.wrappedValue = ProjectsView.SelectedProject(
                             path: row.path,
                             displayName: row.displayName,
                             since: rangeSince

@@ -268,8 +268,36 @@ struct ProjectDetailView: View {
         return String(ymd.suffix(5))
     }
 
+    @State private var hoveredModelAngle: Double?
+
+    private var hoveredModelSlice: ModelSlice? {
+        guard let angle = hoveredModelAngle, !modelSlices.isEmpty else { return nil }
+        var cumulative = 0.0
+        for slice in modelSlices {
+            cumulative += Double(slice.tokens)
+            if angle <= cumulative { return slice }
+        }
+        return modelSlices.last
+    }
+
     private var modelsCard: some View {
-        PacerCard("Models") {
+        let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
+        return PacerCard("Models", trailing: {
+            if let m = hoveredModelSlice {
+                let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
+                HStack(spacing: 6) {
+                    Text(pacerShortModel(m.model))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(pacerTokens(m.tokens))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    Text("(\(pct)%)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }) {
             HStack(alignment: .top, spacing: 24) {
                 Chart(modelSlices) { m in
                     SectorMark(
@@ -279,11 +307,12 @@ struct ProjectDetailView: View {
                     )
                     .foregroundStyle(by: .value("Model", pacerShortModel(m.model)))
                     .cornerRadius(2)
+                    .opacity(hoveredModelSlice.map { $0.id == m.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
+                .chartAngleSelection(value: $hoveredModelAngle)
                 VStack(alignment: .leading, spacing: 6) {
-                    let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
                     ForEach(modelSlices) { m in
                         HStack(alignment: .firstTextBaseline) {
                             Text(pacerShortModel(m.model))
@@ -345,14 +374,27 @@ struct ProjectDetailView: View {
             VStack(alignment: .leading, spacing: 4) {
                 sessionsHeader
                 Divider().padding(.vertical, 2)
-                ForEach(Array(sortedSessions.prefix(20)), id: \.sessionId) { row in
-                    sessionRowView(row)
-                }
-                if sortedSessions.count > 20 {
-                    Text("…and \(sortedSessions.count - 20) more")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 4)
+                // Inner scroll for the full list. The modal's outer
+                // height is bounded by the dismissibleModal frame, so
+                // showing every session needs an inner scrollable
+                // region — without this we either showed "and X more"
+                // pointing at nothing the user could reach, or the
+                // modal stretched off-screen on big projects.
+                if sortedSessions.count <= 12 {
+                    // Tiny enough — no inner scroll needed.
+                    ForEach(sortedSessions, id: \.sessionId) { row in
+                        sessionRowView(row)
+                    }
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(sortedSessions, id: \.sessionId) { row in
+                                sessionRowView(row)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 320)
+                    .scrollIndicators(.automatic)
                 }
             }
         }

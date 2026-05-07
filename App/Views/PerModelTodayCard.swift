@@ -52,8 +52,41 @@ struct PerModelTodayCard: View {
             .sorted { $0.cost > $1.cost }
     }
 
+    /// Selected wedge in the donut. Bound via `chartAngleSelection`
+    /// — Charts hands us the angle clicked/hovered, we map it back to
+    /// a row by accumulating slice widths.
+    @State private var hoveredAngle: Double?
+
+    private var hoveredRow: ModelRow? {
+        guard let angle = hoveredAngle, !rows.isEmpty else { return nil }
+        let total = rows.reduce(0.0) { $0 + Double($1.inputTokens + $1.outputTokens + $1.cacheReadTokens) }
+        guard total > 0 else { return nil }
+        var cumulative: Double = 0
+        for row in rows {
+            cumulative += Double(row.inputTokens + row.outputTokens + row.cacheReadTokens)
+            if angle <= cumulative { return row }
+        }
+        return rows.last
+    }
+
     var body: some View {
-        PacerCard("Today by model") {
+        PacerCard("Today by model", trailing: {
+            // Hover-reveal of the selected wedge — overlays the
+            // hovered model + its share of today's tokens.
+            if let r = hoveredRow {
+                let total = rows.reduce(Int64(0)) { $0 + ($1.inputTokens + $1.outputTokens + $1.cacheReadTokens) }
+                let myTotal = r.inputTokens + r.outputTokens + r.cacheReadTokens
+                let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
+                HStack(spacing: 8) {
+                    Text(pacerShortModel(r.model))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("\(pct)%")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                }
+            }
+        }) {
             if rows.isEmpty {
                 Text("No usage logged today yet.")
                     .font(.system(size: 12))
@@ -79,8 +112,13 @@ struct PerModelTodayCard: View {
             )
             .foregroundStyle(by: .value("Model", row.model))
             .cornerRadius(2)
+            // Subtle highlight: opacity drops on non-hovered slices,
+            // pinpointing the one under the cursor without changing
+            // the chart's geometry.
+            .opacity(hoveredRow.map { $0.id == row.id ? 1.0 : 0.45 } ?? 1.0)
         }
         .chartLegend(.hidden)
+        .chartAngleSelection(value: $hoveredAngle)
     }
 
     private var table: some View {

@@ -211,10 +211,39 @@ struct DayDetailView: View {
         return projectsSortDescending ? sorted.reversed() : sorted
     }
 
+    @State private var hoveredAggAngle: Double?
+
+    private var hoveredAgg: DailyAggregate? {
+        guard let angle = hoveredAggAngle else { return nil }
+        let sorted = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
+        var cumulative = 0.0
+        for agg in sorted {
+            cumulative += agg.totalCostUSD
+            if angle <= cumulative { return agg }
+        }
+        return sorted.last
+    }
+
     private var modelsCard: some View {
-        PacerCard("Models") {
+        PacerCard("Models", trailing: {
+            if let agg = hoveredAgg {
+                let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
+                let pct = total > 0 ? Int(agg.totalCostUSD / total * 100) : 0
+                HStack(spacing: 6) {
+                    Text(pacerShortModel(agg.model))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(pacerCost(agg.totalCostUSD))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    Text("(\(pct)%)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }) {
             HStack(alignment: .top, spacing: 24) {
-                Chart(aggregates, id: \.dateModelKey) { agg in
+                Chart(aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }, id: \.dateModelKey) { agg in
                     SectorMark(
                         angle: .value("Cost", agg.totalCostUSD),
                         innerRadius: .ratio(0.6),
@@ -222,9 +251,11 @@ struct DayDetailView: View {
                     )
                     .foregroundStyle(by: .value("Model", pacerShortModel(agg.model)))
                     .cornerRadius(2)
+                    .opacity(hoveredAgg.map { $0.dateModelKey == agg.dateModelKey ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
+                .chartAngleSelection(value: $hoveredAggAngle)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         SortableColumnHeader(

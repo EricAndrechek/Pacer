@@ -33,8 +33,25 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
     @ViewBuilder let modalContent: (Item) -> ModalContent
 
     func body(content: Content) -> some View {
-        content
-            .overlay(modalLayer)
+        // ZStack rather than .overlay so the modal layer is a sibling
+        // of the underlying content, not a child. Two reasons:
+        //   1. `.disabled(item != nil)` only affects the content
+        //      branch — taps and Esc still work on the modal layer
+        //      itself, which lives in the other branch of the ZStack.
+        //   2. `.overlay` participates in the parent's intrinsic-size
+        //      negotiation in some layouts; the `Color.black.ignoresSafeArea()`
+        //      inside it was making the parent (a ScrollView's content
+        //      stack) think it needed extra height equal to the modal,
+        //      which is the "adds a lot of padding to the bottom"
+        //      symptom the user flagged. ZStack-as-sibling sidesteps
+        //      that.
+        ZStack(alignment: .center) {
+            content
+                .disabled(item != nil)
+            if item != nil {
+                modalLayer
+            }
+        }
     }
 
     /// Builds a fresh dismiss action for each presentation. The
@@ -46,6 +63,8 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
 
     @ViewBuilder
     private var modalLayer: some View {
+        // `item` is non-nil here (the parent ZStack only renders this
+        // branch when the binding has a value).
         if let current = item {
             ZStack {
                 // Tap-to-dismiss scrim. `contentShape` makes the whole

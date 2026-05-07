@@ -202,8 +202,36 @@ private struct ModelsContent: View {
         }
     }
 
+    @State private var hoveredShareAngle: Double?
+
+    private var hoveredShareRow: ModelRow? {
+        guard let angle = hoveredShareAngle, !rows.isEmpty else { return nil }
+        var cumulative = 0.0
+        for row in rows {
+            cumulative += Double(row.totalTokens)
+            if angle <= cumulative { return row }
+        }
+        return rows.last
+    }
+
     private var shareCard: some View {
-        PacerCard("Token share") {
+        let total = rows.reduce(Int64(0)) { $0 + $1.totalTokens }
+        return PacerCard("Token share", trailing: {
+            if let r = hoveredShareRow {
+                let pct = total > 0 ? Int(Double(r.totalTokens) / Double(total) * 100) : 0
+                HStack(spacing: 6) {
+                    Text(r.displayName)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text(pacerTokens(r.totalTokens))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    Text("(\(pct)%)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }) {
             HStack(alignment: .top, spacing: 24) {
                 Chart(rows) { r in
                     SectorMark(
@@ -213,11 +241,12 @@ private struct ModelsContent: View {
                     )
                     .foregroundStyle(by: .value("Model", r.displayName))
                     .cornerRadius(2)
+                    .opacity(hoveredShareRow.map { $0.id == r.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 180, height: 180)
                 .chartLegend(.hidden)
+                .chartAngleSelection(value: $hoveredShareAngle)
                 VStack(alignment: .leading, spacing: 6) {
-                    let total = rows.reduce(Int64(0)) { $0 + $1.totalTokens }
                     ForEach(rows.prefix(8)) { row in
                         HStack(alignment: .firstTextBaseline) {
                             Text(row.displayName)
@@ -243,30 +272,88 @@ private struct ModelsContent: View {
         }
     }
 
+    @State private var trendHoverDate: String?
+
+    /// Per-day, per-model totals for the hovered date. Empty when no
+    /// hover; otherwise a ranked list of (model, tokens) for the day.
+    private var hoveredTrendDay: (date: String, slices: [(model: String, tokens: Int64)])? {
+        guard let h = trendHoverDate else { return nil }
+        let entries = dailyMix.filter { $0.date == h }
+        guard !entries.isEmpty else { return nil }
+        let slices = entries
+            .sorted { $0.tokens > $1.tokens }
+            .map { (model: $0.displayName, tokens: $0.tokens) }
+        return (h, slices)
+    }
+
     private var trendCard: some View {
-        PacerCard("Trend") {
-            Chart(dailyMix) { d in
-                BarMark(
-                    x: .value("Date", d.date),
-                    y: .value("Tokens", d.tokens)
-                )
-                .foregroundStyle(by: .value("Model", d.displayName))
-                .cornerRadius(1.5)
+        PacerCard("Trend", trailing: {
+            // Hover swaps the trailing slot for the date + total tokens.
+            // Detail per-model breakdown shows below the chart on hover
+            // — same overlay-text pattern keeps the chart geometry
+            // stable and gives a useful tooltip without a popup.
+            if let hov = hoveredTrendDay {
+                let total = hov.slices.reduce(Int64(0)) { $0 + $1.tokens }
+                HStack(spacing: 8) {
+                    Text(hov.date)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("\(pacerTokens(total)) tokens")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                }
             }
-            .frame(height: 200)
-            .chartYAxis {
-                AxisMarks(position: .leading) { value in
-                    AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
-                    AxisValueLabel {
-                        if let v = value.as(Double.self) {
-                            Text(pacerTokens(Int64(v)))
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
+        }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Chart {
+                    ForEach(dailyMix) { d in
+                        BarMark(
+                            x: .value("Date", d.date),
+                            y: .value("Tokens", d.tokens)
+                        )
+                        .foregroundStyle(by: .value("Model", d.displayName))
+                        .cornerRadius(1.5)
+                    }
+                    if let h = trendHoverDate, dailyMix.contains(where: { $0.date == h }) {
+                        RuleMark(x: .value("Selected", h))
+                            .foregroundStyle(.secondary.opacity(0.5))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                    }
+                }
+                .frame(height: 200)
+                .chartYAxis {
+                    AxisMarks(position: .leading) { value in
+                        AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
+                        AxisValueLabel {
+                            if let v = value.as(Double.self) {
+                                Text(pacerTokens(Int64(v)))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
+                .chartXAxis(.hidden)
+                .chartXSelection(value: $trendHoverDate)
+
+                // Per-model breakdown of the hovered day. Hidden until
+                // hover so the card doesn't always show a placeholder
+                // row.
+                if let hov = hoveredTrendDay {
+                    HStack(spacing: 16) {
+                        ForEach(hov.slices.prefix(6), id: \.model) { s in
+                            HStack(spacing: 5) {
+                                Text(s.model)
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(pacerTokens(s.tokens))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                }
             }
-            .chartXAxis(.hidden)
         }
     }
 
