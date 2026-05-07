@@ -11,22 +11,39 @@ import PacerCore
 struct DailyCostChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
+    @Query(DailyCostChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Hover/selection target. macOS Charts binds the X-value on
     /// pointer move; we look it up in `dailyTotals` to render the
     /// callout. Nil → no hover, hide overlay.
     @State private var selectedDate: String?
+    @State private var cached = Cached()
 
-    private var dailyTotals: [DailyTotal] {
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    /// `dailyTotals` plus the precomputed annotation set. Without the
+    /// cached set, `shouldAnnotate` re-sorted the full series for
+    /// every bar (30 bars × O(n log n)) on every body re-eval.
+    private struct Cached {
+        var dailyTotals: [DailyTotal] = []
+        var annotateDates: Set<String> = []
+        var totalCost: Double = 0
+    }
+
+    private var dailyTotals: [DailyTotal] { cached.dailyTotals }
+
+    private func refreshCache() {
         // Group by date (trim model dimension), sort ascending so the
         // chart reads left-to-right oldest → today.
         let grouped = Dictionary(grouping: aggregates, by: \.date)
         let sortedDates = grouped.keys.sorted()
-        // Take the most-recent 30 entries from the ascending-sorted
-        // unique dates. Fewer-than-30 days of data is normal on a
-        // fresh install; the chart just renders shorter.
         let lastN = sortedDates.suffix(30)
-        return lastN.map { date in
+        let totals = lastN.map { date -> DailyTotal in
             let rows = grouped[date] ?? []
             return DailyTotal(
                 date: date,
@@ -34,6 +51,14 @@ struct DailyCostChartCard: View {
                 tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens }
             )
         }
+        let topThree = Set(
+            totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date)
+        )
+        cached = Cached(
+            dailyTotals: totals,
+            annotateDates: topThree,
+            totalCost: totals.reduce(0) { $0 + $1.cost }
+        )
     }
 
     var body: some View {
@@ -42,9 +67,8 @@ struct DailyCostChartCard: View {
                 Text("30-day cost")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                if let total = dailyTotals.map(\.cost).reduce(0, +) as Double?,
-                   total > 0 {
-                    Text("total: \(formatCost(total))")
+                if cached.totalCost > 0 {
+                    Text("total: \(formatCost(cached.totalCost))")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -63,6 +87,8 @@ struct DailyCostChartCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ChartContentBuilder
@@ -153,12 +179,11 @@ struct DailyCostChartCard: View {
     }
 
     /// Annotate only the top few cost days so the chart isn't a wall
-    /// of overlapping labels. Sorts descending and takes the top 3.
+    /// of overlapping labels. The set is precomputed in `refreshCache`
+    /// so each bar's annotation is an O(1) lookup, not an O(n log n)
+    /// re-sort per bar.
     private func shouldAnnotate(_ d: DailyTotal) -> Bool {
-        let topThree = Set(
-            dailyTotals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date)
-        )
-        return topThree.contains(d.date)
+        cached.annotateDates.contains(d.date)
     }
 
     private func barColor(for cost: Double) -> Color {

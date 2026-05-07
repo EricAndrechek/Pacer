@@ -18,7 +18,16 @@ struct ProjectDetailView: View {
     let since: Date?
 
     @Environment(\.dismiss) private var dismiss
+    /// Predicate-filtered to this project (and optional since-date).
+    /// Read only from `refreshCache()` — the body never touches it,
+    /// so SwiftData saves don't trigger a re-iteration of every
+    /// sample for this project on every refresh tick.
     @Query private var samples: [TokenSample]
+    /// Cheap single-row scan-meta probe; the value changes once per
+    /// scan cycle. Drives cache refresh while the sheet is open.
+    @Query(ProjectDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    @State private var cached = Cached()
 
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
@@ -45,6 +54,13 @@ struct ProjectDetailView: View {
         }
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct DayPoint: Identifiable {
         let date: String
         let cost: Double
@@ -67,44 +83,36 @@ struct ProjectDetailView: View {
         var id: String { sessionId }
     }
 
-    private var totals: (cost: Double, input: Int64, output: Int64, cacheRead: Int64) {
+    /// All four derived collections built in a single pass over
+    /// `samples`. Body reads these via `cached.*` so a refresh is the
+    /// only thing that re-iterates the predicate's rows.
+    private struct Cached {
+        var totals: (cost: Double, input: Int64, output: Int64, cacheRead: Int64) = (0, 0, 0, 0)
+        var dailySeries: [DayPoint] = []
+        var modelSlices: [ModelSlice] = []
+        var sessions: [SessionRow] = []
+        var sampleCount: Int = 0
+    }
+
+    private var totals: (cost: Double, input: Int64, output: Int64, cacheRead: Int64) { cached.totals }
+    private var dailySeries: [DayPoint] { cached.dailySeries }
+    private var modelSlices: [ModelSlice] { cached.modelSlices }
+    private var sessions: [SessionRow] { cached.sessions }
+
+    private func refreshCache() {
+        // One pass over `samples`, building all four output collections
+        // simultaneously. Previously each was its own computed property
+        // and ran an independent for-loop over samples — body called
+        // them all, so a save fired four full iterations.
         var cost: Double = 0
         var input: Int64 = 0
         var output: Int64 = 0
         var cacheRead: Int64 = 0
-        for s in samples {
-            cost += s.sourceCostUSD ?? 0
-            input += s.inputTokens
-            output += s.outputTokens
-            cacheRead += s.cacheReadTokens
-        }
-        return (cost, input, output, cacheRead)
-    }
 
-    private var dailySeries: [DayPoint] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
-        for s in samples {
-            var v = byDate[s.date] ?? (0, 0)
-            v.cost += s.sourceCostUSD ?? 0
-            v.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
-            byDate[s.date] = v
-        }
-        return byDate.keys.sorted().map { date in
-            DayPoint(date: date, cost: byDate[date]?.cost ?? 0, tokens: byDate[date]?.tokens ?? 0)
-        }
-    }
-
-    private var modelSlices: [ModelSlice] {
         var byModel: [String: Int64] = [:]
-        for s in samples {
-            byModel[s.model, default: 0] += s.inputTokens + s.outputTokens + s.cacheReadTokens
-        }
-        return byModel.map { ModelSlice(model: $0.key, tokens: $0.value) }
-            .sorted { $0.tokens > $1.tokens }
-    }
 
-    private var sessions: [SessionRow] {
-        struct Acc {
+        struct SessionAcc {
             var lastSeen: Date = .distantPast
             var input: Int64 = 0
             var output: Int64 = 0
@@ -112,19 +120,42 @@ struct ProjectDetailView: View {
             var cost: Double = 0
             var modelTokens: [String: Int64] = [:]
         }
-        var bySession: [String: Acc] = [:]
+        var bySession: [String: SessionAcc] = [:]
+
         for s in samples {
-            guard let sid = s.sessionId else { continue }
-            var a = bySession[sid] ?? Acc()
-            a.input += s.inputTokens
-            a.output += s.outputTokens
-            a.cacheRead += s.cacheReadTokens
-            a.cost += s.sourceCostUSD ?? 0
-            a.modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens + s.cacheReadTokens
-            if s.sampledAt > a.lastSeen { a.lastSeen = s.sampledAt }
-            bySession[sid] = a
+            let sCost = s.sourceCostUSD ?? 0
+            let sTokens = s.inputTokens + s.outputTokens + s.cacheReadTokens
+
+            cost += sCost
+            input += s.inputTokens
+            output += s.outputTokens
+            cacheRead += s.cacheReadTokens
+
+            var d = byDate[s.date] ?? (0, 0)
+            d.cost += sCost
+            d.tokens += sTokens
+            byDate[s.date] = d
+
+            byModel[s.model, default: 0] += sTokens
+
+            if let sid = s.sessionId {
+                var a = bySession[sid] ?? SessionAcc()
+                a.input += s.inputTokens
+                a.output += s.outputTokens
+                a.cacheRead += s.cacheReadTokens
+                a.cost += sCost
+                a.modelTokens[s.model, default: 0] += sTokens
+                if s.sampledAt > a.lastSeen { a.lastSeen = s.sampledAt }
+                bySession[sid] = a
+            }
         }
-        return bySession.map { (sid, a) in
+
+        let dailySeries = byDate.keys.sorted().map { date in
+            DayPoint(date: date, cost: byDate[date]?.cost ?? 0, tokens: byDate[date]?.tokens ?? 0)
+        }
+        let modelSlices = byModel.map { ModelSlice(model: $0.key, tokens: $0.value) }
+            .sorted { $0.tokens > $1.tokens }
+        let sessions = bySession.map { (sid, a) in
             let topModel = a.modelTokens.max(by: { $0.value < $1.value })?.key ?? "—"
             return SessionRow(
                 sessionId: sid,
@@ -134,6 +165,14 @@ struct ProjectDetailView: View {
                 topModel: topModel
             )
         }.sorted { $0.lastSeen > $1.lastSeen }
+
+        cached = Cached(
+            totals: (cost, input, output, cacheRead),
+            dailySeries: dailySeries,
+            modelSlices: modelSlices,
+            sessions: sessions,
+            sampleCount: samples.count
+        )
     }
 
     var body: some View {
@@ -154,6 +193,8 @@ struct ProjectDetailView: View {
             .padding(24)
         }
         .frame(minWidth: 640, idealWidth: 720, minHeight: 540, idealHeight: 700)
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var header: some View {
@@ -183,7 +224,7 @@ struct ProjectDetailView: View {
                 metric("input", formatTokens(t.input))
                 metric("output", formatTokens(t.output))
                 metric("cache read", formatTokens(t.cacheRead))
-                metric("samples", "\(samples.count)")
+                metric("samples", "\(cached.sampleCount)")
                 Spacer()
             }
         }

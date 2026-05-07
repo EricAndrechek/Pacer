@@ -61,7 +61,15 @@ enum ModelsRange: String, CaseIterable, Identifiable {
 }
 
 private struct ModelsContent: View {
+    /// Range-filtered aggregates. Same caching rationale as
+    /// ProjectsView: TabView keeps inactive tab bodies alive, so saves
+    /// invalidate every tab. DailyAggregate is much smaller than
+    /// TokenSample, but body computed `rows` and `dailyMix` on every
+    /// re-eval — wasted work.
     @Query private var aggregates: [DailyAggregate]
+    @Query(ModelsContent.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    @State private var cached = Cached()
 
     init(range: ModelsRange) {
         if let days = range.days {
@@ -77,6 +85,13 @@ private struct ModelsContent: View {
         }
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct ModelRow: Identifiable {
         let model: String
         let displayName: String
@@ -91,7 +106,23 @@ private struct ModelsContent: View {
         var id: String { model }
     }
 
-    private var rows: [ModelRow] {
+    private struct DailyMix: Identifiable {
+        let date: String
+        let model: String
+        let displayName: String
+        let tokens: Int64
+        var id: String { "\(date)|\(model)" }
+    }
+
+    private struct Cached {
+        var rows: [ModelRow] = []
+        var dailyMix: [DailyMix] = []
+    }
+
+    private var rows: [ModelRow] { cached.rows }
+    private var dailyMix: [DailyMix] { cached.dailyMix }
+
+    private func refreshCache() {
         struct Acc {
             var cost: Double = 0
             var input: Int64 = 0
@@ -102,6 +133,8 @@ private struct ModelsContent: View {
             var lastSeen: String = "0000-00-00"
         }
         var byModel: [String: Acc] = [:]
+        var mix: [DailyMix] = []
+        mix.reserveCapacity(aggregates.count)
         for r in aggregates {
             var a = byModel[r.model] ?? Acc()
             a.cost += r.totalCostUSD
@@ -112,8 +145,14 @@ private struct ModelsContent: View {
             if r.date < a.firstSeen { a.firstSeen = r.date }
             if r.date > a.lastSeen { a.lastSeen = r.date }
             byModel[r.model] = a
+            mix.append(DailyMix(
+                date: r.date,
+                model: r.model,
+                displayName: shortModel(r.model),
+                tokens: r.inputTokens + r.outputTokens + r.cacheReadTokens
+            ))
         }
-        return byModel.map { (model, a) in
+        let computedRows = byModel.map { (model, a) in
             ModelRow(
                 model: model,
                 displayName: shortModel(model),
@@ -127,39 +166,23 @@ private struct ModelsContent: View {
                 lastSeen: a.lastSeen
             )
         }.sorted { $0.cost > $1.cost }
-    }
-
-    private struct DailyMix: Identifiable {
-        let date: String
-        let model: String
-        let displayName: String
-        let tokens: Int64
-        var id: String { "\(date)|\(model)" }
-    }
-
-    /// Stacked-area-style series: one row per (date, model). Used by the
-    /// trend chart so you can see how the mix changes over time.
-    private var dailyMix: [DailyMix] {
-        aggregates.map { r in
-            DailyMix(
-                date: r.date,
-                model: r.model,
-                displayName: shortModel(r.model),
-                tokens: r.inputTokens + r.outputTokens + r.cacheReadTokens
-            )
-        }
+        cached = Cached(rows: computedRows, dailyMix: mix)
     }
 
     var body: some View {
-        if rows.isEmpty {
-            emptyState
-        } else {
-            VStack(alignment: .leading, spacing: 16) {
-                shareCard
-                trendCard
-                listCard
+        Group {
+            if rows.isEmpty {
+                emptyState
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    shareCard
+                    trendCard
+                    listCard
+                }
             }
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var emptyState: some View {

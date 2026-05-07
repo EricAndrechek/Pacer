@@ -11,8 +11,16 @@ struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
     @Environment(\.dismiss) private var dismiss
+    /// Aggregates for the day — small (≤ a handful of models) so we
+    /// keep reading them directly. Used for the donut and the row
+    /// list, where we need the live items for ForEach identity.
     @Query private var aggregates: [DailyAggregate]
+    /// Samples for the day — can be a few thousand on a busy day.
+    /// Read only via `refreshCache()`; body looks at cached fields.
     @Query private var samples: [TokenSample]
+    @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    @State private var cached = Cached()
 
     init(date: String) {
         self.date = date
@@ -28,24 +36,19 @@ struct DayDetailView: View {
         )
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct Totals {
         var cost: Double = 0
         var input: Int64 = 0
         var output: Int64 = 0
         var cacheRead: Int64 = 0
         var cacheCreation: Int64 = 0
-    }
-
-    private var totals: Totals {
-        var t = Totals()
-        for r in aggregates {
-            t.cost += r.totalCostUSD
-            t.input += r.inputTokens
-            t.output += r.outputTokens
-            t.cacheRead += r.cacheReadTokens
-            t.cacheCreation += r.cacheCreation5mTokens + r.cacheCreation1hTokens
-        }
-        return t
     }
 
     private struct ProjectRow: Identifiable {
@@ -56,7 +59,24 @@ struct DayDetailView: View {
         var id: String { path }
     }
 
-    private var projectRows: [ProjectRow] {
+    private struct Cached {
+        var totals = Totals()
+        var projectRows: [ProjectRow] = []
+    }
+
+    private var totals: Totals { cached.totals }
+    private var projectRows: [ProjectRow] { cached.projectRows }
+
+    private func refreshCache() {
+        var t = Totals()
+        for r in aggregates {
+            t.cost += r.totalCostUSD
+            t.input += r.inputTokens
+            t.output += r.outputTokens
+            t.cacheRead += r.cacheReadTokens
+            t.cacheCreation += r.cacheCreation5mTokens + r.cacheCreation1hTokens
+        }
+
         struct Acc {
             var cost: Double = 0
             var tokens: Int64 = 0
@@ -69,7 +89,7 @@ struct DayDetailView: View {
             a.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
             byProject[key] = a
         }
-        return byProject.map { (key, a) in
+        let rows = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
                 displayName: shortPath(key),
@@ -77,6 +97,8 @@ struct DayDetailView: View {
                 tokens: a.tokens
             )
         }.sorted { $0.cost > $1.cost }
+
+        cached = Cached(totals: t, projectRows: rows)
     }
 
     var body: some View {
@@ -94,6 +116,8 @@ struct DayDetailView: View {
             .padding(24)
         }
         .frame(minWidth: 560, idealWidth: 640, minHeight: 480, idealHeight: 600)
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var header: some View {

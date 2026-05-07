@@ -23,11 +23,13 @@ import PacerCore
 /// 4-band PaceBand policy. Behind pace = green, on track = primary,
 /// ahead = yellow, danger = red.
 struct PaceChartCard: View {
-    /// Limit the @Query to a generous window so it doesn't materialize
-    /// every rate-limit row Pacer has ever written. Constant computed
-    /// once per view init; works because RateLimitSamples roll forward
-    /// and a view rebuilt later just gets a fresher cutoff.
+    /// 8-day window of rate-limit samples. We never read this from
+    /// `body` — the columns get pre-split sample arrays out of the
+    /// cache. Body would otherwise filter+sort the full window twice
+    /// (once per column) on every SwiftData save.
     @Query private var samples: [RateLimitSample]
+    @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached = Cached()
 
     init() {
         // 8 days covers the longest active window (7d) plus a small
@@ -41,33 +43,61 @@ struct PaceChartCard: View {
         )
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    /// Pre-bucketed by window. The header reads `latest`; each column
+    /// reads `fiveHour`/`sevenDay`. No body-time filter/sort.
+    private struct Cached {
+        var fiveHour: [RateLimitSample] = []
+        var sevenDay: [RateLimitSample] = []
+        var latest: RateLimitSample?
+    }
+
+    private func refreshCache() {
+        var fh: [RateLimitSample] = []
+        var sd: [RateLimitSample] = []
+        var newest: RateLimitSample?
+        for s in samples {
+            if s.window == "five_hour" { fh.append(s) }
+            else if s.window == "seven_day" { sd.append(s) }
+            if newest == nil || s.sampledAt > newest!.sampledAt { newest = s }
+        }
+        // Samples come in reverse-chronological from the @Query; the
+        // PaceChartColumn body assumes `windowSamples.first` is the
+        // newest. Append-in-iteration preserves that order.
+        cached = Cached(fiveHour: fh, sevenDay: sd, latest: newest)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Rate-limit pace")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                if let latest = samples.first {
+                if let latest = cached.latest {
                     Text("via \(latest.source) · \(ageText(for: latest.sampledAt))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            if samples.isEmpty {
+            if cached.latest == nil {
                 emptyState
             } else {
                 HStack(alignment: .top, spacing: 20) {
                     PaceChartColumn(
                         title: "5-hour",
-                        window: "five_hour",
                         duration: 5 * 3600,
-                        samples: samples
+                        windowSamples: cached.fiveHour
                     )
                     PaceChartColumn(
                         title: "7-day",
-                        window: "seven_day",
                         duration: 7 * 86400,
-                        samples: samples
+                        windowSamples: cached.sevenDay
                     )
                 }
             }
@@ -76,6 +106,8 @@ struct PaceChartCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var emptyState: some View {
@@ -101,13 +133,11 @@ struct PaceChartCard: View {
 /// stand-alone widget.
 private struct PaceChartColumn: View {
     let title: String
-    let window: String
     let duration: TimeInterval
-    let samples: [RateLimitSample]
-
-    private var windowSamples: [RateLimitSample] {
-        samples.filter { $0.window == window }
-    }
+    /// Already filtered to this column's window and pre-sorted
+    /// reverse-chronological by the parent. Avoids per-body filter/sort
+    /// passes over the full 8-day sample set.
+    let windowSamples: [RateLimitSample]
 
     private var latest: RateLimitSample? { windowSamples.first }
 

@@ -13,8 +13,22 @@ import PacerCore
 ///
 /// Falls back to a neutral icon when no rate-limit samples exist yet.
 struct MenuBarLabel: View {
-    @Query(sort: \RateLimitSample.sampledAt, order: .reverse)
+    /// Cap the fetch — the OAuth poller writes 2 rows per 5-minute
+    /// cycle, so a 7-day history can be ~4k rows. We only ever look at
+    /// `samples.first { $0.window == "five_hour" }`, which the most
+    /// recent two samples will always satisfy. Without the cap, every
+    /// SwiftData save materialized the full history just to fire the
+    /// menu-bar label re-render.
+    @Query(MenuBarLabel.recentDescriptor)
     private var samples: [RateLimitSample]
+
+    private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
 
     @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
     private var styleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
@@ -81,9 +95,19 @@ struct MenuBarLabel: View {
 /// detail view; this is the at-a-glance read.
 struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
-    @Query(sort: \RateLimitSample.sampledAt, order: .reverse)
+    /// Same fetchLimit rationale as MenuBarLabel — we only need the
+    /// latest sample per window, and 8 rows is a safe upper bound.
+    @Query(MenuBarContent.recentDescriptor)
     private var rateLimits: [RateLimitSample]
     @Query private var todayAggregates: [DailyAggregate]
+
+    private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
 
     init() {
         let today = TokenSample.formatDate(Date())

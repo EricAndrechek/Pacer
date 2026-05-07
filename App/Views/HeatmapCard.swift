@@ -16,11 +16,20 @@ struct HeatmapCard: View {
     let onDayTap: (String) -> Void
 
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    @Query(HeatmapCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached = Cached()
 
     init(weekCount: Int = 26, onDayTap: @escaping (String) -> Void) {
         self.weekCount = weekCount
         self.onDayTap = onDayTap
     }
+
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
 
     private struct Cell: Identifiable {
         let date: Date
@@ -29,9 +38,19 @@ struct HeatmapCard: View {
         var id: String { dateKey }
     }
 
-    /// One sub-array per week. Mon..Sun ordering inside each week.
-    /// Earliest week first.
-    private var grid: [[Cell?]] {
+    /// Pre-built grid + percentile-capped color scale. Recomputing this
+    /// in body fired Calendar / DateFormatter calls 26 weeks × 7 days
+    /// each save tick — a small but recurring CPU hit on every History
+    /// tab while in the eval tree.
+    private struct Cached {
+        var grid: [[Cell?]] = []
+        var maxCost: Double = 1
+    }
+
+    private var grid: [[Cell?]] { cached.grid }
+    private var maxCost: Double { cached.maxCost }
+
+    private func refreshCache() {
         // Sum cost per day across models.
         var byDate: [String: Double] = [:]
         for row in aggregates {
@@ -45,7 +64,10 @@ struct HeatmapCard: View {
         // grid's starting Monday.
         guard let thisMonday = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)),
               let firstMonday = cal.date(byAdding: .weekOfYear, value: -(weekCount - 1), to: thisMonday)
-        else { return [] }
+        else {
+            cached = Cached()
+            return
+        }
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -69,20 +91,20 @@ struct HeatmapCard: View {
             }
             weeks.append(week)
         }
-        return weeks
-    }
 
-    private var maxCost: Double {
         // 95th percentile-ish cap so a single outlier doesn't make every
         // other day look colorless. Sort costs desc, take the 5th value
         // if we have at least 20 days; else fall back to overall max.
-        var costs = grid.flatMap { $0 }.compactMap { $0?.cost }.filter { $0 > 0 }
-        guard !costs.isEmpty else { return 1 }
-        costs.sort(by: >)
-        if costs.count >= 20 {
-            return costs[costs.count / 20]
+        var costs = weeks.flatMap { $0 }.compactMap { $0?.cost }.filter { $0 > 0 }
+        let computedMax: Double
+        if costs.isEmpty {
+            computedMax = 1
+        } else {
+            costs.sort(by: >)
+            computedMax = costs.count >= 20 ? costs[costs.count / 20] : costs[0]
         }
-        return costs[0]
+
+        cached = Cached(grid: weeks, maxCost: computedMax)
     }
 
     private static let weekdayLabels = ["M", "T", "W", "T", "F", "S", "S"]
@@ -112,6 +134,8 @@ struct HeatmapCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     /// Month label appears above the first week whose Monday falls

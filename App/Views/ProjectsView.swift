@@ -95,8 +95,20 @@ enum ProjectRange: String, CaseIterable, Identifiable {
 }
 
 private struct ProjectsContent: View {
+    /// Filtered TokenSample query. Never read from `body` — see
+    /// `refreshCache()`. The body reads only `cached.allProjects`,
+    /// because TabView keeps inactive tabs in the eval tree, so a
+    /// SwiftData save fires this view's body even when Projects isn't
+    /// the visible tab. With ~30k samples in the 90-day window,
+    /// recomputing the per-project grouping in body kept Pacer pegged.
     @Query private var samples: [TokenSample]
+    /// Cheap single-row probe — `last_incremental_scan_at` is rewritten
+    /// once per scan cycle. Watching it gives us a coarse-grained
+    /// "data probably changed" tick without materializing the
+    /// TokenSample table.
+    @Query(ProjectsContent.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
+    @State private var cached = Cached()
     @State private var selected: SelectedProject?
 
     /// Sheet's `item:` binding requires Identifiable; wrap the path
@@ -132,6 +144,13 @@ private struct ProjectsContent: View {
         }
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
     private struct ProjectRow: Identifiable {
         let path: String
         let displayName: String
@@ -146,8 +165,24 @@ private struct ProjectsContent: View {
         var id: String { path }
     }
 
+    /// Pre-grouped, pre-sorted rows. searchText filtering is applied
+    /// downstream cheaply over this small list (~tens of projects),
+    /// so typing in the search field doesn't cost a full regroup.
+    private struct Cached {
+        var allProjects: [ProjectRow] = []
+    }
+
     private var rows: [ProjectRow] {
-        // Group samples by projectPath.
+        let needle = searchText.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return cached.allProjects }
+        let lower = needle.lowercased()
+        return cached.allProjects.filter {
+            $0.path.lowercased().contains(lower) ||
+            $0.displayName.lowercased().contains(lower)
+        }
+    }
+
+    private func refreshCache() {
         struct Acc {
             var cost: Double = 0
             var input: Int64 = 0
@@ -173,7 +208,7 @@ private struct ProjectsContent: View {
             if s.sampledAt > a.lastActive { a.lastActive = s.sampledAt }
             byProject[key] = a
         }
-        let unfiltered = byProject.map { (key, a) in
+        let computed = byProject.map { (key, a) in
             ProjectRow(
                 path: key,
                 displayName: shortPath(key),
@@ -187,15 +222,7 @@ private struct ProjectsContent: View {
                 modelCount: a.models.count
             )
         }.sorted { $0.cost > $1.cost }
-        // Substring filter by path or displayName, case-insensitive.
-        // Empty searchText returns all rows unchanged.
-        let needle = searchText.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return unfiltered }
-        let lower = needle.lowercased()
-        return unfiltered.filter {
-            $0.path.lowercased().contains(lower) ||
-            $0.displayName.lowercased().contains(lower)
-        }
+        cached = Cached(allProjects: computed)
     }
 
     var body: some View {
@@ -218,6 +245,8 @@ private struct ProjectsContent: View {
                 since: sel.since
             )
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var noSearchMatchesState: some View {

@@ -12,6 +12,8 @@ import PacerCore
 /// total-cost number changes).
 struct PerModelTodayCard: View {
     @Query private var aggregates: [DailyAggregate]
+    @Query(PerModelTodayCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached: [ModelRow] = []
 
     init() {
         let todayString = TokenSample.formatDate(Date())
@@ -22,14 +24,23 @@ struct PerModelTodayCard: View {
         )
     }
 
-    private var rows: [ModelRow] {
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    private var rows: [ModelRow] { cached }
+
+    private func refreshCache() {
         // Sort descending by tokens — the donut and the table read in
         // the same order, so the user can map row 1 to the largest
         // arc.
         let totalTokens = aggregates.reduce(0) {
             $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
         }
-        return aggregates
+        cached = aggregates
             .map { agg in
                 let tokens = agg.inputTokens + agg.outputTokens + agg.cacheReadTokens
                 let share = totalTokens > 0 ? Double(tokens) / Double(totalTokens) : 0
@@ -66,6 +77,8 @@ struct PerModelTodayCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var donut: some View {
