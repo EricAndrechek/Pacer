@@ -407,7 +407,17 @@ func pacerShortPath(_ path: String) -> String {
     return last.isEmpty ? path : last
 }
 
+/// Relative time string that avoids `RelativeDateTimeFormatter`'s
+/// default "in 0 seconds" / "0 seconds ago" output near zero. We clamp
+/// anything within 5 seconds to a single, reader-friendly word: future
+/// → "now", past → "just now". Used by every freshness/reset chip in
+/// the dashboard, so getting this right means the user never sees the
+/// jarring "in 0 sec" string when a window is mid-reset.
 func pacerRelative(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated) -> String {
+    let interval = date.timeIntervalSinceNow
+    if abs(interval) < 5 {
+        return interval >= 0 ? "now" : "just now"
+    }
     let f = RelativeDateTimeFormatter()
     f.unitsStyle = style
     return f.localizedString(for: date, relativeTo: Date())

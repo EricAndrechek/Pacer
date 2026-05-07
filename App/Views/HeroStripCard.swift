@@ -105,17 +105,20 @@ struct HeroStripCard: View {
     private var costTile: some View {
         HeroTile(label: "Today") {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(pacerCost(todayCost))
-                        .font(.system(size: 32, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
+                Text(pacerCost(todayCost))
+                    .font(.system(size: 32, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                HStack(spacing: 6) {
                     if let (ratio, _) = weekDelta {
                         trendChip(ratio: ratio)
                     }
+                    Text("\(pacerTokens(todayTokens)) tokens")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                Text("\(pacerTokens(todayTokens)) tokens")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -131,6 +134,7 @@ struct HeroStripCard: View {
         let label: String = ratio >= 10 ? String(format: "%.0f×", ratio)
             : String(format: "%.1f×", ratio)
         Chip(text: label, systemImage: icon, tint: tint, size: .compact)
+            .fixedSize()
     }
 
     // MARK: - Pace tile
@@ -143,12 +147,17 @@ struct HeroStripCard: View {
                     now: Date(), resetsAt: resets, windowDuration: duration
                 ) * 100
                 let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                // Chip moved to its own row below the % line so it
+                // can't ever wrap mid-word ("behi nd") when the tile
+                // gets narrow. Layout: hero %, then a single status
+                // line that combines the chip and the resets-in time.
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(Int(s.usedPercentage.rounded()))%")
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(color(for: band))
+                            .lineLimit(1)
                         Text("/")
                             .font(.system(size: 18))
                             .foregroundStyle(.tertiary)
@@ -156,12 +165,15 @@ struct HeroStripCard: View {
                             .font(.system(size: 18, weight: .medium, design: .rounded))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
-                        Spacer(minLength: 0)
-                        paceChip(band: band)
+                            .lineLimit(1)
                     }
-                    Text("resets \(pacerRelative(resets))")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        paceChip(band: band)
+                        Text("resets \(pacerRelative(resets))")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -178,16 +190,22 @@ struct HeroStripCard: View {
 
     @ViewBuilder
     private func paceChip(band: PaceBand) -> some View {
-        switch band {
-        case .green:
-            Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
-        case .white:
-            Chip(text: "on pace", tint: .secondary, size: .compact)
-        case .yellow:
-            Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
-        case .red:
-            Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
+        Group {
+            switch band {
+            case .green:
+                Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
+            case .white:
+                Chip(text: "on pace", tint: .secondary, size: .compact)
+            case .yellow:
+                Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
+            case .red:
+                Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
+            }
         }
+        // Lock the chip's width to its content so it can't get squeezed
+        // and wrap. Layout above uses a Spacer/HStack that would
+        // otherwise let the chip's text wrap when the tile narrows.
+        .fixedSize()
     }
 
     private func color(for band: PaceBand) -> Color {

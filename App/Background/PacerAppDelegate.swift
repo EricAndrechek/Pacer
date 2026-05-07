@@ -52,6 +52,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // logs-tail` read this same file.
         Self.redirectStderrToLogFile()
 
+        // Single-instance gate. Runs before the SwiftData container
+        // opens — a second instance opening the same `pacer.sqlite`
+        // would race the existing process's writes. If another Pacer
+        // is already running we activate it and exit immediately,
+        // skipping container creation and scan-loop bring-up.
+        Self.exitIfAnotherInstanceIsRunning()
+
         // Register defaults before any @AppStorage reads can happen,
         // same reason PacerApp.init used to: `@AppStorage`'s default-
         // value parameter only kicks in when the key is totally
@@ -65,6 +72,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         }
         backgroundService = AppBackgroundService(container: container)
         super.init()
+    }
+
+    /// Activate the existing Pacer instance and exit if one is found.
+    /// Called from `init()` so the check runs before any SwiftData /
+    /// scan-loop work.
+    ///
+    /// Note: macOS's `open -n` deliberately bypasses Launch Services'
+    /// "is it running" gate, which is how multiple instances appeared
+    /// in the first place. The runtime check below catches that case
+    /// (and also a stray Finder double-click while the app is running
+    /// in agent mode without a Dock icon).
+    private static func exitIfAnotherInstanceIsRunning() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != mine }
+        guard let other = others.first else { return }
+        // Bring the existing one forward so the user gets the same
+        // "Pacer popped open" feeling they expected from the second
+        // launch — then exit.
+        other.activate(options: [.activateAllWindows])
+        FileHandle.standardError.write(Data(
+            "[Pacer] another instance is running (pid \(other.processIdentifier)); exiting this one\n".utf8
+        ))
+        exit(0)
     }
 
     /// Append future stderr writes (including PacerCore.Log output) to
@@ -89,6 +122,15 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // anything that writes to `stderr` directly (system frameworks)
         // both end up in the file.
         _ = logURL.path.withCString { freopen($0, "a", stderr) }
+    }
+
+    /// Disable AppKit's automatic window tabbing globally. Pacer is a
+    /// single-window app, so the macOS-default behavior of grouping
+    /// "Show Tab Bar" windows into one chrome with multiple tabs (which
+    /// the prior `WindowGroup` setup tripped on every Cmd+,) is
+    /// unwanted noise.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -145,9 +187,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            // Extract the window pointer outside the @MainActor Task —
+            // capturing the whole `note` would carry a non-Sendable
+            // userInfo dict across the boundary, which Swift 6
+            // diagnoses as a data-race risk.
+            let window = note.object as? NSWindow
             Task { @MainActor in
                 self?.applyActivationPolicyForCurrentWindows()
+                if let window {
+                    Self.ensureWindowOnScreen(window)
+                }
             }
         }
         let willClose = center.addObserver(
@@ -163,6 +213,37 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         windowObservers = [didBecomeKey, willClose]
+    }
+
+    /// macOS persists the main window's frame across launches via the
+    /// `frameAutosaveName`. If the user moved the window onto a
+    /// secondary display and then disconnected it, the restored frame
+    /// can sit entirely off-screen — the user opens "Pacer" from the
+    /// menu bar, sees nothing, and has no obvious way back. This
+    /// reseats the window centered on the main screen whenever its
+    /// saved frame doesn't intersect any current screen.
+    private static func ensureWindowOnScreen(_ window: NSWindow) {
+        // Skip auxiliary windows (panels, menu-bar popover host) — only
+        // the main "Pacer" window needs reseating.
+        guard window.canBecomeMain, !(window is NSPanel) else { return }
+        let frame = window.frame
+        let visible = NSScreen.screens.contains { screen in
+            screen.visibleFrame.intersects(frame)
+        }
+        guard !visible else { return }
+        // Center on the screen that currently has the menu bar (the
+        // user's primary), then save the new frame so the next launch
+        // doesn't repeat the dance.
+        guard let target = NSScreen.main ?? NSScreen.screens.first else { return }
+        let v = target.visibleFrame
+        let newFrame = NSRect(
+            x: v.midX - frame.width / 2,
+            y: v.midY - frame.height / 2,
+            width: frame.width,
+            height: frame.height
+        )
+        window.setFrame(newFrame, display: true, animate: false)
+        window.saveFrame(usingName: window.frameAutosaveName)
     }
 
     /// `.regular` when at least one user-visible window is open

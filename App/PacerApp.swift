@@ -20,7 +20,15 @@ struct PacerApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        // `Window` (vs `WindowGroup`) is the singleton-window scene
+        // type. With a WindowGroup, every `openWindow(id: "main")`
+        // call from the menu bar / Cmd+, / "Settings…" was creating a
+        // *new* window that AppKit then merged into the existing
+        // window's tab bar — visually ugly, breaks "is the dashboard
+        // visible" tracking, and confuses Dock-icon visibility logic.
+        // A singleton Window means `openWindow(id:)` reuses the one
+        // we already have.
+        Window("Pacer", id: "main") {
             ContentView()
                 // NotificationsHost is invisible (zero size) but holds
                 // @Query subscriptions that fire when new RateLimit
