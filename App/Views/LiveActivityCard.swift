@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// "What's happening right now" — token & cost burn rate over the last
 /// hour, plus a projection for end-of-day. Helps catch a runaway

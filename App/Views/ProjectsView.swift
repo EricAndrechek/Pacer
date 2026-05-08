@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// Per-project breakdown. Reads `ProjectDailyAggregate` (precomputed by
 /// the in-process scan) so the table is sub-10ms even on populated

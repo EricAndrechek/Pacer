@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// "Show me everything important without scrolling" — the topmost card
 /// on the Dashboard. Three side-by-side tiles that answer the three

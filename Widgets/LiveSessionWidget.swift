@@ -2,6 +2,7 @@ import WidgetKit
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// "What am I burning right now" widget. Pulls the most-recent
 /// `SessionInfo` (sorted desc by lastSeenAt) and surfaces project name,
@@ -98,7 +99,7 @@ struct LiveSessionProvider: TimelineProvider {
             return LiveSessionEntry(
                 date: Date(),
                 session: .init(
-                    projectDisplayName: widgetShortPath(s.projectPath),
+                    projectDisplayName: pacerShortPath(s.projectPath),
                     totalTokens: s.totalTokens,
                     costUSD: s.cumulativeCostUSD,
                     topModel: s.topModel,
@@ -137,11 +138,11 @@ struct LiveSessionWidgetView: View {
                     .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(formatCostUSD(s.costUSD))
+                Text(pacerCost(s.costUSD))
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
-                Text("\(formatTokensCompact(s.totalTokens)) tokens")
+                Text("\(pacerTokens(s.totalTokens)) tokens")
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -168,12 +169,12 @@ struct LiveSessionWidgetView: View {
                     .truncationMode(.middle)
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     statColumn(
-                        value: formatCostUSD(s.costUSD),
-                        label: s.topModel.isEmpty ? "session" : widgetShortModel(s.topModel)
+                        value: pacerCost(s.costUSD),
+                        label: s.topModel.isEmpty ? "session" : pacerShortModel(s.topModel)
                     )
                     Divider().frame(height: 30)
                     statColumn(
-                        value: formatTokensCompact(s.totalTokens),
+                        value: pacerTokens(s.totalTokens),
                         label: "tokens"
                     )
                 }
@@ -227,7 +228,7 @@ struct LiveSessionWidgetView: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         case .recent, .idle:
-            Text("seen \(formatRelative(s.lastSeenAt))")
+            Text("seen \(pacerRelative(s.lastSeenAt))")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -242,7 +243,7 @@ struct LiveSessionWidgetView: View {
             case .active:
                 Text("\(formatDurationShort(s.elapsedSeconds)) elapsed")
             case .recent, .idle:
-                Text("last seen \(formatRelative(s.lastSeenAt))")
+                Text("last seen \(pacerRelative(s.lastSeenAt))")
             }
             Spacer()
             // Show the started-at clock time on medium so the user

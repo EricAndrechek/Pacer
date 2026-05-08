@@ -178,7 +178,7 @@ struct PaceChartWidgetView: View {
             if let s = entry.fiveHour {
                 PaceChartView(data: s.chart, style: .compact)
                     .frame(maxHeight: .infinity)
-                Text(PacerTimeFormat.resetCaption(
+                Text(pacerResetCaption(
                     resetsAt: s.resetsAt,
                     durationSeconds: s.chart.durationSeconds
                 ))
@@ -250,7 +250,7 @@ struct PaceChartWidgetView: View {
                 paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: true)
                 PaceChartView(data: state.chart, style: style)
                     .frame(maxHeight: .infinity)
-                Text(PacerTimeFormat.resetCaption(
+                Text(pacerResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds
                 ))
@@ -288,7 +288,7 @@ struct PaceChartWidgetView: View {
                 // looks identical to the app card.
                 PaceChartView(data: state.chart, style: .detailed)
                     .frame(maxHeight: .infinity)
-                Text(PacerTimeFormat.resetCaption(
+                Text(pacerResetCaption(
                     resetsAt: state.resetsAt,
                     durationSeconds: state.chart.durationSeconds
                 ))

@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// 24-hour timeline of today's activity. Shows when during the day you
 /// were burning tokens — useful for spotting "I had a 4-hour deep

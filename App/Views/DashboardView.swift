@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Primary view a user sees when opening Pacer. Tightened from the
 /// pre-redesign 7-card stack into:

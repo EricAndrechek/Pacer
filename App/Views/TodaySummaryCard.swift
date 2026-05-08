@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// "Today details" — token-flow breakdown for the current day. Sits
 /// below the HeroStripCard which already shows today's cost; this card

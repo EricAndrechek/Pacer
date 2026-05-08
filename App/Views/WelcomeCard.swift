@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// First-run welcome banner. Renders at the top of the dashboard while
 /// the SwiftData store has zero `TokenSample` and zero `RateLimitSample`

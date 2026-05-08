@@ -168,10 +168,10 @@ struct PaceGaugesWidgetView: View {
     /// the gauge widget reads the same as the dashboard pace card.
     private func resetText(_ date: Date?, durationSeconds: TimeInterval) -> String {
         guard let date else { return "no data" }
-        let rel = formatRelative(date)
+        let rel = pacerRelative(date)
         let clock = durationSeconds <= 6 * 3600
-            ? widgetClockTime(date)
-            : widgetWeekdayClock(date)
+            ? pacerClockTime(date)
+            : pacerWeekdayClock(date)
         return "resets \(rel) · \(clock)"
     }
 }

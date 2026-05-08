@@ -2,6 +2,7 @@ import WidgetKit
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Top projects by cost over the last N days, rendered as a horizontal
 /// bar chart with cost labels. Answers "where's my Claude budget
@@ -102,7 +103,7 @@ struct TopProjectsProvider: TimelineProvider {
                 .sorted { $0.cost > $1.cost }
             let topRows = allRanked.prefix(K.largeRowCount).map {
                 TopProjectsEntry.Row(
-                    displayName: widgetShortPath($0.path),
+                    displayName: pacerShortPath($0.path),
                     costUSD: $0.cost
                 )
             }
@@ -167,7 +168,7 @@ struct TopProjectsWidgetView: View {
     @ViewBuilder
     private var header: some View {
         WidgetTitleBar(title: "TOP PROJECTS · 7d") {
-            Text(formatCostUSD(entry.totalCostUSD))
+            Text(pacerCost(entry.totalCostUSD))
                 .font(.system(family == .systemLarge ? .title3 : .subheadline, design: .rounded).weight(.semibold))
                 .monospacedDigit()
         }
@@ -197,7 +198,7 @@ struct TopProjectsWidgetView: View {
                 .truncationMode(.middle)
                 .frame(width: WidgetStyle.labelColumnWidth, alignment: .leading)
             WidgetProgressBar(fraction: fraction, height: family == .systemLarge ? 9 : 8)
-            Text(formatCostUSD(row.costUSD))
+            Text(pacerCost(row.costUSD))
                 .font(.caption.weight(.medium))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

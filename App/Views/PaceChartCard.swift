@@ -162,7 +162,7 @@ private struct PaceChartColumn: View {
             Eyebrow(text: title)
             Spacer()
             if let resets = latest?.resetsAt {
-                Text(PacerTimeFormat.resetCaption(resetsAt: resets, durationSeconds: duration))
+                Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {

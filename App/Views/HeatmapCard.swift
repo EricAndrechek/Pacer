@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// GitHub-contribution-style activity heatmap. Rows are days of the
 /// week (Mon at top → Sun at bottom), columns are weeks, oldest on the

@@ -19,19 +19,33 @@ import PacerCore
 ///
 /// Sort fields and persistence are caller-supplied so each surface
 /// can store its preference under a distinct App Group key.
-struct SessionsTable: View {
+public struct SessionsTable: View {
     /// Already filtered + ready-to-sort. Caller supplies the rows
     /// from its own @Query so SwiftData updates stay incremental.
-    let rows: [SessionInfo]
+    public let rows: [SessionInfo]
     /// Show the "Project" column. The project-detail modal already
     /// scopes by one project so the column is redundant there; the
     /// day-detail modal benefits from it.
-    let showProjectColumn: Bool
+    public let showProjectColumn: Bool
     /// Callback for opening a session's detail modal.
-    let onSessionTap: (SessionInfo) -> Void
+    public let onSessionTap: (SessionInfo) -> Void
 
-    @Binding var sort: SessionsTableSort
-    @Binding var sortDescending: Bool
+    @Binding public var sort: SessionsTableSort
+    @Binding public var sortDescending: Bool
+
+    public init(
+        rows: [SessionInfo],
+        showProjectColumn: Bool,
+        sort: Binding<SessionsTableSort>,
+        sortDescending: Binding<Bool>,
+        onSessionTap: @escaping (SessionInfo) -> Void
+    ) {
+        self.rows = rows
+        self.showProjectColumn = showProjectColumn
+        self._sort = sort
+        self._sortDescending = sortDescending
+        self.onSessionTap = onSessionTap
+    }
 
     /// Above this many rows the body switches to an inner scroll
     /// view with a visible scrollbar. Below the threshold we render
@@ -39,7 +53,7 @@ struct SessionsTable: View {
     private static let inlineRowThreshold = 12
     private static let scrollMaxHeight: CGFloat = 320
 
-    var body: some View {
+    public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             header
             Divider().padding(.vertical, 2)
@@ -200,7 +214,7 @@ struct SessionsTable: View {
 /// modal which renders the extra column. The Project modal's
 /// previous SessionsSort enum had only the first five — moved to
 /// this superset so we don't fork the type.
-enum SessionsTableSort: String, CaseIterable, Identifiable {
+public enum SessionsTableSort: String, CaseIterable, Identifiable {
     case id, model, project, tokens, cost, lastSeen
-    var id: String { rawValue }
+    public var id: String { rawValue }
 }

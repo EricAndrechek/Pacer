@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// "All time" view — lifetime totals, monthly trend, the activity
 /// heatmap, and most expensive days. Reads from `DailyAggregate` (the

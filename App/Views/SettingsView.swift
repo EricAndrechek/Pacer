@@ -1,5 +1,6 @@
 import SwiftUI
 import PacerCore
+import PacerUI
 
 /// Pacer's preferences UI. Embedded as the 5th destination in the main
 /// window's sidebar (`Cmd+5`) and reachable via `Cmd+,` and the menu-

@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// Detail sheet for a single calendar day. Reachable from the History
 /// tab's heatmap (click a cell). Shows cost / tokens summary, the
@@ -551,11 +552,11 @@ struct DayDetailView: View {
             SessionsTable(
                 rows: sessionRows,
                 showProjectColumn: true,
+                sort: sessionsSortBinding,
+                sortDescending: $sessionsSortDescending,
                 onSessionTap: {
                     selectedSession = ProjectDetailView.SelectedSession(session: $0)
-                },
-                sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending
+                }
             )
         }
     }

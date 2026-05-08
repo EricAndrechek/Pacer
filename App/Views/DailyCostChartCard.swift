@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// 30-day rolling bar chart of daily cost in USD. Pulls
 /// `DailyAggregate` rows ordered descending by date, takes the last

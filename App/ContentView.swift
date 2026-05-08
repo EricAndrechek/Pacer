@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Top-level shell. Sidebar-driven NavigationSplitView with five
 /// destinations: Dashboard / History / Projects / Models / Settings.

@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 // Sort enum was forked into the shared SessionsTable component; this
 // view now reuses `SessionsTableSort` directly.
@@ -391,9 +392,9 @@ struct ProjectDetailView: View {
             SessionsTable(
                 rows: sessionRows,
                 showProjectColumn: false,
-                onSessionTap: { selectedSession = SelectedSession(session: $0) },
                 sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending
+                sortDescending: $sessionsSortDescending,
+                onSessionTap: { selectedSession = SelectedSession(session: $0) }
             )
         }
     }

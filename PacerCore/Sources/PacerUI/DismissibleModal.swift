@@ -19,12 +19,12 @@ import SwiftUI
 /// Setting the binding to nil dismisses; the dimming layer's tap
 /// gesture and the inner content's `Environment(\.dismiss)` both
 /// hand control back to the binding via the same path.
-extension View {
+public extension View {
     func dismissibleModal<Item: Identifiable, Content: View>(
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
-        modifier(DismissibleModalModifier(item: item, modalContent: content))
+        self.modifier(DismissibleModalModifier(item: item, modalContent: content))
     }
 }
 
@@ -118,16 +118,16 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
 /// the wrapped closure is always invoked from MainActor in practice
 /// (SwiftUI view bodies are @MainActor-bound). The compiler can't
 /// prove that without crossing the closure-isolation boundary.
-struct DismissModalAction: @unchecked Sendable {
+public struct DismissModalAction: @unchecked Sendable {
     fileprivate let close: () -> Void
-    func callAsFunction() { close() }
+    public func callAsFunction() { close() }
 }
 
 private struct DismissModalKey: EnvironmentKey {
     static let defaultValue = DismissModalAction(close: {})
 }
 
-extension EnvironmentValues {
+public extension EnvironmentValues {
     /// Dismiss the enclosing dismissible modal, if any. Inner views
     /// read this with `@Environment(\.dismissModal)` and call it from
     /// a Close button or any other dismissal control.

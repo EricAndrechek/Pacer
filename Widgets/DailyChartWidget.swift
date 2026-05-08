@@ -3,6 +3,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// Two-week daily-cost chart. Medium family shows the bar chart;
 /// large adds a stat row with today/avg/total for the period above
@@ -126,7 +127,7 @@ struct DailyChartWidgetView: View {
     @ViewBuilder
     private var header: some View {
         WidgetTitleBar(title: "LAST 14 DAYS") {
-            Text(formatCostUSD(entry.totalCostUSD))
+            Text(pacerCost(entry.totalCostUSD))
                 .font(.system(family == .systemLarge ? .title3 : .headline, design: .rounded).weight(.semibold))
                 .monospacedDigit()
         }
@@ -164,11 +165,11 @@ struct DailyChartWidgetView: View {
     @ViewBuilder
     private var statRow: some View {
         HStack(spacing: 0) {
-            stat(label: "today", value: formatCostUSD(entry.todayCostUSD))
+            stat(label: "today", value: pacerCost(entry.todayCostUSD))
             Divider().frame(height: 24)
-            stat(label: "14-day avg", value: formatCostUSD(entry.avgCostUSD))
+            stat(label: "14-day avg", value: pacerCost(entry.avgCostUSD))
             Divider().frame(height: 24)
-            stat(label: "peak day", value: formatCostUSD(entry.days.map(\.cost).max() ?? 0))
+            stat(label: "peak day", value: pacerCost(entry.days.map(\.cost).max() ?? 0))
         }
     }
 

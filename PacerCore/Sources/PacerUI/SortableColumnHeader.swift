@@ -10,7 +10,7 @@ import SwiftUI
 ///   - Click the active column → toggle direction.
 ///
 /// The caller owns the active-field + direction state via two bindings.
-struct SortableColumnHeader<Field: Equatable>: View {
+public struct SortableColumnHeader<Field: Equatable>: View {
     let label: String
     let field: Field
     let alignment: Alignment
@@ -22,7 +22,7 @@ struct SortableColumnHeader<Field: Equatable>: View {
     /// time.
     let defaultDescending: Bool
 
-    init(
+    public init(
         _ label: String,
         field: Field,
         alignment: Alignment = .leading,
@@ -40,7 +40,7 @@ struct SortableColumnHeader<Field: Equatable>: View {
 
     private var isActive: Bool { activeField == field }
 
-    var body: some View {
+    public var body: some View {
         Button {
             if isActive {
                 descending.toggle()

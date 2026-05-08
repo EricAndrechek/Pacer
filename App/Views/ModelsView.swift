@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// Per-model breakdown — analogous to ProjectsView but keyed on model
 /// name. Useful for "is sonnet doing the bulk of work or am I always

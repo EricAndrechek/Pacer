@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Charts
 import PacerCore
+import PacerUI
 
 /// Today's per-model breakdown. Donut on the left shows the share of
 /// total tokens by model; the table on the right lists each model with

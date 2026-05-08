@@ -219,8 +219,8 @@ private struct AxisModifier: ViewModifier {
             AxisValueLabel(centered: !isShortCycle) {
                 if let d = value.as(Date.self) {
                     Text(isShortCycle
-                        ? PacerTimeFormat.hour(d, style: .compact)
-                        : PacerTimeFormat.weekdayShort(d))
+                        ? pacerHour(d, style: .compact)
+                        : pacerWeekdayShort(d))
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
                 }

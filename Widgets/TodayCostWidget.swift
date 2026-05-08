@@ -2,6 +2,7 @@ import WidgetKit
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Compact "what did I spend today" widget. Hero is the cost in USD,
 /// sub-line is total tokens (input + output + cache reads). Refreshed
@@ -64,20 +65,20 @@ struct TodayCostWidgetView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             WidgetTitleBar(title: "TODAY") {
-                Text(formatWeekdayShort(entry.date))
+                Text(pacerWeekdayShort(entry.date))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 6)
             // Hero cost — bumped from 28pt to 32pt with a tighter
             // line-height so it dominates the small canvas.
-            Text(formatCostUSD(entry.costUSD))
+            Text(pacerCost(entry.costUSD))
                 .font(.system(size: 32, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .foregroundStyle(.primary)
-            Text("\(formatTokensCompact(entry.tokens)) tokens")
+            Text("\(pacerTokens(entry.tokens)) tokens")
                 .font(.system(.subheadline, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)

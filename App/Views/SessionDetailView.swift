@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Per-session drill-down. Reachable from `ProjectDetailView`'s
 /// sessions table (and from `DayDetailView`'s sessions card). Replaces

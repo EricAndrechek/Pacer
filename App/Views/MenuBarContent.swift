@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// What renders in the menu bar status item. The display is governed by
 /// `PacerSettings.MenuBarStyle` (icon-only / percent-only / both, plus
