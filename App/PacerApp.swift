@@ -82,6 +82,19 @@ struct PacerApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
+            // Native About panel. SwiftUI's default uses the asset-
+            // catalog AppIcon and the bundle's CFBundle*Version
+            // strings, which is fine — but we want to inject the
+            // PacerLogo image and a custom credits paragraph. Custom
+            // options on `orderFrontStandardAboutPanel(options:)` is
+            // the macOS-canonical way: a real NSPanel, draggable,
+            // dismissable with Cmd-W, the same shape every Mac user
+            // knows.
+            CommandGroup(replacing: .appInfo) {
+                Button("About Pacer") {
+                    showAboutPanel()
+                }
+            }
             // ⌘1..⌘5 jump between sidebar destinations. Live in
             // `.commands` so they're part of the menu-bar responder
             // chain and reliably fire even when sidebar items don't
@@ -146,5 +159,50 @@ struct PacerApp: App {
         // Menu-bar status item is owned by `PacerAppDelegate` (custom
         // NSStatusItem so we can support right-click context menu and
         // a pulse animation, neither of which MenuBarExtra exposed).
+    }
+
+    // MARK: - About panel
+
+    private func showAboutPanel() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+
+        // PacerLogo is bundled in the app target's Asset Catalog;
+        // fall back to the system app-icon image if the lookup fails
+        // for any reason (matches the asset-catalog default).
+        let icon = NSImage(named: "PacerLogo") ?? NSApp.applicationIconImage
+
+        // NSAttributedString credits — a brief description of what
+        // Pacer is. Renders below the version line in the panel.
+        let creditsBody = """
+        Native macOS tracking for Claude Code usage.
+
+        Storage is local to this Mac. The only network egress is the \
+        five-minute OAuth poll to api.anthropic.com.
+        """
+        let credits = NSAttributedString(
+            string: creditsBody,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.labelColor
+            ]
+        )
+
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [
+            .applicationName: "Pacer",
+            .applicationVersion: version,
+            .version: "build \(build)",
+            .credits: credits,
+        ]
+        if let icon {
+            options[.applicationIcon] = icon
+        }
+
+        // Bring the app forward so the panel is interactive — without
+        // activation a click on the menu-bar "About" item from
+        // accessory-mode (no main window open) would float the panel
+        // behind whatever app is foregrounded.
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
     }
 }

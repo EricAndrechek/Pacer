@@ -226,7 +226,7 @@ struct MenuBarContent: View {
             header
             Divider().opacity(0.4)
             paceRow
-                .padding(.vertical, 14)
+                .padding(.vertical, 12)
             Divider().opacity(0.4)
             todayRow
                 .padding(.vertical, 12)
@@ -237,7 +237,7 @@ struct MenuBarContent: View {
         .padding(.horizontal, 14)
         .padding(.top, 14)
         .padding(.bottom, 10)
-        .frame(width: 300)
+        .frame(width: 320)
     }
 
     // MARK: - Header
@@ -255,6 +255,7 @@ struct MenuBarContent: View {
                 Text(pacerRelative(latest.sampledAt, style: .short))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .help("Latest rate-limit sample")
             }
         }
         .padding(.bottom, 12)
@@ -262,72 +263,78 @@ struct MenuBarContent: View {
 
     // MARK: - Pace row
 
+    /// Two pace columns side-by-side. Each column hosts a small
+    /// `CircularGauge` (same primitive widgets and the dashboard
+    /// pace card use) and a stack of supporting numbers — visual
+    /// consistency with the rest of the app.
     private var paceRow: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .top, spacing: 14) {
             paceColumn(label: "5-hour", sample: fiveHour, duration: 5 * 3600)
-            Divider().frame(height: 70)
+            Divider().frame(height: 78)
             paceColumn(label: "7-day", sample: sevenDay, duration: 7 * 86400)
         }
     }
 
     @ViewBuilder
     private func paceColumn(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             Eyebrow(text: label)
             if let s = sample, let resets = s.resetsAt {
                 let pacePct = PaceMath.paceFraction(
                     now: Date(), resetsAt: resets, windowDuration: duration
                 ) * 100
                 let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text("\(Int(s.usedPercentage.rounded()))%")
-                        .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(color(for: band))
-                    Text("/")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.tertiary)
-                    Text("\(Int(pacePct.rounded()))%")
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 10) {
+                    CircularGauge(
+                        percentage: s.usedPercentage,
+                        lineWidth: 4,
+                        labelFont: .system(size: 11, weight: .semibold, design: .rounded)
+                    )
+                    .frame(width: 42, height: 42)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 3) {
+                            Text("/")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                            Text("\(Int(pacePct.rounded()))% pace")
+                                .font(.system(size: 11, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(band.color)
+                        }
+                        Text("resets \(pacerRelative(resets, style: .short))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Text("resets \(pacerRelative(resets, style: .short))")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
             } else {
-                Text("—")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.tertiary)
-                Text("collecting…")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 10) {
+                    Circle()
+                        .stroke(Color.secondary.opacity(0.18), lineWidth: 4)
+                        .frame(width: 42, height: 42)
+                    Text("collecting…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func color(for band: PaceBand) -> Color {
-        switch band {
-        case .green:  return .green
-        case .white:  return .primary
-        case .yellow: return .yellow
-        case .red:    return .red
-        }
     }
 
     // MARK: - Today row
 
     private var todayRow: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Eyebrow(text: "Today's spend")
                 Text(pacerCost(todayCost))
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
                     .monospacedDigit()
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 3) {
                 Eyebrow(text: "Tokens")
                 Text(pacerTokens(todayTokens))
                     .font(.system(size: 18, weight: .semibold, design: .rounded))

@@ -14,7 +14,7 @@ import PacerUI
 /// its own focused panel rather than a long scroll of stacked sections.
 struct SettingsView: View {
     enum Category: String, CaseIterable, Identifiable {
-        case general, menuBar, notifications, cost, storage, about
+        case general, menuBar, notifications, cost, storage
 
         var id: String { rawValue }
         var label: String {
@@ -24,7 +24,6 @@ struct SettingsView: View {
             case .notifications: return "Notifications"
             case .cost:          return "Cost"
             case .storage:       return "Storage"
-            case .about:         return "About"
             }
         }
         var systemImage: String {
@@ -34,7 +33,6 @@ struct SettingsView: View {
             case .notifications: return "bell.badge.fill"
             case .cost:          return "dollarsign.circle.fill"
             case .storage:       return "externaldrive.fill"
-            case .about:         return "info.circle.fill"
             }
         }
     }
@@ -90,7 +88,6 @@ struct SettingsView: View {
                 case .notifications: NotificationsPanel()
                 case .cost:          CostPanel()
                 case .storage:       StoragePanel()
-                case .about:         AboutPanel()
                 }
             }
             .padding(24)
@@ -617,71 +614,7 @@ private struct StoragePanel: View {
     }
 }
 
-// MARK: - About
-
-private struct AboutPanel: View {
-    private let buildVersion: String = {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-    }()
-    private let buildNumber: String = {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-    }()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard {
-                HStack(alignment: .top, spacing: 16) {
-                    Image("PacerLogo")
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 64, height: 64)
-                        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Pacer")
-                            .font(.system(size: 22, weight: .semibold, design: .rounded))
-                        Text("Version \(buildVersion) (build \(buildNumber))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        Text("Native macOS tracking for Claude Code usage.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 2)
-                    }
-                    Spacer()
-                }
-            }
-
-            PacerCard("Keyboard shortcuts") {
-                VStack(alignment: .leading, spacing: 8) {
-                    shortcutRow("⌘ 1 – ⌘ 5", "Switch sidebar destinations")
-                    shortcutRow("⌘ ,", "Jump to Settings")
-                    shortcutRow("⌘ ⇧ E", "Export today's daily totals")
-                }
-            }
-
-            PacerCard {
-                Text("Storage is local to this Mac. Nothing leaves your machine except the 5-minute OAuth poll to api.anthropic.com.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func shortcutRow(_ shortcut: String, _ description: String) -> some View {
-        HStack(spacing: 12) {
-            Text(shortcut)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(0.06))
-                )
-                .frame(width: 130, alignment: .leading)
-            Text(description)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-        }
-    }
-}
+// (No "About" tab here — App menu → "About Pacer" opens the native
+// NSPanel with logo, version, and credits. Keyboard shortcuts are
+// discoverable through the menu bar where they're listed alongside
+// each command.)

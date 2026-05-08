@@ -86,7 +86,9 @@ App/
                                   Models / Settings), ⌘1..5 keyboard shortcuts. Selection
                                   persisted via @SceneStorage. .navigationTitle +
                                   .navigationSubtitle expose current rate-limit % to the
-                                  window title bar / Dock.
+                                  window title bar / Dock. .toolbar hosts a freshness
+                                  pill on the trailing edge (sidebar header is
+                                  brand-only).
 
   Background/
     PacerAppDelegate.swift      — NSApplicationDelegate. Owns the SwiftData container, the
@@ -136,9 +138,12 @@ App/
     ModelsView.swift            — range picker + token-share donut + per-date stacked trend
                                   chart + full per-model table.
     SettingsView.swift          — Settings as a main-window tab — flat sectioned form with
-                                  Startup, Menu Bar, Notifications, Cost calculation,
-                                  Storage, About. Reachable via Cmd+5 or Cmd+, (which
-                                  posts `.pacerOpenSettings` and ContentView flips the tab).
+                                  General, Menu Bar, Notifications, Cost, Storage. About
+                                  lives in the application menu (CommandGroup
+                                  .appInfo → orderFrontStandardAboutPanel) — native
+                                  NSPanel rather than a Settings tab. Reachable via Cmd+5
+                                  or Cmd+, (which posts `.pacerOpenSettings` and
+                                  ContentView flips the tab).
 
     MenuBarContent.swift        — MenuBarLabel (SwiftUI view rendered into the
                                   NSStatusItem.button via NSHostingView, with tooltip,

@@ -93,6 +93,15 @@ struct ContentView: View {
             detail
                 .navigationTitle(selection.wrappedValue.title)
                 .navigationSubtitle(windowSubtitle)
+                .toolbar {
+                    // Trailing toolbar slot: live freshness pill. The
+                    // sidebar used to host this; moving it to the
+                    // toolbar matches Linear / Reeder / Things / etc.
+                    // and frees the sidebar to be all-navigation.
+                    ToolbarItem(placement: .primaryAction) {
+                        ToolbarFreshness()
+                    }
+                }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 940, minHeight: 660)
@@ -168,20 +177,17 @@ struct ContentView: View {
         .toolbar(removing: .sidebarToggle)
     }
 
-    /// Top-of-sidebar brand block: app glyph, name, and a freshness
-    /// indicator that tells the user data is currently flowing without
-    /// having to click into the dashboard.
+    /// Top-of-sidebar brand block: app glyph + name. Freshness moved
+    /// to the toolbar (matches macOS-native pattern). Sidebar header
+    /// now reads as a clean brand mark with no inline status.
     private var sidebarBrand: some View {
         HStack(spacing: 10) {
             Image("PacerLogo")
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 26, height: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Pacer")
-                    .font(.system(size: 15, weight: .semibold))
-                SidebarFreshness()
-            }
+            Text("Pacer")
+                .font(.system(size: 15, weight: .semibold))
             Spacer(minLength: 0)
         }
     }
@@ -263,15 +269,19 @@ private struct SidebarItem: View {
     }
 }
 
-// MARK: - Sidebar freshness sub-line
+// MARK: - Toolbar freshness chip
 
-/// Mini "● live" / "● 3m ago" line under the app name in the sidebar.
+/// Live "● live" / "● 3m ago" pill living in the window toolbar.
 /// Reads the same most-recent activity sources the dashboard header
 /// uses, capped to 1-row fetches so it never materializes the full
 /// SwiftData store on save.
-private struct SidebarFreshness: View {
-    @Query(SidebarFreshness.tokenProbe) private var tokens: [TokenSample]
-    @Query(SidebarFreshness.rateLimitProbe) private var rateLimits: [RateLimitSample]
+///
+/// Previously lived in the sidebar header; moved to the toolbar to
+/// match macOS-native chrome conventions (Linear / Reeder / Things
+/// all surface live state in their toolbars, not their sidebars).
+private struct ToolbarFreshness: View {
+    @Query(ToolbarFreshness.tokenProbe) private var tokens: [TokenSample]
+    @Query(ToolbarFreshness.rateLimitProbe) private var rateLimits: [RateLimitSample]
     @Query private var scanMeta: [ClaudeCodeMeta]
 
     init() {
@@ -327,14 +337,33 @@ private struct SidebarFreshness: View {
         }
     }
 
+    /// Long-form tooltip on hover so the user can see the exact
+    /// timestamp without parsing the relative label.
+    private var tooltip: String {
+        if let last = lastActivity {
+            let f = DateFormatter()
+            f.dateStyle = .short
+            f.timeStyle = .medium
+            return "Last activity: \(f.string(from: last))"
+        }
+        return "No activity yet."
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             FreshnessPulse(state: freshness)
             Text(label)
-                .font(.system(size: 10, weight: .regular))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .monospacedDigit()
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            Capsule().fill(Color.primary.opacity(0.06))
+        )
+        .help(tooltip)
     }
 }
 
