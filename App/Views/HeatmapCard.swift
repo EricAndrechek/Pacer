@@ -17,6 +17,11 @@ struct HeatmapCard: View {
     let onDayTap: (String) -> Void
 
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    /// Real distinct-session count per day comes from SessionInfo,
+    /// the same source the day-detail modal pulls from. Iterating
+    /// every session once and bucketing across the day(s) it touched
+    /// is N (sessions) rather than D × N (days × sessions).
+    @Query private var sessions: [SessionInfo]
     @Query(HeatmapCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
 
@@ -74,10 +79,12 @@ struct HeatmapCard: View {
     private var grid: [[Cell?]] { cached.grid }
 
     private func refreshCache() {
-        // Sum per-day totals for all three metrics in one pass over
-        // the daily aggregates. We also union session-id sets per day
-        // so the heatmap's "sessions" metric is distinct-session
-        // count rather than per-aggregate-row count.
+        // Per-day rollup: cost + tokens come from DailyAggregate;
+        // distinct-session count comes from iterating SessionInfo and
+        // bucketing each session across every day it overlapped. That
+        // matches what the day-detail modal shows when the user clicks
+        // a cell — both surfaces now answer the same "sessions active
+        // on this day" question instead of two different proxies.
         struct Acc {
             var cost: Double = 0
             var tokens: Int64 = 0
@@ -88,13 +95,30 @@ struct HeatmapCard: View {
             var a = byDate[row.date] ?? Acc()
             a.cost += row.totalCostUSD
             a.tokens += row.inputTokens + row.outputTokens + row.cacheReadTokens
-            // DailyAggregate doesn't carry session IDs, so for the
-            // heatmap's "sessions" tier we approximate via the per-row
-            // (date, model) count. Good enough for visual ranking;
-            // the real per-day distinct-session number lives on the
-            // ProjectDailyAggregate table.
-            a.sessions.insert("\(row.date)|\(row.model)")
             byDate[row.date] = a
+        }
+
+        // Bucket each session into every YYYY-MM-DD it touched. The
+        // overwhelming majority of sessions are single-day so this
+        // loop is essentially `sessions.count` iterations — but
+        // multi-day sessions get counted on each day they were active,
+        // matching the day-detail predicate exactly.
+        let bucketCal = Calendar.current
+        let bucketFmt = DateFormatter()
+        bucketFmt.locale = Locale(identifier: "en_US_POSIX")
+        bucketFmt.timeZone = .current
+        bucketFmt.dateFormat = "yyyy-MM-dd"
+        for s in sessions {
+            var day = bucketCal.startOfDay(for: s.firstSeenAt)
+            let lastDay = bucketCal.startOfDay(for: s.lastSeenAt)
+            while day <= lastDay {
+                let key = bucketFmt.string(from: day)
+                var acc = byDate[key] ?? Acc()
+                acc.sessions.insert(s.sessionId)
+                byDate[key] = acc
+                guard let next = bucketCal.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
         }
 
         let cal = Calendar(identifier: .iso8601)
