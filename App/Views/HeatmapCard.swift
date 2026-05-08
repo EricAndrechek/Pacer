@@ -164,29 +164,62 @@ struct HeatmapCard: View {
     private static let weekdayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     private static let visibleWeekdayIndices: Set<Int> = [0, 2, 4]
 
+    /// Coordinate space for tooltip anchoring. Each hovered cell
+    /// publishes its frame in this space via a PreferenceKey; the
+    /// tooltip overlay reads that frame and floats above the cell.
+    /// Pulled into a constant to keep the cell-frame publisher and
+    /// the overlay reader in sync.
+    private static let coordSpaceName = "heatmap-card"
+
     var body: some View {
         PacerCard("Activity heatmap", trailing: { metricPicker }) {
-            // Reserve the tooltip row so the grid never reflows when
-            // hover state flips between active/inactive. Empty 22pt
-            // strip stays in place; the floating tooltip only changes
-            // its content.
             VStack(alignment: .leading, spacing: 8) {
-                ZStack(alignment: .leading) {
-                    Color.clear.frame(height: 22)
-                    tooltipOverlay
-                        .animation(.easeOut(duration: 0.12), value: hoveredCellId)
-                }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        monthLabelRow
-                        HStack(alignment: .top, spacing: Self.cellSpacing) {
-                            weekdayColumn
-                            ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
-                                weekColumn(week)
+                ZStack(alignment: .topLeading) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            monthLabelRow
+                            HStack(alignment: .top, spacing: Self.cellSpacing) {
+                                weekdayColumn
+                                ForEach(Array(grid.enumerated()), id: \.offset) { _, week in
+                                    weekColumn(week)
+                                }
                             }
                         }
+                        .padding(.vertical, 6)
                     }
-                    .padding(.vertical, 6)
+                    // Floating popover-style tooltip anchored to the
+                    // hovered cell's frame. Lives in a sibling layer of
+                    // the ScrollView so it can extend ABOVE the grid
+                    // without being clipped by the scroll view's bounds.
+                    // `.allowsHitTesting(false)` keeps clicks falling
+                    // through to the cell underneath.
+                    if let id = hoveredCellId,
+                       let cell = cellById(id),
+                       let frame = hoveredCellFrame {
+                        TooltipBubble(
+                            color: color(for: cell.value(for: metric)),
+                            valueText: formatTotal(cell.value(for: metric), kind: metric),
+                            metricLabel: metric.label.lowercased(),
+                            dateText: Self.tooltipDateFmt.string(from: cell.date)
+                        )
+                        .fixedSize()
+                        .position(
+                            x: frame.midX,
+                            y: frame.minY - tooltipOffset
+                        )
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                        .animation(.easeOut(duration: 0.12), value: hoveredCellId)
+                        .zIndex(10)
+                    }
+                }
+                .coordinateSpace(name: Self.coordSpaceName)
+                .onPreferenceChange(HoveredCellFramePreferenceKey.self) { newFrame in
+                    // Track the hovered cell's frame as published by
+                    // the cell's GeometryReader. nil when nothing is
+                    // hovered — clear the local state too so a stale
+                    // frame doesn't survive into the next hover.
+                    hoveredCellFrame = newFrame
                 }
                 summaryFooter
             }
@@ -194,6 +227,12 @@ struct HeatmapCard: View {
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
+
+    /// Vertical offset between the cell's top and the tooltip's
+    /// center. Tooltip is ~40pt tall; positioning its center 30pt
+    /// above the cell's top puts the tooltip's bottom ~10pt above the
+    /// cell, leaving breathing room.
+    private var tooltipOffset: CGFloat { 30 }
 
     private var metricPicker: some View {
         Picker("", selection: Binding(
@@ -320,38 +359,53 @@ struct HeatmapCard: View {
         }
     }
 
-    /// Hovered cell drives the floating tooltip overlay. Stored at
-    /// the parent level (rather than per-cell state) so we can render
-    /// the tooltip in a single overlay pass without each cell hosting
-    /// its own popover — which was intercepting tap-through clicks.
+    /// Hovered-cell state. The cell's id drives which cell highlights
+    /// and which one's frame we anchor the tooltip to. We track the
+    /// frame via a PreferenceKey published from the hovered cell — so
+    /// horizontal scrolling, window resizing, or layout reflows all
+    /// keep the tooltip glued to the cell.
     @State private var hoveredCellId: String?
-    @State private var hoverTask: Task<Void, Never>?
+    @State private var hoveredCellFrame: CGRect?
+    @State private var enterTask: Task<Void, Never>?
+    @State private var exitTask: Task<Void, Never>?
 
-    /// Initial hover takes ~200ms before the tooltip appears so a
-    /// fast cursor sweep across the grid doesn't flicker tooltips.
-    /// Once the tooltip is up, switching between cells updates
-    /// immediately — same dwell behavior as GitHub.
-    private static let initialHoverDelayMS: Int = 200
+    /// Initial hover dwell — tooltip waits this long before appearing
+    /// so a fast cursor sweep across the grid doesn't flicker tooltips.
+    /// Once a tooltip is showing, switching between cells is instant
+    /// (matches GitHub's contribution-graph dwell).
+    private static let initialHoverDelayMS: Int = 180
+    /// Exit grace — keeps the tooltip up briefly when the cursor
+    /// leaves a cell so a slide to a neighbor doesn't dismiss-then-
+    /// re-show. The neighbor's enter cancels this grace before it
+    /// fires, switching tooltips in place.
+    private static let exitGraceMS: Int = 60
 
     private func enterCell(_ id: String) {
-        hoverTask?.cancel()
-        if hoveredCellId == nil {
-            let delay = Self.initialHoverDelayMS
-            hoverTask = Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(delay))
+        exitTask?.cancel()
+        if hoveredCellId != nil {
+            // Tooltip is up — switch instantly.
+            enterTask?.cancel()
+            hoveredCellId = id
+        } else {
+            // First-entry dwell.
+            enterTask?.cancel()
+            enterTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(Self.initialHoverDelayMS))
                 if Task.isCancelled { return }
                 hoveredCellId = id
             }
-        } else {
-            // Tooltip already up — immediate switch.
-            hoveredCellId = id
         }
     }
 
     private func exitCell(_ id: String) {
-        hoverTask?.cancel()
-        if hoveredCellId == id {
-            hoveredCellId = nil
+        enterTask?.cancel()
+        exitTask?.cancel()
+        // Defer dismiss so a concurrent enterCell on a neighbor can
+        // override before the tooltip blinks off.
+        exitTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(Self.exitGraceMS))
+            if Task.isCancelled { return }
+            if hoveredCellId == id { hoveredCellId = nil }
         }
     }
 
@@ -360,6 +414,10 @@ struct HeatmapCard: View {
         let v = cell.value(for: metric)
         if v > 0 {
             // Active cell: clickable + hoverable + cursor flips to link.
+            // The GeometryReader background publishes this cell's frame
+            // in the card-local coordinate space whenever it's the
+            // currently-hovered cell, which lets the tooltip overlay
+            // anchor itself precisely above the cell.
             Button {
                 onDayTap(cell.dateKey)
             } label: {
@@ -368,11 +426,21 @@ struct HeatmapCard: View {
                         .fill(color(for: v))
                     if hoveredCellId == cell.dateKey {
                         RoundedRectangle(cornerRadius: 2)
-                            .stroke(Color.primary.opacity(0.5), lineWidth: 1)
+                            .stroke(Color.primary.opacity(0.55), lineWidth: 1)
                     }
                 }
                 .frame(width: Self.cellSize, height: Self.cellSize)
                 .contentShape(Rectangle())
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: HoveredCellFramePreferenceKey.self,
+                            value: hoveredCellId == cell.dateKey
+                                ? geo.frame(in: .named(Self.coordSpaceName))
+                                : nil
+                        )
+                    }
+                )
             }
             .buttonStyle(.plain)
             .pointerStyle(.link)
@@ -402,55 +470,13 @@ struct HeatmapCard: View {
         return nil
     }
 
-    /// Floating tooltip layer rendered above the grid. Positioned at
-    /// the top of the card body so it never overlaps the grid below
-    /// the hovered cell. Single source of truth for the active hover —
-    /// each cell only flips a binding rather than presenting its own
-    /// popover. That fixes the prior bug where `.popover` per cell
-    /// was intercepting tap-through clicks.
-    @ViewBuilder
-    private var tooltipOverlay: some View {
-        if let id = hoveredCellId, let cell = cellById(id) {
-            let v = cell.value(for: metric)
-            HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(color(for: v))
-                    .frame(width: 10, height: 10)
-                Text(formatTotal(v, kind: metric))
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                Text(metric.label.lowercased())
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text("·")
-                    .foregroundStyle(.tertiary)
-                Text(Self.tooltipDateFmt.string(from: cell.date))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text("· click to drill in")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(PacerDesign.cardStroke, lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
-            .transition(.opacity)
-        }
-    }
-
+    /// Pretty date used by the floating tooltip ("Thu, May 7, 2026").
     private static let tooltipDateFmt: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "EEE, MMM d"
+        f.dateFormat = "EEE, MMM d, yyyy"
         return f
     }()
+
 
     private func color(for value: Double) -> Color {
         guard value > 0 else { return Color.secondary.opacity(0.12) }
@@ -540,3 +566,89 @@ private struct LegendSwatch: View {
     }
 }
 
+// MARK: - Tooltip plumbing
+
+/// PreferenceKey used by the hovered cell to publish its frame in
+/// the heatmap-card coordinate space. The card's overlay reads it
+/// to position the floating tooltip. The reduce keeps the first
+/// non-nil value because at most one cell ever publishes (the
+/// hovered one).
+private struct HoveredCellFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = value ?? nextValue()
+    }
+}
+
+/// Popover-style hover tooltip for the heatmap. Anchored above the
+/// hovered cell via `.position` in the heatmap-card coordinate space.
+/// Renders as a rounded card with a downward arrow pointer + soft
+/// shadow — same visual language as a macOS NSPopover, but it lives
+/// inside our own SwiftUI tree so clicks pass through cleanly with
+/// `.allowsHitTesting(false)`.
+private struct TooltipBubble: View {
+    let color: Color
+    /// Already-formatted value for the active metric ("$12.40", "32K").
+    let valueText: String
+    /// Lowercased metric noun ("cost", "tokens", "sessions").
+    let metricLabel: String
+    /// Pretty date line ("Thu, May 7, 2026").
+    let dateText: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(color)
+                        .frame(width: 10, height: 10)
+                    Text(valueText)
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                    Text(metricLabel)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Text(dateText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Text("Click to drill in")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(PacerDesign.cardStroke, lineWidth: 1)
+            )
+            // Downward arrow pointer, mirrors macOS popover affordance.
+            // Drawn as a small triangle at the bubble's bottom-center.
+            BubbleArrow()
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .frame(width: 10, height: 6)
+                .overlay(
+                    BubbleArrow()
+                        .stroke(PacerDesign.cardStroke, lineWidth: 1)
+                )
+                .offset(y: -1)  // slight overlap so the bubble's stroke covers the arrow's top edge
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 4)
+    }
+}
+
+private struct BubbleArrow: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        p.closeSubpath()
+        return p
+    }
+}
