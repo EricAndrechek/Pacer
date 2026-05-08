@@ -17,9 +17,20 @@ import PacerCore
 /// shorter cadence would just burn the widget budget for visually
 /// identical updates.
 
-private let lookbackDays = 7
-private let mediumRowCount = 3
-private let largeRowCount = 5
+// Constants inside the struct namespace rather than at file scope —
+// file-scope `private let`s referenced from a Widget's `body` getter
+// crashed the extension on launch (every Pacer widget invisible in
+// the gallery, multiple PacerWidgets-*.ips reports all pinned to
+// `TopProjectsWidget.body.getter`). Static constants nested in the
+// struct sidestep whatever runtime path the file-scoped-let was
+// tripping in the sandboxed extension's `body` evaluation, and we
+// don't lose anything by scoping them to the widget that uses them.
+private enum K {
+    static let lookbackDays = 7
+    static let mediumRowCount = 3
+    static let largeRowCount = 5
+    static let rangeLabel = "last 7 days"
+}
 
 struct TopProjectsEntry: TimelineEntry {
     let date: Date
@@ -46,7 +57,7 @@ struct TopProjectsProvider: TimelineProvider {
         ].map { TopProjectsEntry.Row(displayName: $0.0, costUSD: $0.1) }
         return TopProjectsEntry(
             date: Date(),
-            rangeLabel: "last \(lookbackDays) days",
+            rangeLabel: "\(K.rangeLabel)",
             totalCostUSD: rows.reduce(0) { $0 + $1.costUSD },
             projectCount: rows.count,
             rows: rows
@@ -77,7 +88,7 @@ struct TopProjectsProvider: TimelineProvider {
             )
             let aggregates = try context.fetch(descriptor)
             let cutoff = TokenSample.formatDate(
-                Calendar.current.date(byAdding: .day, value: -(lookbackDays - 1), to: Date()) ?? Date()
+                Calendar.current.date(byAdding: .day, value: -(K.lookbackDays - 1), to: Date()) ?? Date()
             )
             let inRange = aggregates.filter { $0.date >= cutoff }
             // Sum cost per project over the window.
@@ -89,7 +100,7 @@ struct TopProjectsProvider: TimelineProvider {
                 .map { (path: $0.key, cost: $0.value) }
                 .filter { $0.cost > 0 }
                 .sorted { $0.cost > $1.cost }
-            let topRows = allRanked.prefix(largeRowCount).map {
+            let topRows = allRanked.prefix(K.largeRowCount).map {
                 TopProjectsEntry.Row(
                     displayName: shortPath($0.path),
                     costUSD: $0.cost
@@ -97,7 +108,7 @@ struct TopProjectsProvider: TimelineProvider {
             }
             return TopProjectsEntry(
                 date: Date(),
-                rangeLabel: "last \(lookbackDays) days",
+                rangeLabel: K.rangeLabel,
                 totalCostUSD: allRanked.reduce(0) { $0 + $1.cost },
                 projectCount: allRanked.count,
                 rows: Array(topRows)
@@ -105,7 +116,7 @@ struct TopProjectsProvider: TimelineProvider {
         } catch {
             return TopProjectsEntry(
                 date: Date(),
-                rangeLabel: "last \(lookbackDays) days",
+                rangeLabel: K.rangeLabel,
                 totalCostUSD: 0,
                 projectCount: 0,
                 rows: []
@@ -128,7 +139,7 @@ struct TopProjectsWidgetView: View {
     }
 
     private var visibleRows: [TopProjectsEntry.Row] {
-        let cap = (family == .systemLarge) ? largeRowCount : mediumRowCount
+        let cap = (family == .systemLarge) ? K.largeRowCount : K.mediumRowCount
         return Array(entry.rows.prefix(cap))
     }
 
@@ -243,7 +254,7 @@ struct TopProjectsWidgetView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("No project activity in the last \(lookbackDays) days.")
+            Text("No project activity in the \(K.rangeLabel).")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -276,7 +287,12 @@ struct TopProjectsWidget: Widget {
             TopProjectsWidgetView(entry: entry)
         }
         .configurationDisplayName("Top projects")
-        .description("Top projects by Claude Code cost over the last \(lookbackDays) days.")
+        // Literal string — no interpolation. `WidgetConfiguration.description(_:)`
+        // takes `LocalizedStringKey`, and interpolating ANY value (even a
+        // literal Int or a static String) into it asserts at extension
+        // launch. Hardcode the lookback in the user-visible string and
+        // keep `K.lookbackDays` for the data math.
+        .description("Top projects by Claude Code cost over the last 7 days.")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }
