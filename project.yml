@@ -80,14 +80,25 @@ targets:
     platform: macOS
     sources:
       - path: Widgets
+        excludes:
+          - "Info.plist"   # generated below; not a Swift source
+    # Hand-managed Info.plist instead of GENERATE_INFOPLIST_FILE +
+    # INFOPLIST_KEY_*. Xcode's auto-generation didn't surface the
+    # `NSExtension` dict from `INFOPLIST_KEY_NSExtensionPointIdentifier`,
+    # which left the .appex undiscoverable by WidgetKit (pluginkit -m
+    # showed nothing; widget gallery was empty). Explicit Info.plist
+    # with the NSExtension entry fixes it.
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Pacer Widgets
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.widgets
         PRODUCT_NAME: PacerWidgets
         CODE_SIGN_ENTITLEMENTS: Widgets/PacerWidgets.entitlements
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_NSExtensionPointIdentifier: com.apple.widgetkit-extension
-        INFOPLIST_KEY_CFBundleDisplayName: Pacer Widgets
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
