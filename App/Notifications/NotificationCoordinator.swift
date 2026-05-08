@@ -132,6 +132,11 @@ public final class NotificationCoordinator {
         markNotified(key: cycleKey, in: context)
     }
 
+    /// Identifier for the "Pacer paused" banner. Shared between the
+    /// post path (`notifyCollectionPaused`) and the launch-time clear
+    /// (`clearCollectionPausedNotification`) so the two stay in sync.
+    private static let collectionPausedIdentifier = "pacer.collection.paused"
+
     /// Posts a one-shot banner when the user quits Pacer. Without it,
     /// a user with launch-at-login on but the menu bar hidden has no
     /// visible signal that data collection has stopped — Pacer goes
@@ -139,6 +144,13 @@ public final class NotificationCoordinator {
     /// idea why. Best-effort: if notifications haven't been authorized
     /// the post is silently dropped (we don't surface a permission
     /// prompt during quit, that'd be bad UX).
+    ///
+    /// The trigger is a small delay rather than immediate. A fast
+    /// quit→relaunch cycle (e.g. `make install`) gives the new process
+    /// time to preempt the still-pending request via
+    /// `clearCollectionPausedNotification()` in `applicationDidFinish-
+    /// Launching`. A genuine quit with no relaunch sees the banner
+    /// land a few seconds later — invisible delay for the user.
     public func notifyCollectionPaused() async {
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .authorized
@@ -150,11 +162,25 @@ public final class NotificationCoordinator {
         content.body = "Reopen Pacer to resume tracking. Historical JSONL gets re-scanned on next launch."
         content.sound = nil // quiet — user just quit, don't be loud
         let request = UNNotificationRequest(
-            identifier: "pacer.collection.paused",
+            identifier: Self.collectionPausedIdentifier,
             content: content,
-            trigger: nil
+            trigger: UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
         )
         try? await center.add(request)
+    }
+
+    /// Clears any "Pacer paused" banner — pending or already delivered
+    /// — for this bundle. Called from the app's launch path: by
+    /// definition the user has reopened Pacer, so the "reopen Pacer"
+    /// banner is moot. Also handles the dev-cycle case where the
+    /// previous process scheduled but didn't finish delivering the
+    /// notification before SIGKILL: the queued request can flush late
+    /// once a process for the bundle exists again, and removing the
+    /// pending request preempts it.
+    public func clearCollectionPausedNotification() {
+        let ids = [Self.collectionPausedIdentifier]
+        center.removeDeliveredNotifications(withIdentifiers: ids)
+        center.removePendingNotificationRequests(withIdentifiers: ids)
     }
 
     /// Today's-cost ceiling notification. Fires once per day-and-threshold

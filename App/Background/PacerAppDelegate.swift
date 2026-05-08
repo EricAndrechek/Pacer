@@ -134,6 +134,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Clear any "Pacer paused" banner left over from a previous
+        // quit. We're alive again, the user is here — the "reopen
+        // Pacer" prompt is moot. Also preempts a pending request that
+        // the prior process scheduled but couldn't fully deliver
+        // before SIGKILL during a dev-cycle quit→relaunch.
+        NotificationCoordinator.shared.clearCollectionPausedNotification()
         backgroundService.start()
         installWindowObservers()
         // Warm the shared sample-cost cache so views (LiveActivity,
