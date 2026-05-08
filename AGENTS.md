@@ -77,20 +77,30 @@ The SwiftUI app is organized like this (under `App/`):
 
 ```
 App/
-  PacerApp.swift                — @main scene graph (WindowGroup + Settings + MenuBarExtra).
+  PacerApp.swift                — @main scene graph (single Window + commands).
                                   Wires the AppDelegate via @NSApplicationDelegateAdaptor and
-                                  reads container/exports from it.
-  ContentView.swift             — top-level TabView (Dashboard / History / Projects /
-                                  Models / Debug), ⌘1..5 keyboard shortcuts.
+                                  reads container/exports from it. Help-menu replaced with
+                                  "Show Database in Finder" / "Open Logs Folder" so users
+                                  have somewhere to look when something goes wrong.
+  ContentView.swift             — NavigationSplitView shell (Dashboard / History / Projects /
+                                  Models / Settings), ⌘1..5 keyboard shortcuts. Selection
+                                  persisted via @SceneStorage. .navigationTitle +
+                                  .navigationSubtitle expose current rate-limit % to the
+                                  window title bar / Dock.
 
   Background/
     PacerAppDelegate.swift      — NSApplicationDelegate. Owns the SwiftData container, the
-                                  AppBackgroundService (in-process scan + OAuth poller), and
-                                  drives Dock-icon visibility (.regular when window open,
-                                  .accessory otherwise). Redirects stderr to
+                                  AppBackgroundService (in-process scan + OAuth poller),
+                                  Dock-icon visibility (.regular when window open,
+                                  .accessory otherwise), AND the menu-bar NSStatusItem
+                                  (custom rather than SwiftUI's MenuBarExtra so we get
+                                  right-click context menu, popover hosting, and pulse
+                                  animation). Redirects stderr to
                                   ~/Library/Logs/Pacer/Pacer.err.log so Log.write output
                                   survives non-terminal launches. Posts a "Pacer paused"
-                                  banner from applicationShouldTerminate.
+                                  banner from applicationShouldTerminate. Container open
+                                  failure surfaces an NSAlert pointing at the store / logs
+                                  rather than a silent fatalError crash.
     AppBackgroundService.swift  — In-process background data collector. Constructs and
                                   runs ScanCoordinator (FSEvents JSONL scan + OAuth polling
                                   + SwiftData persistence) inside the app process.
@@ -104,8 +114,11 @@ App/
 
   Notifications/
     NotificationCoordinator.swift — UNUserNotificationCenter wrapper. Posts banners on
-                                    rate-limit threshold crossings and daily-cost ceiling.
-                                    Cycle dedup via ClaudeCodeMeta keys.
+                                    each rate-limit threshold crossing the user has
+                                    configured (50/75/90 etc., per window) and on the
+                                    daily-cost ceiling. Cycle dedup keys include the
+                                    threshold value so each threshold can fire once per
+                                    cycle without re-firing.
     NotificationsHost.swift     — invisible View under ContentView that holds @Query
                                   subscriptions and dispatches to the coordinator on
                                   upward crossings. Seeds lastSeen* on appear.
@@ -127,8 +140,14 @@ App/
                                   Storage, About. Reachable via Cmd+5 or Cmd+, (which
                                   posts `.pacerOpenSettings` and ContentView flips the tab).
 
-    MenuBarContent.swift        — MenuBarLabel (status item) + MenuBarContent (popover).
-                                  Both honor PacerSettings.
+    MenuBarContent.swift        — MenuBarLabel (SwiftUI view rendered into the
+                                  NSStatusItem.button via NSHostingView, with tooltip,
+                                  pulse animation on threshold crossings, palette-rendered
+                                  SF Symbol band coloring) + MenuBarContent (popover —
+                                  pace columns, today's totals, hover-state footer
+                                  buttons). PacerAppDelegate hosts both; right-click on
+                                  the status item shows a native NSMenu (Open Pacer /
+                                  Settings / Quit) instead of the popover.
 
     Components/
       CircularGauge.swift       — donut + percentage primitive used by PaceChart, MenuBar,

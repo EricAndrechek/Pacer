@@ -19,9 +19,13 @@ struct ContentView: View {
     /// One concrete destination. The `keyboardShortcut` modifier needs
     /// its own enum value per row, so we keep these as cases (not
     /// configurable strings).
-    enum Destination: Hashable, Identifiable {
+    /// `String, RawRepresentable` so `@SceneStorage` can persist the
+    /// selected destination across launches. Without this the sidebar
+    /// always reset to Dashboard on relaunch — annoying for users who
+    /// live in History or Projects.
+    enum Destination: String, Hashable, Identifiable, CaseIterable {
         case dashboard, history, projects, models, settings
-        var id: Self { self }
+        var id: String { rawValue }
 
         var title: String {
             switch self {
@@ -42,16 +46,53 @@ struct ContentView: View {
             case .settings:  return "gearshape.fill"
             }
         }
+    }
 
-        }
+    @SceneStorage("pacer.sidebar.selection")
+    private var selectionRaw: String = Destination.dashboard.rawValue
 
-    @State private var selection: Destination = .dashboard
+    private var selection: Binding<Destination> {
+        Binding(
+            get: { Destination(rawValue: selectionRaw) ?? .dashboard },
+            set: { selectionRaw = $0.rawValue }
+        )
+    }
+
+    /// Cap the @Query so the window-title computation doesn't fan
+    /// out to thousands of rows — we just need the most recent
+    /// sample per window.
+    @Query(ContentView.recentRateLimitDescriptor)
+    private var recentRateLimits: [RateLimitSample]
+
+    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
+
+    /// Composed window subtitle — "5h 23% • 7d 41%". When dragged to
+    /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
+    /// this in place the user gets at-a-glance pacing without
+    /// surfacing the dashboard.
+    private var windowSubtitle: String {
+        let fiveHour = recentRateLimits.first { $0.window == "five_hour" }
+        let sevenDay = recentRateLimits.first { $0.window == "seven_day" }
+        let parts: [String?] = [
+            fiveHour.map { "5h \(Int($0.usedPercentage.rounded()))%" },
+            sevenDay.map { "7d \(Int($0.usedPercentage.rounded()))%" }
+        ]
+        return parts.compactMap { $0 }.joined(separator: " • ")
+    }
 
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
             detail
+                .navigationTitle(selection.wrappedValue.title)
+                .navigationSubtitle(windowSubtitle)
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 940, minHeight: 660)
@@ -61,18 +102,18 @@ struct ContentView: View {
         // The notification carries the destination as its `object`.
         .onReceive(NotificationCenter.default.publisher(for: .pacerSelectDestination)) { note in
             if let dest = note.object as? Destination {
-                selection = dest
+                selectionRaw = dest.rawValue
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
-            selection = .settings
+            selectionRaw = Destination.settings.rawValue
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenProject)) { _ in
             // ProjectsView observes the same notification to actually
             // open the modal — this side just brings it into view if
             // we're not already there.
-            if selection != .projects {
-                selection = .projects
+            if selectionRaw != Destination.projects.rawValue {
+                selectionRaw = Destination.projects.rawValue
             }
         }
     }
@@ -96,14 +137,14 @@ struct ContentView: View {
                     SidebarSection(title: "Overview") {
                         SidebarItem(
                             destination: .dashboard,
-                            selection: $selection
+                            selection: selection
                         )
                     }
 
                     SidebarSection(title: "Activity") {
-                        SidebarItem(destination: .history, selection: $selection)
-                        SidebarItem(destination: .projects, selection: $selection)
-                        SidebarItem(destination: .models, selection: $selection)
+                        SidebarItem(destination: .history, selection: selection)
+                        SidebarItem(destination: .projects, selection: selection)
+                        SidebarItem(destination: .models, selection: selection)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -116,7 +157,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 0) {
                 SidebarItem(
                     destination: .settings,
-                    selection: $selection
+                    selection: selection
                 )
             }
             .padding(.horizontal, 8)
@@ -149,7 +190,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch selection {
+        switch selection.wrappedValue {
         case .dashboard: DashboardView()
         case .history:   HistoryView()
         case .projects:  ProjectsView()
@@ -296,8 +337,6 @@ private struct SidebarFreshness: View {
         }
     }
 }
-
-extension ContentView.Destination: CaseIterable {}
 
 extension Notification.Name {
     /// Fired by the Cmd+, command and the menu-bar Settings button. The
