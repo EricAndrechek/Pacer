@@ -61,6 +61,16 @@ def build_svg(canvas: int, inset: int) -> str:
     to `canvas - inset` on each side. With inset=100, this produces the
     Apple-grid AppIcon. With inset=0, the squircle goes edge-to-edge
     for the in-app PacerLogo.
+
+    Glass-morphism treatment, after Apple's Tahoe-era HIG:
+      - Background: deep gradient + radial halo to imply a lit dome
+      - Squircle inner-rim highlight at the top (specular curvature)
+      - Single thick arc as the focal element, treated as a glass band:
+          * faint full-arc track underneath
+          * color sweep (green→orange) for the active portion
+          * top specular gloss + bottom inner shadow for depth
+      - Glowing position orb instead of a needle, so the focal point
+        reads even at 16-32 px where ticks/needles disappear into noise
     """
     # Squircle bounds
     sq_x = inset
@@ -69,113 +79,155 @@ def build_svg(canvas: int, inset: int) -> str:
     sq_h = canvas - 2 * inset
     corner_radius = sq_w * 0.2237  # macOS continuous-corner approximation
 
-    # Geometry for everything that lives inside the squircle is anchored
-    # to the squircle, not the canvas, so the inset only controls how
-    # much transparent margin sits around the artwork.
+    # Everything inside the squircle is anchored to the squircle so the
+    # inset only controls how much transparent margin sits around the
+    # artwork.
     cx = sq_x + sq_w / 2
-    cy = sq_y + sq_h * 0.575
-    gauge_r = sq_w * 0.314
-    gauge_thickness = sq_w * 0.088
-    needle_len = gauge_r - sq_w * 0.018
-    needle_base = sq_w * 0.029
-    cap_r = sq_w * 0.037
-    cap_inner_r = sq_w * 0.0137
-    tick_len_inner = gauge_r + gauge_thickness / 2 + sq_w * 0.0215
-    tick_len_outer = gauge_r + gauge_thickness / 2 + sq_w * 0.0547
-    tick_stroke = sq_w * 0.0107
+    cy = sq_y + sq_h * 0.555
+    arc_r = sq_w * 0.302
+    arc_w = sq_w * 0.116
+    orb_r = sq_w * 0.072
 
     # Gauge sweep (math degrees, y-flipped). 220° → -40° clockwise = 260° arc.
     start_deg = 220.0
     end_deg = -40.0
-    active_fraction = 0.62
+    active_fraction = 0.64
     total_deg = (start_deg - end_deg) % 360
     active_end_deg = start_deg - active_fraction * total_deg
 
-    track_path = arc_clockwise(cx, cy, gauge_r, start_deg, end_deg)
-    active_path = arc_clockwise(cx, cy, gauge_r, start_deg, active_end_deg)
+    track_path = arc_clockwise(cx, cy, arc_r, start_deg, end_deg)
+    active_path = arc_clockwise(cx, cy, arc_r, start_deg, active_end_deg)
 
-    # Needle as a tapered triangle.
-    tip = deg_to_xy(cx, cy, needle_len, active_end_deg)
-    perp = math.radians(active_end_deg) + math.pi / 2
-    bdx = needle_base * math.cos(perp)
-    bdy = -needle_base * math.sin(perp)
-    base_l = (cx + bdx, cy + bdy)
-    base_r = (cx - bdx, cy - bdy)
+    # Position orb sits where the arc terminates.
+    orb_x, orb_y = deg_to_xy(cx, cy, arc_r, active_end_deg)
 
-    # Tick marks at 5 evenly-spaced positions.
-    ticks: list[str] = []
-    n_ticks = 5
-    for i in range(n_ticks):
-        frac = i / (n_ticks - 1)
-        deg = start_deg - frac * total_deg
-        ix, iy = deg_to_xy(cx, cy, tick_len_inner, deg)
-        ox, oy = deg_to_xy(cx, cy, tick_len_outer, deg)
-        ticks.append(
-            f'<line x1="{ix:.1f}" y1="{iy:.1f}" x2="{ox:.1f}" y2="{oy:.1f}" '
-            f'stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="{tick_stroke:.2f}" stroke-linecap="round"/>'
-        )
+    # Bounds for vertical gradients along the arc (top of arc to bottom).
+    arc_top_y = cy - arc_r - arc_w / 2
+    arc_bot_y = cy + math.sin(math.radians(start_deg)) * -arc_r + arc_w / 2
 
-    # Background gradient anchored to the squircle (not the canvas), so
-    # the gradient direction looks the same regardless of inset.
-    gloss_h = sq_h * 0.55
-    needle_blur = sq_w * 0.0107
+    # Filter blur amounts scale with canvas so they look the same at any size.
+    halo_blur = sq_w * 0.018
+    orb_glow_blur = sq_w * 0.022
+    arc_drop_blur = sq_w * 0.012
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <svg width="{canvas}" height="{canvas}" viewBox="0 0 {canvas} {canvas}" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <!-- Squircle background: deep indigo → royal blue → bright cyan. -->
     <linearGradient id="bg" x1="{sq_x}" y1="{sq_y}" x2="{sq_x + sq_w}" y2="{sq_y + sq_h}" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#6E45E2"/>
-      <stop offset="55%" stop-color="#3B82F6"/>
-      <stop offset="100%" stop-color="#00C6FB"/>
+      <stop offset="0%"   stop-color="#3B1F8F"/>
+      <stop offset="45%"  stop-color="#3457D7"/>
+      <stop offset="100%" stop-color="#22C8F0"/>
     </linearGradient>
-    <linearGradient id="topGloss" x1="{sq_x}" y1="{sq_y}" x2="{sq_x}" y2="{sq_y + gloss_h:.0f}" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22"/>
+
+    <!-- Soft radial halo behind the arc — implies "lit from within". -->
+    <radialGradient id="bgHalo" cx="50%" cy="55%" r="55%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="60%"  stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Squircle top inner-rim highlight (the "wet glass" curvature). -->
+    <linearGradient id="rimGloss" x1="0" y1="{sq_y}" x2="0" y2="{sq_y + sq_h * 0.5:.0f}" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.34"/>
       <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="gaugeSweep" x1="{cx - gauge_r:.0f}" y1="{cy:.0f}" x2="{cx + gauge_r:.0f}" y2="{cy:.0f}" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#34D158"/>
-      <stop offset="55%" stop-color="#FFCC00"/>
-      <stop offset="100%" stop-color="#FF9500"/>
+
+    <!-- Active arc color sweep. The gradient spans the full diameter of
+         the gauge, but only the start..active portion of the arc is
+         drawn — so we shift the stops left so meaningful warm color
+         lands in the visible 0..62% region rather than hiding orange
+         in the unrendered tail. -->
+    <linearGradient id="arcSweep" x1="{cx - arc_r:.0f}" y1="{cy:.0f}" x2="{cx + arc_r:.0f}" y2="{cy:.0f}" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#3BD66E"/>
+      <stop offset="25%"  stop-color="#A8E04A"/>
+      <stop offset="50%"  stop-color="#FFC93A"/>
+      <stop offset="78%"  stop-color="#FF8C2E"/>
+      <stop offset="100%" stop-color="#FF5A4A"/>
     </linearGradient>
-    <radialGradient id="centerCap" cx="50%" cy="40%" r="60%">
-      <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#E0E8FF"/>
+
+    <!-- Glass top highlight (white@top, fading into the arc body). -->
+    <linearGradient id="arcGloss" x1="0" y1="{arc_top_y:.0f}" x2="0" y2="{cy:.0f}" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.65"/>
+      <stop offset="55%"  stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Inner shadow on the lower curve of the arc (depth). -->
+    <linearGradient id="arcShade" x1="0" y1="{cy:.0f}" x2="0" y2="{arc_bot_y:.0f}" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.22"/>
+    </linearGradient>
+
+    <!-- Position orb body: bright white core that fades into a soft blue hint. -->
+    <radialGradient id="orbBody" cx="38%" cy="32%" r="70%">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="55%"  stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#CFE3FF"/>
     </radialGradient>
-    <filter id="needleShadow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="{needle_blur:.2f}"/>
-      <feOffset dx="0" dy="{sq_w * 0.006:.2f}"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+
+    <!-- Soft blur for the background halo. -->
+    <filter id="haloBlur" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="{halo_blur:.2f}"/>
+    </filter>
+
+    <!-- Orb glow: blurred white halo behind the orb body. -->
+    <filter id="orbGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="{orb_glow_blur:.2f}"/>
+    </filter>
+
+    <!-- Drop shadow under the active arc — anchors it on the bg. -->
+    <filter id="arcDropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="{arc_drop_blur:.2f}"/>
+      <feOffset dx="0" dy="{sq_w * 0.010:.2f}"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.42"/></feComponentTransfer>
       <feMerge>
         <feMergeNode/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+
+    <!-- Clip the arc-gloss layer to the active arc stroke so the gloss
+         doesn't bleed past the colored band. -->
+    <clipPath id="arcClip">
+      <path d="{active_path}" fill="none" stroke="#000" stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
+    </clipPath>
   </defs>
 
-  <!-- Squircle background + glossy top highlight -->
+  <!-- 1. Squircle background -->
   <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" rx="{corner_radius:.2f}" ry="{corner_radius:.2f}" fill="url(#bg)"/>
-  <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" rx="{corner_radius:.2f}" ry="{corner_radius:.2f}" fill="url(#topGloss)"/>
 
-  <!-- Tick marks -->
-  {chr(10).join("  " + t for t in ticks)}
-
-  <!-- Gauge track -->
-  <path d="{track_path}" fill="none" stroke="#FFFFFF" stroke-opacity="0.20"
-        stroke-width="{gauge_thickness:.2f}" stroke-linecap="round"/>
-
-  <!-- Active sweep -->
-  <path d="{active_path}" fill="none" stroke="url(#gaugeSweep)"
-        stroke-width="{gauge_thickness:.2f}" stroke-linecap="round"/>
-
-  <!-- Needle -->
-  <g filter="url(#needleShadow)">
-    <polygon points="{base_l[0]:.2f},{base_l[1]:.2f} {tip[0]:.2f},{tip[1]:.2f} {base_r[0]:.2f},{base_r[1]:.2f}"
-             fill="#FFFFFF"/>
+  <!-- 2. Soft radial halo behind the arc -->
+  <g clip-path="inset(0 round {corner_radius:.2f}px)">
+    <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" fill="url(#bgHalo)" filter="url(#haloBlur)"/>
   </g>
 
-  <!-- Center cap -->
-  <circle cx="{cx:.2f}" cy="{cy:.2f}" r="{cap_r:.2f}" fill="url(#centerCap)"/>
-  <circle cx="{cx:.2f}" cy="{cy:.2f}" r="{cap_inner_r:.2f}" fill="#3B82F6"/>
+  <!-- 3. Squircle top rim highlight -->
+  <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" rx="{corner_radius:.2f}" ry="{corner_radius:.2f}" fill="url(#rimGloss)"/>
+
+  <!-- 4. Faint full-arc track -->
+  <path d="{track_path}" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"
+        stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
+
+  <!-- 5. Active arc — color sweep + drop shadow -->
+  <g filter="url(#arcDropShadow)">
+    <path d="{active_path}" fill="none" stroke="url(#arcSweep)"
+          stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
+  </g>
+
+  <!-- 6. Glass top gloss + bottom inner shade, clipped to the active arc -->
+  <g clip-path="url(#arcClip)">
+    <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" fill="url(#arcGloss)"/>
+    <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" fill="url(#arcShade)"/>
+  </g>
+
+  <!-- 7. Position orb: glow halo + body + specular highlight -->
+  <circle cx="{orb_x:.2f}" cy="{orb_y:.2f}" r="{orb_r * 1.35:.2f}"
+          fill="#FFFFFF" fill-opacity="0.32" filter="url(#orbGlow)"/>
+  <circle cx="{orb_x:.2f}" cy="{orb_y:.2f}" r="{orb_r:.2f}" fill="url(#orbBody)"/>
+  <ellipse cx="{orb_x - orb_r * 0.32:.2f}" cy="{orb_y - orb_r * 0.42:.2f}"
+           rx="{orb_r * 0.42:.2f}" ry="{orb_r * 0.26:.2f}"
+           fill="#FFFFFF" fill-opacity="0.85"/>
 </svg>
 """
 

@@ -1,61 +1,119 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <!-- Squircle background: deep indigo → royal blue → bright cyan. -->
     <linearGradient id="bg" x1="100" y1="100" x2="924" y2="924" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#6E45E2"/>
-      <stop offset="55%" stop-color="#3B82F6"/>
-      <stop offset="100%" stop-color="#00C6FB"/>
+      <stop offset="0%"   stop-color="#3B1F8F"/>
+      <stop offset="45%"  stop-color="#3457D7"/>
+      <stop offset="100%" stop-color="#22C8F0"/>
     </linearGradient>
-    <linearGradient id="topGloss" x1="100" y1="100" x2="100" y2="553" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22"/>
+
+    <!-- Soft radial halo behind the arc — implies "lit from within". -->
+    <radialGradient id="bgHalo" cx="50%" cy="55%" r="55%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="60%"  stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Squircle top inner-rim highlight (the "wet glass" curvature). -->
+    <linearGradient id="rimGloss" x1="0" y1="100" x2="0" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.34"/>
       <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="gaugeSweep" x1="253" y1="574" x2="771" y2="574" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#34D158"/>
-      <stop offset="55%" stop-color="#FFCC00"/>
-      <stop offset="100%" stop-color="#FF9500"/>
+
+    <!-- Active arc color sweep. The gradient spans the full diameter of
+         the gauge, but only the start..active portion of the arc is
+         drawn — so we shift the stops left so meaningful warm color
+         lands in the visible 0..62% region rather than hiding orange
+         in the unrendered tail. -->
+    <linearGradient id="arcSweep" x1="263" y1="557" x2="761" y2="557" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#3BD66E"/>
+      <stop offset="25%"  stop-color="#A8E04A"/>
+      <stop offset="50%"  stop-color="#FFC93A"/>
+      <stop offset="78%"  stop-color="#FF8C2E"/>
+      <stop offset="100%" stop-color="#FF5A4A"/>
     </linearGradient>
-    <radialGradient id="centerCap" cx="50%" cy="40%" r="60%">
-      <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#E0E8FF"/>
+
+    <!-- Glass top highlight (white@top, fading into the arc body). -->
+    <linearGradient id="arcGloss" x1="0" y1="261" x2="0" y2="557" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.65"/>
+      <stop offset="55%"  stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Inner shadow on the lower curve of the arc (depth). -->
+    <linearGradient id="arcShade" x1="0" y1="557" x2="0" y2="765" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.22"/>
+    </linearGradient>
+
+    <!-- Position orb body: bright white core that fades into a soft blue hint. -->
+    <radialGradient id="orbBody" cx="38%" cy="32%" r="70%">
+      <stop offset="0%"   stop-color="#FFFFFF"/>
+      <stop offset="55%"  stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#CFE3FF"/>
     </radialGradient>
-    <filter id="needleShadow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="8.82"/>
-      <feOffset dx="0" dy="4.94"/>
-      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+
+    <!-- Soft blur for the background halo. -->
+    <filter id="haloBlur" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="14.83"/>
+    </filter>
+
+    <!-- Orb glow: blurred white halo behind the orb body. -->
+    <filter id="orbGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="18.13"/>
+    </filter>
+
+    <!-- Drop shadow under the active arc — anchors it on the bg. -->
+    <filter id="arcDropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="9.89"/>
+      <feOffset dx="0" dy="8.24"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.42"/></feComponentTransfer>
       <feMerge>
         <feMergeNode/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+
+    <!-- Clip the arc-gloss layer to the active arc stroke so the gloss
+         doesn't bleed past the colored band. -->
+    <clipPath id="arcClip">
+      <path d="M 321.37 717.28 A 248.85 248.85 0 0 1 659.67 357.02" fill="none" stroke="#000" stroke-width="95.58" stroke-linecap="round"/>
+    </clipPath>
   </defs>
 
-  <!-- Squircle background + glossy top highlight -->
+  <!-- 1. Squircle background -->
   <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#bg)"/>
-  <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#topGloss)"/>
 
-  <!-- Tick marks -->
-    <line x1="272.5" y1="774.8" x2="251.5" y2="792.4" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
-  <line x1="228.6" y1="441.6" x2="203.8" y2="430.1" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
-  <line x1="512.0" y1="261.1" x2="512.0" y2="233.7" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
-  <line x1="795.4" y1="441.6" x2="820.2" y2="430.1" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
-  <line x1="751.5" y1="774.8" x2="772.5" y2="792.4" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
-
-  <!-- Gauge track -->
-  <path d="M 313.80 740.11 A 258.74 258.74 0 1 1 710.20 740.11" fill="none" stroke="#FFFFFF" stroke-opacity="0.20"
-        stroke-width="72.51" stroke-linecap="round"/>
-
-  <!-- Active sweep -->
-  <path d="M 313.80 740.11 A 258.74 258.74 0 0 1 646.03 352.49" fill="none" stroke="url(#gaugeSweep)"
-        stroke-width="72.51" stroke-linecap="round"/>
-
-  <!-- Needle -->
-  <g filter="url(#needleShadow)">
-    <polygon points="491.56,561.42 638.35,365.17 532.44,586.18"
-             fill="#FFFFFF"/>
+  <!-- 2. Soft radial halo behind the arc -->
+  <g clip-path="inset(0 round 184.33px)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#bgHalo)" filter="url(#haloBlur)"/>
   </g>
 
-  <!-- Center cap -->
-  <circle cx="512.00" cy="573.80" r="30.49" fill="url(#centerCap)"/>
-  <circle cx="512.00" cy="573.80" r="11.29" fill="#3B82F6"/>
+  <!-- 3. Squircle top rim highlight -->
+  <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#rimGloss)"/>
+
+  <!-- 4. Faint full-arc track -->
+  <path d="M 321.37 717.28 A 248.85 248.85 0 1 1 702.63 717.28" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"
+        stroke-width="95.58" stroke-linecap="round"/>
+
+  <!-- 5. Active arc — color sweep + drop shadow -->
+  <g filter="url(#arcDropShadow)">
+    <path d="M 321.37 717.28 A 248.85 248.85 0 0 1 659.67 357.02" fill="none" stroke="url(#arcSweep)"
+          stroke-width="95.58" stroke-linecap="round"/>
+  </g>
+
+  <!-- 6. Glass top gloss + bottom inner shade, clipped to the active arc -->
+  <g clip-path="url(#arcClip)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#arcGloss)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#arcShade)"/>
+  </g>
+
+  <!-- 7. Position orb: glow halo + body + specular highlight -->
+  <circle cx="659.67" cy="357.02" r="80.09"
+          fill="#FFFFFF" fill-opacity="0.32" filter="url(#orbGlow)"/>
+  <circle cx="659.67" cy="357.02" r="59.33" fill="url(#orbBody)"/>
+  <ellipse cx="640.69" cy="332.11"
+           rx="24.92" ry="15.43"
+           fill="#FFFFFF" fill-opacity="0.85"/>
 </svg>
