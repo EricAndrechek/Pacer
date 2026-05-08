@@ -131,9 +131,10 @@ struct ContentView: View {
     /// having to click into the dashboard.
     private var sidebarBrand: some View {
         HStack(spacing: 10) {
-            Image(systemName: "speedometer")
-                .font(.system(size: 22, weight: .medium))
-                .foregroundStyle(.tint)
+            Image("PacerLogo")
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 26, height: 26)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Pacer")
                     .font(.system(size: 15, weight: .semibold))

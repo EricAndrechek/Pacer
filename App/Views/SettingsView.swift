@@ -484,9 +484,11 @@ private struct AboutPanel: View {
         VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
             PacerCard {
                 HStack(alignment: .top, spacing: 16) {
-                    Image(systemName: "speedometer")
-                        .font(.system(size: 44))
-                        .foregroundStyle(.tint)
+                    Image("PacerLogo")
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 64, height: 64)
+                        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Pacer")
                             .font(.system(size: 22, weight: .semibold, design: .rounded))

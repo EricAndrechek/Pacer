@@ -147,9 +147,10 @@ struct MenuBarContent: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "speedometer")
-                .font(.system(size: 16))
-                .foregroundStyle(.tint)
+            Image("PacerLogo")
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 18, height: 18)
             Text("Pacer")
                 .font(.system(size: 14, weight: .semibold))
             Spacer()

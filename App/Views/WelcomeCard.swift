@@ -38,10 +38,10 @@ struct WelcomeCard: View {
             EmptyView()
         } else {
             HStack(alignment: .top, spacing: 16) {
-                Image(systemName: "speedometer")
-                    .font(.system(size: 28, weight: .medium))
-                    .foregroundStyle(.tint)
-                    .frame(width: 36, alignment: .leading)
+                Image("PacerLogo")
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Welcome to Pacer")
                         .font(.system(size: 16, weight: .semibold))

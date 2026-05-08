@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="100" y1="100" x2="924" y2="924" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#6E45E2"/>
       <stop offset="55%" stop-color="#3B82F6"/>
       <stop offset="100%" stop-color="#00C6FB"/>
     </linearGradient>
-    <linearGradient id="topGloss" x1="0" y1="0" x2="0" y2="563" gradientUnits="userSpaceOnUse">
+    <linearGradient id="topGloss" x1="100" y1="100" x2="100" y2="553" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22"/>
       <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="gaugeSweep" x1="190" y1="589" x2="834" y2="589" gradientUnits="userSpaceOnUse">
+    <linearGradient id="gaugeSweep" x1="253" y1="574" x2="771" y2="574" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#34D158"/>
       <stop offset="55%" stop-color="#FFCC00"/>
       <stop offset="100%" stop-color="#FF9500"/>
@@ -20,8 +20,8 @@
       <stop offset="100%" stop-color="#E0E8FF"/>
     </radialGradient>
     <filter id="needleShadow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="11"/>
-      <feOffset dx="0" dy="6"/>
+      <feGaussianBlur stdDeviation="8.82"/>
+      <feOffset dx="0" dy="4.94"/>
       <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
       <feMerge>
         <feMergeNode/>
@@ -30,32 +30,32 @@
     </filter>
   </defs>
 
-  <!-- Background squircle + glossy top highlight -->
-  <rect x="0" y="0" width="1024" height="1024" rx="226" ry="226" fill="url(#bg)"/>
-  <rect x="0" y="0" width="1024" height="1024" rx="226" ry="226" fill="url(#topGloss)"/>
+  <!-- Squircle background + glossy top highlight -->
+  <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#topGloss)"/>
 
   <!-- Tick marks -->
-    <line x1="214.0" y1="838.8" x2="188.0" y2="860.7" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="11" stroke-linecap="round"/>
-  <line x1="159.4" y1="424.4" x2="128.6" y2="410.0" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="11" stroke-linecap="round"/>
-  <line x1="512.0" y1="199.8" x2="512.0" y2="165.8" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="11" stroke-linecap="round"/>
-  <line x1="864.6" y1="424.4" x2="895.4" y2="410.0" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="11" stroke-linecap="round"/>
-  <line x1="810.0" y1="838.8" x2="836.0" y2="860.7" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="11" stroke-linecap="round"/>
+    <line x1="272.5" y1="774.8" x2="251.5" y2="792.4" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
+  <line x1="228.6" y1="441.6" x2="203.8" y2="430.1" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
+  <line x1="512.0" y1="261.1" x2="512.0" y2="233.7" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
+  <line x1="795.4" y1="441.6" x2="820.2" y2="430.1" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
+  <line x1="751.5" y1="774.8" x2="772.5" y2="792.4" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="8.82" stroke-linecap="round"/>
 
   <!-- Gauge track -->
-  <path d="M 265.33 795.78 A 322 322 0 1 1 758.67 795.78" fill="none" stroke="#FFFFFF" stroke-opacity="0.20"
-        stroke-width="90" stroke-linecap="round"/>
+  <path d="M 313.80 740.11 A 258.74 258.74 0 1 1 710.20 740.11" fill="none" stroke="#FFFFFF" stroke-opacity="0.20"
+        stroke-width="72.51" stroke-linecap="round"/>
 
   <!-- Active sweep -->
-  <path d="M 265.33 795.78 A 322 322 0 0 1 678.80 313.37" fill="none" stroke="url(#gaugeSweep)"
-        stroke-width="90" stroke-linecap="round"/>
+  <path d="M 313.80 740.11 A 258.74 258.74 0 0 1 646.03 352.49" fill="none" stroke="url(#gaugeSweep)"
+        stroke-width="72.51" stroke-linecap="round"/>
 
-  <!-- Needle (with subtle drop shadow) -->
+  <!-- Needle -->
   <g filter="url(#needleShadow)">
-    <polygon points="486.34,573.26 669.48,328.77 537.66,604.34"
+    <polygon points="491.56,561.42 638.35,365.17 532.44,586.18"
              fill="#FFFFFF"/>
   </g>
 
   <!-- Center cap -->
-  <circle cx="512" cy="589" r="38" fill="url(#centerCap)"/>
-  <circle cx="512" cy="589" r="14" fill="#3B82F6"/>
+  <circle cx="512.00" cy="573.80" r="30.49" fill="url(#centerCap)"/>
+  <circle cx="512.00" cy="573.80" r="11.29" fill="#3B82F6"/>
 </svg>
