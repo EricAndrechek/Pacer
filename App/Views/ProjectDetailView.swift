@@ -3,12 +3,8 @@ import SwiftData
 import Charts
 import PacerCore
 
-/// What field to sort the per-session table by. Persists per-table
-/// in the App Group store (`pacer.projectDetail.sessionsSortField`).
-enum SessionsSort: String, CaseIterable, Identifiable {
-    case id, model, tokens, cost, lastSeen
-    var id: String { rawValue }
-}
+// Sort enum was forked into the shared SessionsTable component; this
+// view now reuses `SessionsTableSort` directly.
 
 /// Drill-down for a single project. Presented as a sheet from
 /// `ProjectsView`. Shows:
@@ -146,6 +142,24 @@ struct ProjectDetailView: View {
         .dismissibleModal(item: $selectedSession) { sel in
             SessionDetailView(session: sel.session, projectDisplayName: displayName)
         }
+        // Same stacking pattern for the day-detail modal — clicking a
+        // bar in this project's daily chart drills into that day,
+        // matching the affordance every other bar chart in the app
+        // exposes. Three modals deep at most (Project → Day → Session)
+        // which dismisses cleanly with click-outside.
+        .dismissibleModal(item: $selectedDay) { sel in
+            DayDetailView(date: sel.date)
+        }
+    }
+
+    @State private var selectedDay: SelectedDayWithin?
+
+    /// Scoped Identifiable wrapper for the per-project day-detail
+    /// modal. Distinct type from `DashboardView.SelectedDay` so the
+    /// two view scopes don't accidentally share state.
+    struct SelectedDayWithin: Identifiable {
+        let date: String
+        var id: String { date }
     }
 
     private var header: some View {
@@ -262,6 +276,13 @@ struct ProjectDetailView: View {
                 }
             }
             .chartXSelection(value: $hoveredDate)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let d = hoveredDate {
+                    selectedDay = SelectedDayWithin(date: d)
+                }
+            }
+            .pointerStyle(.link)
         }
     }
 
@@ -347,38 +368,15 @@ struct ProjectDetailView: View {
     }
 
     @AppStorage("pacer.projectDetail.sessionsSortField", store: PacerSettings.store)
-    private var sessionsSortRaw: String = SessionsSort.lastSeen.rawValue
+    private var sessionsSortRaw: String = SessionsTableSort.lastSeen.rawValue
     @AppStorage("pacer.projectDetail.sessionsSortDescending", store: PacerSettings.store)
     private var sessionsSortDescending: Bool = true
 
-    private var sessionsSort: SessionsSort {
-        SessionsSort(rawValue: sessionsSortRaw) ?? .lastSeen
+    private var sessionsSort: SessionsTableSort {
+        SessionsTableSort(rawValue: sessionsSortRaw) ?? .lastSeen
     }
-    private var sessionsSortBinding: Binding<SessionsSort> {
+    private var sessionsSortBinding: Binding<SessionsTableSort> {
         Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
-    }
-
-    private var sortedSessions: [SessionInfo] {
-        let primary: (SessionInfo, SessionInfo) -> Bool
-        switch sessionsSort {
-        case .id:
-            primary = { $0.sessionId < $1.sessionId }
-        case .model:
-            primary = { $0.topModel < $1.topModel }
-        case .tokens:
-            primary = { $0.totalTokens < $1.totalTokens }
-        case .cost:
-            primary = { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
-        case .lastSeen:
-            primary = { $0.lastSeenAt < $1.lastSeenAt }
-        }
-        // Stable tiebreaker: session id (always unique).
-        let sorted = sessionRows.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.sessionId < rhs.sessionId
-        }
-        return sessionsSortDescending ? sorted.reversed() : sorted
     }
 
     private var sessionsCard: some View {
@@ -387,78 +385,16 @@ struct ProjectDetailView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            VStack(alignment: .leading, spacing: 4) {
-                sessionsHeader
-                Divider().padding(.vertical, 2)
-                // Inner scroll for the full list. The modal's outer
-                // height is bounded by the dismissibleModal frame, so
-                // showing every session needs an inner scrollable
-                // region — without this we either showed "and X more"
-                // pointing at nothing the user could reach, or the
-                // modal stretched off-screen on big projects.
-                if sortedSessions.count <= 12 {
-                    // Tiny enough — no inner scroll needed.
-                    ForEach(sortedSessions, id: \.sessionId) { row in
-                        sessionRowView(row)
-                    }
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(sortedSessions, id: \.sessionId) { row in
-                                sessionRowView(row)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 320)
-                    .scrollIndicators(.never)
-                }
-            }
-        }
-    }
-
-    private var sessionsHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
-            SortableColumnHeader(
-                "ID",
-                field: SessionsSort.id,
-                alignment: .leading,
-                active: sessionsSortBinding,
-                descending: $sessionsSortDescending,
-                defaultDescending: false
-            ).frame(width: 80, alignment: .leading)
-            SortableColumnHeader(
-                "Model",
-                field: SessionsSort.model,
-                alignment: .leading,
-                active: sessionsSortBinding,
-                descending: $sessionsSortDescending,
-                defaultDescending: false
-            ).frame(maxWidth: 220, alignment: .leading)
-            Spacer()
-            SortableColumnHeader(
-                "Tokens",
-                field: SessionsSort.tokens,
-                alignment: .trailing,
-                active: sessionsSortBinding,
-                descending: $sessionsSortDescending
-            ).frame(width: 80)
-            SortableColumnHeader(
-                "Cost",
-                field: SessionsSort.cost,
-                alignment: .trailing,
-                active: sessionsSortBinding,
-                descending: $sessionsSortDescending
-            ).frame(width: 70)
-            SortableColumnHeader(
-                "Last seen",
-                field: SessionsSort.lastSeen,
-                alignment: .trailing,
-                active: sessionsSortBinding,
-                descending: $sessionsSortDescending
-            ).frame(width: 80)
-            // Reserve room for the row's chevron-icon column so the
-            // header columns line up with the row body.
-            Spacer().frame(width: 16)
+            // Single shared sortable table. Project-detail hides the
+            // "Project" column since the modal is already scoped to
+            // one project; day-detail enables the same column.
+            SessionsTable(
+                rows: sessionRows,
+                showProjectColumn: false,
+                onSessionTap: { selectedSession = SelectedSession(session: $0) },
+                sort: sessionsSortBinding,
+                sortDescending: $sessionsSortDescending
+            )
         }
     }
 
@@ -467,40 +403,5 @@ struct ProjectDetailView: View {
     struct SelectedSession: Identifiable {
         let session: SessionInfo
         var id: String { session.sessionId }
-    }
-
-    @ViewBuilder
-    private func sessionRowView(_ row: SessionInfo) -> some View {
-        HoverRow(action: { selectedSession = SelectedSession(session: row) }) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(String(row.sessionId.prefix(8)))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 80, alignment: .leading)
-                Text(pacerShortModel(row.topModel))
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 220, alignment: .leading)
-                Spacer(minLength: 8)
-                Text(pacerTokens(row.totalTokens))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Text(pacerCost(row.cumulativeCostUSD))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 70, alignment: .trailing)
-                Text(pacerRelative(row.lastSeenAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 80, alignment: .trailing)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16, alignment: .trailing)
-            }
-        }
     }
 }

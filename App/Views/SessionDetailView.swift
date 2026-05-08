@@ -19,7 +19,6 @@ struct SessionDetailView: View {
     let projectDisplayName: String
 
     @Environment(\.dismissModal) private var dismissModal
-    @State private var resolvedTitle: String?
     @State private var transcriptURL: URL?
 
     var body: some View {
@@ -35,11 +34,10 @@ struct SessionDetailView: View {
         .scrollIndicators(.never)
         .frame(minWidth: 540, idealWidth: 620, minHeight: 460, idealHeight: 560)
         .task(id: session.sessionId) {
-            // First user prompt, best-effort. Cached in the resolver
-            // so reopening this modal is free.
-            let title = await SessionTitleResolver.shared.title(for: session.sessionId)
-            if Task.isCancelled { return }
-            resolvedTitle = title
+            // Probe the transcript path on disk so we can offer
+            // Reveal/Open buttons without paying the read cost the
+            // prior first-prompt resolver did. ~3 dir checks worst
+            // case; bounded.
             transcriptURL = await Self.transcriptURL(for: session.sessionId)
         }
     }
@@ -49,9 +47,9 @@ struct SessionDetailView: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(headlineTitle)
+                Text(pacerShortModel(session.topModel))
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .truncationMode(.tail)
                 HStack(spacing: 6) {
                     Text(String(session.sessionId.prefix(13)))
@@ -69,16 +67,6 @@ struct SessionDetailView: View {
             Button("Close") { dismissModal() }
                 .keyboardShortcut(.cancelAction)
         }
-    }
-
-    /// Use the resolved first-prompt title when available, otherwise
-    /// fall back to the top model name. Kept on a single line in the
-    /// header — the full prompt is shown in the metadata card below.
-    private var headlineTitle: String {
-        if let resolvedTitle, !resolvedTitle.isEmpty {
-            return resolvedTitle
-        }
-        return pacerShortModel(session.topModel)
     }
 
     // MARK: - Summary
@@ -174,17 +162,6 @@ struct SessionDetailView: View {
                     monospaced: true,
                     selectable: true
                 )
-                if let title = resolvedTitle, !title.isEmpty {
-                    Divider().padding(.vertical, 2)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Eyebrow(text: "First user prompt")
-                        Text(title)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
                 if transcriptURL != nil {
                     Divider().padding(.vertical, 2)
                     HStack(spacing: 8) {

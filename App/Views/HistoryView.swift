@@ -299,7 +299,15 @@ private struct TopDaysCard: View {
     @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
     private var descending: Bool = true
 
-    /// Toggle to reveal the next 10 (and so on). The user flagged
+    @AppStorage("pacer.history.topDaysRange", store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.all.rawValue
+
+    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
+
+    /// Toggle to reveal the next 90 (showing top 100). The user flagged
     /// "showing top 10 silently" — now there's a chip in the header
     /// indicating "showing N of M" plus a Show more / Show less link.
     @State private var showAll: Bool = false
@@ -316,13 +324,14 @@ private struct TopDaysCard: View {
         var id: String { date }
     }
 
-    /// All days, sorted by the user's chosen field. We compute the
-    /// full set so the header chip ("X of Y") tells the truth and the
-    /// "Show more" reveal can extend without re-sorting. The visible
-    /// slice in the body is `topRows.prefix(showAll ? rows.count : 10)`.
+    /// Days inside the active range (cutoff is `range.since`),
+    /// sorted by the user's chosen field. The full set lets us print
+    /// "showing N of M" and lets "Show more" extend without resorting.
     private var sortedRows: [DayRow] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
+        let cutoff = range.since.flatMap { TokenSample.formatDate($0) }
         for row in aggregates {
+            if let cutoff, row.date < cutoff { continue }
             var v = byDate[row.date] ?? (0, 0)
             v.cost += row.totalCostUSD
             v.tokens += row.inputTokens + row.outputTokens + row.cacheReadTokens
@@ -363,12 +372,21 @@ private struct TopDaysCard: View {
             }
         }()
         PacerCard(title, trailing: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if !all.isEmpty {
                     Text("showing \(visible.count) of \(all.count)")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
+                Picker("", selection: rangeBinding) {
+                    ForEach(TimeRange.allCases) { r in
+                        Text(r.shortLabel).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .controlSize(.small)
+                .labelsHidden()
             }
         }) {
             if all.isEmpty {

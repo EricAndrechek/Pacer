@@ -426,3 +426,69 @@ func pacerRelative(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .
     f.unitsStyle = style
     return f.localizedString(for: date, relativeTo: Date())
 }
+
+// MARK: - Time-of-day formatting (locale-aware)
+
+/// Whether the user's macOS locale uses a 24-hour clock. Cached on
+/// first read; the system locale rarely changes mid-session and we
+/// don't want to re-derive on every chart axis tick.
+///
+/// Detection asks `DateFormatter` for the localized template "j" — it
+/// returns the canonical hour pattern for the locale ("h a" for 12h,
+/// "HH" for 24h), so the absence of an "a" marker means 24h.
+let pacerUses24HourClock: Bool = {
+    let template = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? ""
+    return !template.contains("a")
+}()
+
+/// Compact hour-of-day label, locale-aware. 12h locales get "3 PM" /
+/// "12 AM"; 24h locales get "15:00" / "00:00". Used by every chart's
+/// time axis so a user never sees "4p" in one chart and "16:00" in
+/// another.
+///
+/// `style` picks how dense the label should be:
+///   - `.compact` → "3p" / "15" (tight axes like the 5h pace chart)
+///   - `.regular` → "3 PM" / "15:00" (wider axes like today-by-hour)
+func pacerHour(_ date: Date, style: PacerHourStyle = .compact) -> String {
+    let cal = Calendar.current
+    let h24 = cal.component(.hour, from: date)
+    if pacerUses24HourClock {
+        switch style {
+        case .compact: return String(format: "%d", h24)
+        case .regular: return String(format: "%02d:00", h24)
+        }
+    }
+    let h12 = ((h24 + 11) % 12) + 1
+    let suffix = h24 < 12 ? "AM" : "PM"
+    switch style {
+    case .compact:
+        // Lowercase 1-letter suffix at this density: "3p", "12a".
+        return "\(h12)\(suffix == "PM" ? "p" : "a")"
+    case .regular:
+        return "\(h12) \(suffix)"
+    }
+}
+
+enum PacerHourStyle {
+    case compact, regular
+}
+
+/// Wall-clock time for a Date. Locale-aware: 12h locales get "3:47 PM",
+/// 24h locales get "15:47". Used in pace-chart "resets at" labels
+/// where seconds aren't useful but minutes are.
+func pacerClockTime(_ date: Date) -> String {
+    let f = DateFormatter()
+    f.locale = .current
+    f.timeStyle = .short
+    f.dateStyle = .none
+    return f.string(from: date)
+}
+
+/// Short weekday + time, used by the 7-day pace chart's reset label.
+/// Returns e.g. "Mon 3 PM" / "Mon 15:00" depending on locale.
+func pacerWeekdayClock(_ date: Date) -> String {
+    let f = DateFormatter()
+    f.locale = .current
+    f.dateFormat = pacerUses24HourClock ? "EEE H:mm" : "EEE h a"
+    return f.string(from: date)
+}

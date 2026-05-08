@@ -198,6 +198,13 @@ private struct ModelsContent: View {
         cachedDailyMixCount = aggregates.count
     }
 
+    @State private var selectedDay: SelectedDay?
+
+    private struct SelectedDay: Identifiable {
+        let date: String
+        var id: String { date }
+    }
+
     var body: some View {
         Group {
             if rows.isEmpty {
@@ -219,6 +226,12 @@ private struct ModelsContent: View {
         .onChange(of: aggregates.count) { _, _ in
             refreshDailyMix()
             refreshShareCumulative()
+        }
+        // Trend bar click drills into that day's modal — surfaces in
+        // the Models tab finally have the same drill-in affordance as
+        // the Dashboard's daily chart and History's heatmap.
+        .dismissibleModal(item: $selectedDay) { sel in
+            DayDetailView(date: sel.date)
         }
     }
 
@@ -387,6 +400,15 @@ private struct ModelsContent: View {
                 }
                 .chartXAxis(.hidden)
                 .chartXSelection(value: $trendHoverDate)
+                // Tap-to-drill — uses the chartXSelection binding,
+                // same minimal pattern as DailyCostChartCard.
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let date = trendHoverDate {
+                        selectedDay = SelectedDay(date: date)
+                    }
+                }
+                .pointerStyle(.link)
 
                 // Per-model breakdown of the hovered day. Hidden until
                 // hover so the card doesn't always show a placeholder

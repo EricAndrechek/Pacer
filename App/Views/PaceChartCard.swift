@@ -133,7 +133,7 @@ private struct PaceChartColumn: View {
             Eyebrow(text: title)
             Spacer()
             if let resets = latest?.resetsAt {
-                Text("resets \(pacerRelative(resets, style: .short))")
+                Text(resetLabel(resets: resets))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {
@@ -142,6 +142,17 @@ private struct PaceChartColumn: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    /// Reset-line copy: relative duration plus the actual wall-clock
+    /// time so the user can plan ("resets in 2h • 9 PM"). 7-day uses
+    /// weekday-with-time so "Mon 3 PM" reads cleanly.
+    private func resetLabel(resets: Date) -> String {
+        let rel = pacerRelative(resets, style: .short)
+        if duration <= 6 * 3600 {
+            return "resets \(rel) · \(pacerClockTime(resets))"
+        }
+        return "resets \(rel) · \(pacerWeekdayClock(resets))"
     }
 
     @ViewBuilder
@@ -267,19 +278,41 @@ private struct PaceChartColumn: View {
         }
     }
 
-    /// X-axis marks tuned per window. 5h cycles get 4 hour-of-day ticks
-    /// ("12p", "3p", "6p"); 7d cycles get one tick per day with the
-    /// abbreviated weekday ("Mon", "Tue"). Keeps the cycle context
-    /// readable without crowding the small chart.
+    /// X-axis marks tuned per window.
+    ///
+    /// **5h cycle** → tick at every wall-clock hour boundary that
+    /// falls inside the cycle. A 5h window starting 4:30 PM gets ticks
+    /// at 5p, 6p, 7p, 8p, 9p — evenly spaced and aligned to the hour
+    /// the user actually thinks in.
+    ///
+    /// **7d cycle** → tick at every local-midnight inside the cycle
+    /// plus one explicit tick at the reset itself so the right edge
+    /// gets a label. Without that explicit reset tick the last day
+    /// landed in a region SwiftUI Charts truncates to "...".
+    ///
+    /// Labels go through the shared `pacerHour` helper so 12h vs 24h
+    /// follows the user's macOS clock setting.
     private func xAxisMarks(cycleStart: Date, resets: Date) -> AxisMarks<some AxisMark> {
-        // 5h ≤ 6h → split into 4 ticks at quarter-cycle.
+        let cal = Calendar.current
         if duration <= 6 * 3600 {
-            let stride = duration / 4
-            let ticks: [Date] = (0...4).map { cycleStart.addingTimeInterval(Double($0) * stride) }
+            // Hour boundaries inside the cycle.
+            var ticks: [Date] = []
+            if let firstHour = cal.nextDate(
+                after: cycleStart,
+                matching: DateComponents(minute: 0, second: 0),
+                matchingPolicy: .nextTime
+            ) {
+                var t = firstHour
+                while t < resets {
+                    ticks.append(t)
+                    guard let next = cal.date(byAdding: .hour, value: 1, to: t) else { break }
+                    t = next
+                }
+            }
             return AxisMarks(values: ticks) { value in
                 AxisValueLabel {
                     if let d = value.as(Date.self) {
-                        Text(Self.shortHour(d))
+                        Text(pacerHour(d, style: .compact))
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
@@ -287,11 +320,8 @@ private struct PaceChartColumn: View {
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.10))
             }
         }
-        // 7d → one tick per day boundary inside the cycle.
-        let cal = Calendar(identifier: .iso8601)
+        // 7d → midnight ticks plus the reset itself.
         var ticks: [Date] = []
-        // First tick = next midnight after cycleStart. Walk daily until
-        // we cross resets; the chart frame will clip anything beyond.
         if let firstMidnight = cal.nextDate(
             after: cycleStart,
             matching: DateComponents(hour: 0, minute: 0, second: 0),
@@ -305,7 +335,11 @@ private struct PaceChartColumn: View {
             }
         }
         return AxisMarks(values: ticks) { value in
-            AxisValueLabel {
+            // `centered: true` puts each weekday label in the middle
+            // of its day's column rather than on the boundary line —
+            // fixes the last day rendering as "..." when the rightmost
+            // midnight sat too close to the chart edge.
+            AxisValueLabel(centered: true) {
                 if let d = value.as(Date.self) {
                     Text(Self.weekday(d))
                         .font(.system(size: 9))
@@ -316,20 +350,9 @@ private struct PaceChartColumn: View {
         }
     }
 
-    /// "3p" / "12a" — compact lowercase hour-of-day. Shorter than
-    /// `DateFormatter`'s "3 PM" so it fits comfortably under a tiny
-    /// 5-hour pace chart.
-    private static func shortHour(_ date: Date) -> String {
-        let cal = Calendar.current
-        let h24 = cal.component(.hour, from: date)
-        let h12 = ((h24 + 11) % 12) + 1
-        let suffix = h24 < 12 ? "a" : "p"
-        return "\(h12)\(suffix)"
-    }
-
     private static func weekday(_ date: Date) -> String {
         let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
+        f.locale = .current
         f.dateFormat = "EEE"
         return f.string(from: date)
     }

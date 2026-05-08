@@ -166,7 +166,16 @@ struct HeatmapCard: View {
 
     var body: some View {
         PacerCard("Activity heatmap", trailing: { metricPicker }) {
+            // Reserve the tooltip row so the grid never reflows when
+            // hover state flips between active/inactive. Empty 22pt
+            // strip stays in place; the floating tooltip only changes
+            // its content.
             VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .leading) {
+                    Color.clear.frame(height: 22)
+                    tooltipOverlay
+                        .animation(.easeOut(duration: 0.12), value: hoveredCellId)
+                }
                 ScrollView(.horizontal, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 4) {
                         monthLabelRow
@@ -311,24 +320,137 @@ struct HeatmapCard: View {
         }
     }
 
-    @ViewBuilder
-    private func cellView(_ cell: Cell) -> some View {
-        HeatmapCellButton(
-            cell: cell,
-            color: color(for: cell.value(for: metric)),
-            valueText: cellValueText(cell),
-            metricLabel: metric.label.lowercased(),
-            onTap: { onDayTap(cell.dateKey) }
-        )
+    /// Hovered cell drives the floating tooltip overlay. Stored at
+    /// the parent level (rather than per-cell state) so we can render
+    /// the tooltip in a single overlay pass without each cell hosting
+    /// its own popover — which was intercepting tap-through clicks.
+    @State private var hoveredCellId: String?
+    @State private var hoverTask: Task<Void, Never>?
+
+    /// Initial hover takes ~200ms before the tooltip appears so a
+    /// fast cursor sweep across the grid doesn't flicker tooltips.
+    /// Once the tooltip is up, switching between cells updates
+    /// immediately — same dwell behavior as GitHub.
+    private static let initialHoverDelayMS: Int = 200
+
+    private func enterCell(_ id: String) {
+        hoverTask?.cancel()
+        if hoveredCellId == nil {
+            let delay = Self.initialHoverDelayMS
+            hoverTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(delay))
+                if Task.isCancelled { return }
+                hoveredCellId = id
+            }
+        } else {
+            // Tooltip already up — immediate switch.
+            hoveredCellId = id
+        }
     }
 
-    private func cellValueText(_ cell: Cell) -> String {
+    private func exitCell(_ id: String) {
+        hoverTask?.cancel()
+        if hoveredCellId == id {
+            hoveredCellId = nil
+        }
+    }
+
+    @ViewBuilder
+    private func cellView(_ cell: Cell) -> some View {
         let v = cell.value(for: metric)
         if v > 0 {
-            return formatTotal(v, kind: metric)
+            // Active cell: clickable + hoverable + cursor flips to link.
+            Button {
+                onDayTap(cell.dateKey)
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color(for: v))
+                    if hoveredCellId == cell.dateKey {
+                        RoundedRectangle(cornerRadius: 2)
+                            .stroke(Color.primary.opacity(0.5), lineWidth: 1)
+                    }
+                }
+                .frame(width: Self.cellSize, height: Self.cellSize)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointerStyle(.link)
+            .onHover { inside in
+                if inside { enterCell(cell.dateKey) }
+                else { exitCell(cell.dateKey) }
+            }
+        } else {
+            // Empty day: just a swatch, no hover affordance, not
+            // clickable. Committed to one consistent behavior — no
+            // teasing tooltip for cells with nothing to drill into.
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: Self.cellSize, height: Self.cellSize)
         }
-        return "no usage"
     }
+
+    /// Find the hovered cell across the full grid. O(weeks*7) but
+    /// the data is already in @State and the lookup only fires on
+    /// hover-state change, not per render.
+    private func cellById(_ id: String) -> Cell? {
+        for week in cached.grid {
+            for cell in week where cell?.dateKey == id {
+                return cell
+            }
+        }
+        return nil
+    }
+
+    /// Floating tooltip layer rendered above the grid. Positioned at
+    /// the top of the card body so it never overlaps the grid below
+    /// the hovered cell. Single source of truth for the active hover —
+    /// each cell only flips a binding rather than presenting its own
+    /// popover. That fixes the prior bug where `.popover` per cell
+    /// was intercepting tap-through clicks.
+    @ViewBuilder
+    private var tooltipOverlay: some View {
+        if let id = hoveredCellId, let cell = cellById(id) {
+            let v = cell.value(for: metric)
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color(for: v))
+                    .frame(width: 10, height: 10)
+                Text(formatTotal(v, kind: metric))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                Text(metric.label.lowercased())
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                Text(Self.tooltipDateFmt.string(from: cell.date))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("· click to drill in")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(PacerDesign.cardStroke, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+            .transition(.opacity)
+        }
+    }
+
+    private static let tooltipDateFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, MMM d"
+        return f
+    }()
 
     private func color(for value: Double) -> Color {
         guard value > 0 else { return Color.secondary.opacity(0.12) }
@@ -343,15 +465,26 @@ struct HeatmapCard: View {
         }
     }
 
+    /// Color bins are derived from a 95th-percentile cap on the
+    /// active metric. Show each swatch's upper-bound value so the user
+    /// can read the legend at a glance — "this dark green = roughly
+    /// $X+". Hover a swatch to see its precise band.
     private var legend: some View {
-        HStack(spacing: 4) {
+        let cap = max(cached.maxByMetric[metric] ?? 0, 0.0001)
+        // Bin upper-bounds in metric units. Same thresholds as
+        // `color(for:)`: 20%, 40%, 60%, 80%, 100% of cap.
+        let upper: [Double] = [0.2, 0.4, 0.6, 0.8, 1.0].map { $0 * cap }
+        return HStack(spacing: 4) {
             Text("Less")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
-            ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { intensity in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(legendColor(intensity: intensity))
-                    .frame(width: 10, height: 10)
+            ForEach(Array(upper.enumerated()), id: \.offset) { idx, ub in
+                LegendSwatch(
+                    color: legendColor(intensity: Double(idx + 1) * 0.2 - 0.001),
+                    upperBound: ub,
+                    metric: metric,
+                    isLast: idx == upper.count - 1
+                )
             }
             Text("More")
                 .font(.system(size: 10))
@@ -371,109 +504,39 @@ struct HeatmapCard: View {
     }
 }
 
-/// One heatmap cell with hover state + GitHub-style tooltip popover.
-/// The popover shows the date + value on hover, only on cells with
-/// any value (zero-cells stay quiet because the entire grid would
-/// pulse popovers on a slow mouse drag otherwise). Click anywhere on
-/// the cell drills into the day modal.
-///
-/// Pulled out of `HeatmapCard` so each cell owns its hover state —
-/// the parent body never re-renders on hover, just the one cell.
-private struct HeatmapCellButton: View {
-    let cell: HeatmapCard.Cell
+/// One swatch in the heatmap legend. Hovering reveals the value
+/// range that swatch represents — useful because the bins are
+/// dynamic (95th-percentile cap on the active metric).
+private struct LegendSwatch: View {
     let color: Color
-    /// Already-formatted value text — e.g. "$12.40", "32.4K", or
-    /// "no usage". Caller picks the right formatter for the active
-    /// metric so this view stays metric-agnostic.
-    let valueText: String
-    let metricLabel: String
-    let onTap: () -> Void
-
+    /// Upper bound of this bin in the active metric's units.
+    let upperBound: Double
+    let metric: ProjectMetric
+    let isLast: Bool
     @State private var hovering: Bool = false
 
-    private var hasValue: Bool {
-        cell.value(for: .cost) > 0
-            || cell.value(for: .tokens) > 0
-            || cell.value(for: .sessions) > 0
-    }
-
-    /// Popover binding: only let the popover show for cells that
-    /// actually have data. Cells with no usage still highlight on
-    /// hover for affordance, but a sea of "no usage" tooltips on a
-    /// fast horizontal cursor sweep is noise.
-    private var popoverBinding: Binding<Bool> {
-        Binding(
-            get: { hovering && hasValue },
-            set: { hovering = $0 }
-        )
-    }
-
     var body: some View {
-        Button(action: onTap) {
-            ZStack {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(color)
+            .frame(width: 10, height: 10)
+            .overlay(
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(color)
-                if hovering && hasValue {
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color.primary.opacity(0.4), lineWidth: 1)
-                }
-            }
-            .frame(width: 11, height: 11)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .pointerStyle(hasValue ? .link : .default)
-        .popover(isPresented: popoverBinding, arrowEdge: .top) {
-            HeatmapTooltipContent(
-                date: cell.date,
-                dateKey: cell.dateKey,
-                valueText: valueText,
-                metricLabel: metricLabel,
-                hasValue: hasValue
+                    .stroke(Color.primary.opacity(hovering ? 0.4 : 0), lineWidth: 1)
             )
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .onHover { hovering = $0 }
+            .help(helpText)
+    }
+
+    private var helpText: String {
+        let formatted: String
+        switch metric {
+        case .cost:     formatted = pacerCost(upperBound)
+        case .tokens:   formatted = pacerTokens(Int64(upperBound))
+        case .sessions: formatted = "\(Int(upperBound))"
         }
+        return isLast
+            ? "≥ \(formatted) \(metric.label.lowercased())"
+            : "up to \(formatted) \(metric.label.lowercased())"
     }
 }
 
-/// Content of the hover popover — pretty date as the headline, the
-/// value + metric label below, and a "click to open" hint. Mirrors
-/// GitHub's contribution-cell tooltip layout, tuned for macOS.
-private struct HeatmapTooltipContent: View {
-    let date: Date
-    let dateKey: String
-    let valueText: String
-    let metricLabel: String
-    let hasValue: Bool
-
-    private static let dateFmt: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEE, MMM d"
-        return f
-    }()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(Self.dateFmt.string(from: date))
-                .font(.system(size: 11, weight: .semibold))
-            HStack(spacing: 4) {
-                Text(valueText)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                if hasValue {
-                    Text(metricLabel)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if hasValue {
-                Text("Click to drill in")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 1)
-            }
-        }
-    }
-}

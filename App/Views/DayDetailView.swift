@@ -212,20 +212,63 @@ struct DayDetailView: View {
                     .foregroundStyle(.tertiary)
             }
         }) {
-            LazyVGrid(
-                columns: Array(
-                    repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                    count: 5
-                ),
-                alignment: .leading,
-                spacing: 12
-            ) {
-                MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
-                MetricTile(value: pacerTokens(t.input), label: "input")
-                MetricTile(value: pacerTokens(t.output), label: "output")
-                MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
-                MetricTile(value: pacerTokens(t.cacheCreation), label: "cache write")
+            VStack(alignment: .leading, spacing: 16) {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                        count: 5
+                    ),
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
+                    MetricTile(value: pacerTokens(t.input), label: "input")
+                    MetricTile(value: pacerTokens(t.output), label: "output")
+                    MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
+                    MetricTile(value: pacerTokens(t.cacheCreation), label: "cache write")
+                }
+                if t.cacheRead > 0 {
+                    cacheRatioRow
+                }
             }
+        }
+    }
+
+    /// Cache-utilization line for this day. Same shape as the
+    /// dashboard's TodayDetailsCard so the user sees the metric the
+    /// same way regardless of which surface they're inspecting. Lets
+    /// them click through expensive days from the heatmap and check
+    /// whether caching was the lever that made them expensive.
+    @ViewBuilder
+    private var cacheRatioRow: some View {
+        let t = totals
+        let denom = Double(t.cacheRead + t.input)
+        let r = denom > 0 ? Double(t.cacheRead) / denom : 0
+        let pctText = String(format: "%.1f%%", r * 100)
+        HStack(spacing: 8) {
+            Image(systemName: "bolt.horizontal.circle.fill")
+                .foregroundStyle(.tint)
+                .font(.system(size: 13))
+            Text("Cache hit rate")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 6)
+                GeometryReader { geo in
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * r, height: 6)
+                }
+                .frame(height: 6)
+            }
+            .frame(maxWidth: 220)
+            Text(pctText)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 56, alignment: .trailing)
         }
     }
 
@@ -482,72 +525,38 @@ struct DayDetailView: View {
         }
     }
 
-    /// Sessions active on this day. Complements the projects card
-    /// above: projects answer "what areas of work", sessions answer
-    /// "what conversations". Each row links to a SessionDetailView.
+    @AppStorage("pacer.dayDetail.sessionsSort", store: PacerSettings.store)
+    private var sessionsSortRaw: String = SessionsTableSort.cost.rawValue
+    @AppStorage("pacer.dayDetail.sessionsSortDescending", store: PacerSettings.store)
+    private var sessionsSortDescending: Bool = true
+
+    private var sessionsSort: SessionsTableSort {
+        SessionsTableSort(rawValue: sessionsSortRaw) ?? .cost
+    }
+    private var sessionsSortBinding: Binding<SessionsTableSort> {
+        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
+    }
+
+    /// Sessions active on this day — same shared SessionsTable that
+    /// the project modal uses, with the "Project" column enabled
+    /// because a day spans many projects. All rows reachable via the
+    /// table's inner scroll once the count exceeds the inline
+    /// threshold; no more "+N more" dead-end.
     private var sessionsCard: some View {
         PacerCard("Sessions", trailing: {
             Text("\(sessionRows.count) on this day")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Eyebrow(text: "Session")
-                    Spacer()
-                    Eyebrow(text: "Project")
-                        .frame(width: 130, alignment: .leading)
-                    Eyebrow(text: "Cost")
-                        .frame(width: 70, alignment: .trailing)
-                    Eyebrow(text: "Last")
-                        .frame(width: 70, alignment: .trailing)
-                    Spacer().frame(width: 16)
-                }
-                .padding(.bottom, 2)
-                Divider().padding(.vertical, 2)
-                ForEach(sessionRows.prefix(20), id: \.sessionId) { row in
-                    HoverRow(action: {
-                        selectedSession = ProjectDetailView.SelectedSession(session: row)
-                    }) {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(String(row.sessionId.prefix(8)))
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                Text(pacerShortModel(row.topModel))
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Text(pacerShortPath(row.projectPath))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(width: 130, alignment: .leading)
-                            Text(pacerCost(row.cumulativeCostUSD))
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            Text(pacerRelative(row.lastSeenAt))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 70, alignment: .trailing)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 16, alignment: .trailing)
-                        }
-                    }
-                }
-                if sessionRows.count > 20 {
-                    Text("+ \(sessionRows.count - 20) more")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 4)
-                }
-            }
+            SessionsTable(
+                rows: sessionRows,
+                showProjectColumn: true,
+                onSessionTap: {
+                    selectedSession = ProjectDetailView.SelectedSession(session: $0)
+                },
+                sort: sessionsSortBinding,
+                sortDescending: $sessionsSortDescending
+            )
         }
     }
 }

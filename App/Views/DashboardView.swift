@@ -34,7 +34,7 @@ struct DashboardView: View {
             PaceChartCard()
             LiveActivityCard()
             TodayDetailsCard()
-            TodayTimelineCard()
+            TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
             DailyCostChartCard(onDayTap: { dayKey in
                 selectedDay = SelectedDay(date: dayKey)

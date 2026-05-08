@@ -136,29 +136,18 @@ struct DailyCostChartCard: View {
             }
         }
         .chartXSelection(value: $selectedDate)
-        // Tap a bar to drill into that day. Uses the chart's selection
-        // proxy so a click anywhere on a bar (or its column) resolves
-        // to a date and forwards to the parent. No-op when the parent
-        // didn't pass an `onDayTap` (e.g. surfaces that don't host a
-        // day-detail modal).
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .onTapGesture { location in
-                        guard let onDayTap else { return }
-                        guard let plotFrame = proxy.plotFrame else { return }
-                        let frame = geo[plotFrame]
-                        let x = location.x - frame.minX
-                        guard x >= 0, x <= frame.width else { return }
-                        if let date: String = proxy.value(atX: x) {
-                            onDayTap(date)
-                        }
-                    }
-                    .pointerStyle(onDayTap != nil ? .link : .default)
+        // Tap-to-drill pattern: chartXSelection already tracks the
+        // hovered/clicked bar via the binding, so on tap we just
+        // open that day. The whole chart surface becomes the hit
+        // target; no chartOverlay needed (an explicit overlay on top
+        // would block hover events from reaching chartXSelection).
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let date = selectedDate, let onDayTap {
+                onDayTap(date)
             }
         }
+        .pointerStyle(onDayTap != nil ? .link : .default)
     }
 
     private func stridedDates(every n: Int, totals: [DailyTotal]) -> [String] {
