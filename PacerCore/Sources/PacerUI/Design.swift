@@ -78,6 +78,11 @@ public struct PacerCard<Content: View, Trailing: View, Footer: View>: View {
         .background(
             RoundedRectangle(cornerRadius: PacerDesign.cardCornerRadius, style: .continuous)
                 .fill(PacerDesign.cardBackground)
+                // Soft drop-shadow gives the card a hint of elevation
+                // off the page background. Kept subtle (4pt radius,
+                // 8% opacity, 1pt y offset) so the look stays Mac-
+                // appropriate — louder shadows read iOS-y.
+                .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 1)
         )
         .overlay(
             RoundedRectangle(cornerRadius: PacerDesign.cardCornerRadius, style: .continuous)

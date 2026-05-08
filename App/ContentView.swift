@@ -37,13 +37,18 @@ struct ContentView: View {
             }
         }
 
-        var systemImage: String {
+        /// SF Symbol name. Outline when not selected, filled when
+        /// selected — matches macOS Sequoia's System Settings
+        /// convention. Symbols without a clean filled variant
+        /// (`gauge.with.dots.needle.*`, `calendar`) return the same
+        /// string for both states.
+        func systemImage(selected: Bool) -> String {
             switch self {
             case .dashboard: return "gauge.with.dots.needle.bottom.50percent"
             case .history:   return "calendar"
-            case .projects:  return "folder.fill"
-            case .models:    return "cpu.fill"
-            case .settings:  return "gearshape.fill"
+            case .projects:  return selected ? "folder.fill"    : "folder"
+            case .models:    return selected ? "cpu.fill"       : "cpu"
+            case .settings:  return selected ? "gearshape.fill" : "gearshape"
             }
         }
     }
@@ -104,7 +109,11 @@ struct ContentView: View {
                 }
         }
         .navigationSplitViewStyle(.balanced)
-        .frame(minWidth: 940, minHeight: 660)
+        // 880×620 instead of the prior 940×660 — small enough to fit
+        // a 13" laptop's window-arranged half-screen, large enough
+        // that the hero strip's three tiles don't squeeze. User can
+        // still resize larger; this is just the floor.
+        .frame(minWidth: 880, minHeight: 620)
         // ⌘1..⌘5 are wired through PacerApp's CommandGroup so they live
         // in the menu-bar responder chain — more reliable than hidden
         // Buttons inside .background, which were missing keystrokes.
@@ -237,7 +246,7 @@ private struct SidebarItem: View {
             selection = destination
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: destination.systemImage)
+                Image(systemName: destination.systemImage(selected: isSelected))
                     .font(.system(size: 13, weight: .medium))
                     .frame(width: 18, alignment: .center)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)

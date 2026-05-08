@@ -26,13 +26,17 @@ struct SettingsView: View {
             case .storage:       return "Storage"
             }
         }
-        var systemImage: String {
+        /// Outline when not selected, filled when selected — macOS
+        /// Sequoia System Settings idiom. `switch.2` and
+        /// `menubar.rectangle` don't have clean filled variants, so
+        /// they stay the same in both states.
+        func systemImage(selected: Bool) -> String {
             switch self {
             case .general:       return "switch.2"
             case .menuBar:       return "menubar.rectangle"
-            case .notifications: return "bell.badge.fill"
-            case .cost:          return "dollarsign.circle.fill"
-            case .storage:       return "externaldrive.fill"
+            case .notifications: return selected ? "bell.badge.fill"     : "bell.badge"
+            case .cost:          return selected ? "dollarsign.circle.fill" : "dollarsign.circle"
+            case .storage:       return selected ? "externaldrive.fill" : "externaldrive"
             }
         }
     }
@@ -110,7 +114,7 @@ private struct CategoryItem: View {
             selection = category
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: category.systemImage)
+                Image(systemName: category.systemImage(selected: isSelected))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(isSelected ? Color.white : .secondary)
                     .frame(width: 18, alignment: .center)
