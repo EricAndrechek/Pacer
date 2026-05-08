@@ -10,6 +10,27 @@ struct PacerApp: App {
     /// just project the container into their own environments.
     @NSApplicationDelegateAdaptor(PacerAppDelegate.self) private var appDelegate
 
+    init() {
+        // Force overlay-style scrollers process-wide. NSScroller reads
+        // `AppleShowScrollBars` via CFPreferences, which gives the
+        // app-domain value priority over NSGlobalDomain — so writing
+        // it here, before any window/scene materializes, makes every
+        // NSScrollView created in this process initialize with
+        // `scrollerStyle = .overlay` from the start.
+        //
+        // Without this, the system pref ("Always" — auto-set when a
+        // mouse is connected) made every fresh ScrollView reserve a
+        // ~15px legacy gutter on its first layout pass and reflow
+        // narrower one frame later, producing the horizontal jiggle
+        // on tab switches. Doing it via .background(NSViewRepresentable)
+        // was already too late: the NSScrollView had laid out once
+        // before our updateNSView could land. Setting the pref pre-
+        // scene runs *before* the first NSScrollView exists, so the
+        // shift is impossible by construction. Process-local — does
+        // not touch the user's global pref or other apps.
+        UserDefaults.standard.set("WhenScrolling", forKey: "AppleShowScrollBars")
+    }
+
     @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
     private var menuBarStyleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
 
