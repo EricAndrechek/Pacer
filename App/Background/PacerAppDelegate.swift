@@ -152,6 +152,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     /// surface failures because logging is supportive infrastructure
     /// — the app shouldn't fail to launch because of a log redirect
     /// problem.
+    ///
+    /// Rotation: before opening for append, if the log is over the
+    /// rotation threshold (5 MB), rename it to `Pacer.err.log.1`
+    /// (overwriting any prior .1) and start fresh. Only one prior
+    /// generation is kept — the per-line ScanCoordinator/OAuthPoller
+    /// output is voluminous and the previous file already covered
+    /// "the previous run", so a single rotation slot is enough for
+    /// most debugging without growing the disk forever.
     private static func redirectStderrToLogFile() {
         let logsDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Pacer", isDirectory: true)
@@ -160,12 +168,31 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             withIntermediateDirectories: true
         )
         let logURL = logsDir.appendingPathComponent("Pacer.err.log")
+        rotateIfLarge(at: logURL, threshold: 5 * 1024 * 1024)
         // freopen("...", "a", stderr) replaces the underlying fd of
         // stderr without changing FILE* identity, so existing code
         // writing via `FileHandle.standardError` (PacerCore.Log) and
         // anything that writes to `stderr` directly (system frameworks)
         // both end up in the file.
         _ = logURL.path.withCString { freopen($0, "a", stderr) }
+    }
+
+    /// Rename `Pacer.err.log` → `Pacer.err.log.1` when the live log
+    /// exceeds the threshold. Best-effort; failures leave the existing
+    /// file intact and we just keep appending. The launch-time check
+    /// is good enough for a long-running app — the daemon doesn't run
+    /// long enough between launches to cross the threshold within a
+    /// single session.
+    private static func rotateIfLarge(at url: URL, threshold: Int) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int,
+              size > threshold else {
+            return
+        }
+        let rotated = url.deletingLastPathComponent()
+            .appendingPathComponent(url.lastPathComponent + ".1")
+        try? FileManager.default.removeItem(at: rotated)
+        try? FileManager.default.moveItem(at: url, to: rotated)
     }
 
     /// Disable AppKit's automatic window tabbing globally. Pacer is a
@@ -252,6 +279,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 self?.applyActivationPolicyForCurrentWindows()
                 if let window {
+                    Self.ensureWindowAutosaves(window)
                     Self.ensureWindowOnScreen(window)
                 }
             }
@@ -269,6 +297,20 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         windowObservers = [didBecomeKey, willClose]
+    }
+
+    /// SwiftUI's `Window` scene typically auto-sets a non-empty
+    /// `frameAutosaveName` from the scene id ("main" → some derived
+    /// name) — but the exact behavior has shifted across macOS
+    /// releases and at least one Sequoia point release left it empty
+    /// in dev builds. Lock in an explicit autosave name on the main
+    /// window so frame size + position reliably persist across
+    /// launches, regardless of what the OS-default would have been.
+    private static func ensureWindowAutosaves(_ window: NSWindow) {
+        guard window.canBecomeMain, !(window is NSPanel) else { return }
+        if window.frameAutosaveName.isEmpty {
+            window.setFrameAutosaveName("PacerMainWindow")
+        }
     }
 
     /// macOS persists the main window's frame across launches via the
