@@ -36,6 +36,24 @@ settings:
     CODE_SIGN_IDENTITY: ""
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGNING_ALLOWED: NO
+    # Disable Xcode 16+'s "Debug Dylib Support". With it on, Debug
+    # builds produce a tiny stub binary that loads the real @main from
+    # `<Target>.debug.dylib` at launch — fast for Xcode incremental
+    # builds, but breaks WidgetKit extension loading. chronod (the
+    # Sequoia widget daemon) launches the .appex and the stub aborts
+    # with `_abort_swift_entry_main_entry_point_not_found___debug_dylib`,
+    # so the gallery shows zero Pacer widgets even though pluginkit
+    # registers the bundle. Disabling the indirection makes the
+    # widget binary self-contained, which is what the install flow
+    # needs anyway (we sign + notarize + staple — there's no
+    # incremental-debug benefit to preserve).
+    ENABLE_DEBUG_DYLIB: NO
+    # SwiftUI Previews' generated `__preview.dylib` is a similar
+    # development-only artifact that bloats the bundle and triggers
+    # extra signing complexity in `bin/dev-install.sh`. Off here for
+    # the same reason — `make install` builds for daily-driver use,
+    # not Xcode preview canvases.
+    ENABLE_PREVIEWS: NO
 
 packages:
   PacerCore:
@@ -92,6 +110,10 @@ targets:
       path: Widgets/Info.plist
       properties:
         CFBundleDisplayName: Pacer Widgets
+        # Match the parent app's version — required by macOS, otherwise
+        # xcodebuild warns and chronod may refuse to register the appex.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
