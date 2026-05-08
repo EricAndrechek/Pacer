@@ -423,11 +423,15 @@ struct PaceChartWidget: Widget {
         StaticConfiguration(kind: kind, provider: PaceChartProvider()) { entry in
             PaceChartWidgetView(entry: entry)
         }
-        .configurationDisplayName("Pace charts")
+        // Display name matches the dashboard card's title verbatim
+        // ("Rate-limit pace") so the picker hits the user's existing
+        // mental model — this is the dashboard's signature view, not
+        // a separate concept.
+        .configurationDisplayName("Rate-limit pace")
         // Literal description — no interpolation; learned the hard way
         // that LocalizedStringKey + interpolation crashes the bundle on
         // launch. See `Widgets/TopProjectsWidget.swift` history.
-        .description("Cycle-anchored pace line graphs for the 5-hour and 7-day windows.")
+        .description("Your usage line traced against the dashed pace target. 5-hour and 7-day windows.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
