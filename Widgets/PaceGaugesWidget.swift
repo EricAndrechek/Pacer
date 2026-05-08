@@ -16,6 +16,10 @@ struct PaceGaugesEntry: TimelineEntry {
     let date: Date
     let fiveHour: WindowState?
     let sevenDay: WindowState?
+    /// Window pick from the widget intent — same enum the pace chart
+    /// widget uses, kept in lockstep so a user who chose "5-hour only"
+    /// for one widget gets the same option set on the other.
+    let window: PaceWindowOption
 
     struct WindowState {
         let usedPct: Double
@@ -23,26 +27,30 @@ struct PaceGaugesEntry: TimelineEntry {
     }
 }
 
-struct PaceGaugesProvider: TimelineProvider {
+struct PaceGaugesProvider: AppIntentTimelineProvider {
+    typealias Intent = PaceGaugesConfigurationIntent
+    typealias Entry = PaceGaugesEntry
+
     func placeholder(in context: Context) -> PaceGaugesEntry {
         PaceGaugesEntry(
             date: Date(),
             fiveHour: .init(usedPct: 35, resetsAt: Date().addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: Date().addingTimeInterval(4 * 86400))
+            sevenDay: .init(usedPct: 62, resetsAt: Date().addingTimeInterval(4 * 86400)),
+            window: .both
         )
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (PaceGaugesEntry) -> Void) {
-        completion(currentEntry())
+    func snapshot(for configuration: PaceGaugesConfigurationIntent, in context: Context) async -> PaceGaugesEntry {
+        currentEntry(window: configuration.window)
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<PaceGaugesEntry>) -> Void) {
-        let entry = currentEntry()
+    func timeline(for configuration: PaceGaugesConfigurationIntent, in context: Context) async -> Timeline<PaceGaugesEntry> {
+        let entry = currentEntry(window: configuration.window)
         let nextRefresh = Date().addingTimeInterval(300)
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
-    private func currentEntry() -> PaceGaugesEntry {
+    private func currentEntry(window: PaceWindowOption) -> PaceGaugesEntry {
         do {
             let container = try PacerStore.makeModelContainer()
             let context = ModelContext(container)
@@ -56,10 +64,11 @@ struct PaceGaugesProvider: TimelineProvider {
             return PaceGaugesEntry(
                 date: Date(),
                 fiveHour: five.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
-                sevenDay: seven.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) }
+                sevenDay: seven.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
+                window: window
             )
         } catch {
-            return PaceGaugesEntry(date: Date(), fiveHour: nil, sevenDay: nil)
+            return PaceGaugesEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
         }
     }
 }
@@ -75,22 +84,35 @@ struct PaceGaugesWidgetView: View {
         }
     }
 
+    /// Resolve the small canvas's single window. `.both` collapses to
+    /// 5-hour because small can't fit two ring gauges side by side at
+    /// a legible size.
+    private func smallTarget() -> (state: PaceGaugesEntry.WindowState?, title: String, duration: TimeInterval) {
+        switch entry.window {
+        case .sevenDay:
+            return (entry.sevenDay, "7-DAY LIMIT", 7 * 86400)
+        case .fiveHour, .both:
+            return (entry.fiveHour, "5-HOUR LIMIT", 5 * 3600)
+        }
+    }
+
     @ViewBuilder
     private var small: some View {
+        let target = smallTarget()
         VStack(alignment: .leading, spacing: 0) {
-            WidgetTitleBar(title: "5-HOUR LIMIT", dotColor: dotColor(for: entry.fiveHour))
+            WidgetTitleBar(title: target.title, dotColor: dotColor(for: target.state))
             Spacer(minLength: 4)
             // Bigger gauge to claim the small canvas — was 70x70, now
             // expands with the available width and keeps a tight 6pt
             // ring stroke for readability.
             HStack {
                 Spacer()
-                ringGauge(for: entry.fiveHour, lineWidth: 9, labelSize: 26)
+                ringGauge(for: target.state, lineWidth: 9, labelSize: 26)
                     .frame(width: 96, height: 96)
                 Spacer()
             }
             Spacer(minLength: 2)
-            Text(resetText(entry.fiveHour?.resetsAt, durationSeconds: 5 * 3600))
+            Text(resetText(target.state?.resetsAt, durationSeconds: target.duration))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -104,26 +126,54 @@ struct PaceGaugesWidgetView: View {
     @ViewBuilder
     private var medium: some View {
         VStack(alignment: .leading, spacing: 6) {
-            WidgetTitleBar(title: "RATE LIMITS")
-            HStack(spacing: 14) {
-                gaugeColumn("5-hour", entry.fiveHour, durationSeconds: 5 * 3600)
-                Divider()
-                gaugeColumn("7-day", entry.sevenDay, durationSeconds: 7 * 86400)
+            WidgetTitleBar(title: mediumTitle)
+            switch entry.window {
+            case .both:
+                HStack(spacing: 14) {
+                    gaugeColumn("5-hour", entry.fiveHour, durationSeconds: 5 * 3600)
+                    Divider()
+                    gaugeColumn("7-day", entry.sevenDay, durationSeconds: 7 * 86400)
+                }
+                .frame(maxHeight: .infinity)
+            case .fiveHour:
+                // One gauge, full canvas — bigger ring, more readable
+                // from across the desk than the split-medium version.
+                gaugeColumn("5-hour", entry.fiveHour, durationSeconds: 5 * 3600, large: true)
+                    .frame(maxHeight: .infinity)
+            case .sevenDay:
+                gaugeColumn("7-day", entry.sevenDay, durationSeconds: 7 * 86400, large: true)
+                    .frame(maxHeight: .infinity)
             }
-            .frame(maxHeight: .infinity)
         }
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(widgetCardBackground, for: .widget)
     }
 
+    /// Title for the medium-family header — adapts to the chosen window.
+    private var mediumTitle: String {
+        switch entry.window {
+        case .both:     return "RATE LIMITS"
+        case .fiveHour: return "5-HOUR LIMIT"
+        case .sevenDay: return "7-DAY LIMIT"
+        }
+    }
+
     @ViewBuilder
     private func gaugeColumn(
         _ label: String,
         _ state: PaceGaugesEntry.WindowState?,
-        durationSeconds: TimeInterval
+        durationSeconds: TimeInterval,
+        large: Bool = false
     ) -> some View {
-        VStack(spacing: 6) {
+        // `large=true` is the single-window medium layout: gauge claims
+        // the whole canvas, so we scale the ring up and use the
+        // dashboard's ~28pt percentage font instead of the cramped 22pt
+        // we use in the dual-column layout.
+        let ringSize: CGFloat = large ? 116 : 78
+        let lineWidth: CGFloat = large ? 11 : 8
+        let labelSize: CGFloat = large ? 28 : 22
+        VStack(spacing: large ? 8 : 6) {
             HStack(spacing: 4) {
                 Circle()
                     .fill(dotColor(for: state) ?? .secondary)
@@ -132,10 +182,10 @@ struct PaceGaugesWidgetView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
-            ringGauge(for: state, lineWidth: 8, labelSize: 22)
-                .frame(width: 78, height: 78)
+            ringGauge(for: state, lineWidth: lineWidth, labelSize: labelSize)
+                .frame(width: ringSize, height: ringSize)
             Text(resetText(state?.resetsAt, durationSeconds: durationSeconds))
-                .font(.caption2)
+                .font(large ? .caption : .caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
@@ -180,7 +230,11 @@ struct PaceGaugesWidget: Widget {
     let kind: String = "PaceGaugesWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: PaceGaugesProvider()) { entry in
+        AppIntentConfiguration(
+            kind: kind,
+            intent: PaceGaugesConfigurationIntent.self,
+            provider: PaceGaugesProvider()
+        ) { entry in
             PaceGaugesWidgetView(entry: entry)
         }
         .configurationDisplayName("Rate limits")

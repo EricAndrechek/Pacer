@@ -23,6 +23,9 @@ struct PaceChartEntry: TimelineEntry {
     let date: Date
     let fiveHour: WindowState?
     let sevenDay: WindowState?
+    /// User's chosen window from the widget's intent config. Drives the
+    /// view's branching (full-canvas single window vs side-by-side both).
+    let window: PaceWindowOption
 
     /// One window's worth of pace data, paired down to what the shared
     /// `PaceChartView` consumes plus the metadata the widget needs for
@@ -47,26 +50,30 @@ struct PaceChartEntry: TimelineEntry {
 
 // MARK: - Provider
 
-struct PaceChartProvider: TimelineProvider {
+struct PaceChartProvider: AppIntentTimelineProvider {
+    typealias Intent = PaceChartConfigurationIntent
+    typealias Entry = PaceChartEntry
+
     func placeholder(in context: Context) -> PaceChartEntry {
         PaceChartEntry(
             date: Date(),
             fiveHour: Self.demoState(duration: K.fiveHourSeconds, usedPct: 38, sampleCount: 8),
-            sevenDay: Self.demoState(duration: K.sevenDaySeconds, usedPct: 62, sampleCount: 12)
+            sevenDay: Self.demoState(duration: K.sevenDaySeconds, usedPct: 62, sampleCount: 12),
+            window: .both
         )
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (PaceChartEntry) -> Void) {
-        completion(currentEntry())
+    func snapshot(for configuration: PaceChartConfigurationIntent, in context: Context) async -> PaceChartEntry {
+        currentEntry(window: configuration.window)
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<PaceChartEntry>) -> Void) {
-        let entry = currentEntry()
+    func timeline(for configuration: PaceChartConfigurationIntent, in context: Context) async -> Timeline<PaceChartEntry> {
+        let entry = currentEntry(window: configuration.window)
         let next = Date().addingTimeInterval(K.refreshSeconds)
-        completion(Timeline(entries: [entry], policy: .after(next)))
+        return Timeline(entries: [entry], policy: .after(next))
     }
 
-    private func currentEntry() -> PaceChartEntry {
+    private func currentEntry(window: PaceWindowOption) -> PaceChartEntry {
         do {
             let container = try PacerStore.makeModelContainer()
             let context = ModelContext(container)
@@ -81,9 +88,9 @@ struct PaceChartProvider: TimelineProvider {
             let rows = try context.fetch(descriptor)
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds)
-            return PaceChartEntry(date: Date(), fiveHour: five, sevenDay: seven)
+            return PaceChartEntry(date: Date(), fiveHour: five, sevenDay: seven, window: window)
         } catch {
-            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil)
+            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
         }
     }
 
@@ -164,18 +171,36 @@ struct PaceChartWidgetView: View {
         }
     }
 
+    /// Title for the dual-window header / fallback. Single-window
+    /// configurations use a tighter title in the small/medium layouts
+    /// where the title bar IS the only header.
+    private var dualTitle: String { "RATE-LIMIT PACE" }
+
+    /// Resolve the small canvas's single window. Small physically can't
+    /// fit two charts, so when the user picks `.both` we fall through
+    /// to 5-hour — that's the cycle people hit first and watch most.
+    private func smallTarget() -> (state: PaceChartEntry.WindowState?, title: String, duration: TimeInterval) {
+        switch entry.window {
+        case .sevenDay:
+            return (entry.sevenDay, "7-DAY PACE", K.sevenDaySeconds)
+        case .fiveHour, .both:
+            return (entry.fiveHour, "5-HOUR PACE", K.fiveHourSeconds)
+        }
+    }
+
     @ViewBuilder
     private var small: some View {
+        let target = smallTarget()
         VStack(alignment: .leading, spacing: 4) {
             WidgetTitleBar(
-                title: "5-HOUR PACE",
-                dotColor: entry.fiveHour?.band.color
+                title: target.title,
+                dotColor: target.state?.band.color
             ) {
-                if let s = entry.fiveHour {
+                if let s = target.state {
                     paceFraction(used: s.chart.usedPct, pace: s.paceEndPct, compact: true)
                 }
             }
-            if let s = entry.fiveHour {
+            if let s = target.state {
                 // Caption sits between the title bar and the chart so it
                 // gets the full column width (~134pt) instead of fighting
                 // for space below the chart's `maxHeight: .infinity`.
@@ -204,14 +229,25 @@ struct PaceChartWidgetView: View {
     @ViewBuilder
     private var medium: some View {
         VStack(alignment: .leading, spacing: 6) {
-            WidgetTitleBar(title: "RATE-LIMIT PACE")
+            WidgetTitleBar(title: dualTitle)
             if entry.fiveHour == nil && entry.sevenDay == nil {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
-                HStack(alignment: .top, spacing: 12) {
-                    column(label: "5-hour", state: entry.fiveHour, style: .compact)
-                    Divider()
-                    column(label: "7-day", state: entry.sevenDay, style: .compact)
+                switch entry.window {
+                case .both:
+                    HStack(alignment: .top, spacing: 12) {
+                        column(label: "5-hour", state: entry.fiveHour, style: .compact)
+                        Divider()
+                        column(label: "7-day", state: entry.sevenDay, style: .compact)
+                    }
+                case .fiveHour:
+                    // One window, full width — chart gets ~290pt instead
+                    // of ~148pt, so we promote to `.detailed` (axis ticks
+                    // + 0/50/100% labels) for a layout that mirrors the
+                    // dashboard pace card.
+                    column(label: "5-hour", state: entry.fiveHour, style: .detailed)
+                case .sevenDay:
+                    column(label: "7-day", state: entry.sevenDay, style: .detailed)
                 }
             }
         }
@@ -223,13 +259,20 @@ struct PaceChartWidgetView: View {
     @ViewBuilder
     private var large: some View {
         VStack(alignment: .leading, spacing: 10) {
-            WidgetTitleBar(title: "RATE-LIMIT PACE")
+            WidgetTitleBar(title: dualTitle)
             if entry.fiveHour == nil && entry.sevenDay == nil {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
-                largeRow(label: "5-hour", state: entry.fiveHour)
-                Divider()
-                largeRow(label: "7-day", state: entry.sevenDay)
+                switch entry.window {
+                case .both:
+                    largeRow(label: "5-hour", state: entry.fiveHour)
+                    Divider()
+                    largeRow(label: "7-day", state: entry.sevenDay)
+                case .fiveHour:
+                    largeRow(label: "5-hour", state: entry.fiveHour)
+                case .sevenDay:
+                    largeRow(label: "7-day", state: entry.sevenDay)
+                }
             }
         }
         .padding(WidgetStyle.largePad)
@@ -343,7 +386,16 @@ struct PaceChartWidget: Widget {
     let kind: String = "PaceChartWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: PaceChartProvider()) { entry in
+        // `AppIntentConfiguration` swaps the static layout for a user-
+        // editable one: long-press the widget → "Edit Widget" → window
+        // picker (5h / 7d / both). Provider is now async-form
+        // `AppIntentTimelineProvider`; entry carries the chosen window
+        // so the view can branch between full-canvas and split layouts.
+        AppIntentConfiguration(
+            kind: kind,
+            intent: PaceChartConfigurationIntent.self,
+            provider: PaceChartProvider()
+        ) { entry in
             PaceChartWidgetView(entry: entry)
         }
         // Display name matches the dashboard card's title verbatim

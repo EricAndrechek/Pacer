@@ -20,6 +20,9 @@ struct DailyChartEntry: TimelineEntry {
     let avgCostUSD: Double
     let todayCostUSD: Double
     let isFresh: Bool
+    /// Lookback range chosen by the user. Drives the header label, the
+    /// stat-row "N-day avg" copy, and how many days the provider rolls up.
+    let range: LookbackRangeOption
 
     struct DayCost: Identifiable {
         let date: String
@@ -29,7 +32,10 @@ struct DailyChartEntry: TimelineEntry {
     }
 }
 
-struct DailyChartProvider: TimelineProvider {
+struct DailyChartProvider: AppIntentTimelineProvider {
+    typealias Intent = DailyChartConfigurationIntent
+    typealias Entry = DailyChartEntry
+
     func placeholder(in context: Context) -> DailyChartEntry {
         let now = Date()
         let cal = Calendar.current
@@ -47,21 +53,22 @@ struct DailyChartProvider: TimelineProvider {
             totalCostUSD: total,
             avgCostUSD: total / Double(max(1, days.count)),
             todayCostUSD: days.last?.cost ?? 0,
-            isFresh: true
+            isFresh: true,
+            range: .days14
         )
     }
 
-    func getSnapshot(in context: Context, completion: @escaping (DailyChartEntry) -> Void) {
-        completion(currentEntry())
+    func snapshot(for configuration: DailyChartConfigurationIntent, in context: Context) async -> DailyChartEntry {
+        currentEntry(range: configuration.range)
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<DailyChartEntry>) -> Void) {
-        let entry = currentEntry()
+    func timeline(for configuration: DailyChartConfigurationIntent, in context: Context) async -> Timeline<DailyChartEntry> {
+        let entry = currentEntry(range: configuration.range)
         let nextRefresh = Date().addingTimeInterval(900)  // 15 min
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        return Timeline(entries: [entry], policy: .after(nextRefresh))
     }
 
-    private func currentEntry() -> DailyChartEntry {
+    private func currentEntry(range: LookbackRangeOption) -> DailyChartEntry {
         do {
             let container = try PacerStore.makeModelContainer()
             let context = ModelContext(container)
@@ -74,7 +81,7 @@ struct DailyChartProvider: TimelineProvider {
             let aggregates = try context.fetch(descriptor)
             let grouped = Dictionary(grouping: aggregates, by: \.date)
             let sortedDates = grouped.keys.sorted()
-            let recent = sortedDates.suffix(14)
+            let recent = sortedDates.suffix(range.days)
             let days = recent.map { date in
                 DailyChartEntry.DayCost(
                     date: date,
@@ -89,7 +96,8 @@ struct DailyChartProvider: TimelineProvider {
                 totalCostUSD: total,
                 avgCostUSD: total / Double(max(1, days.count)),
                 todayCostUSD: days.first { $0.date == today }?.cost ?? 0,
-                isFresh: true
+                isFresh: true,
+                range: range
             )
         } catch {
             return DailyChartEntry(
@@ -98,7 +106,8 @@ struct DailyChartProvider: TimelineProvider {
                 totalCostUSD: 0,
                 avgCostUSD: 0,
                 todayCostUSD: 0,
-                isFresh: false
+                isFresh: false,
+                range: range
             )
         }
     }
@@ -112,7 +121,7 @@ struct DailyChartWidgetView: View {
         VStack(alignment: .leading, spacing: family == .systemLarge ? 10 : 6) {
             header
             if entry.days.isEmpty {
-                WidgetEmptyState(message: entry.isFresh ? "No usage logged in the last 14 days." : "No data yet.")
+                WidgetEmptyState(message: entry.isFresh ? "No usage logged in the \(entry.range.longLabel)." : "No data yet.")
             } else {
                 chart
                 if family == .systemLarge {
@@ -126,7 +135,10 @@ struct DailyChartWidgetView: View {
 
     @ViewBuilder
     private var header: some View {
-        WidgetTitleBar(title: "LAST 14 DAYS") {
+        // Title adapts to the chosen range so the user always sees a
+        // matching label for whatever they picked in the intent ("LAST
+        // 7 DAYS", "LAST 30 DAYS", etc.).
+        WidgetTitleBar(title: "LAST \(entry.range.shortLabel.uppercased())") {
             Text(pacerCost(entry.totalCostUSD))
                 .font(.system(family == .systemLarge ? .title3 : .headline, design: .rounded).weight(.semibold))
                 .monospacedDigit()
@@ -167,7 +179,7 @@ struct DailyChartWidgetView: View {
         HStack(spacing: 0) {
             stat(label: "today", value: pacerCost(entry.todayCostUSD))
             Divider().frame(height: 24)
-            stat(label: "14-day avg", value: pacerCost(entry.avgCostUSD))
+            stat(label: "\(entry.range.shortLabel) avg", value: pacerCost(entry.avgCostUSD))
             Divider().frame(height: 24)
             stat(label: "peak day", value: pacerCost(entry.days.map(\.cost).max() ?? 0))
         }
@@ -196,11 +208,16 @@ struct DailyChartWidget: Widget {
     let kind: String = "DailyChartWidget"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: DailyChartProvider()) { entry in
+        AppIntentConfiguration(
+            kind: kind,
+            intent: DailyChartConfigurationIntent.self,
+            provider: DailyChartProvider()
+        ) { entry in
             DailyChartWidgetView(entry: entry)
         }
         .configurationDisplayName("Daily cost")
-        .description("Last 14 days of Claude Code spend.")
+        // Description stays generic — the actual range is user-picked.
+        .description("Daily Claude Code spend over a configurable lookback window.")
         .supportedFamilies([.systemMedium, .systemLarge])
         // See `PaceChartWidget` for the rationale: drops the system's
         // ~16pt default content margin so `WidgetStyle.*Pad` is the

@@ -130,3 +130,9 @@ targets:
         product: PacerCore
       - package: PacerCore
         product: PacerUI
+      # AppIntents.framework is required for `AppIntentConfiguration`
+      # widgets — without an explicit link, `appintentsmetadataprocessor`
+      # skips metadata extraction at build time and the long-press
+      # picker on the configured widget shows no parameters, even
+      # though everything compiles.
+      - sdk: AppIntents.framework
