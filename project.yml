@@ -91,6 +91,8 @@ targets:
     dependencies:
       - package: PacerCore
         product: PacerCore
+      - package: PacerCore
+        product: PacerUI
       - target: PacerWidgets
 
   PacerWidgets:
@@ -126,3 +128,5 @@ targets:
     dependencies:
       - package: PacerCore
         product: PacerCore
+      - package: PacerCore
+        product: PacerUI

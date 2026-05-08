@@ -2,6 +2,7 @@ import WidgetKit
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// At-a-glance rate-limit gauges. Small family: just the 5h gauge.
 /// Medium: 5h + 7d side by side. Both surface the same data the
@@ -149,18 +150,16 @@ struct PaceGaugesWidgetView: View {
     ) -> some View {
         let pct = state?.usedPct ?? 0
         let labelFont: Font = .system(size: labelSize, weight: .semibold, design: .rounded)
-        WidgetCircularGauge(percentage: pct, lineWidth: lineWidth, labelFont: labelFont)
+        // Shared `PacerUI.CircularGauge` — same primitive the dashboard
+        // uses, identical geometry/coloring per UsageBand. No widget-
+        // local copy.
+        CircularGauge(percentage: pct, lineWidth: lineWidth, labelFont: labelFont)
             .opacity(state == nil ? 0.3 : 1.0)
     }
 
     private func dotColor(for state: PaceGaugesEntry.WindowState?) -> Color? {
         guard let state else { return nil }
-        switch UsageBand(percentage: state.usedPct) {
-        case .green:  return .green
-        case .yellow: return .yellow
-        case .orange: return .orange
-        case .red:    return .red
-        }
+        return UsageBand(percentage: state.usedPct).color
     }
 
     /// Reset caption: relative duration plus the wall-clock anchor —
@@ -174,41 +173,6 @@ struct PaceGaugesWidgetView: View {
             ? widgetClockTime(date)
             : widgetWeekdayClock(date)
         return "resets \(rel) · \(clock)"
-    }
-}
-
-/// Widget-local circular gauge primitive. Mirrors
-/// `App/Views/Components/CircularGauge.swift` — kept in sync manually
-/// because App-target views aren't importable from extensions.
-struct WidgetCircularGauge: View {
-    let percentage: Double
-    let lineWidth: CGFloat
-    let labelFont: Font
-
-    private var fraction: CGFloat {
-        max(0, min(1, CGFloat(percentage) / 100))
-    }
-
-    private var color: Color {
-        switch UsageBand(percentage: percentage) {
-        case .green:  return .green
-        case .yellow: return .yellow
-        case .orange: return .orange
-        case .red:    return .red
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            Circle().stroke(Color.secondary.opacity(0.18), lineWidth: lineWidth)
-            Circle()
-                .trim(from: 0, to: fraction)
-                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text("\(Int(percentage.rounded()))%")
-                .font(labelFont)
-                .monospacedDigit()
-        }
     }
 }
 

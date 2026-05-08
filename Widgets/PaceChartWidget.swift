@@ -1,31 +1,19 @@
 import WidgetKit
 import SwiftUI
 import SwiftData
-import Charts
 import PacerCore
+import PacerUI
 
-/// Cycle-anchored pace chart for the 5-hour and 7-day rate-limit
-/// windows. Mirrors `App/Views/PaceChartCard.swift` but compressed for
-/// widget canvases:
-///   - small : 5h chart only (the cycle a user is most likely to
-///             care about during active coding)
-///   - medium: 5h + 7d side-by-side, matching the dashboard column
-///             layout
-///   - large : 5h + 7d stacked with bigger charts, plus the wall-clock
-///             reset captions the dashboard surfaces
-///
-/// The dashboard renders the actual-usage line as multi-colored
-/// segments (each i→i+1 colored by the band at point i). For widgets
-/// we use a single-colored line tinted by the *current* band — fewer
-/// Chart series, less risk under the extension's tighter render budget,
-/// and the band color still reads correctly because "where am I now"
-/// is the salient question.
+/// Cycle-anchored pace chart widget. The chart itself is the shared
+/// `PacerUI.PaceChartView` — exact same SwiftUI view the dashboard's
+/// `PaceChartCard` renders, so the widgets are pixel-identical to the
+/// app card. This file is just data-fetching + family-aware layout
+/// scaffolding.
 
 private enum K {
     static let fiveHourSeconds: TimeInterval = 5 * 3600
     static let sevenDaySeconds: TimeInterval = 7 * 86400
-    /// Refresh every 5 minutes — same cadence as the OAuth poller, so
-    /// the widget updates as soon as a new sample lands.
+    /// Refresh every 5 minutes — same cadence as the OAuth poller.
     static let refreshSeconds: TimeInterval = 300
 }
 
@@ -36,33 +24,23 @@ struct PaceChartEntry: TimelineEntry {
     let fiveHour: WindowState?
     let sevenDay: WindowState?
 
-    /// One window's worth of pace data. `samples` is the raw
-    /// (sampledAt, usedPct) trail inside the current cycle, sorted
-    /// ascending — already pre-filtered by the provider so the view
-    /// just charts what it gets.
+    /// One window's worth of pace data, paired down to what the shared
+    /// `PaceChartView` consumes plus the metadata the widget needs for
+    /// reset captions and band classification.
     struct WindowState {
-        let usedPct: Double
+        let chart: PaceChartView.Data
         let resetsAt: Date
-        let cycleStart: Date
-        let durationSeconds: TimeInterval
-        let samples: [Sample]
-
-        struct Sample: Identifiable {
-            let time: Date
-            let value: Double
-            var id: TimeInterval { time.timeIntervalSince1970 }
-        }
 
         var paceEndPct: Double {
             PaceMath.paceFraction(
                 now: Date(),
                 resetsAt: resetsAt,
-                windowDuration: durationSeconds
+                windowDuration: chart.durationSeconds
             ) * 100
         }
 
         var band: PaceBand {
-            PaceBand(usedPct: usedPct, paceEndPct: paceEndPct)
+            PaceBand(usedPct: chart.usedPct, paceEndPct: paceEndPct)
         }
     }
 }
@@ -122,23 +100,21 @@ struct PaceChartProvider: TimelineProvider {
         guard let latest = windowRows.first, let resetsAt = latest.resetsAt else { return nil }
         let cycleStart = resetsAt.addingTimeInterval(-duration)
         let now = Date()
-        let inCycle = windowRows
+        var points = windowRows
             .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
             .sorted { $0.sampledAt < $1.sampledAt }
-        var samples = inCycle.map {
-            PaceChartEntry.WindowState.Sample(time: $0.sampledAt, value: $0.usedPercentage)
+            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
+        if points.last?.time != now {
+            points.append(.init(time: now, value: latest.usedPercentage))
         }
-        // Tail point at now so the line ends where the user is.
-        if samples.last?.time != now {
-            samples.append(.init(time: now, value: latest.usedPercentage))
-        }
-        return PaceChartEntry.WindowState(
-            usedPct: latest.usedPercentage,
-            resetsAt: resetsAt,
+        let chart = PaceChartView.Data(
             cycleStart: cycleStart,
+            resetsAt: resetsAt,
             durationSeconds: duration,
-            samples: samples
+            points: points,
+            usedPct: latest.usedPercentage
         )
+        return PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt)
     }
 
     /// Synthetic data for the gallery placeholder — gentle ramp from
@@ -154,22 +130,23 @@ struct PaceChartProvider: TimelineProvider {
         let cycleStart = resets.addingTimeInterval(-duration)
         let elapsed = now.timeIntervalSince(cycleStart)
         let stepInterval = elapsed / Double(max(1, sampleCount - 1))
-        let samples = (0..<sampleCount).map { i in
+        let points = (0..<sampleCount).map { i in
             let t = cycleStart.addingTimeInterval(Double(i) * stepInterval)
             // Mild concave ramp so it doesn't look perfectly linear.
             let frac = Double(i) / Double(max(1, sampleCount - 1))
-            return PaceChartEntry.WindowState.Sample(
+            return PaceChartView.Data.Point(
                 time: t,
                 value: usedPct * (frac * (1.05 - 0.05 * frac))
             )
         }
-        return PaceChartEntry.WindowState(
-            usedPct: usedPct,
-            resetsAt: resets,
+        let chart = PaceChartView.Data(
             cycleStart: cycleStart,
+            resetsAt: resets,
             durationSeconds: duration,
-            samples: samples
+            points: points,
+            usedPct: usedPct
         )
+        return PaceChartEntry.WindowState(chart: chart, resetsAt: resets)
     }
 }
 
@@ -192,16 +169,19 @@ struct PaceChartWidgetView: View {
         VStack(alignment: .leading, spacing: 4) {
             WidgetTitleBar(
                 title: "5-HOUR PACE",
-                dotColor: entry.fiveHour.map { bandColor($0.band) }
+                dotColor: entry.fiveHour?.band.color
             ) {
                 if let s = entry.fiveHour {
-                    paceFraction(used: s.usedPct, pace: s.paceEndPct, compact: true)
+                    paceFraction(used: s.chart.usedPct, pace: s.paceEndPct, compact: true)
                 }
             }
             if let s = entry.fiveHour {
-                PaceLineChart(state: s, compact: true)
+                PaceChartView(data: s.chart, style: .compact)
                     .frame(maxHeight: .infinity)
-                Text(resetCaption(for: s, compact: true))
+                Text(PacerTimeFormat.resetCaption(
+                    resetsAt: s.resetsAt,
+                    durationSeconds: s.chart.durationSeconds
+                ))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -222,9 +202,9 @@ struct PaceChartWidgetView: View {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
                 HStack(alignment: .top, spacing: 12) {
-                    column(label: "5-hour", state: entry.fiveHour)
+                    column(label: "5-hour", state: entry.fiveHour, style: .compact)
                     Divider()
-                    column(label: "7-day", state: entry.sevenDay)
+                    column(label: "7-day", state: entry.sevenDay, style: .compact)
                 }
             }
         }
@@ -251,11 +231,15 @@ struct PaceChartWidgetView: View {
     }
 
     @ViewBuilder
-    private func column(label: String, state: PaceChartEntry.WindowState?) -> some View {
+    private func column(
+        label: String,
+        state: PaceChartEntry.WindowState?,
+        style: PaceChartView.Style
+    ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Circle()
-                    .fill(state.map { bandColor($0.band) } ?? .secondary)
+                    .fill(state?.band.color ?? .secondary)
                     .frame(width: 6, height: 6)
                 Text(label)
                     .font(.caption.weight(.semibold))
@@ -263,10 +247,13 @@ struct PaceChartWidgetView: View {
                 Spacer()
             }
             if let state {
-                paceFraction(used: state.usedPct, pace: state.paceEndPct, compact: true)
-                PaceLineChart(state: state, compact: true)
+                paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: true)
+                PaceChartView(data: state.chart, style: style)
                     .frame(maxHeight: .infinity)
-                Text(resetCaption(for: state, compact: true))
+                Text(PacerTimeFormat.resetCaption(
+                    resetsAt: state.resetsAt,
+                    durationSeconds: state.chart.durationSeconds
+                ))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -285,20 +272,26 @@ struct PaceChartWidgetView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(state.map { bandColor($0.band) } ?? .secondary)
+                    .fill(state?.band.color ?? .secondary)
                     .frame(width: 7, height: 7)
                 Text(label)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                 Spacer()
                 if let state {
-                    paceFraction(used: state.usedPct, pace: state.paceEndPct, compact: false)
+                    paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: false)
                 }
             }
             if let state {
-                PaceLineChart(state: state, compact: false)
+                // Large widget gets the dashboard treatment — axes and
+                // full label typography. With `.detailed` the chart
+                // looks identical to the app card.
+                PaceChartView(data: state.chart, style: .detailed)
                     .frame(maxHeight: .infinity)
-                Text(resetCaption(for: state, compact: false))
+                Text(PacerTimeFormat.resetCaption(
+                    resetsAt: state.resetsAt,
+                    durationSeconds: state.chart.durationSeconds
+                ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -319,7 +312,7 @@ struct PaceChartWidgetView: View {
             Text("\(Int(used.rounded()))%")
                 .font(.system(size: compact ? 16 : 22, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(bandColor(band))
+                .foregroundStyle(band.color)
             Text("/")
                 .font(.system(size: compact ? 11 : 14))
                 .foregroundStyle(.tertiary)
@@ -328,87 +321,6 @@ struct PaceChartWidgetView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-    }
-
-    /// Reset caption: relative duration plus the wall-clock anchor —
-    /// "resets in 2h · 9 PM" for 5h, "resets in 4d · Mon 3 PM" for 7d.
-    /// Mirrors `App/Views/PaceChartCard.swift:resetLabel(resets:)`.
-    private func resetCaption(for s: PaceChartEntry.WindowState, compact: Bool) -> String {
-        let rel = formatRelative(s.resetsAt)
-        let clock = s.durationSeconds <= 6 * 3600
-            ? widgetClockTime(s.resetsAt)
-            : widgetWeekdayClock(s.resetsAt)
-        return "resets \(rel) · \(clock)"
-    }
-
-    private func bandColor(_ band: PaceBand) -> Color {
-        switch band {
-        case .green:  return .green
-        case .white:  return .primary
-        case .yellow: return .yellow
-        case .red:    return .red
-        }
-    }
-}
-
-/// The actual line graph: dashed 0→100% pace line, colored
-/// actual-usage line, tail dot at "now". Pulled out so all three
-/// families instantiate it the same way and the chart never
-/// shifts sub-pixel between the two columns at medium.
-private struct PaceLineChart: View {
-    let state: PaceChartEntry.WindowState
-    let compact: Bool
-
-    var body: some View {
-        let color: Color = {
-            switch state.band {
-            case .green:  return .green
-            case .white:  return .primary
-            case .yellow: return .yellow
-            case .red:    return .red
-            }
-        }()
-        Chart {
-            // Dashed pace line: cycleStart→0%, resetsAt→100%.
-            LineMark(
-                x: .value("t", state.cycleStart),
-                y: .value("pct", 0.0),
-                series: .value("series", "pace")
-            )
-            .foregroundStyle(.secondary.opacity(0.45))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            LineMark(
-                x: .value("t", state.resetsAt),
-                y: .value("pct", 100.0),
-                series: .value("series", "pace")
-            )
-            .foregroundStyle(.secondary.opacity(0.45))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-
-            // Actual-usage line, single color tinted by current band.
-            ForEach(state.samples) { p in
-                LineMark(
-                    x: .value("t", p.time),
-                    y: .value("pct", p.value),
-                    series: .value("series", "actual")
-                )
-                .foregroundStyle(color)
-                .lineStyle(StrokeStyle(lineWidth: compact ? 1.6 : 2, lineCap: .round))
-            }
-            // Tail dot at the most-recent point.
-            if let tail = state.samples.last {
-                PointMark(
-                    x: .value("t", tail.time),
-                    y: .value("pct", tail.value)
-                )
-                .foregroundStyle(color)
-                .symbolSize(compact ? 22 : 36)
-            }
-        }
-        .chartXScale(domain: state.cycleStart...state.resetsAt)
-        .chartYScale(domain: 0...100)
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
     }
 }
 
