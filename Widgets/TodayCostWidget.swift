@@ -8,6 +8,7 @@ import PacerCore
 /// every 5 minutes — fast enough that an active session moves the
 /// number visibly, slow enough to fit comfortably inside the OS's
 /// widget refresh budget.
+
 struct TodayCostEntry: TimelineEntry {
     let date: Date
     let costUSD: Double
@@ -61,47 +62,52 @@ struct TodayCostWidgetView: View {
     var entry: TodayCostEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Today")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(formatCost(entry.costUSD))
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .minimumScaleFactor(0.6)
-                .lineLimit(1)
-            Text("\(formatTokens(entry.tokens)) tokens")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if entry.modelCount > 0 {
-                Text("\(entry.modelCount) model\(entry.modelCount == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            } else if !entry.isFresh {
-                Text("no data")
-                    .font(.caption2)
+        VStack(alignment: .leading, spacing: 0) {
+            WidgetTitleBar(title: "TODAY") {
+                Text(formatWeekdayShort(entry.date))
+                    .font(.caption2.weight(.medium))
                     .foregroundStyle(.tertiary)
             }
+            Spacer(minLength: 6)
+            // Hero cost — bumped from 28pt to 32pt with a tighter
+            // line-height so it dominates the small canvas.
+            Text(formatCostUSD(entry.costUSD))
+                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .foregroundStyle(.primary)
+            Text("\(formatTokensCompact(entry.tokens)) tokens")
+                .font(.system(.subheadline, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
+            footer
         }
-        .padding(8)
+        .padding(WidgetStyle.smallPad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 1000 { return String(format: "$%.0f", usd) }
-        if usd >= 100  { return String(format: "$%.0f", usd) }
-        if usd >= 10   { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-
-    private func formatTokens(_ count: Int64) -> String {
-        let n = Double(count)
-        switch n {
-        case 1_000_000_000...:  return String(format: "%.2fB", n / 1_000_000_000)
-        case 1_000_000...:      return String(format: "%.1fM", n / 1_000_000)
-        case 1_000...:          return String(format: "%.1fK", n / 1_000)
-        default:                return "\(count)"
+    @ViewBuilder
+    private var footer: some View {
+        if !entry.isFresh {
+            Text("no data yet")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        } else if entry.modelCount > 0 {
+            HStack(spacing: 4) {
+                Image(systemName: "circle.grid.2x2.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                Text("\(entry.modelCount) model\(entry.modelCount == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text("nothing logged today")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 }
@@ -113,8 +119,8 @@ struct TodayCostWidget: Widget {
         StaticConfiguration(kind: kind, provider: TodayCostProvider()) { entry in
             TodayCostWidgetView(entry: entry)
         }
-        .configurationDisplayName("Today's Pacer cost")
-        .description("Today's Claude Code spend so far, with total tokens.")
+        .configurationDisplayName("Today")
+        .description("Today's Claude Code spend at a glance.")
         .supportedFamilies([.systemSmall])
     }
 }

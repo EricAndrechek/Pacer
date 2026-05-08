@@ -5,7 +5,12 @@ import PacerCore
 
 /// At-a-glance rate-limit gauges. Small family: just the 5h gauge.
 /// Medium: 5h + 7d side by side. Both surface the same data the
-/// dashboard's PaceChartCard does, just compressed for widget canvas.
+/// dashboard's `PaceChartCard` does, just compressed for widget canvas.
+///
+/// Color band tracks `PacerCore.UsageBand` (green/yellow/orange/red at
+/// 50/75/90 thresholds) so the visual matches the menu-bar glyph and
+/// Settings-tab thresholds.
+
 struct PaceGaugesEntry: TimelineEntry {
     let date: Date
     let fiveHour: WindowState?
@@ -64,88 +69,105 @@ struct PaceGaugesWidgetView: View {
 
     var body: some View {
         switch family {
-        case .systemSmall:
-            small
-        default:
-            medium
+        case .systemSmall: small
+        default:           medium
         }
     }
 
+    @ViewBuilder
     private var small: some View {
-        VStack(spacing: 4) {
-            Text("5-hour")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            gaugeOrPlaceholder(entry.fiveHour, lineWidth: 8, labelSize: 18)
-                .frame(width: 70, height: 70)
+        VStack(alignment: .leading, spacing: 0) {
+            WidgetTitleBar(title: "5-HOUR LIMIT", dotColor: dotColor(for: entry.fiveHour))
+            Spacer(minLength: 4)
+            // Bigger gauge to claim the small canvas — was 70x70, now
+            // expands with the available width and keeps a tight 6pt
+            // ring stroke for readability.
+            HStack {
+                Spacer()
+                ringGauge(for: entry.fiveHour, lineWidth: 9, labelSize: 26)
+                    .frame(width: 96, height: 96)
+                Spacer()
+            }
+            Spacer(minLength: 2)
             Text(resetText(entry.fiveHour?.resetsAt))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(WidgetStyle.smallPad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
+    @ViewBuilder
     private var medium: some View {
-        HStack(spacing: 16) {
-            gaugeColumn("5-hour", entry.fiveHour)
-            Divider()
-            gaugeColumn("7-day", entry.sevenDay)
+        VStack(alignment: .leading, spacing: 6) {
+            WidgetTitleBar(title: "RATE LIMITS")
+            HStack(spacing: 14) {
+                gaugeColumn("5-hour", entry.fiveHour)
+                Divider()
+                gaugeColumn("7-day", entry.sevenDay)
+            }
+            .frame(maxHeight: .infinity)
         }
-        .padding(12)
+        .padding(WidgetStyle.mediumPad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
     }
 
     @ViewBuilder
     private func gaugeColumn(_ label: String, _ state: PaceGaugesEntry.WindowState?) -> some View {
         VStack(spacing: 6) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            gaugeOrPlaceholder(state, lineWidth: 8, labelSize: 18)
-                .frame(width: 70, height: 70)
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(dotColor(for: state) ?? .secondary)
+                    .frame(width: 6, height: 6)
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            ringGauge(for: state, lineWidth: 8, labelSize: 22)
+                .frame(width: 78, height: 78)
             Text(resetText(state?.resetsAt))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
-    private func gaugeOrPlaceholder(
-        _ state: PaceGaugesEntry.WindowState?,
+    private func ringGauge(
+        for state: PaceGaugesEntry.WindowState?,
         lineWidth: CGFloat,
         labelSize: CGFloat
     ) -> some View {
-        if let state {
-            WidgetCircularGauge(
-                percentage: state.usedPct,
-                lineWidth: lineWidth,
-                labelFont: .system(size: labelSize, weight: .semibold, design: .rounded)
-            )
-        } else {
-            WidgetCircularGauge(
-                percentage: 0,
-                lineWidth: lineWidth,
-                labelFont: .system(size: labelSize, weight: .semibold, design: .rounded)
-            )
-            .opacity(0.3)
+        let pct = state?.usedPct ?? 0
+        let labelFont: Font = .system(size: labelSize, weight: .semibold, design: .rounded)
+        WidgetCircularGauge(percentage: pct, lineWidth: lineWidth, labelFont: labelFont)
+            .opacity(state == nil ? 0.3 : 1.0)
+    }
+
+    private func dotColor(for state: PaceGaugesEntry.WindowState?) -> Color? {
+        guard let state else { return nil }
+        switch UsageBand(percentage: state.usedPct) {
+        case .green:  return .green
+        case .yellow: return .yellow
+        case .orange: return .orange
+        case .red:    return .red
         }
     }
 
     private func resetText(_ date: Date?) -> String {
         guard let date else { return "no data" }
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .short
-        return "resets \(f.localizedString(for: date, relativeTo: Date()))"
+        return "resets \(formatRelative(date))"
     }
 }
 
-/// A widget-internal copy of CircularGauge. We can't import App-target
-/// views into the widget extension, so we re-declare the small primitive
-/// here. Stays in sync with App/Views/Components/CircularGauge.swift —
-/// if you change one, change both.
+/// Widget-local circular gauge primitive. Mirrors
+/// `App/Views/Components/CircularGauge.swift` — kept in sync manually
+/// because App-target views aren't importable from extensions.
 struct WidgetCircularGauge: View {
     let percentage: Double
     let lineWidth: CGFloat
@@ -185,8 +207,8 @@ struct PaceGaugesWidget: Widget {
         StaticConfiguration(kind: kind, provider: PaceGaugesProvider()) { entry in
             PaceGaugesWidgetView(entry: entry)
         }
-        .configurationDisplayName("Rate-limit gauges")
-        .description("Current 5-hour and 7-day rate-limit usage.")
+        .configurationDisplayName("Rate limits")
+        .description("5-hour and 7-day Claude Code rate-limit usage.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }

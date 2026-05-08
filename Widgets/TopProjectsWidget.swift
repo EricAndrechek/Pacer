@@ -27,8 +27,8 @@ import PacerCore
 // don't lose anything by scoping them to the widget that uses them.
 private enum K {
     static let lookbackDays = 7
-    static let mediumRowCount = 3
-    static let largeRowCount = 5
+    static let mediumRowCount = 4
+    static let largeRowCount = 6
     static let rangeLabel = "last 7 days"
 }
 
@@ -102,7 +102,7 @@ struct TopProjectsProvider: TimelineProvider {
                 .sorted { $0.cost > $1.cost }
             let topRows = allRanked.prefix(K.largeRowCount).map {
                 TopProjectsEntry.Row(
-                    displayName: shortPath($0.path),
+                    displayName: widgetShortPath($0.path),
                     costUSD: $0.cost
                 )
             }
@@ -132,10 +132,27 @@ struct TopProjectsWidgetView: View {
     @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        switch family {
-        case .systemLarge: large
-        default:           medium
+        VStack(alignment: .leading, spacing: family == .systemLarge ? 8 : 6) {
+            header
+            if visibleRows.isEmpty {
+                WidgetEmptyState(message: "No project activity in the last 7 days.")
+            } else {
+                VStack(spacing: family == .systemLarge ? 6 : 5) {
+                    ForEach(visibleRows) { row in
+                        bar(for: row)
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+                if family == .systemLarge {
+                    Spacer(minLength: 0)
+                    Divider()
+                    footer
+                }
+            }
         }
+        .padding(family == .systemLarge ? WidgetStyle.largePad : WidgetStyle.mediumPad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .containerBackground(.fill.tertiary, for: .widget)
     }
 
     private var visibleRows: [TopProjectsEntry.Row] {
@@ -148,62 +165,10 @@ struct TopProjectsWidgetView: View {
     }
 
     @ViewBuilder
-    private var medium: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            header(showFooter: false)
-            if visibleRows.isEmpty {
-                emptyState
-            } else {
-                VStack(spacing: 4) {
-                    ForEach(visibleRows) { row in
-                        bar(for: row)
-                    }
-                }
-                .frame(maxHeight: .infinity)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
-    }
-
-    @ViewBuilder
-    private var large: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header(showFooter: false)
-            if visibleRows.isEmpty {
-                emptyState
-                Spacer(minLength: 0)
-            } else {
-                VStack(spacing: 6) {
-                    ForEach(visibleRows) { row in
-                        bar(for: row)
-                    }
-                }
-                Spacer(minLength: 0)
-                Divider()
-                footer
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
-    }
-
-    @ViewBuilder
-    private func header(showFooter: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Top projects")
-                .font(.caption.weight(.semibold))
-            Text("·")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            Text(entry.rangeLabel)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(formatCost(entry.totalCostUSD))
-                .font(.system(.subheadline, design: .rounded).weight(.semibold))
+    private var header: some View {
+        WidgetTitleBar(title: "TOP PROJECTS · 7d") {
+            Text(formatCostUSD(entry.totalCostUSD))
+                .font(.system(family == .systemLarge ? .title3 : .subheadline, design: .rounded).weight(.semibold))
                 .monospacedDigit()
         }
     }
@@ -215,9 +180,6 @@ struct TopProjectsWidgetView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()
-            // If there's spillover beyond the visible rows, hint at it
-            // so the user knows the widget is summarized rather than
-            // showing the universe.
             if entry.projectCount > visibleRows.count {
                 Text("+\(entry.projectCount - visibleRows.count) more")
                     .font(.caption2)
@@ -227,54 +189,21 @@ struct TopProjectsWidgetView: View {
     }
 
     private func bar(for row: TopProjectsEntry.Row) -> some View {
-        let fraction = max(0.04, min(1, row.costUSD / maxCost))
+        let fraction = row.costUSD / maxCost
         return HStack(spacing: 8) {
             Text(row.displayName)
                 .font(.caption.weight(.medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: 90, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.secondary.opacity(0.15))
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(.tint)
-                        .frame(width: geo.size.width * CGFloat(fraction))
-                }
-            }
-            .frame(height: 8)
-            Text(formatCost(row.costUSD))
+                .frame(width: WidgetStyle.labelColumnWidth, alignment: .leading)
+            WidgetProgressBar(fraction: fraction, height: family == .systemLarge ? 9 : 8)
+            Text(formatCostUSD(row.costUSD))
                 .font(.caption.weight(.medium))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 44, alignment: .trailing)
+                .frame(minWidth: WidgetStyle.costColumnWidth, alignment: .trailing)
         }
     }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("No project activity in the \(K.rangeLabel).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Formatters
-
-    private func formatCost(_ usd: Double) -> String {
-        if usd >= 1000 { return String(format: "$%.0f", usd) }
-        if usd >= 100  { return String(format: "$%.0f", usd) }
-        if usd >= 10   { return String(format: "$%.1f", usd) }
-        return String(format: "$%.2f", usd)
-    }
-}
-
-private func shortPath(_ path: String) -> String {
-    if path == ProjectDailyAggregate.unknownProjectPath { return "(unknown)" }
-    let last = (path as NSString).lastPathComponent
-    return last.isEmpty ? path : last
 }
 
 // MARK: - Configuration
@@ -288,11 +217,9 @@ struct TopProjectsWidget: Widget {
         }
         .configurationDisplayName("Top projects")
         // Literal string — no interpolation. `WidgetConfiguration.description(_:)`
-        // takes `LocalizedStringKey`, and interpolating ANY value (even a
-        // literal Int or a static String) into it asserts at extension
-        // launch. Hardcode the lookback in the user-visible string and
-        // keep `K.lookbackDays` for the data math.
-        .description("Top projects by Claude Code cost over the last 7 days.")
+        // takes `LocalizedStringKey`, and interpolating into it asserts
+        // at extension launch.
+        .description("Project breakdown over the last 7 days.")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }
