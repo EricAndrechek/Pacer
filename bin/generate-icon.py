@@ -89,17 +89,20 @@ def build_svg(canvas: int, inset: int) -> str:
     orb_r = sq_w * 0.072
 
     # Gauge sweep (math degrees, y-flipped). 220° → -40° clockwise = 260° arc.
+    # The arc is rendered FULL — a symmetric horseshoe — because a partial
+    # fill made the silhouette read as a lowercase "r" (vertical stem on
+    # the left + curved bowl over the top). The orb sits on the arc at
+    # ~62% as the dynamic position indicator instead of terminating it.
     start_deg = 220.0
     end_deg = -40.0
-    active_fraction = 0.64
+    orb_fraction = 0.62
     total_deg = (start_deg - end_deg) % 360
-    active_end_deg = start_deg - active_fraction * total_deg
+    orb_deg = start_deg - orb_fraction * total_deg
 
-    track_path = arc_clockwise(cx, cy, arc_r, start_deg, end_deg)
-    active_path = arc_clockwise(cx, cy, arc_r, start_deg, active_end_deg)
+    arc_path = arc_clockwise(cx, cy, arc_r, start_deg, end_deg)
 
-    # Position orb sits where the arc terminates.
-    orb_x, orb_y = deg_to_xy(cx, cy, arc_r, active_end_deg)
+    # Position orb sits on the arc itself.
+    orb_x, orb_y = deg_to_xy(cx, cy, arc_r, orb_deg)
 
     # Bounds for vertical gradients along the arc (top of arc to bottom).
     arc_top_y = cy - arc_r - arc_w / 2
@@ -187,10 +190,10 @@ def build_svg(canvas: int, inset: int) -> str:
       </feMerge>
     </filter>
 
-    <!-- Clip the arc-gloss layer to the active arc stroke so the gloss
-         doesn't bleed past the colored band. -->
+    <!-- Clip the gloss/shade layers to the arc stroke so they don't
+         bleed past the colored band. -->
     <clipPath id="arcClip">
-      <path d="{active_path}" fill="none" stroke="#000" stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
+      <path d="{arc_path}" fill="none" stroke="#000" stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
     </clipPath>
   </defs>
 
@@ -205,17 +208,13 @@ def build_svg(canvas: int, inset: int) -> str:
   <!-- 3. Squircle top rim highlight -->
   <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" rx="{corner_radius:.2f}" ry="{corner_radius:.2f}" fill="url(#rimGloss)"/>
 
-  <!-- 4. Faint full-arc track -->
-  <path d="{track_path}" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"
-        stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
-
-  <!-- 5. Active arc — color sweep + drop shadow -->
+  <!-- 4. Full colored arc — drop shadow underneath -->
   <g filter="url(#arcDropShadow)">
-    <path d="{active_path}" fill="none" stroke="url(#arcSweep)"
+    <path d="{arc_path}" fill="none" stroke="url(#arcSweep)"
           stroke-width="{arc_w:.2f}" stroke-linecap="round"/>
   </g>
 
-  <!-- 6. Glass top gloss + bottom inner shade, clipped to the active arc -->
+  <!-- 5. Glass top gloss + bottom inner shade, clipped to the arc -->
   <g clip-path="url(#arcClip)">
     <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" fill="url(#arcGloss)"/>
     <rect x="{sq_x}" y="{sq_y}" width="{sq_w}" height="{sq_h}" fill="url(#arcShade)"/>

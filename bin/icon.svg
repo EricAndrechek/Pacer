@@ -75,10 +75,10 @@
       </feMerge>
     </filter>
 
-    <!-- Clip the arc-gloss layer to the active arc stroke so the gloss
-         doesn't bleed past the colored band. -->
+    <!-- Clip the gloss/shade layers to the arc stroke so they don't
+         bleed past the colored band. -->
     <clipPath id="arcClip">
-      <path d="M 321.37 717.28 A 248.85 248.85 0 0 1 659.67 357.02" fill="none" stroke="#000" stroke-width="95.58" stroke-linecap="round"/>
+      <path d="M 321.37 717.28 A 248.85 248.85 0 1 1 702.63 717.28" fill="none" stroke="#000" stroke-width="95.58" stroke-linecap="round"/>
     </clipPath>
   </defs>
 
@@ -93,27 +93,23 @@
   <!-- 3. Squircle top rim highlight -->
   <rect x="100" y="100" width="824" height="824" rx="184.33" ry="184.33" fill="url(#rimGloss)"/>
 
-  <!-- 4. Faint full-arc track -->
-  <path d="M 321.37 717.28 A 248.85 248.85 0 1 1 702.63 717.28" fill="none" stroke="#FFFFFF" stroke-opacity="0.14"
-        stroke-width="95.58" stroke-linecap="round"/>
-
-  <!-- 5. Active arc — color sweep + drop shadow -->
+  <!-- 4. Full colored arc — drop shadow underneath -->
   <g filter="url(#arcDropShadow)">
-    <path d="M 321.37 717.28 A 248.85 248.85 0 0 1 659.67 357.02" fill="none" stroke="url(#arcSweep)"
+    <path d="M 321.37 717.28 A 248.85 248.85 0 1 1 702.63 717.28" fill="none" stroke="url(#arcSweep)"
           stroke-width="95.58" stroke-linecap="round"/>
   </g>
 
-  <!-- 6. Glass top gloss + bottom inner shade, clipped to the active arc -->
+  <!-- 5. Glass top gloss + bottom inner shade, clipped to the arc -->
   <g clip-path="url(#arcClip)">
     <rect x="100" y="100" width="824" height="824" fill="url(#arcGloss)"/>
     <rect x="100" y="100" width="824" height="824" fill="url(#arcShade)"/>
   </g>
 
   <!-- 7. Position orb: glow halo + body + specular highlight -->
-  <circle cx="659.67" cy="357.02" r="80.09"
+  <circle cx="640.91" cy="344.46" r="80.09"
           fill="#FFFFFF" fill-opacity="0.32" filter="url(#orbGlow)"/>
-  <circle cx="659.67" cy="357.02" r="59.33" fill="url(#orbBody)"/>
-  <ellipse cx="640.69" cy="332.11"
+  <circle cx="640.91" cy="344.46" r="59.33" fill="url(#orbBody)"/>
+  <ellipse cx="621.93" cy="319.55"
            rx="24.92" ry="15.43"
            fill="#FFFFFF" fill-opacity="0.85"/>
 </svg>
