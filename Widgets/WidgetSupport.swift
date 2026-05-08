@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import PacerCore
 
 /// Shared formatting helpers + design constants used by every widget.
@@ -83,6 +84,23 @@ func formatWeekdayShort(_ date: Date) -> String {
     WidgetFormatters.weekday.string(from: date)
 }
 
+/// Wall-clock time, locale-aware: "3:47 PM" in 12h locales, "15:47"
+/// in 24h. Mirrors `App/Views/Components/PacerDesign.swift:pacerClockTime`
+/// so widget reset captions match the dashboard's pace-chart card.
+func widgetClockTime(_ date: Date) -> String {
+    WidgetFormatters.clockTime.string(from: date)
+}
+
+/// Short weekday + time, used by the 7-day pace caption. Returns
+/// e.g. "Mon 3 PM" / "Mon 15:00" depending on locale.
+/// Mirrors `pacerWeekdayClock` in the app.
+func widgetWeekdayClock(_ date: Date) -> String {
+    let formatter = WidgetFormatters.uses24HourClock
+        ? WidgetFormatters.weekdayClock24
+        : WidgetFormatters.weekdayClock12
+    return formatter.string(from: date)
+}
+
 /// Type namespace for cached `DateFormatter`s. Static lets on a type
 /// are lazy-on-first-access (not file-scope), which is the form that
 /// survived the widget-bundle crash investigation when file-scoped
@@ -93,6 +111,42 @@ enum WidgetFormatters {
         f.dateFormat = "EEE"
         return f
     }()
+    nonisolated(unsafe) static let clockTime: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f
+    }()
+    nonisolated(unsafe) static let weekdayClock12: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "EEE h a"
+        return f
+    }()
+    nonisolated(unsafe) static let weekdayClock24: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = "EEE H:mm"
+        return f
+    }()
+    /// Whether the user's locale uses a 24-hour clock. Determined by
+    /// asking `DateFormatter` for a short-time template and checking
+    /// for an "a" period designator in the resulting format string —
+    /// same heuristic the app's `pacerUses24HourClock` uses.
+    static var uses24HourClock: Bool {
+        let template = DateFormatter.dateFormat(fromTemplate: "j", options: 0, locale: .current) ?? ""
+        return !template.contains("a")
+    }
+}
+
+/// Card-style background that mirrors the app's `PacerCard`. Apple's
+/// widget templates default to a frosted `.fill.tertiary`; the app
+/// uses `Color(nsColor: .controlBackgroundColor)` for its solid
+/// rounded cards. Wrapping it here means a one-line background change
+/// in every widget keeps them visually unified with the dashboard.
+var widgetCardBackground: Color {
+    Color(nsColor: .controlBackgroundColor)
 }
 
 /// Standardized widget header: a small uppercase title, an optional

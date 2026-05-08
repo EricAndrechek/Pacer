@@ -211,7 +211,7 @@ struct PaceChartWidgetView: View {
         }
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
@@ -230,7 +230,7 @@ struct PaceChartWidgetView: View {
         }
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
@@ -247,7 +247,7 @@ struct PaceChartWidgetView: View {
         }
         .padding(WidgetStyle.largePad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
@@ -330,17 +330,15 @@ struct PaceChartWidgetView: View {
         }
     }
 
+    /// Reset caption: relative duration plus the wall-clock anchor —
+    /// "resets in 2h · 9 PM" for 5h, "resets in 4d · Mon 3 PM" for 7d.
+    /// Mirrors `App/Views/PaceChartCard.swift:resetLabel(resets:)`.
     private func resetCaption(for s: PaceChartEntry.WindowState, compact: Bool) -> String {
         let rel = formatRelative(s.resetsAt)
-        if compact {
-            return "resets \(rel)"
-        }
-        // Wall-clock anchor so "in 2h" can be read as "9 PM" too.
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateStyle = .none
-        f.timeStyle = .short
-        return "resets \(rel) · \(f.string(from: s.resetsAt))"
+        let clock = s.durationSeconds <= 6 * 3600
+            ? widgetClockTime(s.resetsAt)
+            : widgetWeekdayClock(s.resetsAt)
+        return "resets \(rel) · \(clock)"
     }
 
     private func bandColor(_ band: PaceBand) -> Color {

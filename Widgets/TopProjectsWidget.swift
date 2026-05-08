@@ -152,7 +152,7 @@ struct TopProjectsWidgetView: View {
         }
         .padding(family == .systemLarge ? WidgetStyle.largePad : WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     private var visibleRows: [TopProjectsEntry.Row] {

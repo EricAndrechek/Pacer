@@ -120,7 +120,7 @@ struct DailyChartWidgetView: View {
             }
         }
         .padding(family == .systemLarge ? WidgetStyle.largePad : WidgetStyle.mediumPad)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder

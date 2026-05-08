@@ -89,7 +89,7 @@ struct PaceGaugesWidgetView: View {
                 Spacer()
             }
             Spacer(minLength: 2)
-            Text(resetText(entry.fiveHour?.resetsAt))
+            Text(resetText(entry.fiveHour?.resetsAt, durationSeconds: 5 * 3600))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -97,7 +97,7 @@ struct PaceGaugesWidgetView: View {
         }
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
@@ -105,19 +105,23 @@ struct PaceGaugesWidgetView: View {
         VStack(alignment: .leading, spacing: 6) {
             WidgetTitleBar(title: "RATE LIMITS")
             HStack(spacing: 14) {
-                gaugeColumn("5-hour", entry.fiveHour)
+                gaugeColumn("5-hour", entry.fiveHour, durationSeconds: 5 * 3600)
                 Divider()
-                gaugeColumn("7-day", entry.sevenDay)
+                gaugeColumn("7-day", entry.sevenDay, durationSeconds: 7 * 86400)
             }
             .frame(maxHeight: .infinity)
         }
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
-    private func gaugeColumn(_ label: String, _ state: PaceGaugesEntry.WindowState?) -> some View {
+    private func gaugeColumn(
+        _ label: String,
+        _ state: PaceGaugesEntry.WindowState?,
+        durationSeconds: TimeInterval
+    ) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 4) {
                 Circle()
@@ -129,7 +133,7 @@ struct PaceGaugesWidgetView: View {
             }
             ringGauge(for: state, lineWidth: 8, labelSize: 22)
                 .frame(width: 78, height: 78)
-            Text(resetText(state?.resetsAt))
+            Text(resetText(state?.resetsAt, durationSeconds: durationSeconds))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -159,9 +163,17 @@ struct PaceGaugesWidgetView: View {
         }
     }
 
-    private func resetText(_ date: Date?) -> String {
+    /// Reset caption: relative duration plus the wall-clock anchor —
+    /// "resets in 2h · 9 PM" for 5h, "resets in 4d · Mon 3 PM" for 7d.
+    /// Mirrors `App/Views/PaceChartCard.swift:resetLabel(resets:)` so
+    /// the gauge widget reads the same as the dashboard pace card.
+    private func resetText(_ date: Date?, durationSeconds: TimeInterval) -> String {
         guard let date else { return "no data" }
-        return "resets \(formatRelative(date))"
+        let rel = formatRelative(date)
+        let clock = durationSeconds <= 6 * 3600
+            ? widgetClockTime(date)
+            : widgetWeekdayClock(date)
+        return "resets \(rel) · \(clock)"
     }
 }
 

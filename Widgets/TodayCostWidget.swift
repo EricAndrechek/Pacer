@@ -86,7 +86,7 @@ struct TodayCostWidgetView: View {
         }
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder

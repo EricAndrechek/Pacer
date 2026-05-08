@@ -154,7 +154,7 @@ struct LiveSessionWidgetView: View {
         }
         .padding(WidgetStyle.smallPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     @ViewBuilder
@@ -185,7 +185,7 @@ struct LiveSessionWidgetView: View {
         }
         .padding(WidgetStyle.mediumPad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .containerBackground(.fill.tertiary, for: .widget)
+        .containerBackground(widgetCardBackground, for: .widget)
     }
 
     private func statColumn(value: String, label: String) -> some View {
