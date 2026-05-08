@@ -34,8 +34,20 @@ struct MenuBarLabel: View {
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
+    /// Last band we rendered. When this jumps to a warmer band (yellow
+    /// → orange → red) we kick a one-shot scale pulse so the icon
+    /// visibly reacts to the threshold crossing. Without it the only
+    /// signal of "we just went over 75%" was the banner notification —
+    /// which the user might have dismissed on a different screen.
+    @State private var lastBand: UsageBand?
+    @State private var pulse: Bool = false
+
     private var fiveHour: RateLimitSample? {
         samples.first { $0.window == "five_hour" }
+    }
+
+    private var sevenDay: RateLimitSample? {
+        samples.first { $0.window == "seven_day" }
     }
 
     private var style: PacerSettings.MenuBarStyle {
@@ -72,17 +84,94 @@ struct MenuBarLabel: View {
         }
     }
 
+    /// Color the SF Symbol picks up via `.palette` rendering. Reuses
+    /// PaceBandColor's mapping so the menu bar warms up in lockstep
+    /// with the dashboard's pace chart.
+    private var bandColor: Color {
+        switch band {
+        case .green, nil: return .secondary
+        case .yellow:     return .yellow
+        case .orange:     return .orange
+        case .red:        return .red
+        }
+    }
+
+    /// Tooltip shown on hover. Apple's Battery / Wi-Fi / Volume status
+    /// items all surface a one-line summary on hover; ours had nothing.
+    private var tooltip: String {
+        var parts: [String] = []
+        if let f = fiveHour {
+            parts.append("5h: \(Int(f.usedPercentage.rounded()))%")
+        }
+        if let s = sevenDay {
+            parts.append("7d: \(Int(s.usedPercentage.rounded()))%")
+        }
+        if let resets = fiveHour?.resetsAt {
+            parts.append("resets \(pacerRelative(resets))")
+        }
+        if parts.isEmpty {
+            return "Pacer — collecting…"
+        }
+        return parts.joined(separator: " • ")
+    }
+
+    /// Percentage label shown to the right of the icon. The `% only`
+    /// mode now prefixes "5h " so a glance tells you which window —
+    /// before, "23%" with no context was ambiguous when both windows
+    /// are tracked.
+    private var percentLabel: String? {
+        guard let pct = fiveHour?.usedPercentage else { return nil }
+        let rounded = "\(Int(pct.rounded()))%"
+        return style == .percentOnly ? "5h \(rounded)" : rounded
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             if style == .iconOnly || style == .iconAndPercent {
                 Image(systemName: symbolName)
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(bandColor, Color.secondary.opacity(0.5))
+                    .scaleEffect(pulse ? 1.15 : 1.0)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.55), value: pulse)
             }
-            if style == .percentOnly || style == .iconAndPercent {
-                if let pct = fiveHour?.usedPercentage {
-                    Text("\(Int(pct.rounded()))%")
-                        .monospacedDigit()
-                }
+            if style == .percentOnly || style == .iconAndPercent,
+               let label = percentLabel {
+                Text(label)
+                    .monospacedDigit()
+                    .foregroundStyle(band == .red ? Color.red : Color.primary)
             }
+        }
+        .help(tooltip)
+        .onChange(of: band) { oldValue, newValue in
+            // Pulse only on warming (green→yellow, yellow→orange, etc.).
+            // Cooling (band drops at cycle reset) shouldn't draw the eye.
+            guard let newValue, isWarming(from: oldValue, to: newValue) else {
+                lastBand = newValue
+                return
+            }
+            lastBand = newValue
+            pulse = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                pulse = false
+            }
+        }
+    }
+
+    private func isWarming(from old: UsageBand?, to new: UsageBand) -> Bool {
+        guard let old else { return new != .green }
+        return new.severity > old.severity
+    }
+}
+
+private extension UsageBand {
+    /// Higher = warmer / more urgent. Used to detect upward crossings
+    /// for the pulse animation.
+    var severity: Int {
+        switch self {
+        case .green:  return 0
+        case .yellow: return 1
+        case .orange: return 2
+        case .red:    return 3
         }
     }
 }
@@ -92,6 +181,12 @@ struct MenuBarLabel: View {
 /// actions. Deliberately spare — the dashboard is the detail view; this
 /// is the at-a-glance read.
 struct MenuBarContent: View {
+    /// Optional dismiss hook so footer actions can close the popover
+    /// before flipping windows. The custom NSStatusItem host (in
+    /// `PacerAppDelegate`) injects this; if it's nil, the buttons
+    /// still work — they just don't auto-close.
+    var onDismiss: (() -> Void)? = nil
+
     @Environment(\.openWindow) private var openWindow
     @Query(MenuBarContent.recentDescriptor)
     private var rateLimits: [RateLimitSample]
@@ -105,7 +200,8 @@ struct MenuBarContent: View {
         return d
     }()
 
-    init() {
+    init(onDismiss: (() -> Void)? = nil) {
+        self.onDismiss = onDismiss
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
@@ -136,11 +232,11 @@ struct MenuBarContent: View {
                 .padding(.vertical, 12)
             Divider().opacity(0.4)
             footer
-                .padding(.top, 10)
+                .padding(.top, 8)
         }
         .padding(.horizontal, 14)
         .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.bottom, 10)
         .frame(width: 300)
     }
 
@@ -242,34 +338,73 @@ struct MenuBarContent: View {
 
     // MARK: - Footer
 
+    /// Footer rows now use `MenuBarFooterButton` so they pick up a
+    /// hover background — `.borderless` left them visually flat next to
+    /// the rest of the popover, which had hover affordance everywhere
+    /// else (cards, sidebar items, etc.).
     private var footer: some View {
-        HStack(spacing: 14) {
-            Button {
+        HStack(spacing: 4) {
+            MenuBarFooterButton(
+                title: "Open Pacer",
+                systemImage: "macwindow"
+            ) {
+                onDismiss?()
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
-            } label: {
-                Label("Open Pacer", systemImage: "macwindow")
-                    .font(.system(size: 12))
             }
-            Button {
+            MenuBarFooterButton(
+                title: "Settings",
+                systemImage: "gearshape"
+            ) {
+                onDismiss?()
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "main")
                 NotificationCenter.default.post(
                     name: .pacerOpenSettings, object: nil
                 )
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-                    .font(.system(size: 12))
             }
-            Spacer()
-            Button {
+            Spacer(minLength: 0)
+            MenuBarFooterButton(
+                title: "Quit",
+                systemImage: "power",
+                tint: .secondary
+            ) {
                 NSApplication.shared.terminate(nil)
-            } label: {
-                Text("Quit")
-                    .font(.system(size: 12))
             }
             .keyboardShortcut("q")
         }
-        .buttonStyle(.borderless)
+    }
+}
+
+/// Footer-row button with a subtle hover background. Mirrors the
+/// `HoverRow` pattern used in the dashboard tables; lives here as its
+/// own primitive because the popover footer is a horizontal layout
+/// rather than the full-width row HoverRow expects.
+private struct MenuBarFooterButton: View {
+    let title: String
+    let systemImage: String
+    var tint: Color = .primary
+    let action: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .medium))
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(tint)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.08) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }

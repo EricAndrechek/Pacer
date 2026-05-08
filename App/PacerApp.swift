@@ -31,14 +31,7 @@ struct PacerApp: App {
         UserDefaults.standard.set("WhenScrolling", forKey: "AppleShowScrollBars")
     }
 
-    @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
-    private var menuBarStyleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
-
     @Environment(\.openWindow) private var openWindow
-
-    private var showMenuBar: Bool {
-        menuBarStyleRaw != PacerSettings.MenuBarStyle.hidden.rawValue
-    }
 
     var body: some Scene {
         // `Window` (vs `WindowGroup`) is the singleton-window scene
@@ -132,17 +125,26 @@ struct PacerApp: App {
                 }
                 .keyboardShortcut("5", modifiers: .command)
             }
+            // Replace the default Help menu with one that points at
+            // useful local destinations. Apple-default "Pacer Help"
+            // tries to open a help book that doesn't exist, which
+            // shows an error sheet — surfacing logs / the data store
+            // is more useful for a tracking utility.
+            CommandGroup(replacing: .help) {
+                Button("Show Database in Finder") {
+                    if let url = try? PacerStore.storeURL() {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+                Button("Open Logs Folder") {
+                    let url = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/Pacer")
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
-
-        // Menu bar status item. We use `isInserted` so the user can
-        // toggle visibility from Settings without restarting.
-        MenuBarExtra(isInserted: .constant(showMenuBar)) {
-            MenuBarContent()
-                .modelContainer(appDelegate.container)
-        } label: {
-            MenuBarLabel()
-                .modelContainer(appDelegate.container)
-        }
-        .menuBarExtraStyle(.window)
+        // Menu-bar status item is owned by `PacerAppDelegate` (custom
+        // NSStatusItem so we can support right-click context menu and
+        // a pulse animation, neither of which MenuBarExtra exposed).
     }
 }

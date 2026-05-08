@@ -41,6 +41,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowObservers: [NSObjectProtocol] = []
 
+    // Menu-bar status item state. We own the NSStatusItem directly
+    // (rather than using SwiftUI's MenuBarExtra) because MenuBarExtra
+    // doesn't expose the NSStatusItem.button needed for right-click
+    // context menus. The popover content and label are still SwiftUI
+    // — we host them in NSHostingView/NSHostingController.
+    private var statusItem: NSStatusItem?
+    private var statusPopover: NSPopover?
+    private var menuBarHostingView: NSHostingView<AnyView>?
+    private var menuBarPrefObserver: NSObjectProtocol?
+
     override init() {
         // Redirect stderr to a log file before anything else so the
         // ScanCoordinator/OAuthPoller log lines (via PacerCore.Log)
@@ -68,10 +78,44 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         do {
             container = try PacerStore.makeModelContainer()
         } catch {
-            fatalError("Failed to open shared SwiftData container: \(error)")
+            Self.showFatalContainerError(error)
         }
         backgroundService = AppBackgroundService(container: container)
         super.init()
+    }
+
+    /// Container open failed — likely a corrupted store or permission
+    /// issue. Show the user where to look (logs, the App Group
+    /// container) instead of crashing silently into a fatalError.
+    /// Returns Never so the compiler knows control doesn't escape.
+    private static func showFatalContainerError(_ error: Error) -> Never {
+        let alert = NSAlert()
+        alert.messageText = "Pacer can't open its data store"
+        alert.informativeText = """
+        \(error.localizedDescription)
+
+        This usually means the SwiftData store is corrupted or in an unexpected state. \
+        Show in Finder to inspect the App Group container; View Logs for the most recent stderr output. \
+        After moving or deleting the store, relaunch Pacer to start fresh.
+        """
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Show in Finder")
+        alert.addButton(withTitle: "View Logs")
+        alert.addButton(withTitle: "Quit")
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            if let url = try? PacerStore.storeURL() {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        case .alertSecondButtonReturn:
+            let logsDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/Pacer")
+            NSWorkspace.shared.open(logsDir)
+        default:
+            break
+        }
+        exit(1)
     }
 
     /// Activate the existing Pacer instance and exit if one is found.
@@ -142,6 +186,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         backgroundService.start()
         installWindowObservers()
+        installMenuBar()
         // Warm the shared sample-cost cache so views (LiveActivity,
         // DayDetail, TodayTimeline) can compute per-sample cost
         // synchronously without each having to async-load its own
@@ -279,5 +324,179 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         if NSApp.activationPolicy() != target {
             NSApp.setActivationPolicy(target)
         }
+    }
+
+    // MARK: - Menu bar (custom NSStatusItem)
+
+    /// Bring up the status item if the user's preference is anything
+    /// other than `.hidden`. Subscribes to App Group `UserDefaults`
+    /// changes so a flip in Settings → Menu Bar adds/removes the icon
+    /// without a relaunch.
+    private func installMenuBar() {
+        rebuildMenuBarForCurrentStyle()
+        // App Group UserDefaults posts didChangeNotification on every
+        // write; cheaper to gate on "did the style key actually change"
+        // than to rebuild on every settings flip.
+        var lastStyle = currentMenuBarStyle()
+        menuBarPrefObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: PacerSettings.store,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = self.currentMenuBarStyle()
+                if now != lastStyle {
+                    lastStyle = now
+                    self.rebuildMenuBarForCurrentStyle()
+                }
+            }
+        }
+    }
+
+    private func currentMenuBarStyle() -> PacerSettings.MenuBarStyle {
+        let raw = PacerSettings.store.string(forKey: PacerSettings.Key.menuBarStyle) ?? ""
+        return PacerSettings.MenuBarStyle(rawValue: raw) ?? .iconAndPercent
+    }
+
+    private func rebuildMenuBarForCurrentStyle() {
+        let style = currentMenuBarStyle()
+        if style == .hidden {
+            teardownMenuBar()
+        } else if statusItem == nil {
+            buildStatusItem()
+        }
+        // For non-hidden style changes (icon/percent toggles, icon
+        // variant), the SwiftUI MenuBarLabel inside the hosting view
+        // already reacts via @AppStorage — no rebuild needed.
+    }
+
+    private func buildStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let button = item.button else {
+            return
+        }
+        button.target = self
+        button.action = #selector(handleStatusItemClick(_:))
+        // Receive both buttons so we can branch left → popover,
+        // right → context menu in the action handler.
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+
+        // Host MenuBarLabel as a SwiftUI view inside the button. We
+        // get @Query reactivity, the pulse animation, and tooltip
+        // for free; AutoLayout sizes the button to fit the label's
+        // intrinsic content width.
+        let host = NSHostingView(
+            rootView: AnyView(
+                MenuBarLabel()
+                    .modelContainer(container)
+            )
+        )
+        host.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
+            host.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
+            host.centerYAnchor.constraint(equalTo: button.centerYAnchor)
+        ])
+        menuBarHostingView = host
+        statusItem = item
+    }
+
+    private func teardownMenuBar() {
+        if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+        }
+        statusItem = nil
+        menuBarHostingView = nil
+        statusPopover?.close()
+        statusPopover = nil
+    }
+
+    @objc private func handleStatusItemClick(_ sender: AnyObject?) {
+        guard let event = NSApp.currentEvent else {
+            togglePopover()
+            return
+        }
+        if event.type == .rightMouseUp {
+            showStatusContextMenu()
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func togglePopover() {
+        guard let button = statusItem?.button else { return }
+        if let popover = statusPopover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        if statusPopover == nil {
+            let p = NSPopover()
+            // .transient so clicking outside dismisses, matching the
+            // behavior MenuBarExtra had.
+            p.behavior = .transient
+            p.animates = true
+            let host = NSHostingController(
+                rootView: MenuBarContent(onDismiss: { [weak self] in
+                    self?.statusPopover?.performClose(nil)
+                })
+                    .modelContainer(container)
+            )
+            p.contentViewController = host
+            statusPopover = p
+        }
+        statusPopover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func showStatusContextMenu() {
+        guard let button = statusItem?.button else { return }
+        let menu = NSMenu()
+
+        let openItem = NSMenuItem(
+            title: "Open Pacer",
+            action: #selector(menuOpenMainWindow),
+            keyEquivalent: ""
+        )
+        openItem.target = self
+        menu.addItem(openItem)
+
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(menuOpenSettings),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(
+            title: "Quit Pacer",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        menu.addItem(quitItem)
+
+        // popUp(positioning:at:in:) shows the menu under the button
+        // without keeping `statusItem.menu` set — that property would
+        // otherwise hijack subsequent left-clicks too.
+        let location = NSPoint(x: 0, y: button.bounds.height + 4)
+        menu.popUp(positioning: nil, at: location, in: button)
+    }
+
+    @objc private func menuOpenMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    @objc private func menuOpenSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+        NotificationCenter.default.post(name: .pacerOpenSettings, object: nil)
     }
 }
