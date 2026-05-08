@@ -1,10 +1,11 @@
 import WidgetKit
 import SwiftUI
 
-/// Five Pacer widgets:
+/// Six Pacer widgets:
 ///   - TodayCostWidget    : compact today summary (small)
 ///   - PaceGaugesWidget   : 5h + 7d rate-limit gauges (small / medium)
-///   - DailyChartWidget   : 14-day cost sparkline (medium / large)
+///   - PaceChartWidget    : cycle-anchored pace line graphs (small / medium / large)
+///   - DailyChartWidget   : 14-day cost bar chart (medium / large)
 ///   - LiveSessionWidget  : current session pulse (small / medium)
 ///   - TopProjectsWidget  : where the budget is going (medium / large)
 ///
@@ -16,6 +17,7 @@ struct PacerWidgetsBundle: WidgetBundle {
     var body: some Widget {
         TodayCostWidget()
         PaceGaugesWidget()
+        PaceChartWidget()
         DailyChartWidget()
         LiveSessionWidget()
         TopProjectsWidget()
