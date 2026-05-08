@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// Shared design tokens + lightweight view primitives. Centralizing
 /// them here keeps every card / metric / chip in lock-step on radii,
@@ -276,6 +279,52 @@ public struct FreshnessPulse: View {
     }
 }
 
+// MARK: - Overlay-scroller enforcement
+
+#if canImport(AppKit)
+/// Walks up the AppKit view hierarchy to find the enclosing
+/// `NSScrollView` and pins its `scrollerStyle` to `.overlay`,
+/// regardless of the user's "Show scroll bars" system preference.
+/// Apple's docs explicitly call out that setting `.overlay` overrides
+/// the user pref for that scroll view — same approach Apple's own
+/// apps take for content-heavy views.
+private struct OverlayScrollerEnforcer: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Defer to the next runloop tick so the AppKit hierarchy is
+        // fully wired up and we can walk to the NSScrollView ancestor.
+        DispatchQueue.main.async {
+            var ancestor: NSView? = nsView
+            while let current = ancestor {
+                if let scrollView = current as? NSScrollView {
+                    if scrollView.scrollerStyle != .overlay {
+                        scrollView.scrollerStyle = .overlay
+                    }
+                    return
+                }
+                ancestor = current.superview
+            }
+        }
+    }
+}
+#endif
+
+public extension View {
+    /// Pin the enclosing `ScrollView`'s underlying `NSScrollView` to
+    /// overlay-style scrollers so it never reserves a legacy gutter,
+    /// even when the user has "Always show scroll bars" set system-
+    /// wide. Use once per `ScrollView` (e.g. inside `PageScaffold`).
+    @ViewBuilder
+    func pacerOverlayScrollers() -> some View {
+        #if canImport(AppKit)
+        background(OverlayScrollerEnforcer())
+        #else
+        self
+        #endif
+    }
+}
+
 // MARK: - Page scaffold
 
 /// Standard "page" wrapper used by every primary view: ScrollView, an
@@ -310,14 +359,16 @@ public struct PageScaffold<Trailing: View, Content: View>: View {
             .padding(.bottom, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // Hide scroll indicators so AppleShowScrollBars=Always doesn't
-        // reserve a ~15px legacy gutter on the trailing edge of every
-        // ScrollView. Without this, switching tabs caused a horizontal
-        // jiggle: each fresh ScrollView had to discover overflow on
-        // its first layout pass, briefly rendering at full width
-        // before reflowing narrower once the gutter showed up. Matches
-        // what DayDetailView/ProjectDetailView already do.
-        .scrollIndicators(.never)
+        // Pin the underlying NSScrollView to overlay scrollers so the
+        // legacy gutter (reserved when AppleShowScrollBars=Always)
+        // never appears — that gutter is what caused the horizontal
+        // jiggle on tab switches: each fresh ScrollView had to
+        // discover overflow on its first layout pass, briefly
+        // rendering at full width before reflowing narrower once the
+        // ~15px gutter was inserted. Overlay scrollers fade in while
+        // scrolling and never reserve space, which is what Mail,
+        // System Settings, Linear, etc. do regardless of pref.
+        .pacerOverlayScrollers()
     }
 
     private var header: some View {
