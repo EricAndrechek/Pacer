@@ -84,10 +84,16 @@ public final class NotificationCoordinator {
     }
 
     /// Inspect the latest `RateLimitSample` for a window and post a
-    /// notification if it crossed the user's threshold this cycle.
-    /// `previousPct` is the percentage we observed last time we
-    /// checked — passing it lets us detect "crossed upward" rather
-    /// than firing every time we observe a sample above the line.
+    /// notification for every configured threshold the sample just
+    /// crossed upward. `previousPct` is what we observed last time —
+    /// passing it lets us detect "crossed upward" so we don't fire
+    /// every time the sample sits above the line.
+    ///
+    /// Multi-threshold: a user with 50/75/90 configured for 5-hour
+    /// gets up to three banners per cycle (one each as the line is
+    /// crossed). Cycle dedup is keyed on `(window, threshold,
+    /// resetsAt)` so re-launching mid-cycle doesn't re-fire any
+    /// banner that's already been delivered.
     public func handleRateLimitUpdate(
         window: String,
         currentPct: Double,
@@ -97,39 +103,37 @@ public final class NotificationCoordinator {
     ) async {
         let defaults = PacerSettings.store
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
-        let key: String
-        switch window {
-        case "five_hour": key = PacerSettings.Key.fiveHourThresholdPct
-        case "seven_day": key = PacerSettings.Key.sevenDayThresholdPct
-        default: return
-        }
-        let threshold = Double(defaults.integer(forKey: key))
-        guard threshold > 0 else { return }
-        // We only notify on a fresh upward crossing — the prior reading
-        // was below the threshold and the new one is at or above.
+        let thresholds = PacerSettings.thresholds(forWindow: window)
+        guard !thresholds.isEmpty else { return }
         let previous = previousPct ?? 0
-        guard previous < threshold && currentPct >= threshold else { return }
+        // Ascending iteration — banners arrive in the order the user
+        // crossed them (50% before 75% before 90%) when a single
+        // sample crosses multiple thresholds at once.
+        for threshold in thresholds {
+            let t = Double(threshold)
+            guard previous < t, currentPct >= t else { continue }
 
-        let cycleKey = "notif.\(window).\(Int(threshold)).\(resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset")"
-        if alreadyNotified(key: cycleKey, in: context) {
-            return
+            let cycleKey = "notif.\(window).\(threshold).\(resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset")"
+            if alreadyNotified(key: cycleKey, in: context) {
+                continue
+            }
+
+            await requestAuthorizationIfNeeded()
+            let content = UNMutableNotificationContent()
+            content.title = "Pacer rate-limit warning"
+            let label: String = window == "five_hour" ? "5-hour" : "7-day"
+            content.body = "\(label) usage hit \(Int(currentPct.rounded()))% (threshold \(threshold)%)."
+            content.sound = .default
+            content.interruptionLevel = .timeSensitive
+
+            let request = UNNotificationRequest(
+                identifier: cycleKey,
+                content: content,
+                trigger: nil
+            )
+            try? await center.add(request)
+            markNotified(key: cycleKey, in: context)
         }
-
-        await requestAuthorizationIfNeeded()
-        let content = UNMutableNotificationContent()
-        content.title = "Pacer rate-limit warning"
-        let label: String = window == "five_hour" ? "5-hour" : "7-day"
-        content.body = "\(label) usage hit \(Int(currentPct.rounded()))% (threshold \(Int(threshold))%)."
-        content.sound = .default
-        content.interruptionLevel = .timeSensitive
-
-        let request = UNNotificationRequest(
-            identifier: cycleKey,
-            content: content,
-            trigger: nil
-        )
-        try? await center.add(request)
-        markNotified(key: cycleKey, in: context)
     }
 
     /// Identifier for the "Pacer paused" banner. Shared between the

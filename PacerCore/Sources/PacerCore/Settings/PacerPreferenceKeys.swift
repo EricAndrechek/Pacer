@@ -9,8 +9,18 @@ public enum PacerPreferenceKeys {
     public static let menuBarStyle           = "pacer.menuBarStyle"
     public static let menuBarIconStyle       = "pacer.menuBarIconStyle"
     public static let notificationsEnabled   = "pacer.notifications.enabled"
+    /// Single-threshold legacy keys. Kept for migration only — new code
+    /// reads/writes the `*ThresholdsCSV` keys below, which support
+    /// multiple thresholds per window. Migration runs at app launch
+    /// when the CSV key is absent: we seed the CSV from the legacy
+    /// Int so existing users don't lose their threshold.
     public static let fiveHourThresholdPct   = "pacer.notifications.fiveHourThreshold"
     public static let sevenDayThresholdPct   = "pacer.notifications.sevenDayThreshold"
+    /// New multi-threshold storage. Comma-separated ints (e.g.
+    /// "50,75,90"). UserDefaults arrays would also work but CSV is
+    /// trivial to migrate and round-trip across types.
+    public static let fiveHourThresholdsCSV  = "pacer.notifications.fiveHourThresholds"
+    public static let sevenDayThresholdsCSV  = "pacer.notifications.sevenDayThresholds"
     public static let notifyOnDailyCost      = "pacer.notifications.dailyCost"
     public static let dailyCostThresholdUSD  = "pacer.notifications.dailyCostThreshold"
     public static let costMode               = "pacer.display.costMode"

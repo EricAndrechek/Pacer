@@ -69,6 +69,8 @@ public enum PacerSettings {
         public static let notificationsEnabled   = PacerPreferenceKeys.notificationsEnabled
         public static let fiveHourThresholdPct   = PacerPreferenceKeys.fiveHourThresholdPct
         public static let sevenDayThresholdPct   = PacerPreferenceKeys.sevenDayThresholdPct
+        public static let fiveHourThresholdsCSV  = PacerPreferenceKeys.fiveHourThresholdsCSV
+        public static let sevenDayThresholdsCSV  = PacerPreferenceKeys.sevenDayThresholdsCSV
         public static let notifyOnDailyCost      = PacerPreferenceKeys.notifyOnDailyCost
         public static let dailyCostThresholdUSD  = PacerPreferenceKeys.dailyCostThresholdUSD
         public static let costMode               = PacerPreferenceKeys.costMode
@@ -84,6 +86,8 @@ public enum PacerSettings {
         Key.notificationsEnabled:  false,
         Key.fiveHourThresholdPct:  75,
         Key.sevenDayThresholdPct:  75,
+        Key.fiveHourThresholdsCSV: "75",
+        Key.sevenDayThresholdsCSV: "75",
         Key.notifyOnDailyCost:     false,
         Key.dailyCostThresholdUSD: 50.0,
         Key.costMode:              "auto",
@@ -97,5 +101,65 @@ public enum PacerSettings {
     /// has the right shape from launch one.
     public static func registerDefaults() {
         store.register(defaults: defaults)
+        migrateLegacyThresholds()
+    }
+
+    /// One-time migration from the legacy single-Int threshold keys to
+    /// the new CSV keys. We can't do this inside the defaults dict
+    /// because `register(defaults:)` only kicks in when the key is
+    /// completely absent — a returning user has the legacy key set
+    /// and would never see the new CSV default. So: if the user
+    /// already had a customized legacy threshold but no CSV yet, seed
+    /// the CSV from the legacy value.
+    private static func migrateLegacyThresholds() {
+        for (legacy, csv, fallback) in [
+            (Key.fiveHourThresholdPct, Key.fiveHourThresholdsCSV, 75),
+            (Key.sevenDayThresholdPct, Key.sevenDayThresholdsCSV, 75),
+        ] {
+            // Persisted CSV already? Nothing to do — that's authoritative.
+            if store.object(forKey: csv) is String,
+               let raw = store.string(forKey: csv),
+               !raw.isEmpty,
+               raw != "\(fallback)" {
+                continue
+            }
+            let legacyValue = store.integer(forKey: legacy)
+            // store.integer returns 0 if absent; treat 0 as "use default"
+            // so a fresh install seeds 75% rather than "no thresholds".
+            let v = legacyValue > 0 ? legacyValue : fallback
+            store.set("\(v)", forKey: csv)
+        }
+    }
+
+    /// Read thresholds for a window. Always sorted ascending and
+    /// deduped. Empty array means "user removed them all" — caller
+    /// should treat that as "no notifications for this window."
+    public static func thresholds(forWindow window: String) -> [Int] {
+        let key: String
+        switch window {
+        case "five_hour": key = Key.fiveHourThresholdsCSV
+        case "seven_day": key = Key.sevenDayThresholdsCSV
+        default: return []
+        }
+        let raw = store.string(forKey: key) ?? ""
+        let values = raw
+            .split(separator: ",", omittingEmptySubsequences: true)
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { (1...99).contains($0) }
+        return Array(Set(values)).sorted()
+    }
+
+    /// Persist thresholds for a window. Sorts ascending, dedupes,
+    /// clamps to 1...99 before writing.
+    public static func setThresholds(_ values: [Int], forWindow window: String) {
+        let key: String
+        switch window {
+        case "five_hour": key = Key.fiveHourThresholdsCSV
+        case "seven_day": key = Key.sevenDayThresholdsCSV
+        default: return
+        }
+        let cleaned = Array(Set(values.filter { (1...99).contains($0) })).sorted()
+        let csv = cleaned.map(String.init).joined(separator: ",")
+        store.set(csv, forKey: key)
     }
 }

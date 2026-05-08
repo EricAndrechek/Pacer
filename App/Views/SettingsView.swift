@@ -67,7 +67,11 @@ struct SettingsView: View {
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
         .frame(width: 200, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        // Slightly-tinted opaque background, matching macOS Sequoia
+        // System Settings' inner sidebar. The previous half-opacity
+        // window-color let the main pane bleed through and made the
+        // categories list feel washed-out.
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     // MARK: - Content pane
@@ -248,17 +252,18 @@ private struct NotificationsPanel: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
-    @AppStorage(PacerSettings.Key.fiveHourThresholdPct, store: PacerSettings.store)
-    private var fiveHourPct: Int = 75
-
-    @AppStorage(PacerSettings.Key.sevenDayThresholdPct, store: PacerSettings.store)
-    private var sevenDayPct: Int = 75
-
     @AppStorage(PacerSettings.Key.notifyOnDailyCost, store: PacerSettings.store)
     private var dailyCostEnabled: Bool = false
 
     @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
     private var dailyCostThreshold: Double = 50
+
+    /// Currency code used for the daily-cost threshold field. Reads
+    /// the user's locale at view-init time (locale rarely changes
+    /// mid-session) so the formatter follows the system. Falls back
+    /// to USD if the locale doesn't surface a currency.
+    private let currencyCode: String =
+        Locale.current.currency?.identifier ?? "USD"
 
     @State private var testStatus: TestStatus = .idle
 
@@ -280,18 +285,24 @@ private struct NotificationsPanel: View {
                                 }
                             }
                         }
-                    threshold("5-hour window crosses", binding: $fiveHourPct)
-                    threshold("7-day window crosses", binding: $sevenDayPct)
+                    ThresholdListEditor(
+                        title: "5-hour window",
+                        window: "five_hour",
+                        enabled: enabled
+                    )
+                    ThresholdListEditor(
+                        title: "7-day window",
+                        window: "seven_day",
+                        enabled: enabled
+                    )
                 }
             }, footer: {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Notifications fire at most once per cycle, and only on a fresh upward crossing. The first banner triggers the system permission prompt.")
+                    Text("Add as many thresholds per window as you want — Pacer fires a separate banner each time usage crosses one upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                     HStack(spacing: 8) {
                         Text("Not seeing banners?")
                         Button("Open System Settings → Notifications") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
-                                NSWorkspace.shared.open(url)
-                            }
+                            openNotificationsSettings()
                         }
                         .controlSize(.small)
                     }
@@ -306,9 +317,10 @@ private struct NotificationsPanel: View {
                     HStack {
                         Text("Cost threshold")
                         Spacer()
-                        TextField("USD", value: $dailyCostThreshold, format: .currency(code: "USD"))
+                        TextField("Amount", value: $dailyCostThreshold,
+                                  format: .currency(code: currencyCode))
                             .multilineTextAlignment(.trailing)
-                            .frame(width: 110)
+                            .frame(width: 130)
                             .disabled(!dailyCostEnabled)
                     }
                 }
@@ -331,33 +343,6 @@ private struct NotificationsPanel: View {
         }
     }
 
-    /// Threshold row with a slider + numeric stepper. Replaces the
-    /// fixed 50/75/90 picker so users can pick any percentage from
-    /// 1-99 — wanted custom alert points (e.g. 80%, 95%) for finer
-    /// control.
-    @ViewBuilder
-    private func threshold(_ label: String, binding: Binding<Int>) -> some View {
-        HStack(spacing: 12) {
-            Text(label)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Slider(
-                value: Binding(
-                    get: { Double(binding.wrappedValue) },
-                    set: { binding.wrappedValue = Int($0.rounded()) }
-                ),
-                in: 1...99,
-                step: 1
-            )
-            .frame(width: 160)
-            .disabled(!enabled)
-            Text("\(binding.wrappedValue)%")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
-                .foregroundStyle(enabled ? .primary : .secondary)
-        }
-    }
-
     private var testLabel: String? {
         switch testStatus {
         case .idle:        return nil
@@ -366,6 +351,21 @@ private struct NotificationsPanel: View {
         case .denied:      return "system denied; check System Settings → Notifications → Pacer"
         case .failed(let m): return "failed: \(m)"
         }
+    }
+
+    /// Open System Settings → Notifications, falling back to the
+    /// Settings root if Apple renames the extension URL again
+    /// (`com.apple.Notifications-Settings.extension` is correct
+    /// through macOS 15; this guards against a Sequoia point release
+    /// or Tahoe move). NSWorkspace returns false synchronously when
+    /// the URL doesn't resolve, so we can chain a fallback.
+    private func openNotificationsSettings() {
+        let direct = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!
+        if NSWorkspace.shared.open(direct) {
+            return
+        }
+        let root = URL(string: "x-apple.systempreferences:")!
+        NSWorkspace.shared.open(root)
     }
 
     private var testColor: Color {
@@ -396,6 +396,152 @@ extension NotificationsPanel.TestStatus: Equatable {
             return true
         case (.failed, .failed): return true
         default: return false
+        }
+    }
+}
+
+// MARK: - Threshold list editor
+
+/// One window's worth of notification thresholds as an editable list.
+/// Each row is an independent threshold; rows can be added, removed,
+/// and individually adjusted. Persists through `PacerSettings`'s CSV
+/// helpers so the live `NotificationCoordinator` (also reading via
+/// `PacerSettings.thresholds(forWindow:)`) sees changes immediately.
+private struct ThresholdListEditor: View {
+    let title: String
+    let window: String
+    let enabled: Bool
+
+    @State private var thresholds: [Int] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(enabled ? .primary : .secondary)
+                Spacer()
+                Button {
+                    addThreshold()
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(!enabled)
+            }
+            if thresholds.isEmpty {
+                Text("No thresholds — Pacer won't notify for this window.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(Array(thresholds.enumerated()), id: \.offset) { idx, _ in
+                    ThresholdRow(
+                        value: thresholdBinding(for: idx),
+                        enabled: enabled,
+                        onRemove: { remove(at: idx) }
+                    )
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .onAppear { reload() }
+        // Re-pull when the App Group store changes so two Settings
+        // panels (or a CLI write) stay in sync.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UserDefaults.didChangeNotification,
+            object: PacerSettings.store
+        )) { _ in
+            let fresh = PacerSettings.thresholds(forWindow: window)
+            if fresh != thresholds {
+                thresholds = fresh
+            }
+        }
+    }
+
+    private func reload() {
+        thresholds = PacerSettings.thresholds(forWindow: window)
+    }
+
+    private func persist() {
+        PacerSettings.setThresholds(thresholds, forWindow: window)
+        // Re-read so the displayed list reflects sort/dedup applied
+        // by the writer.
+        thresholds = PacerSettings.thresholds(forWindow: window)
+    }
+
+    private func addThreshold() {
+        // Pick a sensible default: midpoint of "above the highest
+        // existing threshold" and 99, or 75 if the list is empty.
+        // Avoids dropping a duplicate of an existing value.
+        let defaultValue: Int
+        if let highest = thresholds.last {
+            defaultValue = min(99, (highest + 99) / 2)
+        } else {
+            defaultValue = 75
+        }
+        thresholds.append(defaultValue)
+        persist()
+    }
+
+    private func remove(at idx: Int) {
+        guard thresholds.indices.contains(idx) else { return }
+        thresholds.remove(at: idx)
+        persist()
+    }
+
+    private func thresholdBinding(for idx: Int) -> Binding<Int> {
+        Binding(
+            get: {
+                guard thresholds.indices.contains(idx) else { return 0 }
+                return thresholds[idx]
+            },
+            set: { newValue in
+                guard thresholds.indices.contains(idx) else { return }
+                thresholds[idx] = max(1, min(99, newValue))
+                persist()
+            }
+        )
+    }
+}
+
+/// One row in the threshold list. Slider fills the available width;
+/// the value is shown to the right alongside a delete button.
+///
+/// Slider drops the `step:` parameter — that's what was causing the
+/// per-percent tick marks the user flagged as visual noise. We snap
+/// to whole percentages on read instead.
+private struct ThresholdRow: View {
+    @Binding var value: Int
+    let enabled: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { Double(value) },
+                    set: { value = Int($0.rounded()) }
+                ),
+                in: 1...99
+            )
+            .controlSize(.small)
+            .disabled(!enabled)
+            Text("\(value)%")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+                .foregroundStyle(enabled ? .primary : .secondary)
+            Button(role: .destructive) {
+                onRemove()
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove threshold")
         }
     }
 }
