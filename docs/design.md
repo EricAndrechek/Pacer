@@ -18,17 +18,23 @@ SwiftData container in an App Group.
 ├── Contents/PlugIns/PacerWidgets.appex         WidgetKit extension
 └── Contents/Helpers/pacertap                   Optional statusline tap binary
 
-App Group: group.com.ericandrechek.pacer
+App Group: YZXWMJ5VBY.com.ericandrechek.pacer
 ├── pacer.sqlite                                SwiftData container (shared by all targets)
 └── ipc.sock                                    Unix-domain-socket IPC for third-party consumers
 ```
+
+The App Group identifier is TeamID-prefixed (`<TeamID>.<bundleid>`)
+instead of the legacy `group.<bundleid>` form because Sequoia 15+
+gates the legacy prefix behind the kTCCServiceSystemPolicyAppData
+"would like to access data from other apps" prompt — see
+`docs/research/tcc-app-management.md`.
 
 ## Distribution
 
 - Personal Apple Developer ID (Eric Andrechek). Hardened runtime + notarization.
 - Sparkle 2.x via SPM. EdDSA-signed appcast hosted on GitHub Pages from a
   `docs/` folder. `generate_appcast` runs in CI.
-- Bundle ID: `com.ericandrechek.pacer`. App Group: `group.com.ericandrechek.pacer`.
+- Bundle ID: `com.ericandrechek.pacer`. App Group: `YZXWMJ5VBY.com.ericandrechek.pacer`.
 - GitHub Releases for distribution. DMG with `/Applications` symlink.
 - **Mac App Store is not the v1 target.** Sandbox blocks Keychain access
   to Claude Code's OAuth token (different Team ID = different access
@@ -276,7 +282,7 @@ config line is just `"command": "pacertap ..."`.
 ## IPC protocol
 
 Unix domain socket at
-`~/Library/Group Containers/group.com.ericandrechek.pacer/ipc.sock`.
+`~/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/ipc.sock`.
 Newline-delimited JSON, JSON-RPC-2.0-shaped.
 
 ```jsonc

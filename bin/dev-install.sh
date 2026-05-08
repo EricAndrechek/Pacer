@@ -170,6 +170,56 @@ echo
 echo "==> Quitting any running Pacer.app GUI"
 APP_WAS_RUNNING="$("${REPO_ROOT}/bin/dev-quit-app.sh")"
 
+# 3a'. Migrate SwiftData store + UserDefaults plist from the legacy
+#      `group.com.ericandrechek.pacer` container to the new TeamID-
+#      prefixed `YZXWMJ5VBY.com.ericandrechek.pacer` container.
+#
+#      Why we do this in shell at this point in the install:
+#        - The OLD app/widget processes are guaranteed quit (step 3a).
+#        - The NEW app bundle isn't yet copied to /Applications, so its
+#          widget extension cannot launch and pre-create an empty new
+#          container that would then race a shell `cp`.
+#        - Idempotent: skipped if the new container already has data, so
+#          re-running `make install` after a successful migration is a
+#          no-op.
+#
+#      The legacy `group.X` prefix triggers the macOS Sequoia App
+#      Management TCC prompt on every launch; the new TeamID-prefixed
+#      identifier does not. See docs/research/tcc-app-management.md.
+LEGACY_CONTAINER="$HOME/Library/Group Containers/group.com.ericandrechek.pacer"
+NEW_CONTAINER="$HOME/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer"
+
+if [ -f "${LEGACY_CONTAINER}/pacer.sqlite" ] && [ ! -f "${NEW_CONTAINER}/pacer.sqlite" ]; then
+    echo
+    echo "==> Migrating SwiftData store from legacy container"
+    mkdir -p "${NEW_CONTAINER}"
+    # Copy the live SQLite plus the WAL/SHM sidecars so SwiftData picks
+    # up uncheckpointed writes too. Use cp -p to preserve mtimes — the
+    # daemon's `JSONLFileCursor` uses sample timestamps, not file mtimes,
+    # so this is cosmetic, but keeps audit logs sensible.
+    cp -p "${LEGACY_CONTAINER}/pacer.sqlite" "${NEW_CONTAINER}/"
+    [ -f "${LEGACY_CONTAINER}/pacer.sqlite-wal" ] && \
+        cp -p "${LEGACY_CONTAINER}/pacer.sqlite-wal" "${NEW_CONTAINER}/"
+    [ -f "${LEGACY_CONTAINER}/pacer.sqlite-shm" ] && \
+        cp -p "${LEGACY_CONTAINER}/pacer.sqlite-shm" "${NEW_CONTAINER}/"
+    size=$(wc -c <"${NEW_CONTAINER}/pacer.sqlite" | tr -d ' ')
+    echo "    copied pacer.sqlite (${size} bytes)"
+fi
+
+# UserDefaults plist for an App Group lives at
+#   <container>/Library/Preferences/<group-id>.plist
+# Filename mirrors the suite identifier, so we copy *and* rename. The
+# new app's UserDefaults(suiteName: PacerStore.appGroupIdentifier) reads
+# this on first launch.
+LEGACY_PREFS="${LEGACY_CONTAINER}/Library/Preferences/group.com.ericandrechek.pacer.plist"
+NEW_PREFS="${NEW_CONTAINER}/Library/Preferences/YZXWMJ5VBY.com.ericandrechek.pacer.plist"
+if [ -f "${LEGACY_PREFS}" ] && [ ! -f "${NEW_PREFS}" ]; then
+    echo "==> Migrating UserDefaults plist"
+    mkdir -p "$(dirname "${NEW_PREFS}")"
+    cp -p "${LEGACY_PREFS}" "${NEW_PREFS}"
+    echo "    copied $(basename "${LEGACY_PREFS}") -> $(basename "${NEW_PREFS}")"
+fi
+
 # 3b. Migrate away from any leftover legacy daemon. Old installs had
 #     a `com.ericandrechek.pacer.daemon.dev` LaunchAgent that's no
 #     longer part of this architecture; bootout the label and remove

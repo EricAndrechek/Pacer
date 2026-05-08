@@ -81,7 +81,7 @@ make uninstall            # remove app (keeps your data)
 ```
 
 Logs land at `~/Library/Logs/Pacer/Pacer.err.log`. SwiftData
-store at `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+store at `~/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/pacer.sqlite`.
 Both persist across reinstalls; `make clean-data` is the only thing
 that wipes them, and it prompts for confirmation.
 

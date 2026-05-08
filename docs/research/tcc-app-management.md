@@ -1,10 +1,83 @@
-# macOS Sequoia App Management TCC Prompt: Investigation & Handoff
+# macOS Sequoia App Management TCC Prompt: Investigation & Resolution
 
 **Pacer Research Report**
-**Date:** 2026-05-07
-**Status:** Partial fix shipped (signing/notarization). One known issue
-remains unresolved for the dev workflow; production impact uncertain
-and needs verification before v1.
+**Investigation:** 2026-05-07
+**Resolution:** 2026-05-07
+**Status:** RESOLVED.
+
+## Resolution
+
+The fix was the **App Group identifier format**, not the architecture.
+
+macOS Sequoia 15+ gates the legacy `group.<bundleid>` prefix behind
+the `kTCCServiceSystemPolicyAppData` ("would like to access data from
+other apps") prompt. The modern `<TeamID>.<bundleid>` form is exempt.
+Pacer's old App Group was `group.com.ericandrechek.pacer`; renaming
+to `YZXWMJ5VBY.com.ericandrechek.pacer` (Team ID `YZXWMJ5VBY`)
+eliminated the prompt while keeping widgets and the App Group
+container intact.
+
+### Changes
+
+- `App/Pacer.entitlements`, `Widgets/PacerWidgets.entitlements` —
+  `com.apple.security.application-groups` updated from
+  `group.com.ericandrechek.pacer` to `YZXWMJ5VBY.com.ericandrechek.pacer`.
+- `PacerCore/Sources/PacerCore/PacerStore.swift` — `appGroupIdentifier`
+  constant updated. Used by `FileManager.containerURL(...)` for the
+  SwiftData store and by `UserDefaults(suiteName:)` for shared prefs.
+- `bin/dev-install.sh` — adds a one-shot copy of `pacer.sqlite` (+
+  WAL/SHM) and the UserDefaults plist from the legacy container path
+  to the new path. Runs between "quit old app" and "install new app",
+  a window where neither old nor new processes can race the copy.
+- `Makefile`, `bin/dev-status.sh`, `bin/dev-uninstall.sh` — updated
+  paths; status script warns if the legacy container is still present
+  after migration so the user can `make clean-data` to remove it.
+
+### Confirming evidence
+
+Every non-prompting app on the user's machine uses the TeamID-prefix
+format, including the apps the original investigation cited as
+"single-binary, no Group Container":
+
+| App        | Group Container directory                      |
+| ---------- | ---------------------------------------------- |
+| iTerm      | `H7V7XYVQ7D.iTerm`                              |
+| Stats      | `RP2S87B72W.eu.exelban.Stats.widgets`           |
+| Raycast    | `SY64MV22J9.com.raycast.macos.shared`           |
+| OrbStack   | `HUAQ24HBR6.dev.orbstack`                       |
+| UTM        | `WDNLXAD4W8.com.utmapp.UTM`                     |
+| MS Office  | `UBF8T346G9.*` (many)                           |
+| Pacer (new)| `YZXWMJ5VBY.com.ericandrechek.pacer`            |
+
+Apps using the legacy `group.X` form (the symptomatic prefix) are
+mostly Apple's own system services and a handful of older third-party
+apps (e.g., `group.com.docker`, `group.coconut-flavour.coconutBattery`).
+
+The original investigation's "Service Policy" diagnosis was correct
+as a symptom but missed that the policy *is* keyed on the identifier
+prefix. The 3-hour signing/notarization deep-dive below documents
+what was tried — everything except renaming the App Group itself.
+
+### Sources that pointed to the fix
+
+- Apple Developer Forums, "macOS Widgets won't launch with app group set"
+  (developer.apple.com/forums/thread/758478) — the original poster's
+  resolution: *"yes, i did eventually figure it out - the group id for
+  the mac builds needs to have your team id as a prefix (this is new
+  for sequoia)"*.
+- Michael Tsai blog, "Group Container Names in Sequoia" (2024-09-11),
+  citing the same: TeamID-prefixed avoids the prompt; legacy `group.`
+  triggers it.
+- Apple's `Configuring app groups` docs note `<TeamID>.<bundleid>` as
+  the macOS-canonical form.
+
+---
+
+## Original investigation (historical, pre-resolution)
+
+What follows is the original report kept verbatim so future agents
+can see what was tried and what the symptom looked like before the
+identifier rename.
 
 ## Executive Summary
 

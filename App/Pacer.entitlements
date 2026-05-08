@@ -4,9 +4,19 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
+	<!--
+	  App Group identifier MUST be prefixed with the Team ID
+	  (YZXWMJ5VBY) on macOS Sequoia 15+. The legacy "group." prefix
+	  triggers the kTCCServiceSystemPolicyAppData prompt — "Pacer
+	  would like to access data from other apps" — on every launch
+	  even with Developer ID + notarization + populated csreq. Apps
+	  that don't prompt (iTerm, Stats, Raycast, OrbStack) all use
+	  <TeamID>.<bundleid>. See docs/research/tcc-app-management.md
+	  for the full investigation.
+	-->
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.ericandrechek.pacer</string>
+		<string>YZXWMJ5VBY.com.ericandrechek.pacer</string>
 	</array>
 	<!--
 	  Force get-task-allow=false even on Debug builds. Xcode auto-

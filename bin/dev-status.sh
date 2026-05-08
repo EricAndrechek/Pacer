@@ -6,7 +6,8 @@ set -euo pipefail
 
 INSTALLED_APP="/Applications/Pacer.app"
 LOG_DIR="$HOME/Library/Logs/Pacer"
-STORE_DIR="$HOME/Library/Group Containers/group.com.ericandrechek.pacer"
+STORE_DIR="$HOME/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer"
+LEGACY_STORE_DIR="$HOME/Library/Group Containers/group.com.ericandrechek.pacer"
 
 # Legacy daemon labels — only checked so we can warn if migration
 # from the old daemon-based architecture didn't complete cleanly.
@@ -84,6 +85,16 @@ if [ -d "${STORE_DIR}" ]; then
     fi
 else
     warn "App Group container missing — Pacer.app hasn't run yet"
+fi
+
+# Legacy container (pre-Sequoia rename, 2026-05-07). Migration runs
+# automatically on first launch with the new container; this is just
+# a heads-up if the old one is still around so the user can clean it.
+if [ -d "${LEGACY_STORE_DIR}" ]; then
+    if [ -f "${LEGACY_STORE_DIR}/pacer.sqlite" ]; then
+        warn "Legacy container still present at ${LEGACY_STORE_DIR}"
+        warn "  (Pacer migrated to TeamID-prefixed container; safe to remove old via 'make clean-data')"
+    fi
 fi
 
 # Recent log lines (most useful for AI debugging)

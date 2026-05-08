@@ -4,9 +4,13 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!--
+	  Must match App/Pacer.entitlements. TeamID-prefix is required on
+	  macOS Sequoia 15+ — see docs/research/tcc-app-management.md.
+	-->
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.ericandrechek.pacer</string>
+		<string>YZXWMJ5VBY.com.ericandrechek.pacer</string>
 	</array>
 </dict>
 </plist>

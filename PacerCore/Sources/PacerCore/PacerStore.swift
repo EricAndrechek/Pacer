@@ -6,7 +6,15 @@ public enum PacerStoreError: Error, Sendable {
 }
 
 public enum PacerStore {
-    public static let appGroupIdentifier = "group.com.ericandrechek.pacer"
+    /// TeamID-prefixed App Group identifier. The legacy `group.` prefix
+    /// triggers the macOS Sequoia App Management prompt on every launch;
+    /// `<TeamID>.<bundleid>` does not. Must match the entitlements files.
+    /// See `docs/research/tcc-app-management.md`.
+    public static let appGroupIdentifier = "YZXWMJ5VBY.com.ericandrechek.pacer"
+    /// Pre-rename identifier. Only ever used by `bin/dev-install.sh` to
+    /// copy SwiftData + UserDefaults from the legacy Group Container on
+    /// upgrade. No first-release end-user has data here.
+    public static let legacyAppGroupIdentifier = "group.com.ericandrechek.pacer"
     public static let storeFileName = "pacer.sqlite"
 
     public static func sharedContainerURL() throws -> URL {

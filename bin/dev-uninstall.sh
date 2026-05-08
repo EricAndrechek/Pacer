@@ -2,9 +2,11 @@
 # Quit the GUI and remove Pacer.app from /Applications. Also bootouts
 # any leftover legacy daemon LaunchAgent (from before the single-binary
 # refactor). Preserves the SwiftData store at
-# ~/Library/Group Containers/group.com.ericandrechek.pacer/ and logs
-# at ~/Library/Logs/Pacer/ — neither is touched by this script. Use
-# `make clean-data` for a full nuke.
+# ~/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/
+# (and the pre-Sequoia container ~/Library/Group Containers/group.com.ericandrechek.pacer/
+# if still present from a pre-rename install) and logs at
+# ~/Library/Logs/Pacer/ — none of these are touched by this script.
+# Use `make clean-data` for a full nuke including both containers.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

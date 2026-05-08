@@ -61,7 +61,9 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 ## Conventions
 
-- Bundle ID: `com.ericandrechek.pacer`. App Group: `group.com.ericandrechek.pacer`.
+- Bundle ID: `com.ericandrechek.pacer`. App Group: `YZXWMJ5VBY.com.ericandrechek.pacer`
+  (TeamID-prefixed; the legacy `group.` prefix triggered the Sequoia
+  App Management prompt — see `docs/research/tcc-app-management.md`).
 - Source paths in commit messages: `Component/File.swift:NN` style for
   navigation.
 - Comments: explain *why*, not *what*. Especially load-bearing for
@@ -153,9 +155,9 @@ shared SwiftData container directly — no IPC.
     - `PacerCore/` → local Swift package (models, parsers, store,
       `LoginItemController` wrapping `SMAppService.mainApp`)
 - Each non-package target has its own `.entitlements` file declaring the
-  shared App Group `group.com.ericandrechek.pacer`. The App Group lets
-  the app and widgets share a single SwiftData container at
-  `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+  shared App Group `YZXWMJ5VBY.com.ericandrechek.pacer`. The App Group
+  lets the app and widgets share a single SwiftData container at
+  `~/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/pacer.sqlite`.
 - Local PacerCore tests: `cd PacerCore && swift test`.
 - Full build verification (no-sign): `xcodebuild ... CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build`
   (see README for the full invocation).
@@ -223,7 +225,7 @@ Logs at `~/Library/Logs/Pacer/Pacer.err.log` — read this directly
 when debugging. PacerCore.Log writes to stderr; the AppDelegate
 `freopen`s stderr to that file early in init so log lines survive
 non-terminal launches (Finder, SMAppService at-login). SwiftData store
-at `~/Library/Group Containers/group.com.ericandrechek.pacer/pacer.sqlite`.
+at `~/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/pacer.sqlite`.
 Both survive `make uninstall`; only `make clean-data` removes them
 (and it prompts).
 
@@ -356,31 +358,28 @@ of them. Mentioned here so future agents don't repeat them:
    (project, date) / sessionId is folded into the dirty set and
    the recomputer rebuilds the table. One-shot; subsequent cycles
    see no gaps.
-5. **macOS Sequoia 15+ prompts `kTCCServiceSystemPolicyAppData`
-   on every launch for any app accessing a Group Container at
-   `~/Library/Group Containers/<group-id>/`** — and split-bundle
-   architecture is a *contributing* cause but not the only one. The
-   single-binary refactor eliminated the daemon-side prompt (which
-   the daemon's bundle-style `--identifier=` codesign flag had
-   already mostly fixed). The app-side prompt still fires because
-   Sequoia's App Management Service Policy gates Group Container
-   access regardless of who the accessor is. tccd logs show the
-   smoking gun: `ReqResult(Auth Right: Unknown (Service Policy),
-   promptType: 1)` even with a matching csreq from a previous
-   Allow click. Apps that DON'T prompt (iTerm, Docker, OrbStack,
-   Stats) keep their data in regular bundle containers
-   (`~/Library/Application Support/<bundle>/`), not Group
-   Containers — that's the real differentiator.
+5. **macOS Sequoia 15+ App Management prompt — RESOLVED 2026-05-07.**
+   The fix was the App Group identifier format, not the architecture.
+   Sequoia gates the legacy `group.<bundleid>` prefix; the modern
+   `<TeamID>.<bundleid>` form is exempt. Pacer's old App Group was
+   `group.com.ericandrechek.pacer`; renaming to
+   `YZXWMJ5VBY.com.ericandrechek.pacer` (Team ID `YZXWMJ5VBY`) eliminated
+   the prompt while keeping widgets and the App Group container.
 
-   To eliminate the prompt entirely, the SwiftData store has to
-   move out of the Group Container. The widget extension is the
-   only reason we use a Group Container in the first place
-   (extensions need shared App Group access to read store data),
-   so the choice is: drop widgets and move data to App Support
-   (no prompt, no widgets), or keep widgets and accept the prompt
-   (one Allow click per launch). XPC service-mediated widget
-   reads with data in App Support is a third option but a much
-   bigger refactor.
+   Confirming evidence: every non-prompting app on the user's machine
+   (iTerm `H7V7XYVQ7D.iTerm`, Stats `RP2S87B72W.eu.exelban.Stats.widgets`,
+   Raycast `SY64MV22J9.com.raycast.macos.shared`,
+   OrbStack `HUAQ24HBR6.dev.orbstack`) uses the TeamID-prefix format.
+   The prior "Service Policy" diagnosis was correct as a symptom but
+   missed that the policy *is* keyed on the identifier prefix. The
+   3-hour signing/notarization deep-dive in
+   `docs/research/tcc-app-management.md` documents what was tried
+   (everything except renaming the App Group itself).
+
+   `bin/dev-install.sh` does a one-shot copy of `pacer.sqlite` (+ WAL/SHM)
+   and the UserDefaults plist from the legacy container path to the
+   new path between "quit old app" and "install new app", so existing
+   dev installs upgrade transparently.
 
 **Trust `swift build` and `swift test`, not SourceKit diagnostics.**
 Real Swift 6 compile errors are flagged by the build. SourceKit's IDE

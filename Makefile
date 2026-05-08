@@ -27,7 +27,8 @@ BUILD_OUTPUT   := $(REPO_ROOT)/Build/Products/Debug/Pacer.app
 INSTALLED_APP  := /Applications/Pacer.app
 LOG_DIR        := $(HOME)/Library/Logs/Pacer
 LOG_ERR        := $(LOG_DIR)/Pacer.err.log
-STORE_DIR      := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
+STORE_DIR      := $(HOME)/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer
+LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
@@ -128,10 +129,12 @@ open:  ## Open Pacer.app from /Applications.
 clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for confirmation.
 	@echo "About to remove:"
 	@echo "  $(STORE_DIR)/pacer.sqlite (and -wal/-shm)"
+	@echo "  $(LEGACY_STORE)/pacer.sqlite (and -wal/-shm)  [pre-Sequoia container]"
 	@echo "  $(LOG_DIR)/*"
 	@read -p "Continue? [y/N] " yn; \
 	if [ "$$yn" = "y" ] || [ "$$yn" = "Y" ]; then \
 		rm -f "$(STORE_DIR)/pacer.sqlite" "$(STORE_DIR)/pacer.sqlite-wal" "$(STORE_DIR)/pacer.sqlite-shm"; \
+		rm -f "$(LEGACY_STORE)/pacer.sqlite" "$(LEGACY_STORE)/pacer.sqlite-wal" "$(LEGACY_STORE)/pacer.sqlite-shm"; \
 		rm -f "$(LOG_DIR)"/*.log; \
 		echo "Wiped."; \
 	else \
