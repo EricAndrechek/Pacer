@@ -12,6 +12,8 @@ import PacerUI
 /// need to invalidate when the total-cost number changes).
 struct PerModelTodayCard: View {
     @Query private var aggregates: [DailyAggregate]
+    @Query(PerModelTodayCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached: [ModelRow] = []
 
     init() {
         let todayString = TokenSample.formatDate(Date())
@@ -22,30 +24,21 @@ struct PerModelTodayCard: View {
         )
     }
 
-    var body: some View {
-        // Inner view computes the row + hover-index caches in its
-        // init so the first render already has the populated layout
-        // — the previous @State + .onAppear pattern flashed an empty
-        // donut on every tab switch. Hover state lives inside the
-        // inner view, so its updates re-render the body but do not
-        // re-run the cumulative-angle build.
-        PerModelTodayContent(aggregates: aggregates)
-    }
-}
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
 
-private struct PerModelTodayContent: View {
-    let rows: [ModelRow]
-    let hoverCumulative: [(row: ModelRow, max: Double)]
-    let hoverTotalTokens: Int64
+    private var rows: [ModelRow] { cached }
 
-    @State private var hoveredAngle: Double?
-
-    init(aggregates: [DailyAggregate]) {
+    private func refreshCache() {
         let totalTokens = aggregates.reduce(0) {
             $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
         }
-        let rows = aggregates
-            .map { agg -> ModelRow in
+        cached = aggregates
+            .map { agg in
                 let tokens = agg.inputTokens + agg.outputTokens + agg.cacheReadTokens
                 let share = totalTokens > 0 ? Double(tokens) / Double(totalTokens) : 0
                 return ModelRow(
@@ -58,23 +51,34 @@ private struct PerModelTodayContent: View {
                 )
             }
             .sorted { $0.cost > $1.cost }
-        self.rows = rows
+    }
 
-        // Cumulative-angle table for hover lookups so per-pixel hover
-        // work is a linear scan over an already-built array — no
-        // reduce-per-move.
+    /// Selected wedge in the donut. Bound via `chartAngleSelection`
+    /// — Charts hands us the angle clicked/hovered, we map it back to
+    /// a row by accumulating slice widths.
+    @State private var hoveredAngle: Double?
+
+    /// Pre-computed cumulative-angle table for hover lookups + total
+    /// for the percent calculation. Refreshed when `cached` changes
+    /// (which only happens on a scan tick), so per-pixel hover work
+    /// is O(rows) over an already-built array — no `reduce` per move.
+    @State private var hoverCumulative: [(row: ModelRow, max: Double)] = []
+    @State private var hoverTotalTokens: Int64 = 0
+
+    @MainActor
+    private func refreshHoverIndex() {
         var running = 0.0
-        var hover: [(row: ModelRow, max: Double)] = []
-        hover.reserveCapacity(rows.count)
-        var hoverTotal: Int64 = 0
+        var built: [(row: ModelRow, max: Double)] = []
+        built.reserveCapacity(rows.count)
+        var totalTokens: Int64 = 0
         for r in rows {
             let t = Int64(r.inputTokens + r.outputTokens + r.cacheReadTokens)
             running += Double(t)
-            hoverTotal += t
-            hover.append((r, running))
+            totalTokens += t
+            built.append((r, running))
         }
-        self.hoverCumulative = hover
-        self.hoverTotalTokens = hoverTotal
+        hoverCumulative = built
+        hoverTotalTokens = totalTokens
     }
 
     private var hoveredRow: ModelRow? {
@@ -87,8 +91,9 @@ private struct PerModelTodayContent: View {
 
     var body: some View {
         PacerCard("Today by model", trailing: {
-            // Hover-reveal of the selected wedge. Reads the precomputed
-            // total instead of doing a fresh `reduce` on every move.
+            // Hover-reveal of the selected wedge. Reads pre-computed
+            // total from `hoverTotalTokens` instead of doing a fresh
+            // `reduce` on every hover tick.
             if let r = hoveredRow {
                 let total = hoverTotalTokens
                 let myTotal = r.inputTokens + r.outputTokens + r.cacheReadTokens
@@ -114,6 +119,14 @@ private struct PerModelTodayContent: View {
                     table
                 }
             }
+        }
+        .onAppear {
+            refreshCache()
+            refreshHoverIndex()
+        }
+        .onChange(of: scanMeta.first?.value) { _, _ in
+            refreshCache()
+            refreshHoverIndex()
         }
     }
 

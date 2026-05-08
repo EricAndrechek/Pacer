@@ -310,6 +310,14 @@ public struct PageScaffold<Trailing: View, Content: View>: View {
             .padding(.bottom, 28)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // Hide scroll indicators so AppleShowScrollBars=Always doesn't
+        // reserve a ~15px legacy gutter on the trailing edge of every
+        // ScrollView. Without this, switching tabs caused a horizontal
+        // jiggle: each fresh ScrollView had to discover overflow on
+        // its first layout pass, briefly rendering at full width
+        // before reflowing narrower once the gutter showed up. Matches
+        // what DayDetailView/ProjectDetailView already do.
+        .scrollIndicators(.never)
     }
 
     private var header: some View {

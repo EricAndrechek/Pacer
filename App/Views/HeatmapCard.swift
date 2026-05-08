@@ -23,32 +23,8 @@ struct HeatmapCard: View {
     /// every session once and bucketing across the day(s) it touched
     /// is N (sessions) rather than D × N (days × sessions).
     @Query private var sessions: [SessionInfo]
-
-    init(weekCount: Int = 52, onDayTap: @escaping (String) -> Void) {
-        self.weekCount = weekCount
-        self.onDayTap = onDayTap
-    }
-
-    var body: some View {
-        // Hand the @Query results to the inner view so the grid is
-        // computed in its init, populating `cached` synchronously
-        // before the first render. Without this split the @State
-        // cache started empty, and the .onAppear refresh repopulated
-        // it on the next tick — causing the heatmap to jump from a
-        // blank frame to the full year on every History-tab mount.
-        HeatmapContent(
-            weekCount: weekCount,
-            aggregates: aggregates,
-            sessions: sessions,
-            onDayTap: onDayTap
-        )
-    }
-}
-
-private struct HeatmapContent: View {
-    let weekCount: Int
-    let onDayTap: (String) -> Void
-    let cached: Cached
+    @Query(HeatmapCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var cached = Cached()
 
     /// Persisted in App Group `UserDefaults` so the user's chosen
     /// coloring survives launches. Lives next to other view-state
@@ -61,21 +37,20 @@ private struct HeatmapContent: View {
         ProjectMetric(rawValue: metricRaw) ?? .cost
     }
 
-    init(
-        weekCount: Int,
-        aggregates: [DailyAggregate],
-        sessions: [SessionInfo],
-        onDayTap: @escaping (String) -> Void
-    ) {
+    init(weekCount: Int = 52, onDayTap: @escaping (String) -> Void) {
         self.weekCount = weekCount
         self.onDayTap = onDayTap
-        self.cached = Self.compute(
-            weekCount: weekCount,
-            aggregates: aggregates,
-            sessions: sessions
-        )
     }
 
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    /// fileprivate so the HeatmapCellButton in this file can reference
+    /// it. Still effectively scoped to this file via the outer struct.
     fileprivate struct Cell: Identifiable {
         let date: Date
         let dateKey: String
@@ -93,22 +68,18 @@ private struct HeatmapContent: View {
         }
     }
 
-    /// Pre-built grid + max-cap that the body reads from. Computed
-    /// once in init from the @Query results so hover/scroll over the
-    /// card never re-iterate.
-    fileprivate struct Cached {
-        var grid: [[Cell?]]
-        var maxByMetric: [ProjectMetric: Double]
-        var totalsByMetric: [ProjectMetric: Double]
+    /// Pre-built grid + max-cap that the body reads from. Recomputed
+    /// only when the underlying data changes (via `scanMeta` tick) so
+    /// hover/scroll over the card don't re-iterate.
+    private struct Cached {
+        var grid: [[Cell?]] = []
+        var maxByMetric: [ProjectMetric: Double] = [:]
+        var totalsByMetric: [ProjectMetric: Double] = [:]
     }
 
     private var grid: [[Cell?]] { cached.grid }
 
-    private static func compute(
-        weekCount: Int,
-        aggregates: [DailyAggregate],
-        sessions: [SessionInfo]
-    ) -> Cached {
+    private func refreshCache() {
         // Per-day rollup: cost + tokens come from DailyAggregate;
         // distinct-session count comes from iterating SessionInfo and
         // bucketing each session across every day it overlapped. That
@@ -156,7 +127,8 @@ private struct HeatmapContent: View {
         guard let thisMonday = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)),
               let firstMonday = cal.date(byAdding: .weekOfYear, value: -(weekCount - 1), to: thisMonday)
         else {
-            return Cached(grid: [], maxByMetric: [:], totalsByMetric: [:])
+            cached = Cached()
+            return
         }
 
         let formatter = DateFormatter()
@@ -205,7 +177,7 @@ private struct HeatmapContent: View {
             }
         }
 
-        return Cached(
+        cached = Cached(
             grid: weeks,
             maxByMetric: maxByMetric,
             totalsByMetric: totalsByMetric
@@ -277,6 +249,8 @@ private struct HeatmapContent: View {
                 summaryFooter
             }
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     /// Vertical offset between the cell's top and the tooltip's
