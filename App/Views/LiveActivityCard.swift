@@ -18,11 +18,6 @@ struct LiveActivityCard: View {
     /// "no samples" — much more useful when the user comes back to
     /// the dashboard after a break.
     @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
-    /// Lightweight signal that the scan loop just ran; drives cache
-    /// invalidation without forcing a fetch of recentSamples on every
-    /// body refresh.
-    @Query(LiveActivityCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cachedStats = LiveStats()
 
     init() {
         let cutoff = Date().addingTimeInterval(-3600)  // 1h
@@ -36,13 +31,6 @@ struct LiveActivityCard: View {
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )
     }
-
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
 
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
@@ -65,10 +53,11 @@ struct LiveActivityCard: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
-    private var stats: LiveStats { cachedStats }
-
-    @MainActor
-    private func refreshStats() {
+    /// Derived synchronously from `recentSamples` so the first render
+    /// already shows the real metric grid. The previous @State + onAppear
+    /// pattern flashed the empty state for one frame on each tab switch,
+    /// reflowing all cards below.
+    private var stats: LiveStats {
         var s = LiveStats()
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         for sample in recentSamples {
@@ -82,7 +71,7 @@ struct LiveActivityCard: View {
                 s.lastSampleAt = sample.sampledAt
             }
         }
-        cachedStats = s
+        return s
     }
 
     private var todayCostSoFar: Double {
@@ -92,7 +81,7 @@ struct LiveActivityCard: View {
     /// "(hourly rate) × (hours left in day)" projection. Bounded by
     /// wall-clock so a 10-minute spike at midnight doesn't extrapolate
     /// to nonsense.
-    private var projectedEndOfDay: Double {
+    private func projectedEndOfDay(stats: LiveStats) -> Double {
         let now = Date()
         let cal = Calendar.current
         let endOfDay = cal.date(bySettingHour: 23, minute: 59, second: 59, of: now) ?? now
@@ -101,27 +90,24 @@ struct LiveActivityCard: View {
     }
 
     var body: some View {
-        PacerCard("Live activity", trailing: { freshnessChip }) {
-            if stats.sampleCount == 0 {
+        let s = stats
+        PacerCard("Live activity", trailing: { freshnessChip(stats: s) }) {
+            if s.sampleCount == 0 {
                 emptyState
             } else {
-                metricGrid
+                metricGrid(stats: s)
             }
         }
-        .onAppear { refreshStats() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshStats() }
-        // When cost mode changes the cache needs to refresh too —
-        // ensureLoaded is cheap if pricing is already in memory.
+        // The pricing cache needs an explicit reload when the user
+        // toggles cost mode — `effectiveCostUSD` reads it. Body re-eval
+        // alone won't trigger that, so we keep this side-effect.
         .onChange(of: costModeRaw) { _, _ in
-            Task {
-                await SampleCostCache.reload()
-                await MainActor.run { refreshStats() }
-            }
+            Task { await SampleCostCache.reload() }
         }
     }
 
     @ViewBuilder
-    private var freshnessChip: some View {
+    private func freshnessChip(stats: LiveStats) -> some View {
         if stats.hasFreshActivity {
             Chip(text: "live", systemImage: "bolt.fill", tint: .yellow, size: .compact)
         } else if let last = stats.lastSampleAt {
@@ -151,7 +137,7 @@ struct LiveActivityCard: View {
         }
     }
 
-    private var metricGrid: some View {
+    private func metricGrid(stats: LiveStats) -> some View {
         LazyVGrid(
             columns: Array(
                 repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
@@ -174,7 +160,7 @@ struct LiveActivityCard: View {
                 label: "today so far"
             )
             MetricTile(
-                value: pacerCost(projectedEndOfDay),
+                value: pacerCost(projectedEndOfDay(stats: stats)),
                 label: "projected EOD",
                 hint: "if rate holds"
             )

@@ -10,11 +10,9 @@ import PacerUI
 /// the two columns.
 struct PaceChartCard: View {
     /// 8-day window of rate-limit samples. Body never reads the array
-    /// — pre-bucketed by window in `cached` so neither column does its
-    /// own filter pass.
+    /// — pre-bucketed by window in `bucketed` so neither column does
+    /// its own filter pass.
     @Query private var samples: [RateLimitSample]
-    @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached = Cached()
 
     init() {
         let cutoff = Date().addingTimeInterval(-8 * 86400)
@@ -25,59 +23,53 @@ struct PaceChartCard: View {
         )
     }
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
-
-    private struct Cached {
+    private struct Bucketed {
         var fiveHour: [RateLimitSample] = []
         var sevenDay: [RateLimitSample] = []
         var latest: RateLimitSample?
     }
 
-    private func refreshCache() {
-        var fh: [RateLimitSample] = []
-        var sd: [RateLimitSample] = []
-        var newest: RateLimitSample?
+    /// Derived synchronously from `samples` so the first render already
+    /// has the real layout — the previous @State + .onAppear pattern
+    /// rendered the empty state for one frame, then reflowed all cards
+    /// below this one when the cache populated.
+    private var bucketed: Bucketed {
+        var b = Bucketed()
         for s in samples {
-            if s.window == "five_hour" { fh.append(s) }
-            else if s.window == "seven_day" { sd.append(s) }
-            if newest == nil || s.sampledAt > newest!.sampledAt { newest = s }
+            if s.window == "five_hour" { b.fiveHour.append(s) }
+            else if s.window == "seven_day" { b.sevenDay.append(s) }
+            if b.latest == nil || s.sampledAt > b.latest!.sampledAt { b.latest = s }
         }
-        cached = Cached(fiveHour: fh, sevenDay: sd, latest: newest)
+        return b
     }
 
     var body: some View {
-        PacerCard("Rate-limit pace", trailing: { trailingChip }) {
-            if cached.latest == nil {
+        let b = bucketed
+        PacerCard("Rate-limit pace", trailing: { trailingChip(latest: b.latest) }) {
+            if b.latest == nil {
                 emptyState
             } else {
                 HStack(alignment: .top, spacing: 24) {
                     PaceChartColumn(
                         title: "5-hour",
                         duration: 5 * 3600,
-                        windowSamples: cached.fiveHour
+                        windowSamples: b.fiveHour
                     )
                     Divider()
                         .frame(height: 110)
                     PaceChartColumn(
                         title: "7-day",
                         duration: 7 * 86400,
-                        windowSamples: cached.sevenDay
+                        windowSamples: b.sevenDay
                     )
                 }
             }
         }
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ViewBuilder
-    private var trailingChip: some View {
-        if let latest = cached.latest {
+    private func trailingChip(latest: RateLimitSample?) -> some View {
+        if let latest {
             Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

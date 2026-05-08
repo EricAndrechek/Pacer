@@ -177,18 +177,13 @@ private struct ModelsContent: View {
         return descending ? sorted.reversed() : sorted
     }
 
-    /// Cached `dailyMix` materialization. Re-mapping `aggregates` on
-    /// every body render allocated a new array each chart-hover tick;
-    /// caching keyed on (aggregate count + scanMeta) means the hover
-    /// path only walks an already-built array.
-    @State private var cachedDailyMix: [DailyMix] = []
-    @State private var cachedDailyMixCount: Int = -1
-
-    private var dailyMix: [DailyMix] { cachedDailyMix }
-
-    @MainActor
-    private func refreshDailyMix() {
-        cachedDailyMix = aggregates.map {
+    /// Re-derived from `aggregates` on every body call. `rows` already
+    /// follows this pattern, so dropping the @State cache here keeps
+    /// the two derivations consistent — and means a tab switch into
+    /// Models doesn't render an empty trend chart for one frame before
+    /// .onAppear refreshes it.
+    private var dailyMix: [DailyMix] {
+        aggregates.map {
             DailyMix(
                 date: $0.date,
                 model: $0.model,
@@ -196,7 +191,6 @@ private struct ModelsContent: View {
                 tokens: $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
             )
         }
-        cachedDailyMixCount = aggregates.count
     }
 
     @State private var selectedDay: SelectedDay?
@@ -218,16 +212,6 @@ private struct ModelsContent: View {
                 }
             }
         }
-        .onAppear {
-            if cachedDailyMixCount != aggregates.count {
-                refreshDailyMix()
-            }
-            refreshShareCumulative()
-        }
-        .onChange(of: aggregates.count) { _, _ in
-            refreshDailyMix()
-            refreshShareCumulative()
-        }
         // Trend bar click drills into that day's modal — surfaces in
         // the Models tab finally have the same drill-in affordance as
         // the Dashboard's daily chart and History's heatmap.
@@ -245,42 +229,39 @@ private struct ModelsContent: View {
     }
 
     @State private var hoveredShareAngle: Double?
-    /// Sorted-by-cumulative-angle table for the share donut. Recomputed
-    /// when `rows` change; consulted on every hover tick. Without this
-    /// the hover path walked the full row array AND summed angles each
-    /// time — N steps per pixel move.
-    @State private var shareCumulative: [(row: ModelRow, max: Double)] = []
-    @State private var shareTotalTokens: Int64 = 0
 
-    @MainActor
-    private func refreshShareCumulative() {
+    /// Sorted-by-cumulative-angle table for the share donut. Derived
+    /// directly from `rows` (a handful of models) — cheap enough to
+    /// rebuild on each body call, and avoids the empty-then-populated
+    /// flash the previous @State cache caused on tab mount.
+    private var shareCumulative: [(row: ModelRow, max: Double)] {
         var running = 0.0
         var built: [(row: ModelRow, max: Double)] = []
         built.reserveCapacity(rows.count)
-        var totalTokens: Int64 = 0
         for r in rows {
             running += Double(r.totalTokens)
-            totalTokens += r.totalTokens
             built.append((r, running))
         }
-        shareCumulative = built
-        shareTotalTokens = totalTokens
+        return built
+    }
+
+    private var shareTotalTokens: Int64 {
+        rows.reduce(0) { $0 + $1.totalTokens }
     }
 
     private var hoveredShareRow: ModelRow? {
-        guard let angle = hoveredShareAngle, !shareCumulative.isEmpty else { return nil }
+        let cumulative = shareCumulative
+        guard let angle = hoveredShareAngle, !cumulative.isEmpty else { return nil }
         // Linear scan over a precomputed table; cheap because N is
         // small (handful of models). Could binary-search but the
         // wins don't show up at this size.
-        for entry in shareCumulative where angle <= entry.max {
+        for entry in cumulative where angle <= entry.max {
             return entry.row
         }
-        return shareCumulative.last?.row
+        return cumulative.last?.row
     }
 
     private var shareCard: some View {
-        // Read pre-computed total from the cache instead of doing a
-        // fresh `reduce` on every body refresh.
         let total = shareTotalTokens
         return PacerCard("Token share", trailing: {
             if let r = hoveredShareRow {

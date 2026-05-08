@@ -312,21 +312,6 @@ private struct ProjectsContent: View {
                 }
             }
         }
-        .onAppear { ensureOverviewIndex() }
-        .onChange(of: aggregates.count) { _, _ in ensureOverviewIndex() }
-        .onChange(of: overviewMetric) { _, _ in ensureOverviewIndex() }
-    }
-
-    /// Refresh the cumulative-angle index iff the input set changed.
-    /// The cache key encodes both (top rows by id) and (metric) so a
-    /// re-render that changed neither doesn't pay the rebuild cost.
-    @MainActor
-    private func ensureOverviewIndex() {
-        let top = Array(rows.prefix(5))
-        let key = "\(overviewMetric.rawValue)|\(top.map(\.id).joined(separator: ","))"
-        if key != overviewIndexKey {
-            refreshOverviewIndex(top: top, metric: overviewMetric)
-        }
     }
 
     private var noSearchMatchesState: some View {
@@ -364,43 +349,37 @@ private struct ProjectsContent: View {
     /// in the card header — mirrors the heatmap's metric picker so the
     /// app feels consistent.
     @State private var hoveredOverviewAngle: Double?
-    /// Pre-computed cumulative-angle index keyed on (rows, metric). The
-    /// hover handler reads it without re-summing — important for chart
-    /// hover tick frequency.
-    @State private var overviewCumulative: [(row: ProjectRow, max: Double)] = []
-    @State private var overviewTotalForMetric: Double = 0
-    @State private var overviewIndexKey: String = ""
 
-    @MainActor
-    private func refreshOverviewIndex(top: [ProjectRow], metric: ProjectMetric) {
+    /// Cumulative-angle index over the top-5 rows for the active
+    /// metric. Derived synchronously so a Projects-tab mount renders
+    /// the donut at its real size on the first frame — the previous
+    /// @State + .onAppear pattern showed an empty donut briefly, then
+    /// snapped to the populated layout one tick later.
+    private var overviewIndex: (cumulative: [(row: ProjectRow, max: Double)], total: Double) {
+        let top = Array(rows.prefix(5))
         var running = 0.0
         var built: [(row: ProjectRow, max: Double)] = []
         built.reserveCapacity(top.count)
         for row in top {
-            running += value(for: metric, in: row)
+            running += value(for: overviewMetric, in: row)
             built.append((row, running))
         }
-        overviewCumulative = built
-        overviewTotalForMetric = running
-        // Cache key changes when the input set changes — body checks
-        // this before triggering a refresh.
-        overviewIndexKey = "\(metric.rawValue)|\(top.map(\.id).joined(separator: ","))"
+        return (built, running)
     }
 
-    private func hoveredOverviewProject(top: [ProjectRow]) -> ProjectRow? {
-        guard let angle = hoveredOverviewAngle, !overviewCumulative.isEmpty else { return nil }
-        for entry in overviewCumulative where angle <= entry.max {
+    private func hoveredOverviewProject(cumulative: [(row: ProjectRow, max: Double)]) -> ProjectRow? {
+        guard let angle = hoveredOverviewAngle, !cumulative.isEmpty else { return nil }
+        for entry in cumulative where angle <= entry.max {
             return entry.row
         }
-        return overviewCumulative.last?.row
+        return cumulative.last?.row
     }
 
     private var overviewCard: some View {
         let top = Array(rows.prefix(5))
-        // Total over the same top set as the donut renders. Read from
-        // the cache; refreshed only when (rows, metric) change.
-        let totalForMetric = overviewTotalForMetric
-        let hovered = hoveredOverviewProject(top: top)
+        let index = overviewIndex
+        let totalForMetric = index.total
+        let hovered = hoveredOverviewProject(cumulative: index.cumulative)
         return PacerCard("Top projects", trailing: {
             HStack(spacing: 12) {
                 if let h = hovered {

@@ -25,36 +25,44 @@ struct TodayTimelineCard: View {
         )
     }
 
-    /// Today's samples. Body never reads the array — we cache via a
-    /// scan-meta tick so a hot save loop doesn't re-iterate ~3000 of
-    /// today's samples on every body refresh.
     @Query private var samples: [TokenSample]
-    @Query(TodayTimelineCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached = Cached()
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
+    var body: some View {
+        // Hand the resolved @Query results to the inner view, which
+        // computes the bucket cache in its init. That keeps the cache
+        // synchronous on first render (no empty→populated reflow when
+        // a tab switch mounts the card) while preserving the original
+        // perf optimization: hover-state changes inside the inner view
+        // re-render its body but do NOT re-run init, so the 24-bucket
+        // computation does not repeat per hover tick.
+        TodayTimelineContent(samples: samples, onTodayTap: onTodayTap)
+    }
+}
 
-    private struct Hour: Identifiable {
+private struct TodayTimelineContent: View {
+    let onTodayTap: (() -> Void)?
+    let cached: Cached
+    @State private var hoveredHour: Int?
+
+    struct Hour: Identifiable {
         let hour: Int
         let tokens: Int64
         let cost: Double
         var id: Int { hour }
     }
 
-    private struct Cached {
-        var hours: [Hour] = (0..<24).map { Hour(hour: $0, tokens: 0, cost: 0) }
+    struct Cached {
+        var hours: [Hour]
         var peakHour: Int?
-        var totalTokens: Int64 = 0
-        var sampleCount: Int = -1
+        var totalTokens: Int64
     }
 
-    @MainActor
-    private func refreshCache() {
+    init(samples: [TokenSample], onTodayTap: (() -> Void)?) {
+        self.onTodayTap = onTodayTap
+        self.cached = Self.compute(samples: samples)
+    }
+
+    private static func compute(samples: [TokenSample]) -> Cached {
         let cal = Calendar.current
         var byHour: [Int: (tokens: Int64, cost: Double)] = [:]
         var total: Int64 = 0
@@ -77,15 +85,12 @@ struct TodayTimelineCard: View {
             return Hour(hour: h, tokens: v.tokens, cost: v.cost)
         }
         let peak = bucketed.max { $0.tokens < $1.tokens }
-        cached = Cached(
+        return Cached(
             hours: bucketed,
             peakHour: (peak?.tokens ?? 0) > 0 ? peak?.hour : nil,
-            totalTokens: total,
-            sampleCount: samples.count
+            totalTokens: total
         )
     }
-
-    @State private var hoveredHour: Int?
 
     var body: some View {
         PacerCard("Today by hour", trailing: {
@@ -126,8 +131,6 @@ struct TodayTimelineCard: View {
                 chart
             }
         }
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var chart: some View {
