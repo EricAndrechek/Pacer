@@ -181,9 +181,18 @@ struct ContentView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 8)
         }
-        .frame(minWidth: 200, idealWidth: 220, maxWidth: 260)
+        // `.navigationSplitViewColumnWidth(min:ideal:max:)` is the
+        // single source of truth for sidebar width — the redundant
+        // `.frame(...)` we used to set on the same VStack confused
+        // the resize handle and let the user drag the divider past
+        // the intended bounds. Drop the .frame so SwiftUI clamps
+        // resize gestures to these limits cleanly.
         .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
-        .toolbar(removing: .sidebarToggle)
+        // Keep the standard sidebar toggle (View → Show / Hide
+        // Sidebar, plus the toolbar button). Previously removed for
+        // visual cleanliness — but combined with the resize divider,
+        // the user could drag-collapse the sidebar with no clear way
+        // to bring it back. The toggle is the recovery path.
         // Make the sidebar a focus target so up/down arrows cycle
         // through destinations, matching macOS-native sidebar nav.
         // .focusEffectDisabled keeps the system focus ring off the

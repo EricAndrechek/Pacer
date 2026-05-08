@@ -265,12 +265,15 @@ private struct NotificationsPanel: View {
     @AppStorage(PacerSettings.Key.dailySummaryHour, store: PacerSettings.store)
     private var dailySummaryHour: Int = 21
 
-    /// Currency code used for the daily-cost threshold field. Reads
-    /// the user's locale at view-init time (locale rarely changes
-    /// mid-session) so the formatter follows the system. Falls back
-    /// to USD if the locale doesn't surface a currency.
-    private let currencyCode: String =
-        Locale.current.currency?.identifier ?? "USD"
+    /// Always USD. Anthropic's pricing — and therefore everything
+    /// `DailyAggregate.totalCostUSD` stores — is denominated in USD,
+    /// so the threshold field must be USD too: a EUR-locale user
+    /// typing "50" expects €50, but the underlying compare against
+    /// today's-USD-cost would still treat it as $50 USD. The
+    /// `.currency(code: "USD")` formatter keeps the code fixed while
+    /// still picking up locale conventions for separator characters
+    /// and currency-symbol placement.
+    private let currencyCode: String = "USD"
 
     @State private var testStatus: TestStatus = .idle
 
