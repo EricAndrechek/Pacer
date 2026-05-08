@@ -58,6 +58,14 @@ public func pacerWeekdayClock(_ date: Date) -> String {
     return f.string(from: date)
 }
 
+/// Compact `pacerWeekdayClock` for narrow widget canvases: weekday plus
+/// `pacerHour(.compact)` — `"Mon 3p"` / `"Mon 15"`. Saves ~3 chars vs.
+/// `"Mon 3 PM"` / `"Mon 15:00"` so the 7-day reset caption fits inside
+/// a small/medium widget column without truncation.
+public func pacerWeekdayClockCompact(_ date: Date) -> String {
+    "\(pacerWeekdayShort(date)) \(pacerHour(date, style: .compact))"
+}
+
 /// Three-letter weekday abbreviation, locale-aware. `"Mon"`, `"Tue"`.
 public func pacerWeekdayShort(_ date: Date) -> String {
     Cached.weekday.string(from: date)
@@ -84,15 +92,27 @@ public func pacerRelative(
 
 // MARK: - Reset caption
 
-/// "resets in 2h · 9 PM" (5h cycle) / "resets in 4d · Mon 3 PM" (7d
-/// cycle). The dashboard pace-card's reset line — promoted into a
+/// "resets in 2 hr. · 9:14 PM" (5h cycle) / "resets in 4 days · Mon 3 PM"
+/// (7d cycle). The dashboard pace-card's reset line — promoted into a
 /// shared helper so the gauge widget, the pace-chart widget, and any
 /// future menu-bar surface all print the same string.
-public func pacerResetCaption(resetsAt: Date, durationSeconds: TimeInterval) -> String {
-    let rel = pacerRelative(resetsAt, style: .short)
-    let clock = durationSeconds <= 6 * 3600
-        ? pacerClockTime(resetsAt)
-        : pacerWeekdayClock(resetsAt)
+///
+/// Pass `compact: true` for narrow widget contexts (~150pt column or
+/// less) — outputs `"resets in 2h · 9p"` / `"resets in 4d · Mon 3p"`,
+/// roughly two-thirds the width of the default. Saves the small and
+/// medium pace-chart widget columns from truncating the reset label.
+public func pacerResetCaption(
+    resetsAt: Date,
+    durationSeconds: TimeInterval,
+    compact: Bool = false
+) -> String {
+    let rel = pacerRelative(resetsAt, style: compact ? .abbreviated : .short)
+    let clock: String
+    if durationSeconds <= 6 * 3600 {
+        clock = compact ? pacerHour(resetsAt, style: .compact) : pacerClockTime(resetsAt)
+    } else {
+        clock = compact ? pacerWeekdayClockCompact(resetsAt) : pacerWeekdayClock(resetsAt)
+    }
     return "resets \(rel) · \(clock)"
 }
 

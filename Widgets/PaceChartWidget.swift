@@ -176,15 +176,22 @@ struct PaceChartWidgetView: View {
                 }
             }
             if let s = entry.fiveHour {
-                PaceChartView(data: s.chart, style: .compact)
-                    .frame(maxHeight: .infinity)
+                // Caption sits between the title bar and the chart so it
+                // gets the full column width (~134pt) instead of fighting
+                // for space below the chart's `maxHeight: .infinity`.
+                // `compact: true` shortens "in 2 hr. · 10:23 AM" to
+                // "in 2h · 10p" so the 7-day form (~22 chars) clears the
+                // single-line budget on a 158pt small canvas.
                 Text(pacerResetCaption(
                     resetsAt: s.resetsAt,
-                    durationSeconds: s.chart.durationSeconds
+                    durationSeconds: s.chart.durationSeconds,
+                    compact: true
                 ))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                PaceChartView(data: s.chart, style: .compact)
+                    .frame(maxHeight: .infinity)
             } else {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             }
@@ -248,15 +255,21 @@ struct PaceChartWidgetView: View {
             }
             if let state {
                 paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: true)
-                PaceChartView(data: state.chart, style: style)
-                    .frame(maxHeight: .infinity)
+                // Caption goes above the chart so it has the column's
+                // full width (~148pt at medium) instead of being squeezed
+                // by the chart filling vertically below. Compact format
+                // keeps the 7-day form ("resets in 4d · Mon 3p", ~22
+                // chars) inside the column width budget.
                 Text(pacerResetCaption(
                     resetsAt: state.resetsAt,
-                    durationSeconds: state.chart.durationSeconds
+                    durationSeconds: state.chart.durationSeconds,
+                    compact: true
                 ))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                PaceChartView(data: state.chart, style: style)
+                    .frame(maxHeight: .infinity)
             } else {
                 Text("collecting…")
                     .font(.caption2)
