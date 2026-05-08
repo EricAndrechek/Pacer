@@ -356,5 +356,10 @@ struct PaceChartWidget: Widget {
         // launch. See `Widgets/TopProjectsWidget.swift` history.
         .description("Your usage line traced against the dashed pace target. 5-hour and 7-day windows.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        // Opt out of the system's default ~16pt content margin so our
+        // own `WidgetStyle.*Pad` is the only inset. Without this, every
+        // widget got system-padding + ours stacked, leaving content
+        // visibly cramped vs first-party widgets that hug the canvas.
+        .contentMarginsDisabled()
     }
 }

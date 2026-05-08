@@ -202,5 +202,9 @@ struct DailyChartWidget: Widget {
         .configurationDisplayName("Daily cost")
         .description("Last 14 days of Claude Code spend.")
         .supportedFamilies([.systemMedium, .systemLarge])
+        // See `PaceChartWidget` for the rationale: drops the system's
+        // ~16pt default content margin so `WidgetStyle.*Pad` is the
+        // only inset.
+        .contentMarginsDisabled()
     }
 }

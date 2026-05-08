@@ -222,5 +222,6 @@ struct TopProjectsWidget: Widget {
         // at extension launch.
         .description("Project breakdown over the last 7 days.")
         .supportedFamilies([.systemMedium, .systemLarge])
+        .contentMarginsDisabled()
     }
 }

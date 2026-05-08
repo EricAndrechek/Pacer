@@ -123,5 +123,6 @@ struct TodayCostWidget: Widget {
         .configurationDisplayName("Today")
         .description("Today's Claude Code spend at a glance.")
         .supportedFamilies([.systemSmall])
+        .contentMarginsDisabled()
     }
 }

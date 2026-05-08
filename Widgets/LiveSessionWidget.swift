@@ -268,5 +268,6 @@ struct LiveSessionWidget: Widget {
         .configurationDisplayName("Current session")
         .description("Project, tokens, cost, and freshness for the most-recent Claude Code session.")
         .supportedFamilies([.systemSmall, .systemMedium])
+        .contentMarginsDisabled()
     }
 }

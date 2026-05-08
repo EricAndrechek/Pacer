@@ -186,5 +186,6 @@ struct PaceGaugesWidget: Widget {
         .configurationDisplayName("Rate limits")
         .description("5-hour and 7-day Claude Code rate-limit usage.")
         .supportedFamilies([.systemSmall, .systemMedium])
+        .contentMarginsDisabled()
     }
 }
