@@ -184,6 +184,37 @@ struct ContentView: View {
         .frame(minWidth: 200, idealWidth: 220, maxWidth: 260)
         .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
         .toolbar(removing: .sidebarToggle)
+        // Make the sidebar a focus target so up/down arrows cycle
+        // through destinations, matching macOS-native sidebar nav.
+        // .focusEffectDisabled keeps the system focus ring off the
+        // big VStack — individual SidebarItem rows surface selection
+        // with their own background tint.
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) {
+            moveSelection(by: -1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            moveSelection(by: 1)
+            return .handled
+        }
+    }
+
+    /// Cycle the sidebar selection by `delta` positions, wrapping at
+    /// the ends. Only the navigation destinations participate — we
+    /// skip Settings on cycle so up/down doesn't bounce out of the
+    /// usage views into Settings every time you reach the bottom of
+    /// "Activity."
+    private func moveSelection(by delta: Int) {
+        let order: [Destination] = [.dashboard, .history, .projects, .models, .settings]
+        let current = selection.wrappedValue
+        guard let idx = order.firstIndex(of: current) else {
+            selection.wrappedValue = .dashboard
+            return
+        }
+        let next = (idx + delta + order.count) % order.count
+        selection.wrappedValue = order[next]
     }
 
     /// Top-of-sidebar brand block: app glyph + name. Freshness moved

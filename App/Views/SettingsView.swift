@@ -259,6 +259,12 @@ private struct NotificationsPanel: View {
     @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
     private var dailyCostThreshold: Double = 50
 
+    @AppStorage(PacerSettings.Key.notifyDailySummary, store: PacerSettings.store)
+    private var dailySummaryEnabled: Bool = false
+
+    @AppStorage(PacerSettings.Key.dailySummaryHour, store: PacerSettings.store)
+    private var dailySummaryHour: Int = 21
+
     /// Currency code used for the daily-cost threshold field. Reads
     /// the user's locale at view-init time (locale rarely changes
     /// mid-session) so the formatter follows the system. Falls back
@@ -327,6 +333,27 @@ private struct NotificationsPanel: View {
                 }
             })
 
+            PacerCard("Daily summary", content: {
+                VStack(alignment: .leading, spacing: 14) {
+                    Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
+                        .toggleStyle(.switch)
+                    HStack {
+                        Text("Send at")
+                        Spacer()
+                        Picker("Send at", selection: $dailySummaryHour) {
+                            ForEach(0..<24, id: \.self) { h in
+                                Text(formatHour(h)).tag(h)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 130)
+                        .disabled(!dailySummaryEnabled)
+                    }
+                }
+            }, footer: {
+                Text("Quiet, informational banner showing today's spend and top model. Fires once per day after the chosen time, only if you've used Claude Code that day.")
+            })
+
             PacerCard("Test", content: {
                 HStack {
                     Button("Send test notification") {
@@ -352,6 +379,20 @@ private struct NotificationsPanel: View {
         case .denied:      return "system denied; check System Settings → Notifications → Pacer"
         case .failed(let m): return "failed: \(m)"
         }
+    }
+
+    /// Locale-aware hour label for the daily-summary picker. 12-hour
+    /// locales get "9 PM"; 24-hour locales get "21:00".
+    private func formatHour(_ h: Int) -> String {
+        var components = DateComponents()
+        components.hour = h
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = pacerUses24HourClock ? "HH:mm" : "h a"
+        guard let date = Calendar.current.date(from: components) else {
+            return "\(h):00"
+        }
+        return f.string(from: date)
     }
 
     /// Open System Settings → Notifications, falling back to the

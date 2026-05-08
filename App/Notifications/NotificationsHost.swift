@@ -52,6 +52,16 @@ struct NotificationsHost: View {
                 }
                 lastSeenDailyCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
                 await NotificationCoordinator.shared.requestAuthorizationIfNeeded()
+                // Daily-summary watchdog: tick every five minutes and
+                // post the once-a-day banner when the user-configured
+                // hour has been reached. Five minutes is fast enough
+                // to land within a tight window of "9:00 PM" without
+                // burning cycles. The coordinator's per-date dedup
+                // makes redundant ticks no-ops.
+                while !Task.isCancelled {
+                    handleDailySummary()
+                    try? await Task.sleep(for: .seconds(300))
+                }
             }
     }
 
@@ -97,6 +107,24 @@ struct NotificationsHost: View {
         Task { @MainActor in
             await NotificationCoordinator.shared.handleDailyCostUpdate(
                 currentCost: current,
+                date: today,
+                context: context
+            )
+        }
+    }
+
+    private func handleDailySummary() {
+        let current = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+        // Top model by cost. Multiple aggregate rows per (date, model)
+        // shouldn't exist, but `max(by:)` is safe either way.
+        let top = todayAggregates.max(by: { $0.totalCostUSD < $1.totalCostUSD })
+        let modelCount = Set(todayAggregates.map(\.model)).count
+        let today = TokenSample.formatDate(Date())
+        Task { @MainActor in
+            await NotificationCoordinator.shared.handleDailySummary(
+                currentCost: current,
+                topModel: top?.model,
+                modelCount: modelCount,
                 date: today,
                 context: context
             )

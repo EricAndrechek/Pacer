@@ -187,6 +187,58 @@ public final class NotificationCoordinator {
         center.removePendingNotificationRequests(withIdentifiers: ids)
     }
 
+    /// Once-per-day informational summary. Fires at most once per
+    /// local date once the configured hour has been reached.
+    /// Independent of the daily-cost ceiling banner — that one fires
+    /// when the user crosses a threshold; this one is purely
+    /// informational ("here's how today went") at a time of the
+    /// user's choosing.
+    public func handleDailySummary(
+        currentCost: Double,
+        topModel: String?,
+        modelCount: Int,
+        date: String,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notifyDailySummary) else { return }
+        // Hour gate: only fire once we're at or past the configured
+        // hour locally.
+        let configuredHour = defaults.integer(forKey: PacerSettings.Key.dailySummaryHour)
+        let nowHour = Calendar.current.component(.hour, from: Date())
+        guard nowHour >= configuredHour else { return }
+        // Don't notify when there's literally nothing to report —
+        // gives the user a clean "did Pacer break?" signal: if the
+        // banner doesn't fire on a known-active day, something's
+        // wrong upstream.
+        guard currentCost > 0 else { return }
+
+        let key = "notif.dailySummary.\(date)"
+        if alreadyNotified(key: key, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer daily summary"
+        let costStr = String(format: "$%.2f", currentCost)
+        if let topModel, modelCount > 0 {
+            let modelLabel = topModel
+                .split(separator: "/").last.map(String.init) ?? topModel
+            content.body = modelCount > 1
+                ? "\(costStr) today across \(modelCount) models. Top: \(modelLabel)."
+                : "\(costStr) today on \(modelLabel)."
+        } else {
+            content.body = "\(costStr) today."
+        }
+        content.sound = nil // quiet — informational, not urgent
+        content.interruptionLevel = .passive
+
+        let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: key, in: context)
+    }
+
     /// Today's-cost ceiling notification. Fires once per day-and-threshold
     /// pair so re-launching the app doesn't re-notify.
     public func handleDailyCostUpdate(

@@ -23,6 +23,12 @@ public enum PacerPreferenceKeys {
     public static let sevenDayThresholdsCSV  = "pacer.notifications.sevenDayThresholds"
     public static let notifyOnDailyCost      = "pacer.notifications.dailyCost"
     public static let dailyCostThresholdUSD  = "pacer.notifications.dailyCostThreshold"
+    /// Once-a-day "you spent X today" banner. Independent of the
+    /// daily-cost ceiling above — that one fires when the threshold
+    /// is exceeded; this one is purely informational at a chosen
+    /// time of day (default 9 PM local).
+    public static let notifyDailySummary     = "pacer.notifications.dailySummary"
+    public static let dailySummaryHour       = "pacer.notifications.dailySummaryHour"
     public static let costMode               = "pacer.display.costMode"
     /// Time-range selector shared by Projects, Models, and any future
     /// "rolling N-day" view. Persisted so the user's last-chosen window
