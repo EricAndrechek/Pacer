@@ -277,11 +277,17 @@ public struct FreshnessPulse: View {
     public var body: some View {
         ZStack {
             if shouldPulse {
+                // Halo scales from the dot's size (7pt, scale 0.5 of
+                // the 14pt outer frame) up to exactly the outer frame
+                // and fades out, so the radar-pulse stays *inside* the
+                // 14pt enclosing badge. The previous geometry started
+                // at 14pt and scaled to 1.3× → ~18pt, which spilled
+                // outside the ToolbarFreshness capsule.
                 Circle()
                     .fill(color.opacity(0.35))
                     .frame(width: 14, height: 14)
-                    .scaleEffect(pulse ? 1.3 : 0.9)
-                    .opacity(pulse ? 0.0 : 0.6)
+                    .scaleEffect(pulse ? 1.0 : 0.5)
+                    .opacity(pulse ? 0.0 : 0.7)
                     .animation(
                         .easeInOut(duration: 1.4).repeatForever(autoreverses: false),
                         value: pulse
