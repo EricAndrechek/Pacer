@@ -8,161 +8,42 @@ import PacerUI
 /// `PacerSettings`) so the menu bar, in-process scan, and widgets pick
 /// up changes without a restart.
 ///
-/// Layout: a small inner sidebar of categories on the left; the right-
-/// hand pane shows the selected category's content. Mirrors the
-/// macOS Sequoia System Settings shape — every Pacer category becomes
-/// its own focused panel rather than a long scroll of stacked sections.
+/// Layout: one scrolling `Form` with every settings section inline.
+/// Earlier iterations split the sections behind an inner-sidebar
+/// "tabs in tabs" pattern that mimicked macOS Sequoia System Settings
+/// — but at the size of Pacer's settings surface, the inner sidebar
+/// was overkill and introduced background-color contrast issues
+/// against the outer NavigationSplitView sidebar. A single grouped
+/// Form is the idiom Mail, Notes, Reminders, and similar single-app
+/// settings panes use; sections give the same visual grouping the
+/// inner sidebar provided.
 struct SettingsView: View {
-    enum Category: String, CaseIterable, Identifiable {
-        case general, menuBar, notifications, cost, storage
-
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .general:       return "General"
-            case .menuBar:       return "Menu Bar"
-            case .notifications: return "Notifications"
-            case .cost:          return "Cost"
-            case .storage:       return "Storage"
-            }
-        }
-        /// Outline when not selected, filled when selected — macOS
-        /// Sequoia System Settings idiom. `switch.2` and
-        /// `menubar.rectangle` don't have clean filled variants, so
-        /// they stay the same in both states.
-        func systemImage(selected: Bool) -> String {
-            switch self {
-            case .general:       return "switch.2"
-            case .menuBar:       return "menubar.rectangle"
-            case .notifications: return selected ? "bell.badge.fill"     : "bell.badge"
-            case .cost:          return selected ? "dollarsign.circle.fill" : "dollarsign.circle"
-            case .storage:       return selected ? "externaldrive.fill" : "externaldrive"
-            }
-        }
-    }
-
-    @State private var category: Category = .general
-
     var body: some View {
-        HStack(spacing: 0) {
-            categorySidebar
-            Divider()
-            content
+        Form {
+            StartupSection()
+            MenuBarSection()
+            RateLimitAlertsSection()
+            ThresholdSection(title: "5-hour window", window: "five_hour")
+            ThresholdSection(title: "7-day window", window: "seven_day")
+            DailyCostAlertSection()
+            DailySummarySection()
+            NotificationTestSection()
+            CostCalculationSection()
+            StorageSection()
         }
-        .frame(minWidth: 720, minHeight: 540)
-    }
-
-    // MARK: - Inner sidebar
-
-    private var categorySidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Settings")
-                .font(.title2)
-                .fontWeight(.semibold)
-                .fontDesign(.rounded)
-                .padding(.horizontal, 12)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
-            ForEach(Category.allCases) { c in
-                CategoryItem(category: c, selection: $category)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-        .frame(width: 200, alignment: .leading)
-        // Slightly-tinted opaque background, matching macOS Sequoia
-        // System Settings' inner sidebar. The previous half-opacity
-        // window-color let the main pane bleed through and made the
-        // categories list feel washed-out.
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    // MARK: - Content pane
-
-    /// Panel title above each Form. Pinned at the top of the right
-    /// pane while the Form scrolls underneath — same layout as macOS
-    /// Sequoia System Settings. Pulling the title out of the Form
-    /// keeps the heading visible while a long Notifications panel is
-    /// scrolled.
-    @ViewBuilder
-    private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(category.label)
-                .font(.title)
-                .fontWeight(.semibold)
-                .fontDesign(.rounded)
-                .padding(.horizontal, 24)
-                .padding(.top, 22)
-                .padding(.bottom, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Each panel is a `Form` with `.formStyle(.grouped)` — the
-            // System-Settings-shape grouped rows give us native label
-            // alignment, the correct vertical insets, row dividers,
-            // and proper VoiceOver "settings list" semantics. The
-            // grouped Form scrolls itself so there is no outer
-            // ScrollView wrapping these panels.
-            Group {
-                switch category {
-                case .general:       GeneralPanel()
-                case .menuBar:       MenuBarPanel()
-                case .notifications: NotificationsPanel()
-                case .cost:          CostPanel()
-                case .storage:       StoragePanel()
-                }
-            }
-        }
+        .formStyle(.grouped)
+        // Constrain the detail pane so a wide window doesn't stretch
+        // the form rows to the full window width — settings forms
+        // read best at moderate width even when the user has a 27"
+        // display.
+        .frame(maxWidth: 720, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
-// MARK: - Sidebar item
+// MARK: - Startup
 
-private struct CategoryItem: View {
-    let category: SettingsView.Category
-    @Binding var selection: SettingsView.Category
-    @State private var hovering: Bool = false
-
-    private var isSelected: Bool { selection == category }
-
-    var body: some View {
-        Button {
-            selection = category
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: category.systemImage(selected: isSelected))
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(isSelected ? Color.white : .secondary)
-                    .frame(width: 18, alignment: .center)
-                Text(category.label)
-                    .font(.body)
-                    .fontWeight(isSelected ? .semibold : .regular)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(background)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-    }
-
-    private var background: Color {
-        if isSelected { return Color.accentColor }
-        if hovering { return Color.primary.opacity(0.06) }
-        return .clear
-    }
-}
-
-// MARK: - General
-
-private struct GeneralPanel: View {
+private struct StartupSection: View {
     @State private var loginItemStatus: LoginItemController.Status = .unknown
     @State private var actionError: String?
 
@@ -193,33 +74,30 @@ private struct GeneralPanel: View {
     }
 
     var body: some View {
-        Form {
-            Section {
-                Toggle("Open Pacer at login", isOn: isEnabled)
-                if loginItemStatus == .requiresApproval {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Text("Approval required.")
-                            .font(.caption)
-                        Button("Open System Settings") {
-                            LoginItemController.openSystemSettingsApproval()
-                        }
-                        .controlSize(.small)
-                    }
-                }
-                if let err = actionError {
-                    Text(err)
+        Section {
+            Toggle("Open Pacer at login", isOn: isEnabled)
+            if loginItemStatus == .requiresApproval {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Approval required.")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                    Button("Open System Settings") {
+                        LoginItemController.openSystemSettingsApproval()
+                    }
+                    .controlSize(.small)
                 }
-            } header: {
-                Text("Startup")
-            } footer: {
-                Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
             }
+            if let err = actionError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("Startup")
+        } footer: {
+            Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
         }
-        .formStyle(.grouped)
         .onAppear { refresh() }
     }
 
@@ -230,7 +108,7 @@ private struct GeneralPanel: View {
 
 // MARK: - Menu Bar
 
-private struct MenuBarPanel: View {
+private struct MenuBarSection: View {
     @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
     private var styleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
 
@@ -238,181 +116,59 @@ private struct MenuBarPanel: View {
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
     var body: some View {
-        Form {
-            Section {
-                Picker("What to show", selection: $styleRaw) {
-                    ForEach(PacerSettings.MenuBarStyle.allCases) { style in
-                        Text(style.label).tag(style.rawValue)
-                    }
+        Section {
+            Picker("What to show", selection: $styleRaw) {
+                ForEach(PacerSettings.MenuBarStyle.allCases) { style in
+                    Text(style.label).tag(style.rawValue)
                 }
-                Picker("Icon style", selection: $iconRaw) {
-                    ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
-                        Text(style.label).tag(style.rawValue)
-                    }
-                }
-                .disabled(styleRaw == PacerSettings.MenuBarStyle.percentOnly.rawValue
-                          || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
-            } header: {
-                Text("Display")
-            } footer: {
-                Text("Hiding the menu bar item doesn't stop tracking — Pacer keeps collecting in the background as long as the app process is running. Open the dashboard from Spotlight or the Dock when needed.")
             }
+            Picker("Icon style", selection: $iconRaw) {
+                ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
+                    Text(style.label).tag(style.rawValue)
+                }
+            }
+            .disabled(styleRaw == PacerSettings.MenuBarStyle.percentOnly.rawValue
+                      || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
+        } header: {
+            Text("Menu bar")
+        } footer: {
+            Text("Hiding the menu bar item doesn't stop tracking — Pacer keeps collecting in the background as long as the app process is running. Open the dashboard from Spotlight or the Dock when needed.")
         }
-        .formStyle(.grouped)
     }
 }
 
-// MARK: - Notifications
+// MARK: - Rate-limit alerts
 
-private struct NotificationsPanel: View {
+private struct RateLimitAlertsSection: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
-    @AppStorage(PacerSettings.Key.notifyOnDailyCost, store: PacerSettings.store)
-    private var dailyCostEnabled: Bool = false
-
-    @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
-    private var dailyCostThreshold: Double = 50
-
-    @AppStorage(PacerSettings.Key.notifyDailySummary, store: PacerSettings.store)
-    private var dailySummaryEnabled: Bool = false
-
-    @AppStorage(PacerSettings.Key.dailySummaryHour, store: PacerSettings.store)
-    private var dailySummaryHour: Int = 21
-
-    /// Always USD. Anthropic's pricing — and therefore everything
-    /// `DailyAggregate.totalCostUSD` stores — is denominated in USD,
-    /// so the threshold field must be USD too: a EUR-locale user
-    /// typing "50" expects €50, but the underlying compare against
-    /// today's-USD-cost would still treat it as $50 USD. The
-    /// `.currency(code: "USD")` formatter keeps the code fixed while
-    /// still picking up locale conventions for separator characters
-    /// and currency-symbol placement.
-    private let currencyCode: String = "USD"
-
-    @State private var testStatus: TestStatus = .idle
-
-    enum TestStatus {
-        case idle, sending, sent, denied, failed(String)
-    }
-
     var body: some View {
-        Form {
-            Section {
-                Toggle("Enable rate-limit notifications", isOn: $enabled)
-                    .onChange(of: enabled) { _, newValue in
-                        if newValue {
-                            Task {
-                                await NotificationCoordinator.shared
-                                    .requestAuthorizationIfNeeded()
-                            }
+        Section {
+            Toggle("Enable rate-limit notifications", isOn: $enabled)
+                .onChange(of: enabled) { _, newValue in
+                    if newValue {
+                        Task {
+                            await NotificationCoordinator.shared
+                                .requestAuthorizationIfNeeded()
                         }
                     }
-            } header: {
-                Text("Rate-limit alerts")
-            } footer: {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Add as many thresholds per window as you want — Pacer fires a separate banner each time usage crosses one upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
-                    HStack(spacing: 8) {
-                        Text("Not seeing banners?")
-                        Button("Open System Settings → Notifications") {
-                            openNotificationsSettings()
-                        }
-                        .controlSize(.small)
-                    }
-                    Text("Pacer's banner style is set there — choose **Banners** or **Alerts** rather than **None**.")
                 }
-            }
-
-            // Each window's threshold list is its own Section so the
-            // dynamic list of slider rows + "Add threshold" button reads
-            // as native grouped rows (matches macOS System Settings'
-            // "Add Item" patterns, e.g. Login Items, Sound).
-            ThresholdSection(
-                title: "5-hour window",
-                window: "five_hour",
-                enabled: enabled
-            )
-            ThresholdSection(
-                title: "7-day window",
-                window: "seven_day",
-                enabled: enabled
-            )
-
-            Section("Daily cost alert") {
-                Toggle("Notify when today's cost exceeds threshold", isOn: $dailyCostEnabled)
-                // LabeledContent + paired Stepper is the macOS-native
-                // pattern for "typed numeric value with up/down arrows."
-                // Without the Stepper, users had to retype the whole
-                // amount to adjust by $5; the field still accepts free
-                // input for non-standard values.
-                LabeledContent("Cost threshold") {
-                    HStack(spacing: 4) {
-                        TextField("Amount", value: $dailyCostThreshold,
-                                  format: .currency(code: currencyCode))
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 110)
-                        Stepper("", value: $dailyCostThreshold, in: 1...10_000, step: 5)
-                            .labelsHidden()
+        } header: {
+            Text("Rate-limit alerts")
+        } footer: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add thresholds per window — Pacer fires a banner each time usage crosses one upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                HStack(spacing: 8) {
+                    Text("Not seeing banners?")
+                    Button("Open System Settings → Notifications") {
+                        openNotificationsSettings()
                     }
+                    .controlSize(.small)
                 }
-                .disabled(!dailyCostEnabled)
-            }
-
-            Section {
-                Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
-                Picker("Send at", selection: $dailySummaryHour) {
-                    ForEach(0..<24, id: \.self) { h in
-                        Text(formatHour(h)).tag(h)
-                    }
-                }
-                .disabled(!dailySummaryEnabled)
-            } header: {
-                Text("Daily summary")
-            } footer: {
-                Text("Quiet, informational banner showing today's spend and top model. Fires once per day after the chosen time, only if you've used Claude Code that day.")
-            }
-
-            Section("Test") {
-                HStack {
-                    Button("Send test notification") {
-                        Task { await sendTestNotification() }
-                    }
-                    .disabled(testStatus == .sending)
-                    if let label = testLabel {
-                        Text(label)
-                            .font(.caption)
-                            .foregroundStyle(testColor)
-                    }
-                    Spacer()
-                }
+                Text("Pacer's banner style is set there — choose **Banners** or **Alerts** rather than **None**.")
             }
         }
-        .formStyle(.grouped)
-    }
-
-    private var testLabel: String? {
-        switch testStatus {
-        case .idle:        return nil
-        case .sending:     return "sending…"
-        case .sent:        return "sent"
-        case .denied:      return "system denied; check System Settings → Notifications → Pacer"
-        case .failed(let m): return "failed: \(m)"
-        }
-    }
-
-    /// Locale-aware hour label for the daily-summary picker. 12-hour
-    /// locales get "9 PM"; 24-hour locales get "21:00".
-    private func formatHour(_ h: Int) -> String {
-        var components = DateComponents()
-        components.hour = h
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = pacerUses24HourClock ? "HH:mm" : "h a"
-        guard let date = Calendar.current.date(from: components) else {
-            return "\(h):00"
-        }
-        return f.string(from: date)
     }
 
     /// Open System Settings → Notifications, falling back to the
@@ -429,52 +185,22 @@ private struct NotificationsPanel: View {
         let root = URL(string: "x-apple.systempreferences:")!
         NSWorkspace.shared.open(root)
     }
-
-    private var testColor: Color {
-        switch testStatus {
-        case .sent:    return .green
-        case .denied, .failed: return .orange
-        default:       return .secondary
-        }
-    }
-
-    private func sendTestNotification() async {
-        testStatus = .sending
-        let outcome = await NotificationCoordinator.shared.sendTestNotification()
-        await MainActor.run {
-            switch outcome {
-            case .delivered:        testStatus = .sent
-            case .denied:           testStatus = .denied
-            case .failed(let msg):  testStatus = .failed(msg)
-            }
-        }
-    }
-}
-
-extension NotificationsPanel.TestStatus: Equatable {
-    fileprivate static func == (lhs: NotificationsPanel.TestStatus, rhs: NotificationsPanel.TestStatus) -> Bool {
-        switch (lhs, rhs) {
-        case (.idle, .idle), (.sending, .sending), (.sent, .sent), (.denied, .denied):
-            return true
-        case (.failed, .failed): return true
-        default: return false
-        }
-    }
 }
 
 // MARK: - Threshold list section
 
 /// One window's worth of notification thresholds, rendered as a Form
-/// `Section` so it sits flush with the rest of the Settings panel.
-/// Each row is an independent threshold; rows can be added, removed,
-/// and individually adjusted. Persists through `PacerSettings`'s CSV
-/// helpers so the live `NotificationCoordinator` (also reading via
-/// `PacerSettings.thresholds(forWindow:)`) sees changes immediately.
+/// `Section`. Each row is an independent threshold; rows can be added,
+/// removed, and individually adjusted. Persists through
+/// `PacerSettings`'s helpers so the live `NotificationCoordinator`
+/// (also reading via `PacerSettings.thresholds(forWindow:)`) sees
+/// changes immediately.
 private struct ThresholdSection: View {
     let title: String
     let window: String
-    let enabled: Bool
 
+    @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
+    private var enabled: Bool = false
     @State private var thresholds: [Int] = []
 
     var body: some View {
@@ -563,10 +289,6 @@ private struct ThresholdSection: View {
 
 /// One row in the threshold list. Slider fills the available width;
 /// the value is shown to the right alongside a delete button.
-///
-/// Slider drops the `step:` parameter — that's what was causing the
-/// per-percent tick marks the user flagged as visual noise. We snap
-/// to whole percentages on read instead.
 private struct ThresholdRow: View {
     @Binding var value: Int
     let enabled: Bool
@@ -584,7 +306,9 @@ private struct ThresholdRow: View {
             .controlSize(.small)
             .disabled(!enabled)
             Text("\(value)%")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(.callout)
+                .fontWeight(.semibold)
+                .fontDesign(.rounded)
                 .monospacedDigit()
                 .frame(width: 44, alignment: .trailing)
                 .foregroundStyle(enabled ? .primary : .secondary)
@@ -600,34 +324,177 @@ private struct ThresholdRow: View {
     }
 }
 
+// MARK: - Daily cost alert
+
+private struct DailyCostAlertSection: View {
+    @AppStorage(PacerSettings.Key.notifyOnDailyCost, store: PacerSettings.store)
+    private var dailyCostEnabled: Bool = false
+
+    @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
+    private var dailyCostThreshold: Double = 50
+
+    /// Always USD. Anthropic's pricing — and therefore everything
+    /// `DailyAggregate.totalCostUSD` stores — is denominated in USD,
+    /// so the threshold field must be USD too: a EUR-locale user
+    /// typing "50" expects €50, but the underlying compare against
+    /// today's-USD-cost would still treat it as $50 USD. The
+    /// `.currency(code: "USD")` formatter keeps the code fixed while
+    /// still picking up locale conventions for separator characters
+    /// and currency-symbol placement.
+    private let currencyCode: String = "USD"
+
+    var body: some View {
+        Section("Daily cost alert") {
+            Toggle("Notify when today's cost exceeds threshold", isOn: $dailyCostEnabled)
+            // LabeledContent + paired Stepper is the macOS-native
+            // pattern for "typed numeric value with up/down arrows."
+            LabeledContent("Cost threshold") {
+                HStack(spacing: 4) {
+                    TextField("Amount", value: $dailyCostThreshold,
+                              format: .currency(code: currencyCode))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 110)
+                    Stepper("", value: $dailyCostThreshold, in: 1...10_000, step: 5)
+                        .labelsHidden()
+                }
+            }
+            .disabled(!dailyCostEnabled)
+        }
+    }
+}
+
+// MARK: - Daily summary
+
+private struct DailySummarySection: View {
+    @AppStorage(PacerSettings.Key.notifyDailySummary, store: PacerSettings.store)
+    private var dailySummaryEnabled: Bool = false
+
+    @AppStorage(PacerSettings.Key.dailySummaryHour, store: PacerSettings.store)
+    private var dailySummaryHour: Int = 21
+
+    var body: some View {
+        Section {
+            Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
+            Picker("Send at", selection: $dailySummaryHour) {
+                ForEach(0..<24, id: \.self) { h in
+                    Text(formatHour(h)).tag(h)
+                }
+            }
+            .disabled(!dailySummaryEnabled)
+        } header: {
+            Text("Daily summary")
+        } footer: {
+            Text("Quiet, informational banner showing today's spend and top model. Fires once per day after the chosen time, only if you've used Claude Code that day.")
+        }
+    }
+
+    /// Locale-aware hour label for the daily-summary picker. 12-hour
+    /// locales get "9 PM"; 24-hour locales get "21:00".
+    private func formatHour(_ h: Int) -> String {
+        var components = DateComponents()
+        components.hour = h
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateFormat = pacerUses24HourClock ? "HH:mm" : "h a"
+        guard let date = Calendar.current.date(from: components) else {
+            return "\(h):00"
+        }
+        return f.string(from: date)
+    }
+}
+
+// MARK: - Notification test
+
+private struct NotificationTestSection: View {
+    @State private var testStatus: TestStatus = .idle
+
+    enum TestStatus: Equatable {
+        case idle, sending, sent, denied, failed(String)
+
+        static func == (lhs: TestStatus, rhs: TestStatus) -> Bool {
+            switch (lhs, rhs) {
+            case (.idle, .idle), (.sending, .sending),
+                 (.sent, .sent), (.denied, .denied):
+                return true
+            case (.failed, .failed): return true
+            default: return false
+            }
+        }
+    }
+
+    var body: some View {
+        Section("Notification test") {
+            HStack {
+                Button("Send test notification") {
+                    Task { await sendTestNotification() }
+                }
+                .disabled(testStatus == .sending)
+                if let label = testLabel {
+                    Text(label)
+                        .font(.caption)
+                        .foregroundStyle(testColor)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    private var testLabel: String? {
+        switch testStatus {
+        case .idle:        return nil
+        case .sending:     return "sending…"
+        case .sent:        return "sent"
+        case .denied:      return "system denied; check System Settings → Notifications → Pacer"
+        case .failed(let m): return "failed: \(m)"
+        }
+    }
+
+    private var testColor: Color {
+        switch testStatus {
+        case .sent:    return .green
+        case .denied, .failed: return .orange
+        default:       return .secondary
+        }
+    }
+
+    private func sendTestNotification() async {
+        testStatus = .sending
+        let outcome = await NotificationCoordinator.shared.sendTestNotification()
+        await MainActor.run {
+            switch outcome {
+            case .delivered:        testStatus = .sent
+            case .denied:           testStatus = .denied
+            case .failed(let msg):  testStatus = .failed(msg)
+            }
+        }
+    }
+}
+
 // MARK: - Cost calculation
 
-private struct CostPanel: View {
+private struct CostCalculationSection: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costMode: String = "auto"
 
     var body: some View {
-        Form {
-            Section {
-                Picker("Mode", selection: $costMode) {
-                    Text("Auto (prefer stored, calculate when missing)").tag("auto")
-                    Text("Calculate (always from tokens × pricing)").tag("calculate")
-                    Text("Display (only stored Claude Code costs)").tag("display")
-                }
-                .pickerStyle(.radioGroup)
-            } header: {
-                Text("Cost calculation")
-            } footer: {
-                Text("**Auto** matches `bun x ccusage`. **Calculate** is what you want when older Claude Code lines lack `costUSD`. **Display** only shows server-supplied numbers and ignores tokens that didn't come with one.")
+        Section {
+            Picker("Mode", selection: $costMode) {
+                Text("Auto (prefer stored, calculate when missing)").tag("auto")
+                Text("Calculate (always from tokens × pricing)").tag("calculate")
+                Text("Display (only stored Claude Code costs)").tag("display")
             }
+            .pickerStyle(.radioGroup)
+        } header: {
+            Text("Cost calculation")
+        } footer: {
+            Text("**Auto** matches `bun x ccusage`. **Calculate** is what you want when older Claude Code lines lack `costUSD`. **Display** only shows server-supplied numbers and ignores tokens that didn't come with one.")
         }
-        .formStyle(.grouped)
     }
 }
 
 // MARK: - Storage
 
-private struct StoragePanel: View {
+private struct StorageSection: View {
     private var storeURL: URL? { try? PacerStore.storeURL() }
 
     private var logsDirURL: URL {
@@ -636,50 +503,45 @@ private struct StoragePanel: View {
     }
 
     var body: some View {
-        Form {
-            Section("Database") {
-                if let url = storeURL {
-                    LabeledContent("Location") {
-                        Text(url.path)
-                            .font(.system(.caption, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Spacer()
-                        Button("Show in Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([url])
-                        }
-                    }
-                } else {
-                    Text("App Group container unavailable.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Logs") {
+        Section("Database") {
+            if let url = storeURL {
                 LabeledContent("Location") {
-                    Text(logsDirURL.path)
+                    Text(url.path)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
                 }
                 HStack {
                     Spacer()
-                    Button("Open in Finder") {
-                        NSWorkspace.shared.open(logsDirURL)
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
+                }
+            } else {
+                Text("App Group container unavailable.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        Section("Logs") {
+            LabeledContent("Location") {
+                Text(logsDirURL.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            HStack {
+                Spacer()
+                Button("Open in Finder") {
+                    NSWorkspace.shared.open(logsDirURL)
                 }
             }
         }
-        .formStyle(.grouped)
     }
 }
 
-// (No "About" tab here — App menu → "About Pacer" opens the native
-// NSPanel with logo, version, and credits. Keyboard shortcuts are
-// discoverable through the menu bar where they're listed alongside
-// each command.)
+// (No "About" section here — App menu → "About Pacer" opens the native
+// NSPanel with logo, version, and credits.)
