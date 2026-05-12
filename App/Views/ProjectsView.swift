@@ -29,13 +29,13 @@ struct ProjectsView: View {
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
     @State private var searchText: String = ""
-    /// Lifted from ProjectsContent so the dismissibleModal modifier
+    /// Lifted from ProjectsContent so the modal-navigation modifier
     /// can attach OUTSIDE the PageScaffold's ScrollView. Without
     /// lifting this state up, the modal overlay sat inside the
     /// ScrollView's content frame and (a) scrolled with the page,
     /// (b) added empty padding to the bottom of the scrollable area
     /// equal to the modal's frame.
-    @State private var selectedProject: SelectedProject?
+    @State private var modalRoot: PacerModalDestination?
 
     private var range: TimeRange {
         TimeRange(rawValue: rangeRaw) ?? .ninetyDays
@@ -59,7 +59,13 @@ struct ProjectsView: View {
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
-                selectedBinding: $selectedProject
+                onSelectProject: { path, displayName, since in
+                    modalRoot = .project(
+                        path: path,
+                        displayName: displayName,
+                        since: since
+                    )
+                }
             )
             .id("\(range.rawValue)")
         }
@@ -75,31 +81,7 @@ struct ProjectsView: View {
             placement: .toolbar,
             prompt: "Filter projects"
         )
-        .dismissibleModal(item: $selectedProject) { sel in
-            ProjectDetailView(
-                projectPath: sel.path,
-                displayName: sel.displayName,
-                since: sel.since
-            )
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerOpenProject)) { note in
-            // DayDetailView posts this when the user clicks a project
-            // row inside the day modal. We open the project modal
-            // immediately; the day modal is responsible for dismissing
-            // itself before posting.
-            if let req = note.object as? SelectedProject {
-                selectedProject = req
-            }
-        }
-    }
-
-    /// Identifies the project the user clicked into. Lives at this
-    /// level so the modal stays out of the scroll content.
-    struct SelectedProject: Identifiable {
-        let path: String
-        let displayName: String
-        let since: Date?
-        var id: String { path }
+        .pacerModalNavigation(root: $modalRoot)
     }
 
     private var rangeBinding: Binding<TimeRange> {
@@ -166,7 +148,10 @@ private struct ProjectsContent: View {
     let sortFieldBinding: Binding<ProjectSort>
     let sortDescendingBinding: Binding<Bool>
     let overviewMetricBinding: Binding<ProjectMetric>
-    let selectedBinding: Binding<ProjectsView.SelectedProject?>
+    /// Callback into the page-level modal navigator. Receives the
+    /// project's path + display name + the range's start-date so the
+    /// detail view can scope its @Query.
+    let onSelectProject: (_ path: String, _ displayName: String, _ since: Date?) -> Void
 
     init(
         range: TimeRange,
@@ -178,7 +163,7 @@ private struct ProjectsContent: View {
         sortFieldBinding: Binding<ProjectSort>,
         sortDescendingBinding: Binding<Bool>,
         overviewMetricBinding: Binding<ProjectMetric>,
-        selectedBinding: Binding<ProjectsView.SelectedProject?>
+        onSelectProject: @escaping (_ path: String, _ displayName: String, _ since: Date?) -> Void
     ) {
         let since: Date?
         let cutoffString: String?
@@ -199,7 +184,7 @@ private struct ProjectsContent: View {
         self.sortFieldBinding = sortFieldBinding
         self.sortDescendingBinding = sortDescendingBinding
         self.overviewMetricBinding = overviewMetricBinding
-        self.selectedBinding = selectedBinding
+        self.onSelectProject = onSelectProject
         if let cutoffString {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -519,21 +504,13 @@ private struct ProjectsContent: View {
                 Divider().padding(.vertical, 4)
                 ForEach(rows) { row in
                     HoverRow(action: {
-                        selectedBinding.wrappedValue = ProjectsView.SelectedProject(
-                            path: row.path,
-                            displayName: row.displayName,
-                            since: rangeSince
-                        )
+                        onSelectProject(row.path, row.displayName, rangeSince)
                     }) {
                         projectRow(row)
                     }
                     .contextMenu {
                         Button("Open project") {
-                            selectedBinding.wrappedValue = ProjectsView.SelectedProject(
-                                path: row.path,
-                                displayName: row.displayName,
-                                since: rangeSince
-                            )
+                            onSelectProject(row.path, row.displayName, rangeSince)
                         }
                         if row.path != ProjectDailyAggregate.unknownProjectPath {
                             Button("Reveal in Finder") {

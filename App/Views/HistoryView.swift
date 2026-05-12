@@ -11,27 +11,20 @@ import PacerUI
 /// Order: lifetime hero → 26-week heatmap → monthly bar chart → top
 /// expensive days table.
 struct HistoryView: View {
-    @State private var selectedDay: SelectedDay?
-
-    struct SelectedDay: Identifiable {
-        let date: String
-        var id: String { date }
-    }
+    @State private var modalRoot: PacerModalDestination?
 
     var body: some View {
         PageScaffold("History", subtitle: "Lifetime view of your usage.") {
             LifetimeSummaryCard()
             HeatmapCard { dayKey in
-                selectedDay = SelectedDay(date: dayKey)
+                modalRoot = .day(date: dayKey)
             }
             MonthlyChartCard()
             TopDaysCard { dayKey in
-                selectedDay = SelectedDay(date: dayKey)
+                modalRoot = .day(date: dayKey)
             }
         }
-        .dismissibleModal(item: $selectedDay) { sel in
-            DayDetailView(date: sel.date)
-        }
+        .pacerModalNavigation(root: $modalRoot)
     }
 }
 

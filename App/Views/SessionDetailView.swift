@@ -4,48 +4,99 @@ import PacerCore
 import PacerUI
 
 /// Per-session drill-down. Reachable from `ProjectDetailView`'s
-/// sessions table (and from `DayDetailView`'s sessions card). Replaces
-/// the prior in-row "session title + transcript icon" inline pattern
-/// with a fuller surface that has room for cumulative tokens broken
-/// down by tier, the resolved session title (first user prompt),
-/// duration, and a transcript-reveal action.
-///
-/// Shown as a stacked dismissible modal so clicking outside dismisses
-/// just this view, leaving the underlying project / day modal intact.
+/// sessions table (and from `DayDetailView`'s sessions card) via the
+/// unified modal navigation — pushed onto the parent NavigationStack
+/// rather than opening as a nested modal. The native back button in
+/// the navigation chrome returns the user to wherever they came from;
+/// Esc/Cmd+W dismisses the whole modal.
 struct SessionDetailView: View {
-    let session: SessionInfo
+    /// Session identifier. Passed instead of the full SessionInfo so
+    /// the view can sit in a `NavigationStack` path (which requires
+    /// `Hashable` payloads) — the SessionInfo is fetched here via
+    /// `@Query` keyed on this id.
+    let sessionId: String
     /// Display name of the project this session belongs to. Plumbed
-    /// from the parent so we don't have to re-derive it from
-    /// `projectPath` at this layer.
+    /// from the parent so we don't have to re-derive it from the
+    /// session's `projectPath` at this layer.
     let projectDisplayName: String
 
+    @Query private var sessions: [SessionInfo]
     @Environment(\.dismissModal) private var dismissModal
     @State private var transcriptURL: URL?
 
+    init(sessionId: String, projectDisplayName: String) {
+        self.sessionId = sessionId
+        self.projectDisplayName = projectDisplayName
+        let id = sessionId
+        _sessions = Query(
+            filter: #Predicate<SessionInfo> { $0.sessionId == id }
+        )
+    }
+
+    /// The looked-up SessionInfo, or nil while SwiftData hasn't
+    /// hydrated the query yet (and the very-rare case where the
+    /// session has been deleted since the modal opened).
+    private var session: SessionInfo? { sessions.first }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                header
-                summaryCard
-                tokensCard
-                metadataCard
+        Group {
+            if let session {
+                content(for: session)
+            } else {
+                // Brief flash before @Query lands; if the session
+                // genuinely vanished we surface a tiny "not found"
+                // state rather than crashing.
+                missingState
             }
-            .padding(24)
         }
-        .scrollIndicators(.never)
         .frame(minWidth: 540, idealWidth: 620, minHeight: 460, idealHeight: 560)
-        .task(id: session.sessionId) {
+        // Hide the navigation bar's default-title space for this leaf.
+        // The custom inline header below is the actual title surface;
+        // duplicating it in the toolbar would be cluttered.
+        .navigationTitle("")
+        .toolbar(removing: .title)
+        .task(id: sessionId) {
             // Probe the transcript path on disk so we can offer
             // Reveal/Open buttons without paying the read cost the
             // prior first-prompt resolver did. ~3 dir checks worst
             // case; bounded.
-            transcriptURL = await Self.transcriptURL(for: session.sessionId)
+            transcriptURL = await Self.transcriptURL(for: sessionId)
         }
+    }
+
+    @ViewBuilder
+    private func content(for session: SessionInfo) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+                header(for: session)
+                summaryCard(for: session)
+                tokensCard(for: session)
+                metadataCard(for: session)
+            }
+            .padding(24)
+        }
+        .scrollIndicators(.never)
+    }
+
+    private var missingState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "questionmark.folder")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("Session not found")
+                .font(.headline)
+            Text(sessionId)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
     }
 
     // MARK: - Header
 
-    private var header: some View {
+    @ViewBuilder
+    private func header(for session: SessionInfo) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(pacerShortModel(session.topModel))
@@ -68,13 +119,13 @@ struct SessionDetailView: View {
             }
             Spacer(minLength: 12)
             Button("Close") { dismissModal() }
-                .keyboardShortcut(.cancelAction)
         }
     }
 
     // MARK: - Summary
 
-    private var summaryCard: some View {
+    @ViewBuilder
+    private func summaryCard(for session: SessionInfo) -> some View {
         PacerCard("Summary") {
             LazyVGrid(
                 columns: Array(
@@ -87,7 +138,7 @@ struct SessionDetailView: View {
                 MetricTile(value: pacerCost(session.cumulativeCostUSD), label: "cost", size: .hero)
                 MetricTile(value: pacerTokens(session.totalTokens), label: "tokens")
                 MetricTile(value: pacerShortModel(session.topModel), label: "top model", size: .compact)
-                MetricTile(value: durationLabel, label: "duration", size: .compact)
+                MetricTile(value: Self.durationLabel(for: session), label: "duration", size: .compact)
             }
         }
     }
@@ -95,7 +146,7 @@ struct SessionDetailView: View {
     /// `firstSeen → lastSeen`. Compact ("3h 12m"); hour granularity for
     /// long-running sessions, second granularity for sub-minute hits so
     /// "0m" is never the answer.
-    private var durationLabel: String {
+    private static func durationLabel(for session: SessionInfo) -> String {
         let seconds = max(0, session.lastSeenAt.timeIntervalSince(session.firstSeenAt))
         if seconds < 60 { return "\(Int(seconds))s" }
         let minutes = Int(seconds / 60)
@@ -110,7 +161,8 @@ struct SessionDetailView: View {
 
     // MARK: - Tokens
 
-    private var tokensCard: some View {
+    @ViewBuilder
+    private func tokensCard(for session: SessionInfo) -> some View {
         PacerCard("Tokens") {
             VStack(alignment: .leading, spacing: 8) {
                 tokenRow("Input", session.cumulativeInputTokens, hint: "uncached prompt bytes")
@@ -144,7 +196,8 @@ struct SessionDetailView: View {
 
     // MARK: - Metadata
 
-    private var metadataCard: some View {
+    @ViewBuilder
+    private func metadataCard(for session: SessionInfo) -> some View {
         PacerCard("Details") {
             VStack(alignment: .leading, spacing: 10) {
                 metadataRow(

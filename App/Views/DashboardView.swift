@@ -18,12 +18,7 @@ import PacerUI
 /// updates stay incremental: a new TokenSample only invalidates the
 /// cards that read TokenSample/DailyAggregate, not the rate-limit hero.
 struct DashboardView: View {
-    @State private var selectedDay: SelectedDay?
-
-    private struct SelectedDay: Identifiable {
-        let date: String
-        var id: String { date }
-    }
+    @State private var modalRoot: PacerModalDestination?
 
     var body: some View {
         PageScaffold(
@@ -38,12 +33,10 @@ struct DashboardView: View {
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
             DailyCostChartCard(onDayTap: { dayKey in
-                selectedDay = SelectedDay(date: dayKey)
+                modalRoot = .day(date: dayKey)
             })
         }
-        .dismissibleModal(item: $selectedDay) { sel in
-            DayDetailView(date: sel.date)
-        }
+        .pacerModalNavigation(root: $modalRoot)
     }
 
     /// Open today's day-detail modal. Pinned to the user's local
@@ -51,6 +44,6 @@ struct DashboardView: View {
     /// what aggregates actually store under.
     private func openToday() {
         let today = TokenSample.formatDate(Date())
-        selectedDay = SelectedDay(date: today)
+        modalRoot = .day(date: today)
     }
 }

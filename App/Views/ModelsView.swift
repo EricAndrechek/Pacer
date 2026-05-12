@@ -17,6 +17,8 @@ struct ModelsView: View {
     @AppStorage("pacer.models.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
 
+    @State private var modalRoot: PacerModalDestination?
+
     private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .ninetyDays }
     private var sort: ModelsSort { ModelsSort(rawValue: sortRaw) ?? .cost }
 
@@ -35,10 +37,14 @@ struct ModelsView: View {
                 descending: sortDescending,
                 rangeBinding: rangeBinding,
                 sortFieldBinding: sortFieldBinding,
-                sortDescendingBinding: $sortDescending
+                sortDescendingBinding: $sortDescending,
+                onSelectDay: { date in
+                    modalRoot = .day(date: date)
+                }
             )
             .id(range)
         }
+        .pacerModalNavigation(root: $modalRoot)
     }
 }
 
@@ -69,6 +75,9 @@ private struct ModelsContent: View {
     let rangeBinding: Binding<TimeRange>
     let sortFieldBinding: Binding<ModelsSort>
     let sortDescendingBinding: Binding<Bool>
+    /// Callback to the page-level modal navigator when a chart bar
+    /// is tapped — opens that day's day-detail modal.
+    let onSelectDay: (String) -> Void
 
     init(
         range: TimeRange,
@@ -76,13 +85,15 @@ private struct ModelsContent: View {
         descending: Bool,
         rangeBinding: Binding<TimeRange>,
         sortFieldBinding: Binding<ModelsSort>,
-        sortDescendingBinding: Binding<Bool>
+        sortDescendingBinding: Binding<Bool>,
+        onSelectDay: @escaping (String) -> Void
     ) {
         self.sort = sort
         self.descending = descending
         self.rangeBinding = rangeBinding
         self.sortFieldBinding = sortFieldBinding
         self.sortDescendingBinding = sortDescendingBinding
+        self.onSelectDay = onSelectDay
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
@@ -193,13 +204,6 @@ private struct ModelsContent: View {
         }
     }
 
-    @State private var selectedDay: SelectedDay?
-
-    private struct SelectedDay: Identifiable {
-        let date: String
-        var id: String { date }
-    }
-
     var body: some View {
         Group {
             if rows.isEmpty {
@@ -211,12 +215,6 @@ private struct ModelsContent: View {
                     listCard
                 }
             }
-        }
-        // Trend bar click drills into that day's modal — surfaces in
-        // the Models tab finally have the same drill-in affordance as
-        // the Dashboard's daily chart and History's heatmap.
-        .dismissibleModal(item: $selectedDay) { sel in
-            DayDetailView(date: sel.date)
         }
     }
 
@@ -402,7 +400,7 @@ private struct ModelsContent: View {
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if let date = trendHoverDate {
-                        selectedDay = SelectedDay(date: date)
+                        onSelectDay(date)
                     }
                 }
                 .accessibilityLabel("Daily token mix by model")

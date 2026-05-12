@@ -12,6 +12,7 @@ struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
     @Environment(\.dismissModal) private var dismissModal
+    @Environment(\.pacerModalPush) private var push
     @Query private var aggregates: [DailyAggregate]
     @Query private var samples: [TokenSample]
     @Query private var sessionRows: [SessionInfo]
@@ -155,26 +156,11 @@ struct DayDetailView: View {
         }
         .scrollIndicators(.never)
         .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
+        .navigationTitle(prettyDate)
+        .toolbar(removing: .title)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
-        // Open the project's detail view stacked on top of this day
-        // modal — keeps the user oriented in the day context they
-        // started from. They can dismiss back into the day, or
-        // chain through sessions inside the project view.
-        .dismissibleModal(item: $selectedProject) { sel in
-            ProjectDetailView(
-                projectPath: sel.path,
-                displayName: sel.displayName,
-                since: sel.since
-            )
-        }
-        .dismissibleModal(item: $selectedSession) { sel in
-            SessionDetailView(session: sel.session, projectDisplayName: pacerShortPath(sel.session.projectPath))
-        }
     }
-
-    @State private var selectedProject: ProjectsView.SelectedProject?
-    @State private var selectedSession: ProjectDetailView.SelectedSession?
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -321,17 +307,15 @@ struct DayDetailView: View {
         return modelsSortDescending ? sorted.reversed() : sorted
     }
 
-    /// Tap handler on a day-detail project row: open the project's
-    /// detail view stacked on top of the day modal so the user stays
-    /// oriented in the day they came from. Skip the synthetic
-    /// "(unknown)" path — there's no project to open.
+    /// Tap handler on a day-detail project row: push the project's
+    /// detail view onto the parent modal's NavigationStack so the
+    /// native back button returns to this day modal. Skip the
+    /// synthetic "(unknown)" path — there's no project to open.
     private func openProject(_ row: ProjectRow) {
         guard row.path != ProjectDailyAggregate.unknownProjectPath else { return }
-        selectedProject = ProjectsView.SelectedProject(
-            path: row.path,
-            displayName: row.displayName,
-            since: nil  // day detail has no time-range scope, so go all-time
-        )
+        // day detail has no time-range scope, so push with since: nil
+        // → opens the project's all-time detail
+        push(.project(path: row.path, displayName: row.displayName, since: nil))
     }
 
     private var sortedProjectRows: [ProjectRow] {
@@ -581,8 +565,11 @@ struct DayDetailView: View {
                 showProjectColumn: true,
                 sort: sessionsSortBinding,
                 sortDescending: $sessionsSortDescending,
-                onSessionTap: {
-                    selectedSession = ProjectDetailView.SelectedSession(session: $0)
+                onSessionTap: { session in
+                    push(.session(
+                        sessionId: session.sessionId,
+                        projectDisplayName: pacerShortPath(session.projectPath)
+                    ))
                 }
             )
         }

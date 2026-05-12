@@ -23,6 +23,7 @@ struct ProjectDetailView: View {
     let since: Date?
 
     @Environment(\.dismissModal) private var dismissModal
+    @Environment(\.pacerModalPush) private var push
     @Query private var aggregates: [ProjectDailyAggregate]
     @Query private var sessionRows: [SessionInfo]
 
@@ -134,33 +135,8 @@ struct ProjectDetailView: View {
         }
         .scrollIndicators(.never)
         .frame(minWidth: 640, idealWidth: 760, minHeight: 540, idealHeight: 720)
-        // Stacked dismissible modal for the per-session detail. Lives
-        // here (not at the page level) because session selection only
-        // makes sense within the context of an open project modal.
-        // The session modal's dim layer covers everything underneath
-        // — clicking outside dismisses just the session modal, leaving
-        // the project modal in place.
-        .dismissibleModal(item: $selectedSession) { sel in
-            SessionDetailView(session: sel.session, projectDisplayName: displayName)
-        }
-        // Same stacking pattern for the day-detail modal — clicking a
-        // bar in this project's daily chart drills into that day,
-        // matching the affordance every other bar chart in the app
-        // exposes. Three modals deep at most (Project → Day → Session)
-        // which dismisses cleanly with click-outside.
-        .dismissibleModal(item: $selectedDay) { sel in
-            DayDetailView(date: sel.date)
-        }
-    }
-
-    @State private var selectedDay: SelectedDayWithin?
-
-    /// Scoped Identifiable wrapper for the per-project day-detail
-    /// modal. Distinct type from `DashboardView.SelectedDay` so the
-    /// two view scopes don't accidentally share state.
-    struct SelectedDayWithin: Identifiable {
-        let date: String
-        var id: String { date }
+        .navigationTitle(displayName)
+        .toolbar(removing: .title)
     }
 
     private var header: some View {
@@ -284,7 +260,7 @@ struct ProjectDetailView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if let d = hoveredDate {
-                    selectedDay = SelectedDayWithin(date: d)
+                    push(.day(date: d))
                 }
             }
             .accessibilityLabel("Daily cost for \(displayName)")
@@ -411,15 +387,13 @@ struct ProjectDetailView: View {
                 showProjectColumn: false,
                 sort: sessionsSortBinding,
                 sortDescending: $sessionsSortDescending,
-                onSessionTap: { selectedSession = SelectedSession(session: $0) }
+                onSessionTap: { session in
+                    push(.session(
+                        sessionId: session.sessionId,
+                        projectDisplayName: displayName
+                    ))
+                }
             )
         }
-    }
-
-    @State private var selectedSession: SelectedSession?
-
-    struct SelectedSession: Identifiable {
-        let session: SessionInfo
-        var id: String { session.sessionId }
     }
 }
