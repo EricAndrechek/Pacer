@@ -54,38 +54,41 @@ public enum KeychainOAuthError: Error, Sendable, Equatable {
 
 /// Reads Claude Code's OAuth credential out of the macOS Keychain.
 ///
-/// ## Why we use `SecItemCopyMatching` directly (not `/usr/bin/security`)
+/// ## Why we shell out to `/usr/bin/security` instead of `SecItemCopyMatching`
 ///
-/// The reference-impl reference implementation shells out to
-/// `/usr/bin/security find-generic-password` because Stream Deck plugins
-/// run inside a third-party host process whose Keychain ACL identity is
-/// the host, not the plugin — easier to let the system tool handle the
-/// prompt than to wrangle access groups. Pacer is a first-party signed
-/// `.app`, so `SecItemCopyMatching` triggers a user prompt naming
-/// "Pacer" itself: cleaner UX, no subprocess, no exit-code parsing,
-/// no PATH dependency. We follow Apple's recommended path.
+/// The Claude Code-credentials keychain item is written by Claude Code
+/// (the Node.js CLI) and ends up with two ACL layers:
+///   1. Application ACL — names which signed apps may read it.
+///   2. Partition list — names which Team IDs the system trusts to
+///      satisfy that ACL.
+///
+/// Claude Code creates the item with partition list `apple-tool:` only.
+/// When Pacer (Team ID `YZXWMJ5VBY`) calls `SecItemCopyMatching`, the
+/// application-ACL check passes once the user clicks "Always Allow",
+/// but the partition-list check fails on every read — Pacer's Team ID
+/// isn't in `apple-tool:`. Updating the partition list requires the
+/// user's *login-keychain password*, not just a click on the prompt;
+/// without that password, "Always Allow" only suppresses the prompt
+/// for the current call. Result: a recurring prompt every poll cycle.
+///
+/// `/usr/bin/security` is an Apple-signed binary that's already in both
+/// layers (it's the canonical `apple-tool:` partition member), so it
+/// reads without prompting. The reference-impl reference plugin reached
+/// the same conclusion. This costs one ~10ms subprocess every 5
+/// minutes — negligible — and works without asking the user to do
+/// anything special.
 ///
 /// ## First-run UX
 ///
-/// The first call from a freshly-installed Pacer (or after the user
-/// rotates their login keychain) will surface a system dialog:
-/// *"Pacer wants to access 'Claude Code-credentials' in your keychain."*
-/// "Always Allow" persists the grant; subsequent reads return silently.
-///
-/// Pacer.app and PacerDaemon are separate binaries with separate
-/// signatures, so each gets its own ACL prompt. The app onboarding flow
-/// is responsible for performing the first read in foreground (so the
-/// prompt can appear); the daemon's first poll after that may *also*
-/// prompt — or, if it runs from a non-interactive launch context, fail
-/// with `accessDenied` until the user runs the app once. The poller
-/// handles `accessDenied` as a soft failure (no rate-limit data, but
-/// JSONL pipeline keeps working).
+/// Because `/usr/bin/security` is already trusted, there is no system
+/// dialog on first read. Pacer can poll silently from launch.
 ///
 /// ## Test seam
 ///
-/// Production wires `defaultRawReader`, which calls `SecItemCopyMatching`.
-/// Tests inject a closure that returns prebaked Data (or a typed error)
-/// — see `KeychainOAuthTests.swift`.
+/// Production wires `defaultRawReader`, which shells out to
+/// `/usr/bin/security find-generic-password -w`. Tests inject a closure
+/// that returns prebaked Data (or a typed error) — see
+/// `KeychainOAuthTests.swift`.
 public struct KeychainOAuth: Sendable {
 
     /// Service name Claude Code writes its credential under, verified
@@ -107,40 +110,76 @@ public struct KeychainOAuth: Sendable {
         self.rawReader = rawReader
     }
 
-    /// Production reader. Performs a synchronous `SecItemCopyMatching`
-    /// against the user's login keychain. Safe to call from any thread —
-    /// Apple documents `SecItemCopyMatching` as thread-safe. Blocks
-    /// until the user dismisses the access prompt on first call from
-    /// this binary; subsequent calls return immediately once the ACL
-    /// is granted.
+    /// Production reader. Shells out to `/usr/bin/security
+    /// find-generic-password -w` and returns the printed JSON blob.
+    /// See the type doc for why we use the CLI instead of SecItem.
+    ///
+    /// We deliberately do NOT pin `-a <username>` — Claude Code stores
+    /// the entry under the current user but the service name is unique
+    /// on a normal install, and skipping `-a` keeps us robust to
+    /// account-name edge cases (renamed accounts, multi-user setups).
+    ///
+    /// Exit-status mapping comes from the `security(1)` man page and
+    /// confirmation from `SecBase.h`:
+    ///   - 0  → success; stdout is the password blob plus a trailing newline
+    ///   - 44 → `errSecItemNotFound` (-25300, masked to one byte)
+    ///   - 36 → `errSecAuthFailed` (-25293, masked) — user cancelled
+    ///   - 51 → `errSecInteractionNotAllowed` (-25308, masked) — non-UI context
+    /// Anything else is surfaced raw via `.unexpectedStatus`.
     public static let defaultRawReader: RawReader = {
-        // We deliberately do NOT pin `kSecAttrAccount` — Claude Code
-        // writes the entry under the current login user's username,
-        // and `SecItemCopyMatching` matches on whatever attributes we
-        // specify, ignoring others. Service name is enough to find a
-        // single entry. (If two accounts ever existed under the same
-        // service, we'd take the first; this would be Anthropic-side
-        // behavior change worth investigating, not silently handling.)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainOAuth.serviceName,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "find-generic-password",
+            "-s", KeychainOAuth.serviceName,
+            "-w",
         ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            // Couldn't even spawn — bad PATH, missing binary, sandbox
+            // refusal. Carry the underlying CocoaError code so a log
+            // reader can route it.
+            let nsError = error as NSError
+            return .failure(.unexpectedStatus(OSStatus(nsError.code)))
+        }
+
+        // The keychain is normally unlocked at login, so the subprocess
+        // returns in well under a second. The timeout below is a safety
+        // net for the pathological "locked keychain prompts modally"
+        // case; without it, a single bad keychain state could wedge the
+        // poller actor forever.
+        let timeoutSeconds: TimeInterval = 5
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            process.waitUntilExit()
+            group.leave()
+        }
+        if group.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+            process.terminate()
+            // Drain so the kernel doesn't hold the pipes open.
+            _ = try? stdout.fileHandleForReading.readToEnd()
+            _ = try? stderr.fileHandleForReading.readToEnd()
+            return .failure(.accessDenied)
+        }
+
+        let status = process.terminationStatus
         switch status {
-        case errSecSuccess:
-            guard let data = item as? Data else {
-                return .failure(.unexpectedStatus(status))
-            }
+        case 0:
+            let data = (try? stdout.fileHandleForReading.readToEnd()) ?? Data()
             return .success(data)
-        case errSecItemNotFound:
+        case 44:
             return .failure(.notFound)
-        case errSecAuthFailed, errSecInteractionNotAllowed, errSecUserCanceled:
+        case 36, 51, 128:
             return .failure(.accessDenied)
         default:
-            return .failure(.unexpectedStatus(status))
+            return .failure(.unexpectedStatus(OSStatus(status)))
         }
     }
 
@@ -177,9 +216,8 @@ public struct KeychainOAuth: Sendable {
     // the whole point of the read.
 
     private func decode(_ data: Data) -> Result<OAuthCredential, KeychainOAuthError> {
-        // The keychain blob may have leading/trailing whitespace from
-        // how `security -w` formats it; `SecItemCopyMatching` does not
-        // add whitespace, but defensive trim is cheap.
+        // `security -w` emits the password followed by a newline; trim
+        // it so JSON parse sees a clean object.
         let trimmed = data.trimmedASCIIWhitespace()
 
         let parsed: Any
