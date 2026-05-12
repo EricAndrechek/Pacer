@@ -29,12 +29,6 @@ struct ProjectsView: View {
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
     @State private var searchText: String = ""
-    /// Lifted from ProjectsContent so the modal-navigation modifier
-    /// can attach OUTSIDE the PageScaffold's ScrollView. Without
-    /// lifting this state up, the modal overlay sat inside the
-    /// ScrollView's content frame and (a) scrolled with the page,
-    /// (b) added empty padding to the bottom of the scrollable area
-    /// equal to the modal's frame.
     @State private var modalRoot: PacerModalDestination?
 
     private var range: TimeRange {
@@ -288,11 +282,6 @@ private struct ProjectsContent: View {
     }
 
     var body: some View {
-        // No more `.dismissibleModal` here — it lives on the outer
-        // ProjectsView so the overlay sits ABOVE the PageScaffold's
-        // ScrollView rather than inside its content. This view just
-        // sets the binding when the user picks a project; the parent
-        // owns the modal layer.
         Group {
             if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState

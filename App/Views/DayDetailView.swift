@@ -143,17 +143,20 @@ struct DayDetailView: View {
     }
 
     var body: some View {
-        PacerModalContent(
-            title: prettyDate,
-            subtitle: date,
-            minWidth: 580, idealWidth: 660,
-            minHeight: 480, idealHeight: 620
-        ) {
-            summaryCard
-            if !aggregates.isEmpty { modelsCard }
-            if !projectRows.isEmpty { projectsCard }
-            if !sessionRows.isEmpty { sessionsCard }
+        ScrollView {
+            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+                summaryCard
+                if !aggregates.isEmpty { modelsCard }
+                if !projectRows.isEmpty { projectsCard }
+                if !sessionRows.isEmpty { sessionsCard }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollIndicators(.never)
+        .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
+        .navigationTitle(prettyDate)
+        .navigationSubtitle(date)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
