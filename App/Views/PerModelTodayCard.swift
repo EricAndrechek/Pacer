@@ -146,6 +146,21 @@ struct PerModelTodayCard: View {
         }
         .chartLegend(.hidden)
         .chartAngleSelection(value: $hoveredAngle)
+        .accessibilityLabel("Today's token share by model")
+        .accessibilityValue(perModelShareSummary)
+    }
+
+    /// Summary string read aloud by VoiceOver in place of the donut.
+    /// Spells out each model's share so a screen-reader user gets the
+    /// same information sighted users get from the wedges + legend.
+    private var perModelShareSummary: String {
+        let total = hoverTotalTokens
+        guard total > 0 else { return "no data yet" }
+        return rows.prefix(5).map { row in
+            let tokens = row.inputTokens + row.outputTokens + row.cacheReadTokens
+            let pct = Int(Double(tokens) / Double(total) * 100)
+            return "\(pacerShortModel(row.model)) \(pct) percent"
+        }.joined(separator: ", ")
     }
 
     private var table: some View {

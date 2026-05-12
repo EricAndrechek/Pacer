@@ -107,7 +107,7 @@ private struct LifetimeSummaryCard: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
-                Picker("", selection: rangeBinding) {
+                Picker("Time range", selection: rangeBinding) {
                     ForEach(TimeRange.allCases) { r in
                         Text(r.shortLabel).tag(r)
                     }
@@ -215,6 +215,8 @@ private struct MonthlyChartCard: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .accessibilityLabel("\(longMonth(m.month))")
+                .accessibilityValue(pacerCost(m.cost))
             }
             // Selection callout moved to the card header so the chart
             // doesn't reflow on hover. Just keep a thin dashed rule
@@ -252,6 +254,7 @@ private struct MonthlyChartCard: View {
                 }
             }
         }
+        .accessibilityLabel("Cost by month for the last 12 months")
     }
 
     /// `2026-04` → `Apr` (or `Apr '26` when the visible window straddles
@@ -379,7 +382,7 @@ private struct TopDaysCard: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
-                Picker("", selection: rangeBinding) {
+                Picker("Time range", selection: rangeBinding) {
                     ForEach(TimeRange.allCases) { r in
                         Text(r.shortLabel).tag(r)
                     }
@@ -495,6 +498,12 @@ private struct TopDaysCard: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: 16, alignment: .trailing)
             }
+        }
+        .contextMenu {
+            Button("Open day") { onDayTap(row.date) }
+            Divider()
+            Button("Copy date") { pacerCopyToPasteboard(row.date) }
+            Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
         }
     }
 

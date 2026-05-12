@@ -142,13 +142,16 @@ struct DailyCostChartCard: View {
         // open that day. The whole chart surface becomes the hit
         // target; no chartOverlay needed (an explicit overlay on top
         // would block hover events from reaching chartXSelection).
+        // Arrow cursor (default) — clickable charts don't warrant the
+        // link cursor per macOS HIG.
         .contentShape(Rectangle())
         .onTapGesture {
             if let date = selectedDate, let onDayTap {
                 onDayTap(date)
             }
         }
-        .pointerStyle(onDayTap != nil ? .link : .default)
+        .accessibilityLabel("Daily cost over the last 30 days")
+        .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
     }
 
     private func stridedDates(every n: Int, totals: [DailyTotal]) -> [String] {

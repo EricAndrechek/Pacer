@@ -278,8 +278,8 @@ private struct HeroTile<Content: View>: View {
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .pointerStyle(.link)
             .help("Open today's breakdown")
+            .accessibilityHint("Opens today's detailed breakdown")
         } else {
             surface
         }

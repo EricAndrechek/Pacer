@@ -243,6 +243,10 @@ public struct FreshnessPulse: View {
 
     public let state: Freshness
     @State private var pulse: Bool = false
+    /// Honor the user's "Reduce motion" accessibility preference — the
+    /// repeating halo animation is decorative, the colored dot alone
+    /// communicates freshness just as well without motion.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(state: Freshness) {
         self.state = state
@@ -257,7 +261,7 @@ public struct FreshnessPulse: View {
         }
     }
 
-    private var shouldPulse: Bool { state == .live }
+    private var shouldPulse: Bool { state == .live && !reduceMotion }
 
     public var body: some View {
         ZStack {
@@ -364,8 +368,8 @@ public struct HoverRow<Content: View>: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        // Cursor flips to the pointing-hand on hover so the row reads
-        // as actionable.
-        .pointerStyle(.link)
+        // Arrow cursor (default) — macOS HIG reserves the pointing-hand
+        // for hyperlinks. Native Mac list rows (Finder, Mail, Things)
+        // keep the arrow; the hover background is the affordance.
     }
 }

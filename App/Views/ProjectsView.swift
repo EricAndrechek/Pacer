@@ -59,11 +59,22 @@ struct ProjectsView: View {
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
-                searchBinding: $searchText,
                 selectedBinding: $selectedProject
             )
             .id("\(range.rawValue)")
         }
+        // Native macOS search field lives in the window toolbar — frees
+        // the card header from the custom magnifying-glass + xmark
+        // arrangement we built by hand, and gets the standard search
+        // chrome (clear button, placeholder, a11y) for free. Each
+        // sidebar destination has its own toolbar context inside the
+        // NavigationSplitView, so the field only appears while
+        // Projects is the active destination.
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "Filter projects"
+        )
         .dismissibleModal(item: $selectedProject) { sel in
             ProjectDetailView(
                 projectPath: sel.path,
@@ -155,7 +166,6 @@ private struct ProjectsContent: View {
     let sortFieldBinding: Binding<ProjectSort>
     let sortDescendingBinding: Binding<Bool>
     let overviewMetricBinding: Binding<ProjectMetric>
-    let searchBinding: Binding<String>
     let selectedBinding: Binding<ProjectsView.SelectedProject?>
 
     init(
@@ -168,7 +178,6 @@ private struct ProjectsContent: View {
         sortFieldBinding: Binding<ProjectSort>,
         sortDescendingBinding: Binding<Bool>,
         overviewMetricBinding: Binding<ProjectMetric>,
-        searchBinding: Binding<String>,
         selectedBinding: Binding<ProjectsView.SelectedProject?>
     ) {
         let since: Date?
@@ -190,7 +199,6 @@ private struct ProjectsContent: View {
         self.sortFieldBinding = sortFieldBinding
         self.sortDescendingBinding = sortDescendingBinding
         self.overviewMetricBinding = overviewMetricBinding
-        self.searchBinding = searchBinding
         self.selectedBinding = selectedBinding
         if let cutoffString {
             _aggregates = Query(
@@ -398,7 +406,7 @@ private struct ProjectsContent: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
-                Picker("", selection: overviewMetricBinding) {
+                Picker("Overview metric", selection: overviewMetricBinding) {
                     ForEach(ProjectMetric.allCases) { m in
                         Text(m.label).tag(m)
                     }
@@ -423,6 +431,8 @@ private struct ProjectsContent: View {
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredOverviewAngle)
+                .accessibilityLabel("Top 5 projects by \(overviewMetric.label)")
+                .accessibilityValue(topProjectsSummary(top: top, total: totalForMetric))
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(Array(top.enumerated()), id: \.offset) { idx, row in
                         let v = value(for: overviewMetric, in: row)
@@ -453,6 +463,17 @@ private struct ProjectsContent: View {
         }
     }
 
+    /// VoiceOver alternative to the donut. Lists each top project with
+    /// its share of the active metric, comma-separated.
+    private func topProjectsSummary(top: [ProjectRow], total: Double) -> String {
+        guard total > 0 else { return "no data yet" }
+        return top.map { row in
+            let v = value(for: overviewMetric, in: row)
+            let pct = Int((v / total * 100).rounded())
+            return "\(row.displayName) \(pct) percent"
+        }.joined(separator: ", ")
+    }
+
     private func value(for metric: ProjectMetric, in row: ProjectRow) -> Double {
         switch metric {
         case .cost:     return row.cost
@@ -474,11 +495,15 @@ private struct ProjectsContent: View {
     /// the page toolbar) per the "closer to the thing we are showing"
     /// principle — every card that scopes its data to a time window
     /// announces the window right next to the data.
+    ///
+    /// The text filter moved out of the card trailing into the window
+    /// toolbar via `.searchable` on the parent view — gives users the
+    /// native macOS search field (system clear button, accessibility
+    /// label, placement consistency with Mail / Finder / Notes).
     private var projectListCard: some View {
         PacerCard("All projects", trailing: {
             HStack(spacing: 10) {
-                searchField
-                Picker("", selection: rangeBinding) {
+                Picker("Time range", selection: rangeBinding) {
                     ForEach(TimeRange.allCases) { r in
                         Text(r.label).tag(r)
                     }
@@ -502,6 +527,29 @@ private struct ProjectsContent: View {
                     }) {
                         projectRow(row)
                     }
+                    .contextMenu {
+                        Button("Open project") {
+                            selectedBinding.wrappedValue = ProjectsView.SelectedProject(
+                                path: row.path,
+                                displayName: row.displayName,
+                                since: rangeSince
+                            )
+                        }
+                        if row.path != ProjectDailyAggregate.unknownProjectPath {
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting(
+                                    [URL(fileURLWithPath: row.path)]
+                                )
+                            }
+                        }
+                        Divider()
+                        Button("Copy path") {
+                            pacerCopyToPasteboard(row.path)
+                        }
+                        Button("Copy display name") {
+                            pacerCopyToPasteboard(row.displayName)
+                        }
+                    }
                 }
                 HStack {
                     Text("\(rows.count) project\(rows.count == 1 ? "" : "s")")
@@ -512,38 +560,6 @@ private struct ProjectsContent: View {
                 .padding(.top, 8)
             }
         }
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .font(.system(size: 11))
-            TextField("Filter", text: searchBinding)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .frame(width: 140)
-            if !searchText.isEmpty {
-                Button {
-                    searchBinding.wrappedValue = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(nsColor: .textBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(PacerDesign.cardStroke, lineWidth: 1)
-        )
     }
 
     /// Column headers double as sort controls. Click an inactive column

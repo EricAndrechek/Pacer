@@ -260,7 +260,7 @@ struct HeatmapCard: View {
     private var tooltipOffset: CGFloat { 30 }
 
     private var metricPicker: some View {
-        Picker("", selection: Binding(
+        Picker("Heatmap metric", selection: Binding(
             get: { metric },
             set: { metricRaw = $0.rawValue }
         )) {
@@ -468,11 +468,15 @@ struct HeatmapCard: View {
                 )
             }
             .buttonStyle(.plain)
-            .pointerStyle(.link)
+            // Arrow cursor (default) — Apple's macOS HIG reserves the
+            // link cursor for hyperlinks. The hover stroke + tooltip is
+            // the affordance.
             .onHover { inside in
                 if inside { enterCell(cell.dateKey) }
                 else { exitCell(cell.dateKey) }
             }
+            .accessibilityLabel(cellAccessibilityLabel(cell))
+            .accessibilityHint("Opens the day's detailed breakdown")
         } else {
             // Empty day: just a swatch, no hover affordance, not
             // clickable. Committed to one consistent behavior — no
@@ -514,6 +518,24 @@ struct HeatmapCard: View {
         case 0.6..<0.8: return Color.green.opacity(0.85)
         default:        return Color.green
         }
+    }
+
+    /// VoiceOver-friendly label for an active cell — speaks the date and
+    /// the cell's value in the current metric ("Thu, May 7, 2026: $12.40").
+    private func cellAccessibilityLabel(_ cell: Cell) -> String {
+        let date = Self.tooltipDateFmt.string(from: cell.date)
+        let v = cell.value(for: metric)
+        let valueText: String
+        switch metric {
+        case .cost:
+            valueText = pacerCost(v)
+        case .tokens:
+            valueText = "\(pacerTokens(Int64(v))) tokens"
+        case .sessions:
+            let n = Int(v)
+            valueText = "\(n) \(n == 1 ? "session" : "sessions")"
+        }
+        return "\(date): \(valueText)"
     }
 
     /// Color bins are derived from a 95th-percentile cap on the

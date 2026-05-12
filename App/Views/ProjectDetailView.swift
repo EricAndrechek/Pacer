@@ -277,13 +277,16 @@ struct ProjectDetailView: View {
                 }
             }
             .chartXSelection(value: $hoveredDate)
+            // Arrow cursor (default) per macOS HIG — clickable charts
+            // don't warrant the link cursor.
             .contentShape(Rectangle())
             .onTapGesture {
                 if let d = hoveredDate {
                     selectedDay = SelectedDayWithin(date: d)
                 }
             }
-            .pointerStyle(.link)
+            .accessibilityLabel("Daily cost for \(displayName)")
+            .accessibilityHint("Click a bar to drill into that day")
         }
     }
 
@@ -301,6 +304,16 @@ struct ProjectDetailView: View {
     }
 
     @State private var hoveredModelAngle: Double?
+
+    /// VoiceOver alternative to the model donut — per-model token share
+    /// read as a comma list.
+    private func modelSlicesSummary(total: Int64) -> String {
+        guard total > 0 else { return "no data" }
+        return modelSlices.prefix(5).map { m in
+            let pct = Int(Double(m.tokens) / Double(total) * 100)
+            return "\(pacerShortModel(m.model)) \(pct) percent"
+        }.joined(separator: ", ")
+    }
 
     private var hoveredModelSlice: ModelSlice? {
         guard let angle = hoveredModelAngle, !modelSlices.isEmpty else { return nil }
@@ -344,6 +357,8 @@ struct ProjectDetailView: View {
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredModelAngle)
+                .accessibilityLabel("Model share for \(displayName)")
+                .accessibilityValue(modelSlicesSummary(total: total))
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(modelSlices) { m in
                         HStack(alignment: .firstTextBaseline) {

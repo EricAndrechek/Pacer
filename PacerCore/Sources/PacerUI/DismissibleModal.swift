@@ -96,10 +96,20 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .shadow(color: .black.opacity(0.35), radius: 30, x: 0, y: 12)
                     .padding(40)
-                    // Esc dismisses, mirroring sheet behavior.
+                    // Esc + Cmd+W both dismiss, mirroring native sheet
+                    // and window conventions. Two hidden buttons because
+                    // .keyboardShortcut can only attach one shortcut per
+                    // view; stacking them in one .background works
+                    // because each gets its own zero-sized frame.
                     .background {
                         Button("") { item = nil }
                             .keyboardShortcut(.cancelAction)
+                            .opacity(0)
+                            .frame(width: 0, height: 0)
+                    }
+                    .background {
+                        Button("") { item = nil }
+                            .keyboardShortcut("w", modifiers: .command)
                             .opacity(0)
                             .frame(width: 0, height: 0)
                     }

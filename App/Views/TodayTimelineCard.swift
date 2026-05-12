@@ -174,11 +174,14 @@ struct TodayTimelineCard: View {
         // Tap anywhere on the chart drills into today's day modal —
         // same pattern as DailyCostChartCard. The chartXSelection
         // binding is already tracking hover state; tap commits.
+        // Arrow cursor (default) per HIG — clickable charts don't
+        // warrant the link cursor.
         .contentShape(Rectangle())
         .onTapGesture {
             if onTodayTap != nil { onTodayTap?() }
         }
-        .pointerStyle(onTodayTap != nil ? .link : .default)
+        .accessibilityLabel("Today's activity by hour")
+        .accessibilityHint(onTodayTap != nil ? "Opens today's detailed breakdown" : "")
     }
 
     /// Wrapper that builds a Date for hour-of-day h on today, then

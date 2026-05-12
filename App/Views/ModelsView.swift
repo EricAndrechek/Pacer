@@ -249,6 +249,18 @@ private struct ModelsContent: View {
         rows.reduce(0) { $0 + $1.totalTokens }
     }
 
+    /// VoiceOver summary read in place of the donut. Lists the top 5
+    /// models with their token-share percentage so screen-reader users
+    /// get the same info sighted users get from wedges + legend.
+    private var shareSummary: String {
+        let total = shareTotalTokens
+        guard total > 0 else { return "no data yet" }
+        return rows.prefix(5).map { r in
+            let pct = Int(Double(r.totalTokens) / Double(total) * 100)
+            return "\(r.displayName) \(pct) percent"
+        }.joined(separator: ", ")
+    }
+
     private var hoveredShareRow: ModelRow? {
         let cumulative = shareCumulative
         guard let angle = hoveredShareAngle, !cumulative.isEmpty else { return nil }
@@ -293,6 +305,8 @@ private struct ModelsContent: View {
                 .frame(width: 180, height: 180)
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredShareAngle)
+                .accessibilityLabel("Token share across models")
+                .accessibilityValue(shareSummary)
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(rows.prefix(8)) { row in
                         HStack(alignment: .firstTextBaseline) {
@@ -383,14 +397,16 @@ private struct ModelsContent: View {
                 .chartXAxis(.hidden)
                 .chartXSelection(value: $trendHoverDate)
                 // Tap-to-drill — uses the chartXSelection binding,
-                // same minimal pattern as DailyCostChartCard.
+                // same minimal pattern as DailyCostChartCard. Arrow
+                // cursor (default) per macOS HIG.
                 .contentShape(Rectangle())
                 .onTapGesture {
                     if let date = trendHoverDate {
                         selectedDay = SelectedDay(date: date)
                     }
                 }
-                .pointerStyle(.link)
+                .accessibilityLabel("Daily token mix by model")
+                .accessibilityHint("Click a bar to drill into that day")
 
                 // Per-model breakdown of the hovered day. Hidden until
                 // hover so the card doesn't always show a placeholder
@@ -417,7 +433,7 @@ private struct ModelsContent: View {
         PacerCard("All models", trailing: {
             // Inline range picker — same "controls live next to the data
             // they scope" pattern as ProjectsView.
-            Picker("", selection: rangeBinding) {
+            Picker("Time range", selection: rangeBinding) {
                 ForEach(TimeRange.allCases) { r in
                     Text(r.label).tag(r)
                 }
@@ -434,6 +450,15 @@ private struct ModelsContent: View {
                     modelRow(row)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
+                        .contextMenu {
+                            Button("Copy model name") { pacerCopyToPasteboard(row.model) }
+                            Button("Copy display name") { pacerCopyToPasteboard(row.displayName) }
+                            Divider()
+                            Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
+                            Button("Copy token total") {
+                                pacerCopyToPasteboard(pacerTokens(row.totalTokens))
+                            }
+                        }
                 }
                 HStack {
                     Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")

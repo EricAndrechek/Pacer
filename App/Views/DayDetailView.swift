@@ -359,6 +359,16 @@ struct DayDetailView: View {
     @State private var sortedAggsByCost: [DailyAggregate] = []
     @State private var aggCumulative: [(agg: DailyAggregate, max: Double)] = []
 
+    /// VoiceOver summary of the per-model donut for this day.
+    private var modelsAccessibilitySummary: String {
+        let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
+        guard total > 0 else { return "no data" }
+        return sortedAggsByCost.prefix(5).map { agg in
+            let pct = Int(agg.totalCostUSD / total * 100)
+            return "\(pacerShortModel(agg.model)) \(pct) percent"
+        }.joined(separator: ", ")
+    }
+
     private var hoveredAgg: DailyAggregate? {
         guard let angle = hoveredAggAngle, !aggCumulative.isEmpty else { return nil }
         for entry in aggCumulative where angle <= entry.max {
@@ -402,6 +412,8 @@ struct DayDetailView: View {
                 .frame(width: 160, height: 160)
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredAggAngle)
+                .accessibilityLabel("Models used on \(prettyDate)")
+                .accessibilityValue(modelsAccessibilitySummary)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         SortableColumnHeader(
@@ -520,6 +532,19 @@ struct DayDetailView: View {
                                 .foregroundStyle(.tertiary)
                                 .frame(width: 16, alignment: .trailing)
                         }
+                    }
+                    .contextMenu {
+                        if row.path != ProjectDailyAggregate.unknownProjectPath {
+                            Button("Open project") { openProject(row) }
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting(
+                                    [URL(fileURLWithPath: row.path)]
+                                )
+                            }
+                            Divider()
+                        }
+                        Button("Copy path") { pacerCopyToPasteboard(row.path) }
+                        Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
                     }
                 }
             }

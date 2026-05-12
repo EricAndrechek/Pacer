@@ -41,6 +41,9 @@ struct MenuBarLabel: View {
     /// which the user might have dismissed on a different screen.
     @State private var lastBand: UsageBand?
     @State private var pulse: Bool = false
+    /// Reduce-motion suppression: the icon color escalation alone
+    /// already communicates warming; the scale pulse is decorative.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var fiveHour: RateLimitSample? {
         samples.first { $0.window == "five_hour" }
@@ -150,6 +153,9 @@ struct MenuBarLabel: View {
                 return
             }
             lastBand = newValue
+            // Skip the scale pulse under Reduce Motion — color escalation
+            // is enough.
+            guard !reduceMotion else { return }
             pulse = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                 pulse = false

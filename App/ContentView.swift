@@ -413,6 +413,9 @@ private struct ToolbarFreshness: View {
             Capsule().fill(Color.primary.opacity(0.06))
         )
         .help(tooltip)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Activity status: \(label)")
+        .accessibilityHint(tooltip)
     }
 }
 
