@@ -45,9 +45,10 @@ struct WelcomeCard: View {
                     .frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Welcome to Pacer")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.title3)
+                        .fontWeight(.semibold)
                     Text("Tracking your Claude Code usage in realtime. On first launch Pacer scans every JSONL transcript in `~/.claude/projects` so you start with the data you already have. Numbers will appear within seconds of any Claude Code activity.")
-                        .font(.system(size: 12))
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

@@ -329,7 +329,7 @@ private struct ProjectsContent: View {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
                     Text("No projects match \u{201C}\(searchText)\u{201D}")
-                        .font(.system(size: 13))
+                        .font(.body)
                         .foregroundStyle(.secondary)
                 }
                 Text("Try clearing the filter or widening the time range.")
@@ -343,7 +343,7 @@ private struct ProjectsContent: View {
         PacerCard {
             VStack(alignment: .leading, spacing: 6) {
                 Text("No project activity in the selected range.")
-                    .font(.system(size: 13))
+                    .font(.body)
                     .foregroundStyle(.secondary)
                 Text("Pacer reads `cwd` from each Claude Code JSONL line, so projects show up automatically as soon as you run Claude Code in a directory.")
                     .font(.caption)

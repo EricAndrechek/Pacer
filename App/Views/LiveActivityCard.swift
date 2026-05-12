@@ -124,15 +124,15 @@ struct LiveActivityCard: View {
         if let latest = latestSamples.first {
             VStack(alignment: .leading, spacing: 4) {
                 Text("No traffic in the last hour.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 Text("Last sample \(pacerRelative(latest.sampledAt)) — \(pacerShortModel(latest.model)).")
-                    .font(.system(size: 11))
+                    .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }
         } else {
             Text("No samples yet. This card will light up as Claude Code activity hits the store.")
-                .font(.system(size: 12))
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
     }

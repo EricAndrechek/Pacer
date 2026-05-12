@@ -110,7 +110,7 @@ struct PerModelTodayCard: View {
         }) {
             if rows.isEmpty {
                 Text("No usage logged today yet.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 HStack(alignment: .top, spacing: 24) {

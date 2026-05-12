@@ -61,8 +61,14 @@ public struct PacerCard<Content: View, Trailing: View, Footer: View>: View {
         VStack(alignment: .leading, spacing: 12) {
             if let title {
                 HStack(alignment: .firstTextBaseline) {
+                    // `.title3` is the macOS Dynamic Type bracket that
+                    // sits where 15pt landed empirically; pairing with
+                    // `.semibold` reproduces the prior visual weight
+                    // while letting card titles respect the user's
+                    // Display & Text Size accessibility setting.
                     Text(title)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.title3)
+                        .fontWeight(.semibold)
                     Spacer(minLength: 8)
                     trailing()
                 }
@@ -109,6 +115,11 @@ public struct MetricTile: View {
 
     public enum Size {
         case hero, regular, compact
+        /// Hero numbers stay explicit — they need a specific visual
+        /// weight in the tile layouts and the layouts use
+        /// `minimumScaleFactor` to recover under Dynamic Type's larger
+        /// brackets. The labels under the value, in contrast, use
+        /// Dynamic Type styles so they scale cleanly.
         var fontSize: CGFloat {
             switch self {
             case .hero: return 32
@@ -118,8 +129,8 @@ public struct MetricTile: View {
         }
         var labelFont: Font {
             switch self {
-            case .hero: return .system(size: 12, weight: .medium)
-            case .regular, .compact: return .system(size: 11, weight: .regular)
+            case .hero:               return .callout.weight(.medium)
+            case .regular, .compact:  return .subheadline
             }
         }
     }
@@ -324,11 +335,17 @@ public struct PageScaffold<Trailing: View, Content: View>: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
+                // `.largeTitle` matches the prior 26pt at default
+                // Dynamic Type and scales for users with Display & Text
+                // Size bumped. `.semibold` + rounded design preserves
+                // the look of the previous hand-rolled size.
                 Text(title)
-                    .font(.system(size: 26, weight: .semibold, design: .rounded))
+                    .font(.largeTitle)
+                    .fontWeight(.semibold)
+                    .fontDesign(.rounded)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 12))
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }

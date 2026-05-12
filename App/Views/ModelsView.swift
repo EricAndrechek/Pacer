@@ -223,7 +223,7 @@ private struct ModelsContent: View {
     private var emptyState: some View {
         PacerCard {
             Text("No model activity in the selected range.")
-                .font(.system(size: 13))
+                .font(.body)
                 .foregroundStyle(.secondary)
         }
     }

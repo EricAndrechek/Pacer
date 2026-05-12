@@ -119,7 +119,7 @@ struct TodayTimelineCard: View {
         }) {
             if cached.totalTokens == 0 {
                 Text("No activity logged today yet.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(height: 100)
             } else {

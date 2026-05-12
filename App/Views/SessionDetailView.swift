@@ -49,18 +49,20 @@ struct SessionDetailView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(pacerShortModel(session.topModel))
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .font(.title)
+                    .fontWeight(.semibold)
+                    .fontDesign(.rounded)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 HStack(spacing: 6) {
                     Text(String(session.sessionId.prefix(13)))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                     Text("·")
                         .foregroundStyle(.tertiary)
                     Text(projectDisplayName)
-                        .font(.system(size: 11))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }

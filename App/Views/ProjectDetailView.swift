@@ -167,9 +167,11 @@ struct ProjectDetailView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(displayName)
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .font(.title)
+                    .fontWeight(.semibold)
+                    .fontDesign(.rounded)
                 Text(projectPath)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

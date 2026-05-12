@@ -80,7 +80,7 @@ struct DailyCostChartCard: View {
         }) {
             if d.dailyTotals.isEmpty {
                 Text("No daily aggregates yet.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(height: 200)
             } else {

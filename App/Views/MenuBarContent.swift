@@ -254,12 +254,13 @@ struct MenuBarContent: View {
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 18, height: 18)
+            // Headline ≈ prior 14pt + semibold; Dynamic-Type-aware.
             Text("Pacer")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.headline)
             Spacer()
             if let latest = rateLimits.first {
                 Text(pacerRelative(latest.sampledAt, style: .short))
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .help("Latest rate-limit sample")
             }

@@ -122,7 +122,7 @@ private struct LifetimeSummaryCard: View {
                 Text(range == .all
                      ? "No history yet — start using Claude Code and Pacer will catch up."
                      : "No activity in this range. Try widening the time window.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 LazyVGrid(
@@ -190,7 +190,7 @@ private struct MonthlyChartCard: View {
         }) {
             if monthly.isEmpty {
                 Text("No monthly history yet.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(height: 200)
             } else {
@@ -395,7 +395,7 @@ private struct TopDaysCard: View {
         }) {
             if all.isEmpty {
                 Text("No data yet.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 let maxCost = visible.map(\.cost).max() ?? 1

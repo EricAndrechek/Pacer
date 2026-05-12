@@ -33,7 +33,7 @@ struct TodayDetailsCard: View {
         }) {
             if totals.isEmpty {
                 Text("No usage logged today yet. Pacer will write within seconds of any Claude Code activity.")
-                    .font(.system(size: 12))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 18) {
@@ -81,9 +81,10 @@ struct TodayDetailsCard: View {
             HStack(spacing: 8) {
                 Image(systemName: "bolt.horizontal.circle.fill")
                     .foregroundStyle(.tint)
-                    .font(.system(size: 13))
+                    .font(.body)
                 Text("Cache hit rate")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.callout)
+                    .fontWeight(.medium)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 ZStack(alignment: .leading) {

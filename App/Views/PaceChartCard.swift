@@ -79,14 +79,14 @@ struct PaceChartCard: View {
     private var emptyState: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 20))
+                .font(.title3)
                 .foregroundStyle(.tint)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Waiting for the first rate-limit reading")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.body.weight(.medium))
                 Text("Pacer checks Anthropic every 5 minutes. If you're signed into Claude Code, the 5-hour and 7-day pace will appear here shortly.")
-                    .font(.system(size: 11))
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

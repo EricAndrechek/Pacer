@@ -57,7 +57,9 @@ struct SettingsView: View {
     private var categorySidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Settings")
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .font(.title2)
+                .fontWeight(.semibold)
+                .fontDesign(.rounded)
                 .padding(.horizontal, 12)
                 .padding(.top, 18)
                 .padding(.bottom, 12)
@@ -83,7 +85,9 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
                 Text(category.label)
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .font(.title)
+                    .fontWeight(.semibold)
+                    .fontDesign(.rounded)
                     .padding(.bottom, 4)
 
                 switch category {
@@ -115,11 +119,12 @@ private struct CategoryItem: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: category.systemImage(selected: isSelected))
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.body.weight(.medium))
                     .foregroundStyle(isSelected ? Color.white : .secondary)
                     .frame(width: 18, alignment: .center)
                 Text(category.label)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(.body)
+                    .fontWeight(isSelected ? .semibold : .regular)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)
                 Spacer(minLength: 0)
             }

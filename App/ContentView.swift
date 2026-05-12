@@ -235,8 +235,11 @@ struct ContentView: View {
                 .resizable()
                 .interpolation(.high)
                 .frame(width: 26, height: 26)
+            // `.title3` ≈ prior 15pt; Dynamic-Type-aware so the brand
+            // mark scales with Display & Text Size.
             Text("Pacer")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.title3)
+                .fontWeight(.semibold)
             Spacer(minLength: 0)
         }
     }
@@ -287,11 +290,12 @@ private struct SidebarItem: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: destination.systemImage(selected: isSelected))
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.body.weight(.medium))
                     .frame(width: 18, alignment: .center)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)
                 Text(destination.title)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(.body)
+                    .fontWeight(isSelected ? .semibold : .regular)
                     .foregroundStyle(isSelected ? Color.white : Color.primary)
                 Spacer(minLength: 0)
             }
@@ -402,7 +406,8 @@ private struct ToolbarFreshness: View {
         HStack(spacing: 5) {
             FreshnessPulse(state: freshness)
             Text(label)
-                .font(.system(size: 11, weight: .medium))
+                .font(.subheadline)
+                .fontWeight(.medium)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .monospacedDigit()

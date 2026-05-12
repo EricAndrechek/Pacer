@@ -180,9 +180,11 @@ struct DayDetailView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(prettyDate)
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .font(.title)
+                    .fontWeight(.semibold)
+                    .fontDesign(.rounded)
                 Text(date)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             Spacer()
