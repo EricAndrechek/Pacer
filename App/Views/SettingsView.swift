@@ -8,11 +8,13 @@ import PacerUI
 /// `PacerSettings`) so the menu bar, in-process scan, and widgets pick
 /// up changes without a restart.
 ///
-/// Layout: a single scrolling stack of `PacerCard` surfaces, one per
-/// section. Earlier attempts used (a) an inner-sidebar "tabs in tabs"
-/// pattern that mimicked macOS Sequoia System Settings — overkill for
-/// a settings surface this small — and (b) `Form { Section }
-/// .formStyle(.grouped)`, which on macOS Sequoia in dark mode
+/// Layout: scrolling stack grouped into three sections — General,
+/// Notifications, Data — each introduced by a tracked uppercase label
+/// (matching the sidebar's section style) above a column of
+/// `PacerCard` surfaces. Earlier attempts used (a) an inner-sidebar
+/// "tabs in tabs" pattern that mimicked macOS Sequoia System Settings
+/// — overkill for a settings surface this small — and (b) `Form {
+/// Section }.formStyle(.grouped)`, which on macOS Sequoia in dark mode
 /// produced almost no visible row grouping and read as a flat list of
 /// stuff with no chrome. PacerCard gives the same surface language as
 /// the dashboard, so Settings reads as a continuation of the app
@@ -20,17 +22,22 @@ import PacerUI
 struct SettingsView: View {
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                StartupCard()
-                MenuBarCard()
-                RateLimitAlertsCard()
-                ThresholdCard(title: "5-hour window", window: "five_hour")
-                ThresholdCard(title: "7-day window", window: "seven_day")
-                DailyCostAlertCard()
-                DailySummaryCard()
-                NotificationTestCard()
-                CostCalculationCard()
-                StorageCard()
+            VStack(alignment: .leading, spacing: 28) {
+                SettingsSection("General") {
+                    StartupCard()
+                    MenuBarCard()
+                }
+                SettingsSection("Notifications") {
+                    RateLimitAlertsCard()
+                    DailyCostAlertCard()
+                    DailySummaryCard()
+                    NotificationTestCard()
+                }
+                SettingsSection("Data") {
+                    CostCalculationCard()
+                    DatabaseCard()
+                    LogsCard()
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 18)
@@ -40,6 +47,34 @@ struct SettingsView: View {
             // the cards sit consistently flush with the sidebar.
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+}
+
+// MARK: - Section header
+
+/// Tracked uppercase label above a group of related cards. Mirrors the
+/// sidebar's `SidebarSection` style at a slightly larger 12pt so it
+/// reads cleanly across the wider detail pane while still sitting
+/// quieter than the card titles below it.
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+            Text(title.uppercased())
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+                .padding(.bottom, -4)
+            content()
         }
     }
 }
@@ -387,24 +422,37 @@ private extension PacerSettings.MenuBarChip {
 
 // MARK: - Rate-limit alerts
 
+/// Combined rate-limit alerts card: the master enable toggle plus the
+/// per-window threshold lists (5-hour, 7-day) live together inside one
+/// card with subsection labels, so the parent-child relationship reads
+/// as a single concept instead of three loose cards. Persists through
+/// `PacerSettings` so the live `NotificationCoordinator` (also reading
+/// via `PacerSettings.thresholds(forWindow:)`) sees changes
+/// immediately.
 private struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
     var body: some View {
         PacerCard("Rate-limit alerts", content: {
-            Toggle("Enable rate-limit notifications", isOn: $enabled)
-                .onChange(of: enabled) { _, newValue in
-                    if newValue {
-                        Task {
-                            await NotificationCoordinator.shared
-                                .requestAuthorizationIfNeeded()
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle("Enable rate-limit notifications", isOn: $enabled)
+                    .onChange(of: enabled) { _, newValue in
+                        if newValue {
+                            Task {
+                                await NotificationCoordinator.shared
+                                    .requestAuthorizationIfNeeded()
+                            }
                         }
                     }
-                }
+                Divider().opacity(0.4)
+                ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
+                Divider().opacity(0.4)
+                ThresholdSubsection(title: "7-day window", window: "seven_day", enabled: enabled)
+            }
         }, footer: {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Add thresholds per window below — Pacer fires a banner each time usage crosses one upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                 HStack(spacing: 8) {
                     Text("Not seeing banners?")
                     Button("Open System Settings → Notifications") {
@@ -427,47 +475,42 @@ private struct RateLimitAlertsCard: View {
     }
 }
 
-// MARK: - Threshold card
-
-/// One window's worth of notification thresholds, rendered as a
-/// `PacerCard`. Each row is an independent threshold; rows can be
-/// added, removed, and individually adjusted. Persists through
-/// `PacerSettings`'s helpers so the live `NotificationCoordinator`
-/// (also reading via `PacerSettings.thresholds(forWindow:)`) sees
-/// changes immediately.
-private struct ThresholdCard: View {
+/// One window's threshold list rendered inline inside the combined
+/// rate-limit card — small uppercase label on top with an "Add" button
+/// trailing, followed by per-threshold slider rows.
+private struct ThresholdSubsection: View {
     let title: String
     let window: String
+    let enabled: Bool
 
-    @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
-    private var enabled: Bool = false
     @State private var thresholds: [Int] = []
 
     var body: some View {
-        PacerCard(title, trailing: {
-            Button {
-                addThreshold()
-            } label: {
-                Label("Add threshold", systemImage: "plus.circle.fill")
-                    .labelStyle(.titleAndIcon)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Eyebrow(text: title)
+                Spacer()
+                Button {
+                    addThreshold()
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .controlSize(.small)
+                .disabled(!enabled)
             }
-            .controlSize(.small)
-            .disabled(!enabled)
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                if thresholds.isEmpty {
-                    Text("No thresholds — Pacer won't notify for this window.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .padding(.vertical, 4)
-                } else {
-                    ForEach(Array(thresholds.enumerated()), id: \.offset) { idx, _ in
-                        ThresholdRow(
-                            value: thresholdBinding(for: idx),
-                            enabled: enabled,
-                            onRemove: { remove(at: idx) }
-                        )
-                    }
+            if thresholds.isEmpty {
+                Text("No thresholds — Pacer won't notify for this window.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 2)
+            } else {
+                ForEach(Array(thresholds.enumerated()), id: \.offset) { idx, _ in
+                    ThresholdRow(
+                        value: thresholdBinding(for: idx),
+                        enabled: enabled,
+                        onRemove: { remove(at: idx) }
+                    )
                 }
             }
         }
@@ -732,35 +775,37 @@ private struct CostCalculationCard: View {
 
 // MARK: - Storage
 
-private struct StorageCard: View {
+private struct DatabaseCard: View {
     private var storeURL: URL? { try? PacerStore.storeURL() }
 
+    var body: some View {
+        PacerCard("Database") {
+            if let url = storeURL {
+                PathRow(path: url.path) {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } buttonLabel: {
+                    Text("Show in Finder")
+                }
+            } else {
+                Text("App Group container unavailable.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct LogsCard: View {
     private var logsDirURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Pacer")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard("Database") {
-                if let url = storeURL {
-                    PathRow(path: url.path) {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    } buttonLabel: {
-                        Text("Show in Finder")
-                    }
-                } else {
-                    Text("App Group container unavailable.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            PacerCard("Logs") {
-                PathRow(path: logsDirURL.path) {
-                    NSWorkspace.shared.open(logsDirURL)
-                } buttonLabel: {
-                    Text("Open in Finder")
-                }
+        PacerCard("Logs") {
+            PathRow(path: logsDirURL.path) {
+                NSWorkspace.shared.open(logsDirURL)
+            } buttonLabel: {
+                Text("Open in Finder")
             }
         }
     }
