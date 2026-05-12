@@ -122,44 +122,38 @@ struct ProjectDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                summaryCard
-                if !dailySeries.isEmpty { dailyChartCard }
-                if !modelSlices.isEmpty { modelsCard }
-                if !sessionRows.isEmpty { sessionsCard }
+        PacerModalContent(
+            title: displayName,
+            subtitle: projectPath,
+            minWidth: 640, idealWidth: 760,
+            minHeight: 540, idealHeight: 720,
+            trailing: {
+                // Jump to the project directory in Finder. Hidden
+                // for the synthetic "(unknown)" path Pacer assigns
+                // to samples whose JSONL line lacks `cwd`.
+                if projectPath != ProjectDailyAggregate.unknownProjectPath {
+                    PacerModalIconButton(
+                        systemName: "folder",
+                        help: "Reveal in Finder",
+                        accessibilityLabel: "Reveal in Finder"
+                    ) {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [URL(fileURLWithPath: projectPath)]
+                        )
+                    }
+                }
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        ) {
+            summaryCard
+            if !dailySeries.isEmpty { dailyChartCard }
+            if !modelSlices.isEmpty { modelsCard }
+            if !sessionRows.isEmpty { sessionsCard }
         }
-        .scrollIndicators(.never)
-        .frame(minWidth: 640, idealWidth: 760, minHeight: 540, idealHeight: 720)
-        .navigationTitle(displayName)
-        .navigationSubtitle(projectPath)
     }
 
     private var summaryCard: some View {
         let t = totals
-        return PacerCard("Summary", trailing: {
-            // Reveal in Finder lives in the summary card header
-            // rather than the sheet toolbar — macOS SwiftUI
-            // accumulates `.toolbar` items across every view in a
-            // NavigationStack, so a Project-level toolbar button
-            // would still show while drilled into a Session. Keeping
-            // this inline scopes it to the right view.
-            if projectPath != ProjectDailyAggregate.unknownProjectPath {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting(
-                        [URL(fileURLWithPath: projectPath)]
-                    )
-                } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
-                        .font(.system(size: 11))
-                }
-                .controlSize(.small)
-                .help("Open this project's folder in Finder")
-            }
-        }) {
+        return PacerCard("Summary") {
             LazyVGrid(
                 columns: Array(
                     repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
