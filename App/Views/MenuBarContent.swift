@@ -3,24 +3,44 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// What renders in the menu bar status item. The display is governed by
-/// `PacerSettings.MenuBarStyle` (icon-only / percent-only / both, plus
-/// hidden which is handled at the scene level). The icon glyph itself
-/// is governed by `PacerSettings.MenuBarIconStyle`:
-///   - gaugeNeedle: SF Symbol `gauge.with.dots.needle.*percent` whose
-///                  fill ramps with the current band.
-///   - ringFill:    SF Symbol `circle.dotted` -> filled ring proxies.
-///   - dot:         a colored dot, smallest visual weight.
+/// What renders in the menu bar status item. The displayed content is
+/// driven by `PacerSettings.menuBarChips()` — an ordered list the user
+/// configures in Settings → Menu bar. Any combination of:
 ///
-/// Falls back to a neutral icon when no rate-limit samples exist yet.
+///   - `.icon`         — `MenuBarIconStyle`-driven SF Symbol; color
+///                       warms with the 5-hour usage band.
+///   - `.fiveHourPct`  — current 5-hour rate-limit utilization.
+///   - `.sevenDayPct`  — current 7-day rate-limit utilization.
+///   - `.todayCost`    — today's spend in USD.
+///   - `.todayTokens`  — today's token total (K / M / B suffixed).
+///   - `.activeModel`  — model name of the most recent TokenSample.
+///
+/// Empty chip list = host tears the NSStatusItem down (handled in
+/// `PacerAppDelegate.rebuildMenuBarForCurrentChips`).
 struct MenuBarLabel: View {
     /// Cap the fetch — we only ever look at the most-recent sample per
     /// window. Without the cap, every SwiftData save materialized the
     /// full ~4k-row history just to fire the menu-bar label re-render.
-    @Query(MenuBarLabel.recentDescriptor)
-    private var samples: [RateLimitSample]
+    @Query(MenuBarLabel.recentRateLimitDescriptor)
+    private var rateSamples: [RateLimitSample]
 
-    private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
+    /// Today's aggregates for cost / tokens chips. Filtered by date so
+    /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
+    @Query private var todayAggregates: [DailyAggregate]
+
+    /// Single most recent TokenSample, for the active-model chip. Cap
+    /// to 1 — we never need any other field besides `model`.
+    @Query(MenuBarLabel.recentTokenSampleDescriptor)
+    private var recentSamples: [TokenSample]
+
+    init() {
+        let today = TokenSample.formatDate(Date())
+        _todayAggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date == today }
+        )
+    }
+
+    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
@@ -28,8 +48,16 @@ struct MenuBarLabel: View {
         return d
     }()
 
-    @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
-    private var styleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
+    private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
+        var d = FetchDescriptor<TokenSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }()
+
+    @AppStorage(PacerSettings.Key.menuBarChips, store: PacerSettings.store)
+    private var chipsRaw: String = "icon,five_hour_pct"
 
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
@@ -45,16 +73,30 @@ struct MenuBarLabel: View {
     /// already communicates warming; the scale pulse is decorative.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    // MARK: - Derived state
+
+    private var chips: [PacerSettings.MenuBarChip] {
+        // Re-parse from the @AppStorage CSV so SwiftUI body-eval picks
+        // up changes immediately (PacerSettings.menuBarChips() reads
+        // the same store but isn't reactive on its own).
+        var seen = Set<PacerSettings.MenuBarChip>()
+        var ordered: [PacerSettings.MenuBarChip] = []
+        for token in chipsRaw.split(separator: ",") {
+            let trimmed = token.trimmingCharacters(in: .whitespaces)
+            guard let chip = PacerSettings.MenuBarChip(rawValue: trimmed),
+                  !seen.contains(chip) else { continue }
+            seen.insert(chip)
+            ordered.append(chip)
+        }
+        return ordered
+    }
+
     private var fiveHour: RateLimitSample? {
-        samples.first { $0.window == "five_hour" }
+        rateSamples.first { $0.window == "five_hour" }
     }
 
     private var sevenDay: RateLimitSample? {
-        samples.first { $0.window == "seven_day" }
-    }
-
-    private var style: PacerSettings.MenuBarStyle {
-        PacerSettings.MenuBarStyle(rawValue: styleRaw) ?? .iconAndPercent
+        rateSamples.first { $0.window == "seven_day" }
     }
 
     private var iconStyle: PacerSettings.MenuBarIconStyle {
@@ -63,6 +105,21 @@ struct MenuBarLabel: View {
 
     private var band: UsageBand? {
         fiveHour.map { UsageBand(percentage: $0.usedPercentage) }
+    }
+
+    /// Color the SF Symbol picks up via `.palette` rendering. Critical
+    /// difference vs the prior version: at green / nil, we now use
+    /// `.primary` instead of `.secondary` so Pacer reads as a healthy,
+    /// active item next to battery / Wi-Fi / time. The previous muted
+    /// look made it look broken or inactive when usage was low —
+    /// which is the *common* state, not the exception.
+    private var bandColor: Color {
+        switch band {
+        case .green, nil: return .primary
+        case .yellow:     return .yellow
+        case .orange:     return .orange
+        case .red:        return .red
+        }
     }
 
     private var symbolName: String {
@@ -87,20 +144,33 @@ struct MenuBarLabel: View {
         }
     }
 
-    /// Color the SF Symbol picks up via `.palette` rendering. Reuses
-    /// PaceBandColor's mapping so the menu bar warms up in lockstep
-    /// with the dashboard's pace chart.
-    private var bandColor: Color {
-        switch band {
-        case .green, nil: return .secondary
-        case .yellow:     return .yellow
-        case .orange:     return .orange
-        case .red:        return .red
+    // MARK: - Chip data
+
+    private var todayCost: Double {
+        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+    }
+
+    private var todayTokens: Int64 {
+        todayAggregates.reduce(0) {
+            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
         }
+    }
+
+    private var activeModel: String? {
+        recentSamples.first.map { pacerShortModel($0.model) }
+    }
+
+    /// Whether the 5h-percent chip should prefix itself with "5h ". When
+    /// it's the only window chip on screen, the prefix is redundant;
+    /// when 7-day is also visible, the prefix removes ambiguity.
+    private var fiveHourNeedsPrefix: Bool {
+        chips.contains(.sevenDayPct)
     }
 
     /// Tooltip shown on hover. Apple's Battery / Wi-Fi / Volume status
     /// items all surface a one-line summary on hover; ours had nothing.
+    /// We dump whatever the chips don't already show so the user can
+    /// hover for the "everything else."
     private var tooltip: String {
         var parts: [String] = []
         if let f = fiveHour {
@@ -118,30 +188,19 @@ struct MenuBarLabel: View {
         return parts.joined(separator: " • ")
     }
 
-    /// Percentage label shown to the right of the icon. The `% only`
-    /// mode now prefixes "5h " so a glance tells you which window —
-    /// before, "23%" with no context was ambiguous when both windows
-    /// are tracked.
-    private var percentLabel: String? {
-        guard let pct = fiveHour?.usedPercentage else { return nil }
-        let rounded = "\(Int(pct.rounded()))%"
-        return style == .percentOnly ? "5h \(rounded)" : rounded
-    }
+    // MARK: - Layout
 
     var body: some View {
-        HStack(spacing: 4) {
-            if style == .iconOnly || style == .iconAndPercent {
-                Image(systemName: symbolName)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(bandColor, Color.secondary.opacity(0.5))
-                    .scaleEffect(pulse ? 1.15 : 1.0)
-                    .animation(.spring(response: 0.35, dampingFraction: 0.55), value: pulse)
-            }
-            if style == .percentOnly || style == .iconAndPercent,
-               let label = percentLabel {
-                Text(label)
-                    .monospacedDigit()
-                    .foregroundStyle(band == .red ? Color.red : Color.primary)
+        // No outer padding — the NSStatusBarButton already adds the
+        // menu-bar's standard side margins, and any SwiftUI padding
+        // here just ate into the content area without enlarging the
+        // button (NSStatusItem's `variableLength` measures the
+        // button's native intrinsic content size, not a custom
+        // subview's). Spacing between chips comes from `HStack`'s
+        // own `spacing:`.
+        HStack(spacing: 6) {
+            ForEach(chips) { chip in
+                chipView(chip)
             }
         }
         .help(tooltip)
@@ -163,6 +222,77 @@ struct MenuBarLabel: View {
         }
     }
 
+    @ViewBuilder
+    private func chipView(_ chip: PacerSettings.MenuBarChip) -> some View {
+        switch chip {
+        case .icon:
+            // `.monochrome` (not `.palette`) so the SF Symbol renders
+            // in one solid tint — `gauge.with.dots.needle.*percent`
+            // has a body layer that `.palette` was painting with
+            // `.secondary.opacity(0.5)`, which read as "greyed out"
+            // even at full health. Monochrome with `bandColor` makes
+            // the whole icon read at full strength like Battery /
+            // Wi-Fi when the band is green.
+            Image(systemName: symbolName)
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(bandColor)
+                .scaleEffect(pulse ? 1.15 : 1.0)
+                .animation(
+                    .spring(response: 0.35, dampingFraction: 0.55),
+                    value: pulse
+                )
+
+        case .fiveHourPct:
+            percentChip(
+                prefix: fiveHourNeedsPrefix ? "5h " : nil,
+                sample: fiveHour
+            )
+
+        case .sevenDayPct:
+            percentChip(prefix: "7d ", sample: sevenDay)
+
+        case .todayCost:
+            textChip(pacerCost(todayCost))
+
+        case .todayTokens:
+            textChip(pacerTokens(todayTokens))
+
+        case .activeModel:
+            if let model = activeModel {
+                textChip(model)
+            } else {
+                textChip("—")
+            }
+        }
+    }
+
+    /// Percent chip with an optional window prefix ("5h " / "7d "). The
+    /// percent text warms to red at the red band — yellow / orange
+    /// stay primary because colored text in the menu bar reads poorly
+    /// (especially at the high-contrast accessibility setting). The
+    /// icon chip carries the band coloring; this one only escalates at
+    /// the red/critical threshold.
+    @ViewBuilder
+    private func percentChip(prefix: String?, sample: RateLimitSample?) -> some View {
+        if let s = sample {
+            let band = UsageBand(percentage: s.usedPercentage)
+            let pct = "\(Int(s.usedPercentage.rounded()))%"
+            Text((prefix ?? "") + pct)
+                .monospacedDigit()
+                .foregroundStyle(band == .red ? Color.red : Color.primary)
+        } else {
+            Text((prefix ?? "") + "—")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func textChip(_ text: String) -> some View {
+        Text(text)
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+    }
+
     private func isWarming(from old: UsageBand?, to new: UsageBand) -> Bool {
         guard let old else { return new != .green }
         return new.severity > old.severity
@@ -182,19 +312,20 @@ private extension UsageBand {
     }
 }
 
-/// What renders inside the popover when the menu bar item is clicked.
-/// Compact view of both rate-limit windows, today's totals, and quick
-/// actions. Deliberately spare — the dashboard is the detail view; this
-/// is the at-a-glance read.
-struct MenuBarContent: View {
-    /// Optional dismiss hook so footer actions can close the popover
-    /// before flipping windows. The custom NSStatusItem host (in
-    /// `PacerAppDelegate`) injects this; if it's nil, the buttons
-    /// still work — they just don't auto-close.
-    var onDismiss: (() -> Void)? = nil
-
-    @Environment(\.openWindow) private var openWindow
-    @Query(MenuBarContent.recentDescriptor)
+/// The "data" portion of the status-bar NSMenu — pace rows for 5h /
+/// 7d and today's spend / tokens. Hosted in a single `NSMenuItem.view`
+/// (see `PacerAppDelegate.buildStatusMenu`) so the action items
+/// (Open / Settings / Quit) below it can be real `NSMenuItem`s with
+/// native chrome, keyboard shortcuts, and macOS's automatic
+/// menu-bar handoff behavior.
+///
+/// Why this exists separately from `MenuBarLabel`: the label is what
+/// shows in the menu bar all the time (gauge + chips); this is what
+/// drops down when the user clicks. The label is reactive at the
+/// chip level via @AppStorage; this view is reactive at the data
+/// level via @Query.
+struct MenuStatusContent: View {
+    @Query(MenuStatusContent.recentDescriptor)
     private var rateLimits: [RateLimitSample]
     @Query private var todayAggregates: [DailyAggregate]
 
@@ -206,8 +337,7 @@ struct MenuBarContent: View {
         return d
     }()
 
-    init(onDismiss: (() -> Void)? = nil) {
-        self.onDismiss = onDismiss
+    init() {
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
@@ -228,202 +358,86 @@ struct MenuBarContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider().opacity(0.4)
-            paceRow
-                .padding(.vertical, 12)
-            Divider().opacity(0.4)
-            todayRow
-                .padding(.vertical, 12)
-            Divider().opacity(0.4)
-            footer
-                .padding(.top, 8)
+        // Width is fixed because the host (`NSMenuItem.view`) doesn't
+        // re-measure when the SwiftUI body changes size — the menu
+        // tracks the view's frame at attach time. 280pt is wide enough
+        // for "pace 50% · resets in 2 hr." without truncating and
+        // matches typical Apple status menu widths (Wi-Fi ~280pt,
+        // Battery ~260pt).
+        VStack(alignment: .leading, spacing: 4) {
+            paceRow(label: "5-HOUR", sample: fiveHour, duration: 5 * 3600)
+            paceRow(label: "7-DAY", sample: sevenDay, duration: 7 * 86400)
+            // Native NSMenu items don't have inset separators; ours
+            // here is a SwiftUI Divider that runs the content width —
+            // close enough that the eye doesn't catch it as "off."
+            Divider()
+                .padding(.vertical, 4)
+            todayValueRow(label: "Today", value: pacerCost(todayCost))
+            todayValueRow(label: "Tokens", value: pacerTokens(todayTokens))
         }
         .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
-        // `idealWidth` rather than a hard `width` so locale variants
-        // can flex a bit when the numbers/labels need more room.
-        // `maxHeight` caps growth on tall displays — without it the
-        // popover would expand indefinitely if a future iteration of
-        // this view added more content.
-        .frame(idealWidth: 320, maxHeight: 480)
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image("PacerLogo")
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 18, height: 18)
-            // Headline ≈ prior 14pt + semibold; Dynamic-Type-aware.
-            Text("Pacer")
-                .font(.headline)
-            Spacer()
-            if let latest = rateLimits.first {
-                Text(pacerRelative(latest.sampledAt, style: .short))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help("Latest rate-limit sample")
-            }
-        }
-        .padding(.bottom, 12)
-    }
-
-    // MARK: - Pace row
-
-    /// Two pace columns side-by-side. Each column hosts a small
-    /// `CircularGauge` (same primitive widgets and the dashboard
-    /// pace card use) and a stack of supporting numbers — visual
-    /// consistency with the rest of the app.
-    private var paceRow: some View {
-        HStack(alignment: .top, spacing: 14) {
-            paceColumn(label: "5-hour", sample: fiveHour, duration: 5 * 3600)
-            Divider().frame(height: 78)
-            paceColumn(label: "7-day", sample: sevenDay, duration: 7 * 86400)
-        }
+        .padding(.vertical, 8)
+        .frame(width: 280, alignment: .leading)
     }
 
     @ViewBuilder
-    private func paceColumn(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Eyebrow(text: label)
+    private func paceRow(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .tracking(0.5)
+                .frame(width: 48, alignment: .leading)
+
             if let s = sample, let resets = s.resetsAt {
                 let pacePct = PaceMath.paceFraction(
                     now: Date(), resetsAt: resets, windowDuration: duration
                 ) * 100
                 let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
-                HStack(alignment: .center, spacing: 10) {
-                    CircularGauge(
-                        percentage: s.usedPercentage,
-                        lineWidth: 4,
-                        labelFont: .system(size: 11, weight: .semibold, design: .rounded)
-                    )
-                    .frame(width: 42, height: 42)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 3) {
-                            Text("/")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                            Text("\(Int(pacePct.rounded()))% pace")
-                                .font(.system(size: 11, weight: .medium))
-                                .monospacedDigit()
-                                .foregroundStyle(band.color)
-                        }
-                        Text("resets \(pacerRelative(resets, style: .short))")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                }
-            } else {
-                HStack(spacing: 10) {
-                    Circle()
-                        .stroke(Color.secondary.opacity(0.18), lineWidth: 4)
-                        .frame(width: 42, height: 42)
-                    Text("collecting…")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 
-    // MARK: - Today row
-
-    private var todayRow: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Eyebrow(text: "Today's spend")
-                Text(pacerCost(todayCost))
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 3) {
-                Eyebrow(text: "Tokens")
-                Text(pacerTokens(todayTokens))
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-            }
-        }
-    }
-
-    // MARK: - Footer
-
-    /// Footer rows now use `MenuBarFooterButton` so they pick up a
-    /// hover background — `.borderless` left them visually flat next to
-    /// the rest of the popover, which had hover affordance everywhere
-    /// else (cards, sidebar items, etc.).
-    private var footer: some View {
-        HStack(spacing: 4) {
-            MenuBarFooterButton(
-                title: "Open Pacer",
-                systemImage: "macwindow"
-            ) {
-                onDismiss?()
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "main")
-            }
-            MenuBarFooterButton(
-                title: "Settings",
-                systemImage: "gearshape"
-            ) {
-                onDismiss?()
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "main")
-                NotificationCenter.default.post(
-                    name: .pacerOpenSettings, object: nil
+                CircularGauge(
+                    percentage: s.usedPercentage,
+                    lineWidth: 3,
+                    labelFont: .system(size: 8, weight: .bold, design: .rounded)
                 )
+                .frame(width: 22, height: 22)
+
+                Text("\(Int(s.usedPercentage.rounded()))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .frame(width: 32, alignment: .trailing)
+
+                Text("pace \(Int(pacePct.rounded()))%")
+                    .font(.system(size: 11, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(band.color)
+
+                Spacer(minLength: 4)
+
+                Text("resets \(pacerRelative(resets, style: .short))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("collecting…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
-            MenuBarFooterButton(
-                title: "Quit",
-                systemImage: "power",
-                tint: .secondary
-            ) {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
         }
     }
-}
 
-/// Footer-row button with a subtle hover background. Mirrors the
-/// `HoverRow` pattern used in the dashboard tables; lives here as its
-/// own primitive because the popover footer is a horizontal layout
-/// rather than the full-width row HoverRow expects.
-private struct MenuBarFooterButton: View {
-    let title: String
-    let systemImage: String
-    var tint: Color = .primary
-    let action: () -> Void
-    @State private var hovering: Bool = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .medium))
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(hovering ? Color.primary.opacity(0.08) : Color.clear)
-            )
-            .contentShape(Rectangle())
+    @ViewBuilder
+    private func todayValueRow(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.primary)
+                .frame(width: 48, alignment: .leading)
+            Spacer()
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.primary)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
 }

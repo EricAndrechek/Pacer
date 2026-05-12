@@ -6,8 +6,19 @@ import Foundation
 /// the typed enums (MenuBarStyle, etc.); core types living here let
 /// the daemon read prefs without depending on App-target code.
 public enum PacerPreferenceKeys {
+    /// Legacy single-style key. Kept for migration only — new code
+    /// reads/writes `menuBarChips`, which lets the user pick any combo
+    /// of icon + 5h% + 7d% + cost + tokens + active model and reorder
+    /// them. Migration runs at app launch when the chips key is absent:
+    /// we seed it from the legacy style so returning users keep what
+    /// they had.
     public static let menuBarStyle           = "pacer.menuBarStyle"
     public static let menuBarIconStyle       = "pacer.menuBarIconStyle"
+    /// CSV of `MenuBarChip` ids in display order, e.g.
+    /// `"icon,five_hour_pct"`. Empty string = hide the status item
+    /// entirely (the user toggled every chip off). Absent key = run
+    /// the legacy-style migration on first launch with this build.
+    public static let menuBarChips           = "pacer.menuBarChips"
     public static let notificationsEnabled   = "pacer.notifications.enabled"
     /// Single-threshold legacy keys. Kept for migration only — new code
     /// reads/writes the `*ThresholdsCSV` keys below, which support

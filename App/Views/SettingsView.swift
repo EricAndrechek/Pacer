@@ -111,24 +111,50 @@ private struct StartupCard: View {
 
 // MARK: - Menu Bar
 
+/// Lets the user pick any combination of menu-bar chips (icon, 5h%,
+/// 7d%, today cost, today tokens, active model) and reorder them via
+/// drag. Persists through `PacerSettings.setMenuBarChips`, which the
+/// live `MenuBarLabel` reads via @AppStorage so changes apply in real
+/// time without a relaunch.
+///
+/// Why a chip list rather than a fixed-style picker: the previous
+/// 4-way enum (icon / percent / icon+percent / hidden) couldn't surface
+/// today's cost, the 7-day window, or the active model. The chip list
+/// scales to future additions and lets users build the exact at-a-
+/// glance summary they want.
 private struct MenuBarCard: View {
-    @AppStorage(PacerSettings.Key.menuBarStyle, store: PacerSettings.store)
-    private var styleRaw: String = PacerSettings.MenuBarStyle.iconAndPercent.rawValue
+    @AppStorage(PacerSettings.Key.menuBarChips, store: PacerSettings.store)
+    private var chipsRaw: String = "icon,five_hour_pct"
 
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
+    /// Local mutable mirror of the persisted chip order. We re-derive
+    /// from the @AppStorage on every read and write back via
+    /// `PacerSettings.setMenuBarChips`. The local array is what the
+    /// `List`'s `onMove` mutates — binding directly to `chipsRaw`
+    /// would force CSV re-parsing on every drag delta.
+    @State private var enabledOrder: [PacerSettings.MenuBarChip] = []
+
+    /// All chips not currently enabled, rendered as "Add" rows below.
+    private var disabledChips: [PacerSettings.MenuBarChip] {
+        let enabledSet = Set(enabledOrder)
+        return PacerSettings.MenuBarChip.defaultOrder
+            .filter { !enabledSet.contains($0) }
+    }
+
+    private var iconIsEnabled: Bool {
+        enabledOrder.contains(.icon)
+    }
+
     var body: some View {
         PacerCard("Menu bar", content: {
-            VStack(alignment: .leading, spacing: 12) {
-                LabeledControlRow(label: "What to show") {
-                    Picker("What to show", selection: $styleRaw) {
-                        ForEach(PacerSettings.MenuBarStyle.allCases) { style in
-                            Text(style.label).tag(style.rawValue)
-                        }
-                    }
-                    .labelsHidden()
+            VStack(alignment: .leading, spacing: 14) {
+                enabledList
+                if !disabledChips.isEmpty {
+                    addList
                 }
+                Divider().opacity(0.4)
                 LabeledControlRow(label: "Icon style") {
                     Picker("Icon style", selection: $iconRaw) {
                         ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
@@ -136,13 +162,226 @@ private struct MenuBarCard: View {
                         }
                     }
                     .labelsHidden()
-                    .disabled(styleRaw == PacerSettings.MenuBarStyle.percentOnly.rawValue
-                              || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
+                    .disabled(!iconIsEnabled)
                 }
             }
         }, footer: {
-            Text("Hiding the menu bar item doesn't stop tracking — Pacer keeps collecting in the background as long as the app process is running. Open the dashboard from Spotlight or the Dock when needed.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Drag rows to reorder. Toggle every row off to hide the menu-bar item entirely — Pacer keeps collecting in the background as long as the app process is running.")
+                if enabledOrder.isEmpty {
+                    Text("Menu-bar item is hidden. Open Pacer from Spotlight or the Dock when you want the dashboard.")
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
+            }
         })
+        .onAppear { reload() }
+        // Keep `enabledOrder` in sync if another surface (CLI, another
+        // Settings window) writes to the store while we're open.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UserDefaults.didChangeNotification,
+            object: PacerSettings.store
+        )) { _ in
+            let fresh = PacerSettings.menuBarChips()
+            if fresh != enabledOrder {
+                enabledOrder = fresh
+            }
+        }
+    }
+
+    private var enabledList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if enabledOrder.isEmpty {
+                Text("No chips selected — menu-bar item hidden.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 6)
+            } else {
+                ForEach(enabledOrder) { chip in
+                    EnabledChipRow(
+                        chip: chip,
+                        onRemove: { remove(chip) },
+                        onMoveUp: index(of: chip).flatMap { idx in
+                            idx == 0 ? nil : { move(from: idx, to: idx - 1) }
+                        },
+                        onMoveDown: index(of: chip).flatMap { idx in
+                            idx == enabledOrder.count - 1 ? nil : { move(from: idx, to: idx + 1) }
+                        }
+                    )
+                }
+                // `.onMove` would need a `List` parent for drag — we
+                // ship arrow buttons + a hint in the footer so the
+                // affordance works inside this `VStack`-based card
+                // without changing the surrounding chrome.
+            }
+        }
+    }
+
+    private var addList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Add")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            ForEach(disabledChips) { chip in
+                AddChipRow(chip: chip) { add(chip) }
+            }
+        }
+    }
+
+    // MARK: - Mutation
+
+    private func reload() {
+        enabledOrder = PacerSettings.menuBarChips()
+    }
+
+    private func persist() {
+        PacerSettings.setMenuBarChips(enabledOrder)
+    }
+
+    private func index(of chip: PacerSettings.MenuBarChip) -> Int? {
+        enabledOrder.firstIndex(of: chip)
+    }
+
+    private func add(_ chip: PacerSettings.MenuBarChip) {
+        guard !enabledOrder.contains(chip) else { return }
+        enabledOrder.append(chip)
+        persist()
+    }
+
+    private func remove(_ chip: PacerSettings.MenuBarChip) {
+        enabledOrder.removeAll { $0 == chip }
+        persist()
+    }
+
+    private func move(from: Int, to: Int) {
+        guard enabledOrder.indices.contains(from),
+              (0...enabledOrder.count).contains(to),
+              from != to else { return }
+        let chip = enabledOrder.remove(at: from)
+        let clamped = max(0, min(enabledOrder.count, to))
+        enabledOrder.insert(chip, at: clamped)
+        persist()
+    }
+}
+
+/// One row in the enabled-chip list. Shows the chip's icon glyph,
+/// label, blurb, and up/down/remove controls. Hover reveals the
+/// reorder buttons; they stay visible-but-dim otherwise so first-time
+/// users discover them without hovering.
+private struct EnabledChipRow: View {
+    let chip: PacerSettings.MenuBarChip
+    let onRemove: () -> Void
+    /// `nil` when this is the first row — disables the "up" arrow.
+    let onMoveUp: (() -> Void)?
+    /// `nil` when this is the last row — disables the "down" arrow.
+    let onMoveDown: (() -> Void)?
+
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: chip.symbolName)
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(chip.label)
+                    .font(.callout)
+                Text(chip.blurb)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 4) {
+                arrowButton(systemImage: "chevron.up", action: onMoveUp)
+                arrowButton(systemImage: "chevron.down", action: onMoveDown)
+            }
+            .opacity(hovering ? 1.0 : 0.55)
+            Button(role: .destructive, action: onRemove) {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove from menu bar")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder
+    private func arrowButton(
+        systemImage: String,
+        action: (() -> Void)?
+    ) -> some View {
+        Button {
+            action?()
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .disabled(action == nil)
+    }
+}
+
+/// "Add this chip" row shown below the enabled list. Single-tap to
+/// append to the end of the order; the user can then drag it into
+/// place with the arrow buttons.
+private struct AddChipRow: View {
+    let chip: PacerSettings.MenuBarChip
+    let onAdd: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        Button(action: onAdd) {
+            HStack(spacing: 10) {
+                Image(systemName: chip.symbolName)
+                    .frame(width: 18)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(chip.label)
+                        .font(.callout)
+                    Text(chip.blurb)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.tint)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+private extension PacerSettings.MenuBarChip {
+    /// SF Symbol shown in Settings to give each chip-row a visual
+    /// anchor. The same icons appear in the menu bar chip-list dropdown
+    /// later if we add one — keep them representative.
+    var symbolName: String {
+        switch self {
+        case .icon:          return "gauge.with.dots.needle.50percent"
+        case .fiveHourPct:   return "clock"
+        case .sevenDayPct:   return "calendar"
+        case .todayCost:     return "dollarsign.circle"
+        case .todayTokens:   return "number.square"
+        case .activeModel:   return "cpu"
+        }
     }
 }
 

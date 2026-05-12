@@ -36,6 +36,15 @@ import PacerCore
 @MainActor
 final class PacerAppDelegate: NSObject, NSApplicationDelegate {
 
+    /// One-shot destination hint set by status-menu actions before
+    /// opening the main window. `ContentView.onAppear` consumes (and
+    /// clears) this on first mount, so a "Settings…" click from the
+    /// status menu lands on the Settings tab even when no window was
+    /// previously open. Avoids the synchronous-NotificationCenter-vs-
+    /// SwiftUI-mount race that the prior `asyncAfter` workaround was
+    /// papering over.
+    @MainActor static var pendingDestination: ContentView.Destination?
+
     let container: ModelContainer
     let backgroundService: AppBackgroundService
 
@@ -47,8 +56,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     // context menus. The popover content and label are still SwiftUI
     // — we host them in NSHostingView/NSHostingController.
     private var statusItem: NSStatusItem?
-    private var statusPopover: NSPopover?
-    private var menuBarHostingView: NSHostingView<AnyView>?
+    private var statusMenu: NSMenu?
+    /// Held strong so the SwiftUI content inside the menu keeps its
+    /// @Query subscriptions alive between menu opens — without this,
+    /// the host would deallocate and SwiftData would re-fetch every
+    /// time the user clicked the status item.
+    private var statusMenuContentController: NSViewController?
+    private var menuBarHostingView: SizingHostingView?
     private var menuBarPrefObserver: NSObjectProtocol?
 
     override init() {
@@ -299,48 +313,73 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         windowObservers = [didBecomeKey, willClose]
     }
 
+    /// Fallback AppKit autosave name we install when SwiftUI didn't
+    /// already give the main window one. Most builds will use whatever
+    /// `Window("Pacer", id: "main")` produces; this is just the safety
+    /// net for the dev-build case where SwiftUI sometimes leaves the
+    /// property empty.
+    private static let mainWindowAutosaveName = "PacerMainWindow"
+
     /// SwiftUI's `Window` scene typically auto-sets a non-empty
-    /// `frameAutosaveName` from the scene id ("main" → some derived
-    /// name) — but the exact behavior has shifted across macOS
-    /// releases and at least one Sequoia point release left it empty
-    /// in dev builds. Lock in an explicit autosave name on the main
-    /// window so frame size + position reliably persist across
-    /// launches, regardless of what the OS-default would have been.
+    /// `frameAutosaveName` from the scene id — but the exact behavior
+    /// has shifted across macOS releases and at least one Sequoia
+    /// point release left it empty in dev builds. Install a fallback
+    /// name when that happens so frame size + position reliably
+    /// persist across launches.
+    ///
+    /// Also pins the menu-bar-app collection behavior. Both `Window`
+    /// scene's `.defaultPosition(.center)` and `.defaultSize(...)`
+    /// modifiers handle first-launch placement on the SwiftUI side,
+    /// so this function doesn't touch the frame.
     private static func ensureWindowAutosaves(_ window: NSWindow) {
         guard window.canBecomeMain, !(window is NSPanel) else { return }
         if window.frameAutosaveName.isEmpty {
-            window.setFrameAutosaveName("PacerMainWindow")
+            window.setFrameAutosaveName(mainWindowAutosaveName)
         }
+        applyMenuBarAppBehavior(window)
+    }
+
+    /// Make the main window behave like a tool window for a menu-bar
+    /// agent app: when the user activates Pacer (clicks the status
+    /// item, hits the global shortcut, ⌘-Tabs to it), the window
+    /// follows them to the active Space rather than yanking them via
+    /// Mission Control to whichever Space it was last left on.
+    ///
+    /// `.moveToActiveSpace` is exactly the right knob for this — it
+    /// only fires on app activation, doesn't make the window appear
+    /// on every Space at once, and doesn't fight Spaces assignment
+    /// for users who pin windows to specific Spaces. It matches what
+    /// 1Password / Things / Raycast / Bartender / etc. all do.
+    ///
+    /// We `.insert` rather than assign so we preserve whatever defaults
+    /// AppKit/SwiftUI already set (most importantly `.managed`, which
+    /// is what lets the window participate in Mission Control / Stage
+    /// Manager normally).
+    private static func applyMenuBarAppBehavior(_ window: NSWindow) {
+        window.collectionBehavior.insert(.moveToActiveSpace)
     }
 
     /// macOS persists the main window's frame across launches via the
     /// `frameAutosaveName`. If the user moved the window onto a
     /// secondary display and then disconnected it, the restored frame
     /// can sit entirely off-screen — the user opens "Pacer" from the
-    /// menu bar, sees nothing, and has no obvious way back. This
-    /// reseats the window centered on the main screen whenever its
-    /// saved frame doesn't intersect any current screen.
+    /// menu bar, sees nothing, and has no obvious way back. Recenter
+    /// on the primary screen (the one with the menu bar) and save so
+    /// the next launch doesn't repeat the dance.
+    ///
+    /// `NSWindow.center()` is AppKit's blessed centering API; on
+    /// post-display-disconnect setups it lands on whatever screen
+    /// macOS has elected as primary, which is exactly where the user
+    /// is working from after their secondary went away.
     private static func ensureWindowOnScreen(_ window: NSWindow) {
         // Skip auxiliary windows (panels, menu-bar popover host) — only
         // the main "Pacer" window needs reseating.
         guard window.canBecomeMain, !(window is NSPanel) else { return }
-        let frame = window.frame
-        let visible = NSScreen.screens.contains { screen in
-            screen.visibleFrame.intersects(frame)
+        let onSomeScreen = NSScreen.screens.contains { screen in
+            screen.visibleFrame.intersects(window.frame)
         }
-        guard !visible else { return }
-        // Center on the screen that currently has the menu bar (the
-        // user's primary), then save the new frame so the next launch
-        // doesn't repeat the dance.
-        guard let target = NSScreen.main ?? NSScreen.screens.first else { return }
-        let v = target.visibleFrame
-        let newFrame = NSRect(
-            x: v.midX - frame.width / 2,
-            y: v.midY - frame.height / 2,
-            width: frame.width,
-            height: frame.height
-        )
-        window.setFrame(newFrame, display: true, animate: false)
+        guard !onSomeScreen else { return }
+        window.center()
         window.saveFrame(usingName: window.frameAutosaveName)
     }
 
@@ -370,16 +409,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu bar (custom NSStatusItem)
 
-    /// Bring up the status item if the user's preference is anything
-    /// other than `.hidden`. Subscribes to App Group `UserDefaults`
-    /// changes so a flip in Settings → Menu Bar adds/removes the icon
-    /// without a relaunch.
+    /// Bring up the status item if the user has any chips configured.
+    /// Subscribes to App Group `UserDefaults` changes so toggling every
+    /// chip off (or back on) adds/removes the icon without a relaunch.
+    /// Per-chip reordering and content changes are handled reactively
+    /// inside `MenuBarLabel` via `@AppStorage` — no rebuild needed.
     private func installMenuBar() {
-        rebuildMenuBarForCurrentStyle()
-        // App Group UserDefaults posts didChangeNotification on every
-        // write; cheaper to gate on "did the style key actually change"
-        // than to rebuild on every settings flip.
-        var lastStyle = currentMenuBarStyle()
+        rebuildMenuBarForCurrentChips()
+        // Only rebuild when the "is the item present at all" answer
+        // changes (empty chip list ↔ at least one chip). Every other
+        // chip-list change is handled by the SwiftUI label re-render.
+        var lastIsEmpty = currentChipsAreEmpty()
         menuBarPrefObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: PacerSettings.store,
@@ -387,48 +427,51 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                let now = self.currentMenuBarStyle()
-                if now != lastStyle {
-                    lastStyle = now
-                    self.rebuildMenuBarForCurrentStyle()
+                let nowEmpty = self.currentChipsAreEmpty()
+                if nowEmpty != lastIsEmpty {
+                    lastIsEmpty = nowEmpty
+                    self.rebuildMenuBarForCurrentChips()
                 }
             }
         }
     }
 
-    private func currentMenuBarStyle() -> PacerSettings.MenuBarStyle {
-        let raw = PacerSettings.store.string(forKey: PacerSettings.Key.menuBarStyle) ?? ""
-        return PacerSettings.MenuBarStyle(rawValue: raw) ?? .iconAndPercent
+    /// True when the user has zero chips configured — the status item
+    /// should be torn down. `string(forKey:)` returns the registered
+    /// default ("icon,five_hour_pct") for a never-set key, so a fresh
+    /// install shows the item by default.
+    private func currentChipsAreEmpty() -> Bool {
+        let raw = PacerSettings.store.string(forKey: PacerSettings.Key.menuBarChips) ?? ""
+        return raw.split(separator: ",").isEmpty
     }
 
-    private func rebuildMenuBarForCurrentStyle() {
-        let style = currentMenuBarStyle()
-        if style == .hidden {
+    private func rebuildMenuBarForCurrentChips() {
+        if currentChipsAreEmpty() {
             teardownMenuBar()
         } else if statusItem == nil {
             buildStatusItem()
         }
-        // For non-hidden style changes (icon/percent toggles, icon
-        // variant), the SwiftUI MenuBarLabel inside the hosting view
-        // already reacts via @AppStorage — no rebuild needed.
     }
 
     private func buildStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Start with a placeholder width; the host's fittingSize feeds
+        // back into NSStatusItem.length once the SwiftUI body has had a
+        // chance to lay out. `variableLength` alone *doesn't* size off a
+        // custom subview — it measures the button's native image+title,
+        // which we never set — so without an explicit length the button
+        // collapses to the system-default ~38pt and clips any chips
+        // beyond a single icon.
+        let item = NSStatusBar.system.statusItem(withLength: 30)
         guard let button = item.button else {
             return
         }
-        button.target = self
-        button.action = #selector(handleStatusItemClick(_:))
-        // Receive both buttons so we can branch left → popover,
-        // right → context menu in the action handler.
-        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         // Host MenuBarLabel as a SwiftUI view inside the button. We
-        // get @Query reactivity, the pulse animation, and tooltip
-        // for free; AutoLayout sizes the button to fit the label's
-        // intrinsic content width.
-        let host = NSHostingView(
+        // get @Query reactivity, the pulse animation, and tooltip for
+        // free. The host is a `SizingHostingView` — a tiny subclass
+        // that reports SwiftUI body size changes back via a closure
+        // so we can resize the NSStatusItem to fit.
+        let host = SizingHostingView(
             rootView: AnyView(
                 MenuBarLabel()
                     .modelContainer(container)
@@ -436,18 +479,42 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         )
         host.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(host)
-        // Flush leading/trailing — the menu-bar HIG sizes status items
-        // off their content's intrinsic width. The earlier ±4pt insets
-        // made Pacer's status item visibly fatter than Battery /
-        // Bluetooth / iCloud / etc. when displayed side-by-side. Let
-        // the SwiftUI label own all its padding.
+        // Pin host on all four edges so it tracks button bounds — and
+        // separately drive the button (via `item.length`) off the
+        // host's fittingSize. The two coordinate through the resize
+        // callback below, not through AutoLayout.
         NSLayoutConstraint.activate([
             host.leadingAnchor.constraint(equalTo: button.leadingAnchor),
             host.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            host.centerYAnchor.constraint(equalTo: button.centerYAnchor)
+            host.topAnchor.constraint(equalTo: button.topAnchor),
+            host.bottomAnchor.constraint(equalTo: button.bottomAnchor)
         ])
+        // Match `item.length` to the SwiftUI content width whenever the
+        // hosted body re-lays out (chip-list change, percent text grow,
+        // active-model name change). Without this the button stays at
+        // its initial length and the second/third/fourth chip clip off
+        // the right edge invisibly.
+        host.onContentSizeChange = { [weak item] size in
+            // Guard against weird zero sizes during early layout; AppKit
+            // throws assertion failures when length goes negative.
+            let width = max(20, ceil(size.width))
+            item?.length = width
+        }
         menuBarHostingView = host
+
+        // Attach an NSMenu (not an NSPopover). NSStatusItem handles
+        // the click → open and click-elsewhere → close flow itself,
+        // gives the button a native "selected" highlight while the
+        // menu is open, and participates in menu-bar handoff (clicking
+        // another menu-bar item closes ours and opens that one in one
+        // motion). The popover variant we used to have did none of
+        // these without manual button-highlight management and was a
+        // tracking discontinuity vs the rest of the menu bar.
+        let menu = buildStatusMenu()
+        item.menu = menu
+
         statusItem = item
+        statusMenu = menu
     }
 
     private func teardownMenuBar() {
@@ -456,49 +523,57 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem = nil
         menuBarHostingView = nil
-        statusPopover?.close()
-        statusPopover = nil
+        statusMenu = nil
+        statusMenuContentController = nil
     }
 
-    @objc private func handleStatusItemClick(_ sender: AnyObject?) {
-        guard let event = NSApp.currentEvent else {
-            togglePopover()
-            return
-        }
-        if event.type == .rightMouseUp {
-            showStatusContextMenu()
-        } else {
-            togglePopover()
-        }
-    }
+    /// Build the dropdown menu attached to the status item via
+    /// `item.menu`. One custom-view item up top with the SwiftUI pace
+    /// + today content, then native NSMenuItems for the standard
+    /// actions (Open / Settings / Quit). The action items get real
+    /// keyboard shortcuts and the macOS-default menu chrome — the
+    /// previous popover footer was a row of SwiftUI buttons that
+    /// looked like custom UI in the middle of an otherwise-native
+    /// menu-bar interaction.
+    private func buildStatusMenu() -> NSMenu {
+        let menu = NSMenu()
+        // Don't validate menu items via responder chain — we hard-wire
+        // their `target` so they're always enabled. Without this the
+        // pace/today custom-view item disables itself (no action) and
+        // looks dim.
+        menu.autoenablesItems = false
 
-    private func togglePopover() {
-        guard let button = statusItem?.button else { return }
-        if let popover = statusPopover, popover.isShown {
-            popover.performClose(nil)
-            return
-        }
-        if statusPopover == nil {
-            let p = NSPopover()
-            // .transient so clicking outside dismisses, matching the
-            // behavior MenuBarExtra had.
-            p.behavior = .transient
-            p.animates = true
-            let host = NSHostingController(
-                rootView: MenuBarContent(onDismiss: { [weak self] in
-                    self?.statusPopover?.performClose(nil)
-                })
+        // Custom-view item: pace rows + today's totals. NSHostingController
+        // is retained on the delegate so SwiftData @Query subscriptions
+        // stay live between opens. The view re-evaluates its body in
+        // response to data changes regardless of whether the menu is
+        // visible — so when the user opens the menu, the numbers are
+        // already current.
+        let contentController = NSHostingController(
+            rootView: AnyView(
+                MenuStatusContent()
                     .modelContainer(container)
             )
-            p.contentViewController = host
-            statusPopover = p
-        }
-        statusPopover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-    }
+        )
+        // NSMenuItem.view doesn't auto-size — the menu reads the
+        // view's frame at attach time. Use the host's fittingSize so
+        // the SwiftUI body's intrinsic dimensions drive the layout.
+        let fittingSize = contentController.view.fittingSize
+        contentController.view.frame = NSRect(
+            x: 0, y: 0,
+            width: max(280, fittingSize.width),
+            height: max(120, fittingSize.height)
+        )
+        let contentItem = NSMenuItem()
+        contentItem.view = contentController.view
+        // We don't want this item to highlight on hover — it's
+        // informational, not actionable. Leaving `target`/`action`
+        // nil makes NSMenu skip it during keyboard navigation as
+        // well, which is the right semantics.
+        menu.addItem(contentItem)
+        statusMenuContentController = contentController
 
-    private func showStatusContextMenu() {
-        guard let button = statusItem?.button else { return }
-        let menu = NSMenu()
+        menu.addItem(NSMenuItem.separator())
 
         let openItem = NSMenuItem(
             title: "Open Pacer",
@@ -525,25 +600,108 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         )
         menu.addItem(quitItem)
 
-        // popUp(positioning:at:in:) shows the menu under the button
-        // without keeping `statusItem.menu` set — that property would
-        // otherwise hijack subsequent left-clicks too.
-        let location = NSPoint(x: 0, y: button.bounds.height + 4)
-        menu.popUp(positioning: nil, at: location, in: button)
+        return menu
+    }
+
+    /// Ensure the main `Window("Pacer", id: "main")` scene is on
+    /// screen and frontmost. Returns `true` if a main window already
+    /// existed (and was just brought forward); `false` if the call
+    /// had to ask AppKit to materialize it via the reopen flow.
+    ///
+    /// Callers that want to additionally signal a destination
+    /// (status menu's "Settings…") branch on the return value:
+    /// when true, post the destination notification directly because
+    /// `ContentView` is already subscribed; when false, stash the
+    /// destination on `pendingDestination` so the freshly-mounting
+    /// `ContentView.onAppear` consumes it.
+    @discardableResult
+    private func ensureMainWindowVisible() -> Bool {
+        // `NSApp.activate(ignoringOtherApps:)` was effectively neutered
+        // in macOS 14 — third-party apps can no longer pull focus
+        // from the foreground app unless the activation was triggered
+        // by an explicit user gesture (status-item click, registered
+        // global shortcut). The no-arg form is the one Apple says to
+        // use now; it respects the "yielded focus" rules and reliably
+        // brings us forward when called from one of those gestures.
+        // The deprecated form would silently leave the window behind
+        // whatever app was previously frontmost.
+        NSApp.activate()
+        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
+            // Pin the menu-bar-app collection behavior BEFORE
+            // `makeKeyAndOrderFront` so the very first activation
+            // already pulls the window to the current Space rather
+            // than bouncing the user via Mission Control to wherever
+            // the window was last left.
+            Self.applyMenuBarAppBehavior(window)
+            window.deminiaturize(nil)
+            window.makeKeyAndOrderFront(nil)
+            return true
+        }
+        // No window exists. With `LSUIElement=true` and a SwiftUI
+        // `Window("Pacer", id: "main")` scene, closing the dashboard
+        // tears the window down — the scene is still in memory but no
+        // visible NSWindow. Re-opening our own bundle URL triggers
+        // AppKit's "this app is already running → call
+        // `applicationShouldHandleReopen`" flow, which causes the
+        // SwiftUI Window scene to materialize its singleton window
+        // again. There's no other AppDelegate-accessible API for this
+        // — `openWindow(id:)` only works from inside a SwiftUI view.
+        NSWorkspace.shared.open(Bundle.main.bundleURL)
+        return false
     }
 
     @objc private func menuOpenMainWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
-            window.makeKeyAndOrderFront(nil)
-        }
+        ensureMainWindowVisible()
     }
 
     @objc private func menuOpenSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
-            window.makeKeyAndOrderFront(nil)
+        let wasAlreadyOpen = ensureMainWindowVisible()
+        if wasAlreadyOpen {
+            // ContentView is already mounted and subscribed via
+            // `.onReceive(...pacerOpenSettings)`. Post-and-go.
+            NotificationCenter.default.post(name: .pacerOpenSettings, object: nil)
+        } else {
+            // ContentView is about to mount. Stash the destination
+            // so its `.onAppear` lands us on Settings instead of the
+            // default Dashboard. Deterministic; no timer required.
+            Self.pendingDestination = .settings
         }
-        NotificationCenter.default.post(name: .pacerOpenSettings, object: nil)
+    }
+}
+
+/// `NSHostingView<AnyView>` subclass that calls a closure when its
+/// intrinsic content size changes. Used by the status-item host so
+/// `NSStatusItem.length` can track the SwiftUI body's natural width
+/// — `variableLength` alone only measures `button.image` + `title`,
+/// neither of which we set, so without a manual length the button
+/// collapses to a system default and clips chips off the right.
+///
+/// `intrinsicContentSize` is overridden to fire the callback whenever
+/// AppKit asks AutoLayout to re-measure us. That covers the bulk of
+/// real changes: chip-list edits, percent text growing from "6%" to
+/// "100%", active-model name updates. A few SwiftUI redraws that
+/// don't change layout will trigger spurious callbacks too, but
+/// `NSStatusItem.length = x` is idempotent, so the over-fire is
+/// harmless.
+final class SizingHostingView: NSHostingView<AnyView> {
+    var onContentSizeChange: ((NSSize) -> Void)?
+
+    private var lastReportedSize: NSSize = .zero
+
+    override var intrinsicContentSize: NSSize {
+        let size = super.intrinsicContentSize
+        // SwiftUI sometimes returns `noIntrinsicMetric` (-1) during
+        // early layout; skip those — there's nothing useful to size to.
+        guard size.width > 0 else { return size }
+        if abs(size.width - lastReportedSize.width) > 0.5
+            || abs(size.height - lastReportedSize.height) > 0.5 {
+            lastReportedSize = size
+            // Defer the callback so we don't reenter layout while
+            // `intrinsicContentSize` is being computed; AppKit warns
+            // loudly when constraints change mid-layout pass.
+            let report = onContentSizeChange
+            DispatchQueue.main.async { report?(size) }
+        }
+        return size
     }
 }

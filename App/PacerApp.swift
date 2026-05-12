@@ -52,6 +52,14 @@ struct PacerApp: App {
                 .background(NotificationsHost())
         }
         .modelContainer(appDelegate.container)
+        // First-launch placement. These apply only when AppKit has no
+        // autosaved frame to restore (genuinely first ever open or a
+        // wiped UserDefaults). Once the user moves or resizes the
+        // window, AppKit's frameAutosaveName mechanism takes over and
+        // these are ignored — so we're not fighting users who want
+        // the window somewhere specific.
+        .defaultPosition(.center)
+        .defaultSize(width: 1080, height: 720)
         .commands {
             CommandGroup(after: .importExport) {
                 Divider()
@@ -77,7 +85,10 @@ struct PacerApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
                     openWindow(id: "main")
-                    NSApp.activate(ignoringOtherApps: true)
+                    // `NSApp.activate(ignoringOtherApps:)` was neutered
+                    // in macOS 14; the no-arg form is what works for
+                    // user-initiated activations like a menu command.
+                    NSApp.activate()
                     NotificationCenter.default.post(name: .pacerOpenSettings, object: nil)
                 }
                 .keyboardShortcut(",", modifiers: .command)
@@ -201,8 +212,10 @@ struct PacerApp: App {
         // Bring the app forward so the panel is interactive — without
         // activation a click on the menu-bar "About" item from
         // accessory-mode (no main window open) would float the panel
-        // behind whatever app is foregrounded.
-        NSApp.activate(ignoringOtherApps: true)
+        // behind whatever app is foregrounded. Use the modern no-arg
+        // `activate()` — the `ignoringOtherApps:` form was neutered in
+        // macOS 14.
+        NSApp.activate()
         NSApp.orderFrontStandardAboutPanel(options: options)
     }
 }

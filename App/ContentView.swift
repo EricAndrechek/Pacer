@@ -126,6 +126,18 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selectionRaw = Destination.settings.rawValue
         }
+        // Consume any one-shot destination queued by `PacerAppDelegate`
+        // (a status-menu "Settings…" click when no window was open).
+        // The notification path above handles the window-was-already-
+        // open case; this `onAppear` handles the window-just-mounted
+        // case. The static is cleared on read so a normal close/reopen
+        // doesn't trigger the same navigation a second time.
+        .onAppear {
+            if let pending = PacerAppDelegate.pendingDestination {
+                PacerAppDelegate.pendingDestination = nil
+                selectionRaw = pending.rawValue
+            }
+        }
     }
 
     // MARK: - Sidebar
