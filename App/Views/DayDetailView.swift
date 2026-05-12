@@ -156,14 +156,13 @@ struct DayDetailView: View {
         }
         .scrollIndicators(.never)
         .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
-        .navigationTitle(prettyDate)
-        .toolbar(removing: .title)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
+            PacerModalBackButton()
             VStack(alignment: .leading, spacing: 4) {
                 Text(prettyDate)
                     .font(.title)
@@ -175,7 +174,6 @@ struct DayDetailView: View {
             }
             Spacer()
             Button("Close") { dismissModal() }
-                .keyboardShortcut(.cancelAction)
         }
     }
 

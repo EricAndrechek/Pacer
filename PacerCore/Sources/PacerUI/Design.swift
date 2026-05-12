@@ -277,19 +277,22 @@ public struct FreshnessPulse: View {
     public var body: some View {
         ZStack {
             if shouldPulse {
-                // Halo scales from the dot's size (7pt, scale 0.5 of
-                // the 14pt outer frame) up to exactly the outer frame
-                // and fades out, so the radar-pulse stays *inside* the
-                // 14pt enclosing badge. The previous geometry started
-                // at 14pt and scaled to 1.3× → ~18pt, which spilled
-                // outside the ToolbarFreshness capsule.
+                // Radar ring: a stroked circle that starts at the
+                // dot's size (7pt) and expands to ~11pt at peak,
+                // fading as it grows. Strict upper bound is well
+                // inside the 14pt enclosing frame, so the halo never
+                // reaches the badge capsule's interior edges — fixes
+                // the "pulse leaks out of the pill" complaint that
+                // both the filled-halo geometries before failed to
+                // address (the prior versions kept the halo's peak
+                // size at or above the frame edge).
                 Circle()
-                    .fill(color.opacity(0.35))
-                    .frame(width: 14, height: 14)
-                    .scaleEffect(pulse ? 1.0 : 0.5)
-                    .opacity(pulse ? 0.0 : 0.7)
+                    .stroke(color.opacity(0.6), lineWidth: 1.2)
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(pulse ? 1.55 : 1.0)
+                    .opacity(pulse ? 0.0 : 0.85)
                     .animation(
-                        .easeInOut(duration: 1.4).repeatForever(autoreverses: false),
+                        .easeOut(duration: 1.4).repeatForever(autoreverses: false),
                         value: pulse
                     )
             }
@@ -298,6 +301,10 @@ public struct FreshnessPulse: View {
                 .frame(width: 7, height: 7)
         }
         .frame(width: 14, height: 14)
+        // Hard-clip to the outer frame as a belt-and-suspenders so
+        // any AA fringe or future geometry change can't bleed past
+        // the badge boundary.
+        .clipShape(Circle())
         .onAppear { if shouldPulse { pulse = true } }
     }
 }

@@ -135,12 +135,11 @@ struct ProjectDetailView: View {
         }
         .scrollIndicators(.never)
         .frame(minWidth: 640, idealWidth: 760, minHeight: 540, idealHeight: 720)
-        .navigationTitle(displayName)
-        .toolbar(removing: .title)
     }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
+            PacerModalBackButton()
             VStack(alignment: .leading, spacing: 4) {
                 Text(displayName)
                     .font(.title)
@@ -163,12 +162,11 @@ struct ProjectDetailView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([url])
                 } label: {
                     Label("Reveal in Finder", systemImage: "folder")
-                        .font(.system(size: 12))
                 }
+                .controlSize(.small)
                 .help("Open this project's folder in Finder")
             }
             Button("Close") { dismissModal() }
-                .keyboardShortcut(.cancelAction)
         }
     }
 

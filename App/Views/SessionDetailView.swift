@@ -50,11 +50,6 @@ struct SessionDetailView: View {
             }
         }
         .frame(minWidth: 540, idealWidth: 620, minHeight: 460, idealHeight: 560)
-        // Hide the navigation bar's default-title space for this leaf.
-        // The custom inline header below is the actual title surface;
-        // duplicating it in the toolbar would be cluttered.
-        .navigationTitle("")
-        .toolbar(removing: .title)
         .task(id: sessionId) {
             // Probe the transcript path on disk so we can offer
             // Reveal/Open buttons without paying the read cost the
@@ -98,6 +93,7 @@ struct SessionDetailView: View {
     @ViewBuilder
     private func header(for session: SessionInfo) -> some View {
         HStack(alignment: .firstTextBaseline) {
+            PacerModalBackButton()
             VStack(alignment: .leading, spacing: 4) {
                 Text(pacerShortModel(session.topModel))
                     .font(.title)

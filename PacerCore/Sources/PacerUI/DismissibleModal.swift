@@ -80,22 +80,28 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
                     .onTapGesture {
                         item = nil
                     }
-                // Modal content. We provide a `dismiss` environment
-                // value so the inner view can wire its Close button to
-                // the same path. The keyboardShortcut(.cancelAction)
-                // on Close still routes through this binding.
-                modalContent(current)
-                    .environment(\.dismissModal, makeDismissAction())
-                    // Keep the user from seeing a transparent corner
-                    // sliver — the inner views own their padding +
-                    // chrome.
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(nsColor: .windowBackgroundColor))
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: .black.opacity(0.35), radius: 30, x: 0, y: 12)
-                    .padding(40)
+                // Modal content. The hit-test wrapper below is load-
+                // bearing: without it, clicks on the modal's empty
+                // space (between cards, around padding) fall through
+                // to the scrim and dismiss the modal — `.background`
+                // and `.contentShape` on the outer chain weren't
+                // enough because SwiftUI's hit test only considers
+                // the foreground content's drawn children, not
+                // background fills. Wrapping in a ZStack with an
+                // explicit hit-positive `Rectangle()` underlay
+                // guarantees every point inside the modal's rounded
+                // rect absorbs taps; inner Buttons / HoverRows
+                // continue to receive their clicks first because
+                // hit-testing picks the deepest hit-positive view.
+                ZStack {
+                    Rectangle()
+                        .fill(Color(nsColor: .windowBackgroundColor))
+                    modalContent(current)
+                        .environment(\.dismissModal, makeDismissAction())
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .shadow(color: .black.opacity(0.35), radius: 30, x: 0, y: 12)
+                .padding(40)
                     // Esc + Cmd+W both dismiss, mirroring native sheet
                     // and window conventions. Two hidden buttons because
                     // .keyboardShortcut can only attach one shortcut per
