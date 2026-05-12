@@ -22,7 +22,6 @@ struct ProjectDetailView: View {
     let displayName: String
     let since: Date?
 
-    @Environment(\.dismissModal) private var dismissModal
     @Environment(\.pacerModalPush) private var push
     @Query private var aggregates: [ProjectDailyAggregate]
     @Query private var sessionRows: [SessionInfo]
@@ -123,50 +122,32 @@ struct ProjectDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                header
-                summaryCard
-                if !dailySeries.isEmpty { dailyChartCard }
-                if !modelSlices.isEmpty { modelsCard }
-                if !sessionRows.isEmpty { sessionsCard }
-            }
-            .padding(24)
-        }
-        .scrollIndicators(.never)
-        .frame(minWidth: 640, idealWidth: 760, minHeight: 540, idealHeight: 720)
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            PacerModalBackButton()
-            VStack(alignment: .leading, spacing: 4) {
-                Text(displayName)
-                    .font(.title)
-                    .fontWeight(.semibold)
-                    .fontDesign(.rounded)
-                Text(projectPath)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-            Spacer(minLength: 12)
-            // Convenience for the user — jump to the project directory
-            // in Finder. Disabled for the synthetic "(unknown)" path
-            // that Pacer uses for samples whose JSONL line lacks `cwd`.
-            if projectPath != ProjectDailyAggregate.unknownProjectPath {
-                Button {
-                    let url = URL(fileURLWithPath: projectPath)
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
+        PacerModalContent(
+            title: displayName,
+            subtitle: projectPath,
+            minWidth: 640, idealWidth: 760,
+            minHeight: 540, idealHeight: 720,
+            trailing: {
+                // Jump to the project directory in Finder. Hidden
+                // for the synthetic "(unknown)" path Pacer assigns
+                // to samples whose JSONL line lacks `cwd`.
+                if projectPath != ProjectDailyAggregate.unknownProjectPath {
+                    PacerModalIconButton(
+                        systemName: "folder",
+                        help: "Reveal in Finder",
+                        accessibilityLabel: "Reveal in Finder"
+                    ) {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [URL(fileURLWithPath: projectPath)]
+                        )
+                    }
                 }
-                .controlSize(.small)
-                .help("Open this project's folder in Finder")
             }
-            Button("Close") { dismissModal() }
+        ) {
+            summaryCard
+            if !dailySeries.isEmpty { dailyChartCard }
+            if !modelSlices.isEmpty { modelsCard }
+            if !sessionRows.isEmpty { sessionsCard }
         }
     }
 

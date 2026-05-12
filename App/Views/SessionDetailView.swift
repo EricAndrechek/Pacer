@@ -21,7 +21,6 @@ struct SessionDetailView: View {
     let projectDisplayName: String
 
     @Query private var sessions: [SessionInfo]
-    @Environment(\.dismissModal) private var dismissModal
     @State private var transcriptURL: URL?
 
     init(sessionId: String, projectDisplayName: String) {
@@ -39,17 +38,38 @@ struct SessionDetailView: View {
     private var session: SessionInfo? { sessions.first }
 
     var body: some View {
-        Group {
+        PacerModalContent(
+            title: chromeTitle,
+            subtitle: chromeSubtitle,
+            minWidth: 540, idealWidth: 620,
+            minHeight: 460, idealHeight: 560,
+            trailing: {
+                if let url = transcriptURL {
+                    PacerModalIconButton(
+                        systemName: "doc.text.magnifyingglass",
+                        help: "Reveal transcript in Finder",
+                        accessibilityLabel: "Reveal transcript"
+                    ) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                    PacerModalIconButton(
+                        systemName: "doc.plaintext",
+                        help: "Open JSONL transcript",
+                        accessibilityLabel: "Open transcript"
+                    ) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        ) {
             if let session {
-                content(for: session)
+                summaryCard(for: session)
+                tokensCard(for: session)
+                metadataCard(for: session)
             } else {
-                // Brief flash before @Query lands; if the session
-                // genuinely vanished we surface a tiny "not found"
-                // state rather than crashing.
                 missingState
             }
         }
-        .frame(minWidth: 540, idealWidth: 620, minHeight: 460, idealHeight: 560)
         .task(id: sessionId) {
             // Probe the transcript path on disk so we can offer
             // Reveal/Open buttons without paying the read cost the
@@ -59,18 +79,20 @@ struct SessionDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private func content(for session: SessionInfo) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                header(for: session)
-                summaryCard(for: session)
-                tokensCard(for: session)
-                metadataCard(for: session)
-            }
-            .padding(24)
-        }
-        .scrollIndicators(.never)
+    /// Chrome title — model name for the session, or a "loading" hint
+    /// if @Query hasn't hydrated yet. Falls back to the session id
+    /// prefix if SessionInfo genuinely doesn't exist.
+    private var chromeTitle: String {
+        if let session { return pacerShortModel(session.topModel) }
+        return "Session"
+    }
+
+    /// Chrome subtitle — short session id · project name. Mirrors the
+    /// previous header's monospaced id line so users can still pick
+    /// the session out of a stack visually.
+    private var chromeSubtitle: String {
+        let shortId = String(sessionId.prefix(13))
+        return "\(shortId) · \(projectDisplayName)"
     }
 
     private var missingState: some View {
@@ -86,36 +108,6 @@ struct SessionDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
-    }
-
-    // MARK: - Header
-
-    @ViewBuilder
-    private func header(for session: SessionInfo) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            PacerModalBackButton()
-            VStack(alignment: .leading, spacing: 4) {
-                Text(pacerShortModel(session.topModel))
-                    .font(.title)
-                    .fontWeight(.semibold)
-                    .fontDesign(.rounded)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                HStack(spacing: 6) {
-                    Text(String(session.sessionId.prefix(13)))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                    Text(projectDisplayName)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer(minLength: 12)
-            Button("Close") { dismissModal() }
-        }
     }
 
     // MARK: - Summary
@@ -214,28 +206,6 @@ struct SessionDetailView: View {
                     monospaced: true,
                     selectable: true
                 )
-                if transcriptURL != nil {
-                    Divider().padding(.vertical, 2)
-                    HStack(spacing: 8) {
-                        Button {
-                            if let url = transcriptURL {
-                                NSWorkspace.shared.activateFileViewerSelecting([url])
-                            }
-                        } label: {
-                            Label("Reveal transcript", systemImage: "doc.text.magnifyingglass")
-                                .font(.system(size: 12))
-                        }
-                        Button {
-                            if let url = transcriptURL {
-                                NSWorkspace.shared.open(url)
-                            }
-                        } label: {
-                            Label("Open JSONL", systemImage: "doc.plaintext")
-                                .font(.system(size: 12))
-                        }
-                        Spacer()
-                    }
-                }
             }
         }
     }

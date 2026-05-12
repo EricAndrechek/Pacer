@@ -11,7 +11,6 @@ import PacerUI
 struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
-    @Environment(\.dismissModal) private var dismissModal
     @Environment(\.pacerModalPush) private var push
     @Query private var aggregates: [DailyAggregate]
     @Query private var samples: [TokenSample]
@@ -144,37 +143,19 @@ struct DayDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                header
-                summaryCard
-                if !aggregates.isEmpty { modelsCard }
-                if !projectRows.isEmpty { projectsCard }
-                if !sessionRows.isEmpty { sessionsCard }
-            }
-            .padding(24)
+        PacerModalContent(
+            title: prettyDate,
+            subtitle: date,
+            minWidth: 580, idealWidth: 660,
+            minHeight: 480, idealHeight: 620
+        ) {
+            summaryCard
+            if !aggregates.isEmpty { modelsCard }
+            if !projectRows.isEmpty { projectsCard }
+            if !sessionRows.isEmpty { sessionsCard }
         }
-        .scrollIndicators(.never)
-        .frame(minWidth: 580, idealWidth: 660, minHeight: 480, idealHeight: 620)
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
-    }
-
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            PacerModalBackButton()
-            VStack(alignment: .leading, spacing: 4) {
-                Text(prettyDate)
-                    .font(.title)
-                    .fontWeight(.semibold)
-                    .fontDesign(.rounded)
-                Text(date)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Close") { dismissModal() }
-        }
     }
 
     /// `2026-04-30` → `Thursday, April 30, 2026`. Falls back to the raw
