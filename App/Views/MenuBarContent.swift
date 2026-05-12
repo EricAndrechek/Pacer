@@ -243,7 +243,12 @@ struct MenuBarContent: View {
         .padding(.horizontal, 14)
         .padding(.top, 14)
         .padding(.bottom, 10)
-        .frame(width: 320)
+        // `idealWidth` rather than a hard `width` so locale variants
+        // can flex a bit when the numbers/labels need more room.
+        // `maxHeight` caps growth on tall displays — without it the
+        // popover would expand indefinitely if a future iteration of
+        // this view added more content.
+        .frame(idealWidth: 320, maxHeight: 480)
     }
 
     // MARK: - Header

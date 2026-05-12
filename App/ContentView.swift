@@ -187,7 +187,13 @@ struct ContentView: View {
         // the resize handle and let the user drag the divider past
         // the intended bounds. Drop the .frame so SwiftUI clamps
         // resize gestures to these limits cleanly.
-        .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 260)
+        //
+        // `min: 220` rather than the prior 200 — at 200pt the
+        // "Dashboard" / "History" rows ran right up to the trailing
+        // edge of the selection background, eating the comfortable
+        // breathing room the rest of the layout has. 220 gives the
+        // selected-row pill room without making the sidebar feel wide.
+        .navigationSplitViewColumnWidth(min: 220, ideal: 230, max: 280)
         // Keep the standard sidebar toggle (View → Show / Hide
         // Sidebar, plus the toolbar button). Previously removed for
         // visual cleanliness — but combined with the resize divider,

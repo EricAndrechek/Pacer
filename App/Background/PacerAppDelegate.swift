@@ -436,9 +436,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         )
         host.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(host)
+        // Flush leading/trailing — the menu-bar HIG sizes status items
+        // off their content's intrinsic width. The earlier ±4pt insets
+        // made Pacer's status item visibly fatter than Battery /
+        // Bluetooth / iCloud / etc. when displayed side-by-side. Let
+        // the SwiftUI label own all its padding.
         NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
-            host.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
+            host.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: button.trailingAnchor),
             host.centerYAnchor.constraint(equalTo: button.centerYAnchor)
         ])
         menuBarHostingView = host
