@@ -80,16 +80,30 @@ struct SettingsView: View {
 
     // MARK: - Content pane
 
+    /// Panel title above each Form. Pinned at the top of the right
+    /// pane while the Form scrolls underneath — same layout as macOS
+    /// Sequoia System Settings. Pulling the title out of the Form
+    /// keeps the heading visible while a long Notifications panel is
+    /// scrolled.
     @ViewBuilder
     private var content: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                Text(category.label)
-                    .font(.title)
-                    .fontWeight(.semibold)
-                    .fontDesign(.rounded)
-                    .padding(.bottom, 4)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(category.label)
+                .font(.title)
+                .fontWeight(.semibold)
+                .fontDesign(.rounded)
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+                .padding(.bottom, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Each panel is a `Form` with `.formStyle(.grouped)` — the
+            // System-Settings-shape grouped rows give us native label
+            // alignment, the correct vertical insets, row dividers,
+            // and proper VoiceOver "settings list" semantics. The
+            // grouped Form scrolls itself so there is no outer
+            // ScrollView wrapping these panels.
+            Group {
                 switch category {
                 case .general:       GeneralPanel()
                 case .menuBar:       MenuBarPanel()
@@ -98,9 +112,8 @@ struct SettingsView: View {
                 case .storage:       StoragePanel()
                 }
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
@@ -180,37 +193,33 @@ private struct GeneralPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard(
-                "Startup",
-                content: {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Open Pacer at login", isOn: isEnabled)
-                            .toggleStyle(.switch)
-                        if loginItemStatus == .requiresApproval {
-                            HStack(spacing: 8) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                                Text("Approval required.")
-                                    .font(.caption)
-                                Button("Open System Settings") {
-                                    LoginItemController.openSystemSettingsApproval()
-                                }
-                                .controlSize(.small)
-                            }
+        Form {
+            Section {
+                Toggle("Open Pacer at login", isOn: isEnabled)
+                if loginItemStatus == .requiresApproval {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Approval required.")
+                            .font(.caption)
+                        Button("Open System Settings") {
+                            LoginItemController.openSystemSettingsApproval()
                         }
-                        if let err = actionError {
-                            Text(err)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
+                        .controlSize(.small)
                     }
-                },
-                footer: {
-                    Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
                 }
-            )
+                if let err = actionError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            } header: {
+                Text("Startup")
+            } footer: {
+                Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
+            }
         }
+        .formStyle(.grouped)
         .onAppear { refresh() }
     }
 
@@ -229,26 +238,27 @@ private struct MenuBarPanel: View {
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard("Display", content: {
-                VStack(alignment: .leading, spacing: 14) {
-                    Picker("What to show", selection: $styleRaw) {
-                        ForEach(PacerSettings.MenuBarStyle.allCases) { style in
-                            Text(style.label).tag(style.rawValue)
-                        }
+        Form {
+            Section {
+                Picker("What to show", selection: $styleRaw) {
+                    ForEach(PacerSettings.MenuBarStyle.allCases) { style in
+                        Text(style.label).tag(style.rawValue)
                     }
-                    Picker("Icon style", selection: $iconRaw) {
-                        ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
-                            Text(style.label).tag(style.rawValue)
-                        }
-                    }
-                    .disabled(styleRaw == PacerSettings.MenuBarStyle.percentOnly.rawValue
-                              || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
                 }
-            }, footer: {
+                Picker("Icon style", selection: $iconRaw) {
+                    ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
+                        Text(style.label).tag(style.rawValue)
+                    }
+                }
+                .disabled(styleRaw == PacerSettings.MenuBarStyle.percentOnly.rawValue
+                          || styleRaw == PacerSettings.MenuBarStyle.hidden.rawValue)
+            } header: {
+                Text("Display")
+            } footer: {
                 Text("Hiding the menu bar item doesn't stop tracking — Pacer keeps collecting in the background as long as the app process is running. Open the dashboard from Spotlight or the Dock when needed.")
-            })
+            }
         }
+        .formStyle(.grouped)
     }
 }
 
@@ -287,31 +297,20 @@ private struct NotificationsPanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard("Rate-limit alerts", content: {
-                VStack(alignment: .leading, spacing: 14) {
-                    Toggle("Enable rate-limit notifications", isOn: $enabled)
-                        .toggleStyle(.switch)
-                        .onChange(of: enabled) { _, newValue in
-                            if newValue {
-                                Task {
-                                    await NotificationCoordinator.shared
-                                        .requestAuthorizationIfNeeded()
-                                }
+        Form {
+            Section {
+                Toggle("Enable rate-limit notifications", isOn: $enabled)
+                    .onChange(of: enabled) { _, newValue in
+                        if newValue {
+                            Task {
+                                await NotificationCoordinator.shared
+                                    .requestAuthorizationIfNeeded()
                             }
                         }
-                    ThresholdListEditor(
-                        title: "5-hour window",
-                        window: "five_hour",
-                        enabled: enabled
-                    )
-                    ThresholdListEditor(
-                        title: "7-day window",
-                        window: "seven_day",
-                        enabled: enabled
-                    )
-                }
-            }, footer: {
+                    }
+            } header: {
+                Text("Rate-limit alerts")
+            } footer: {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Add as many thresholds per window as you want — Pacer fires a separate banner each time usage crosses one upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                     HStack(spacing: 8) {
@@ -323,46 +322,58 @@ private struct NotificationsPanel: View {
                     }
                     Text("Pacer's banner style is set there — choose **Banners** or **Alerts** rather than **None**.")
                 }
-            })
+            }
 
-            PacerCard("Daily cost alert", content: {
-                VStack(alignment: .leading, spacing: 14) {
-                    Toggle("Notify when today's cost exceeds threshold", isOn: $dailyCostEnabled)
-                        .toggleStyle(.switch)
-                    HStack {
-                        Text("Cost threshold")
-                        Spacer()
+            // Each window's threshold list is its own Section so the
+            // dynamic list of slider rows + "Add threshold" button reads
+            // as native grouped rows (matches macOS System Settings'
+            // "Add Item" patterns, e.g. Login Items, Sound).
+            ThresholdSection(
+                title: "5-hour window",
+                window: "five_hour",
+                enabled: enabled
+            )
+            ThresholdSection(
+                title: "7-day window",
+                window: "seven_day",
+                enabled: enabled
+            )
+
+            Section("Daily cost alert") {
+                Toggle("Notify when today's cost exceeds threshold", isOn: $dailyCostEnabled)
+                // LabeledContent + paired Stepper is the macOS-native
+                // pattern for "typed numeric value with up/down arrows."
+                // Without the Stepper, users had to retype the whole
+                // amount to adjust by $5; the field still accepts free
+                // input for non-standard values.
+                LabeledContent("Cost threshold") {
+                    HStack(spacing: 4) {
                         TextField("Amount", value: $dailyCostThreshold,
                                   format: .currency(code: currencyCode))
                             .multilineTextAlignment(.trailing)
-                            .frame(width: 130)
-                            .disabled(!dailyCostEnabled)
+                            .frame(width: 110)
+                        Stepper("", value: $dailyCostThreshold, in: 1...10_000, step: 5)
+                            .labelsHidden()
                     }
                 }
-            })
+                .disabled(!dailyCostEnabled)
+            }
 
-            PacerCard("Daily summary", content: {
-                VStack(alignment: .leading, spacing: 14) {
-                    Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
-                        .toggleStyle(.switch)
-                    HStack {
-                        Text("Send at")
-                        Spacer()
-                        Picker("Send at", selection: $dailySummaryHour) {
-                            ForEach(0..<24, id: \.self) { h in
-                                Text(formatHour(h)).tag(h)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 130)
-                        .disabled(!dailySummaryEnabled)
+            Section {
+                Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
+                Picker("Send at", selection: $dailySummaryHour) {
+                    ForEach(0..<24, id: \.self) { h in
+                        Text(formatHour(h)).tag(h)
                     }
                 }
-            }, footer: {
+                .disabled(!dailySummaryEnabled)
+            } header: {
+                Text("Daily summary")
+            } footer: {
                 Text("Quiet, informational banner showing today's spend and top model. Fires once per day after the chosen time, only if you've used Claude Code that day.")
-            })
+            }
 
-            PacerCard("Test", content: {
+            Section("Test") {
                 HStack {
                     Button("Send test notification") {
                         Task { await sendTestNotification() }
@@ -375,8 +386,9 @@ private struct NotificationsPanel: View {
                     }
                     Spacer()
                 }
-            })
+            }
         }
+        .formStyle(.grouped)
     }
 
     private var testLabel: String? {
@@ -450,14 +462,15 @@ extension NotificationsPanel.TestStatus: Equatable {
     }
 }
 
-// MARK: - Threshold list editor
+// MARK: - Threshold list section
 
-/// One window's worth of notification thresholds as an editable list.
+/// One window's worth of notification thresholds, rendered as a Form
+/// `Section` so it sits flush with the rest of the Settings panel.
 /// Each row is an independent threshold; rows can be added, removed,
 /// and individually adjusted. Persists through `PacerSettings`'s CSV
 /// helpers so the live `NotificationCoordinator` (also reading via
 /// `PacerSettings.thresholds(forWindow:)`) sees changes immediately.
-private struct ThresholdListEditor: View {
+private struct ThresholdSection: View {
     let title: String
     let window: String
     let enabled: Bool
@@ -465,27 +478,11 @@ private struct ThresholdListEditor: View {
     @State private var thresholds: [Int] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(enabled ? .primary : .secondary)
-                Spacer()
-                Button {
-                    addThreshold()
-                } label: {
-                    Label("Add threshold", systemImage: "plus.circle.fill")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .disabled(!enabled)
-            }
+        Section {
             if thresholds.isEmpty {
                 Text("No thresholds — Pacer won't notify for this window.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-                    .padding(.vertical, 4)
             } else {
                 ForEach(Array(thresholds.enumerated()), id: \.offset) { idx, _ in
                     ThresholdRow(
@@ -495,8 +492,15 @@ private struct ThresholdListEditor: View {
                     )
                 }
             }
+            Button {
+                addThreshold()
+            } label: {
+                Label("Add threshold", systemImage: "plus.circle.fill")
+            }
+            .disabled(!enabled)
+        } header: {
+            Text(title)
         }
-        .padding(.vertical, 4)
         .onAppear { reload() }
         // Re-pull when the App Group store changes so two Settings
         // panels (or a CLI write) stay in sync.
@@ -603,18 +607,21 @@ private struct CostPanel: View {
     private var costMode: String = "auto"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard("Cost calculation", content: {
+        Form {
+            Section {
                 Picker("Mode", selection: $costMode) {
                     Text("Auto (prefer stored, calculate when missing)").tag("auto")
                     Text("Calculate (always from tokens × pricing)").tag("calculate")
                     Text("Display (only stored Claude Code costs)").tag("display")
                 }
                 .pickerStyle(.radioGroup)
-            }, footer: {
+            } header: {
+                Text("Cost calculation")
+            } footer: {
                 Text("**Auto** matches `bun x ccusage`. **Calculate** is what you want when older Claude Code lines lack `costUSD`. **Display** only shows server-supplied numbers and ignores tokens that didn't come with one.")
-            })
+            }
         }
+        .formStyle(.grouped)
     }
 }
 
@@ -629,16 +636,18 @@ private struct StoragePanel: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            PacerCard("Database", content: {
+        Form {
+            Section("Database") {
                 if let url = storeURL {
-                    HStack {
+                    LabeledContent("Location") {
                         Text(url.path)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .textSelection(.enabled)
                             .foregroundStyle(.secondary)
+                    }
+                    HStack {
                         Spacer()
                         Button("Show in Finder") {
                             NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -648,22 +657,25 @@ private struct StoragePanel: View {
                     Text("App Group container unavailable.")
                         .foregroundStyle(.secondary)
                 }
-            })
+            }
 
-            PacerCard("Logs", content: {
-                HStack {
+            Section("Logs") {
+                LabeledContent("Location") {
                     Text(logsDirURL.path)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                }
+                HStack {
                     Spacer()
                     Button("Open in Finder") {
                         NSWorkspace.shared.open(logsDirURL)
                     }
                 }
-            })
+            }
         }
+        .formStyle(.grouped)
     }
 }
 
