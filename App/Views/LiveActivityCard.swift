@@ -11,21 +11,67 @@ import PacerUI
 /// scanning Pacer writes near-realtime, so this card moves visibly
 /// while Claude Code is actively running.
 struct LiveActivityCard: View {
-    @Query private var recentSamples: [TokenSample]
+    /// Hour buckets for "recent" activity. Previously this card
+    /// queried every `TokenSample` in the last hour and called
+    /// `effectiveCostUSD(mode:)` per row to compute the rate — fine on
+    /// a quiet day, but on an active session with hundreds of samples
+    /// per hour this re-walked them on every scan tick. The hourly
+    /// rollup is keyed `(date, hour, model)` with cost already
+    /// applied; summing the two most-recent hour buckets is a stable
+    /// rolling-rate approximation (the window slides between exactly
+    /// 1 hour at the top of the hour and ~2 hours just before the
+    /// next rollover). The exact 60-minute precision the old query
+    /// gave isn't load-bearing — this card is a "what's the
+    /// hour-scale burn rate" indicator, not a billing report.
+    @Query private var recentHourlyRows: [HourlyAggregate]
     @Query private var todayAggregates: [DailyAggregate]
-    /// Most-recent sample (any age). When the last-hour set is empty
-    /// this lets us say "last activity 3h ago" instead of a flat
-    /// "no samples" — much more useful when the user comes back to
-    /// the dashboard after a break.
+    /// Most-recent sample (any age). When the recent set is empty this
+    /// lets us say "last activity 3h ago" instead of a flat "no
+    /// samples" — much more useful when the user comes back to the
+    /// dashboard after a break. fetchLimit=1 keeps it cheap.
     @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
 
     init() {
-        let cutoff = Date().addingTimeInterval(-3600)  // 1h
-        _recentSamples = Query(
-            filter: #Predicate<TokenSample> { $0.sampledAt >= cutoff },
-            sort: \.sampledAt,
-            order: .reverse
-        )
+        // Two-hour window covers the current hour bucket plus the
+        // previous one, which together always include a full
+        // "last hour" worth of samples (the precise span depends on
+        // where in the current hour we are). The cutoff is computed
+        // by hour boundary so the predicate maps cleanly to the
+        // rollup's date+hour keying.
+        let now = Date()
+        let cal = Calendar.current
+        let currentHourStart = cal.date(
+            bySettingHour: cal.component(.hour, from: now),
+            minute: 0,
+            second: 0,
+            of: now
+        ) ?? now
+        let twoHoursAgoStart = cal.date(byAdding: .hour, value: -1, to: currentHourStart) ?? now
+        // Predicate is "row's hour-start >= twoHoursAgoStart"; expressed
+        // via the (date, hour) key range to avoid a sampledAt predicate
+        // on a derived column. Today + (possibly) yesterday for the
+        // midnight-crossing case.
+        let todayString = TokenSample.formatDate(now)
+        let yesterdayString = TokenSample.formatDate(twoHoursAgoStart)
+        let lowestHour = cal.component(.hour, from: twoHoursAgoStart)
+        if todayString == yesterdayString {
+            // Same day: a simple (date == today, hour >= lowestHour).
+            _recentHourlyRows = Query(
+                filter: #Predicate<HourlyAggregate> {
+                    $0.date == todayString && $0.hour >= lowestHour
+                }
+            )
+        } else {
+            // Midnight cross: today's hour-0/1 buckets plus yesterday's
+            // hour-23 bucket. Express as union via OR — both legs use
+            // the `(date, hour)` index.
+            _recentHourlyRows = Query(
+                filter: #Predicate<HourlyAggregate> {
+                    $0.date == todayString
+                    || ($0.date == yesterdayString && $0.hour >= lowestHour)
+                }
+            )
+        }
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
@@ -50,27 +96,29 @@ struct LiveActivityCard: View {
         }
     }
 
+    /// Cost mode is read here purely to drive the
+    /// `SampleCostCache.reload()` side effect below — the data path
+    /// no longer touches `effectiveCostUSD(mode:)` (cost is baked into
+    /// HourlyAggregate at recompute time). Other views that still
+    /// call the per-sample helper (e.g. `ProjectDetailView`'s
+    /// Subprojects card) rely on this global reload, so it stays.
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
-    /// Derived synchronously from `recentSamples` so the first render
-    /// already shows the real metric grid. The previous @State + onAppear
-    /// pattern flashed the empty state for one frame on each tab switch,
-    /// reflowing all cards below.
+    /// Derived synchronously from the hourly rollup so the first render
+    /// already shows real numbers. Cost is the recomputer's stored
+    /// value — no per-render `effectiveCostUSD(mode:)` calls, no
+    /// pricing lookups on the body path. `lastSampleAt` comes from the
+    /// fetchLimit=1 probe; sampleCount is summed from the same buckets
+    /// the rate metric uses (recomputer writes it on every upsert).
     private var stats: LiveStats {
         var s = LiveStats()
-        let mode = CostMode(rawValue: costModeRaw) ?? .auto
-        for sample in recentSamples {
-            s.tokensLastHour += sample.inputTokens + sample.outputTokens + sample.cacheReadTokens
-            // Single shared helper — same one DayDetail / TodayTimeline
-            // / CSVExporter use. Replaces the per-card pricing-snapshot
-            // dance with a process-wide cache warmed at app launch.
-            s.costLastHour += sample.effectiveCostUSD(mode: mode)
-            s.sampleCount += 1
-            if sample.sampledAt > (s.lastSampleAt ?? .distantPast) {
-                s.lastSampleAt = sample.sampledAt
-            }
+        for row in recentHourlyRows {
+            s.tokensLastHour += row.inputTokens + row.outputTokens + row.cacheReadTokens
+            s.costLastHour += row.totalCostUSD
+            s.sampleCount += row.sampleCount
         }
+        s.lastSampleAt = latestSamples.first?.sampledAt
         return s
     }
 

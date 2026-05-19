@@ -54,6 +54,7 @@ public enum PacerStore {
             for: Heartbeat.self,
             TokenSample.self,
             DailyAggregate.self,
+            HourlyAggregate.self,
             ProjectDailyAggregate.self,
             RateLimitSample.self,
             SessionInfo.self,

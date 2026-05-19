@@ -30,6 +30,23 @@ public struct ProjectDatePair: Hashable, Sendable {
     }
 }
 
+/// One `(date, hour, model)` bucket whose `HourlyAggregate` needs
+/// recomputing. Hour is the user's local-zone 0–23, matching the
+/// `date` column's local-zone semantics on `TokenSample`. Drives
+/// `HourlyAggregateRecomputer` — sister of `DateModelPair`, with an
+/// extra hour dimension.
+public struct DateHourModelTriple: Hashable, Sendable {
+    public let date: String
+    public let hour: Int
+    public let model: String
+
+    public init(date: String, hour: Int, model: String) {
+        self.date = date
+        self.hour = hour
+        self.model = model
+    }
+}
+
 /// Idempotent inserter for `TokenSample` rows. The hot loop in a full
 /// historical scan will call `insert(_:)` ~500K times on the user's
 /// dataset, so the dedup check has to be O(1). Pre-loads every
@@ -56,6 +73,10 @@ public final class SamplePersister {
     /// `ProjectAggregateRecomputer`. Same shape and semantics as
     /// `dirtyPairs`, just keyed differently.
     public private(set) var dirtyProjectDates: Set<ProjectDatePair>
+    /// `(date, hour, model)` buckets touched this session. Drives
+    /// `HourlyAggregateRecomputer`. Hour is the user's local-zone
+    /// 0–23 computed from `sample.sampledAt`.
+    public private(set) var dirtyHourBuckets: Set<DateHourModelTriple>
     /// Session ids touched this session. Drives `SessionInfoRecomputer`.
     /// Only entries with a non-nil `sessionId` mark this set —
     /// session-less entries (older Claude Code lines) don't get a
@@ -78,6 +99,13 @@ public final class SamplePersister {
     /// `dirtyProjectDates`. This is the bootstrap for users upgrading
     /// from a build that didn't have `ProjectDailyAggregate`.
     private var missingProjectAggregatePairs: Set<ProjectDatePair>
+    /// `(date, hour, model)` triples with TokenSamples but no matching
+    /// `HourlyAggregate` at persister-init time. Same recovery path as
+    /// the other `missing*` sets — bootstraps the hourly rollup for
+    /// users upgrading from a build that didn't have it. The
+    /// `consumeMissingHourBuckets()` drain is one-shot per persister
+    /// lifetime; subsequent scans see no gaps and return empty.
+    private var missingHourBuckets: Set<DateHourModelTriple>
     /// Session ids with TokenSamples but no matching `SessionInfo` row
     /// at persister-init time. Same one-shot recovery path as the other
     /// missing-* sets. Bootstrap for users upgrading from a build that
@@ -101,9 +129,11 @@ public final class SamplePersister {
         self.seenDedupKeys = []
         self.dirtyPairs = []
         self.dirtyProjectDates = []
+        self.dirtyHourBuckets = []
         self.dirtySessionIds = []
         self.missingAggregatePairs = []
         self.missingProjectAggregatePairs = []
+        self.missingHourBuckets = []
         self.missingSessionIds = []
         self.pendingInsertCount = 0
         self.stats = Stats(inserted: 0, skippedAsDuplicate: 0)
@@ -127,6 +157,15 @@ public final class SamplePersister {
         dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
         dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+        // Hour bucket uses the same user-local calendar that
+        // `TokenSample.date` was formatted under, so a sample at
+        // 23:30 local lands in (today, 23) — and the next half-hour's
+        // sample, even though wall-clock has rolled to tomorrow, will
+        // land correctly under (tomorrow, 0). `Calendar.current` is
+        // safe to call here; we're on MainActor.
+        let hour = Self.localHour(of: sample.sampledAt)
+        dirtyHourBuckets.insert(DateHourModelTriple(
+            date: sample.date, hour: hour, model: sample.model))
         if let sid = sample.sessionId, !sid.isEmpty {
             dirtySessionIds.insert(sid)
         }
@@ -161,6 +200,7 @@ public final class SamplePersister {
     public func clearDirtyPairs() {
         dirtyPairs.removeAll()
         dirtyProjectDates.removeAll()
+        dirtyHourBuckets.removeAll()
         dirtySessionIds.removeAll()
     }
 
@@ -183,6 +223,17 @@ public final class SamplePersister {
         let pairs = missingProjectAggregatePairs
         missingProjectAggregatePairs.removeAll()
         return pairs
+    }
+
+    /// Drain and return the (date, hour, model) triples missing
+    /// `HourlyAggregate` rows at persister-init time. Same one-shot
+    /// semantics as the other `consumeMissing*` drains. Non-empty on
+    /// first scan after the schema is extended (bootstrap of the new
+    /// rollup); empty on subsequent scans.
+    public func consumeMissingHourBuckets() -> Set<DateHourModelTriple> {
+        let triples = missingHourBuckets
+        missingHourBuckets.removeAll()
+        return triples
     }
 
     /// Drain and return session ids with TokenSamples but no
@@ -209,6 +260,13 @@ public final class SamplePersister {
         dirtyProjectDates.formUnion(pairs)
     }
 
+    /// Merge external hour-bucket triples into the dirty set. Symmetric
+    /// to `addDirtyPairs(_:)` for the hourly rollup path. Used to fold
+    /// `missingHourBuckets` into `dirtyHourBuckets` from ScanCoordinator.
+    public func addDirtyHourBuckets(_ triples: Set<DateHourModelTriple>) {
+        dirtyHourBuckets.formUnion(triples)
+    }
+
     /// Merge external session ids into the dirty set. Symmetric to
     /// `addDirtyPairs(_:)` for the SessionInfo rollup path.
     public func addDirtySessionIds(_ ids: Set<String>) {
@@ -225,12 +283,20 @@ public final class SamplePersister {
     /// subtracting the existing aggregate set.
     public func markEverySampleDirty() throws {
         var descriptor = FetchDescriptor<TokenSample>()
-        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId]
+        // sampledAt is needed here too — hour bucket derives from it.
+        // Cheap to fetch alongside the existing slim columns and worth
+        // the cost; without it the hourly rollup would not rebuild on
+        // a cost-recompute version bump and every HourlyAggregate
+        // would silently keep its pre-bump cost numbers.
+        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt]
         let samples = try context.fetch(descriptor)
         for sample in samples {
             dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
             dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+            let hour = Self.localHour(of: sample.sampledAt)
+            dirtyHourBuckets.insert(DateHourModelTriple(
+                date: sample.date, hour: hour, model: sample.model))
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
             }
@@ -364,6 +430,14 @@ public final class SamplePersister {
         }
     }
 
+    /// User-local 0–23 hour-of-day for a `sampledAt` instant. Matches
+    /// the local-zone semantics of `TokenSample.date` so a (date,
+    /// hour) pair always agrees with the row it came from.
+    /// `Calendar.current` is cheap on MainActor.
+    fileprivate static func localHour(of date: Date) -> Int {
+        Calendar.current.component(.hour, from: date)
+    }
+
     private func preloadFromStore() throws {
         // SwiftData materializes every row in a `FetchDescriptor`
         // result as a full `@Model` object by default. With ~500K
@@ -381,12 +455,18 @@ public final class SamplePersister {
         // and it lets us detect missing-aggregate gaps for both
         // rollup tables below.
         var sampleDescriptor = FetchDescriptor<TokenSample>()
+        // sampledAt joins the slim column list so we can compute the
+        // hour-bucket triple in the same one-pass scan that builds the
+        // other dirty/missing sets. Without it the hourly rollup would
+        // need a second full fetch — costly during preload for power
+        // users with ~500K rows.
         sampleDescriptor.propertiesToFetch = [
-            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId
+            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt
         ]
         let samples = try context.fetch(sampleDescriptor)
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
+        var sampleHourBuckets: Set<DateHourModelTriple> = []
         var sampleSessionIds: Set<String> = []
         for sample in samples {
             if let key = sample.dedupKey {
@@ -395,6 +475,9 @@ public final class SamplePersister {
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
             sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: sample.date))
+            let hour = Self.localHour(of: sample.sampledAt)
+            sampleHourBuckets.insert(DateHourModelTriple(
+                date: sample.date, hour: hour, model: sample.model))
             if let sid = sample.sessionId, !sid.isEmpty {
                 sampleSessionIds.insert(sid)
             }
@@ -420,6 +503,15 @@ public final class SamplePersister {
             projectAggregatePairs.insert(ProjectDatePair(projectPath: agg.projectPath, date: agg.date))
         }
         missingProjectAggregatePairs = sampleProjectPairs.subtracting(projectAggregatePairs)
+
+        var hourAggDesc = FetchDescriptor<HourlyAggregate>()
+        hourAggDesc.propertiesToFetch = [\.date, \.hour, \.model]
+        var hourAggregateTriples: Set<DateHourModelTriple> = []
+        for agg in try context.fetch(hourAggDesc) {
+            hourAggregateTriples.insert(DateHourModelTriple(
+                date: agg.date, hour: agg.hour, model: agg.model))
+        }
+        missingHourBuckets = sampleHourBuckets.subtracting(hourAggregateTriples)
 
         var sessDesc = FetchDescriptor<SessionInfo>()
         sessDesc.propertiesToFetch = [\.sessionId]

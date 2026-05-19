@@ -19,16 +19,19 @@ struct TodayTimelineCard: View {
     init(onTodayTap: (() -> Void)? = nil) {
         self.onTodayTap = onTodayTap
         let today = TokenSample.formatDate(Date())
-        _samples = Query(
-            filter: #Predicate<TokenSample> { $0.date == today },
-            sort: \.sampledAt
+        // Today-scoped `HourlyAggregate` rows are at most 24 × N_models
+        // — typically <100. Previously this card queried every
+        // `TokenSample` for today (often 3000+) and re-walked them on
+        // every scan tick to bucket by hour, calling
+        // `effectiveCostUSD(mode:)` per row. The recomputer applies
+        // cost mode once at write time, so the read path here is just
+        // sum-by-hour over the prebuilt rollup.
+        _hourlyRows = Query(
+            filter: #Predicate<HourlyAggregate> { $0.date == today }
         )
     }
 
-    /// Today's samples. Body never reads the array — we cache via a
-    /// scan-meta tick so a hot save loop doesn't re-iterate ~3000 of
-    /// today's samples on every body refresh.
-    @Query private var samples: [TokenSample]
+    @Query private var hourlyRows: [HourlyAggregate]
     @Query(TodayTimelineCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
 
@@ -50,26 +53,21 @@ struct TodayTimelineCard: View {
         var hours: [Hour] = (0..<24).map { Hour(hour: $0, tokens: 0, cost: 0) }
         var peakHour: Int?
         var totalTokens: Int64 = 0
-        var sampleCount: Int = -1
     }
 
     @MainActor
     private func refreshCache() {
-        let cal = Calendar.current
+        // Sum across models per hour. Each HourlyAggregate row is one
+        // (today, hour, model) bucket pre-applied with the user's
+        // current cost mode, so we just add them up.
         var byHour: [Int: (tokens: Int64, cost: Double)] = [:]
         var total: Int64 = 0
-        let mode = PacerPreferences.costMode()
-        for s in samples {
-            let h = cal.component(.hour, from: s.sampledAt)
-            var v = byHour[h] ?? (0, 0)
-            let t = s.inputTokens + s.outputTokens + s.cacheReadTokens
+        for row in hourlyRows {
+            var v = byHour[row.hour] ?? (0, 0)
+            let t = row.inputTokens + row.outputTokens + row.cacheReadTokens
             v.tokens += t
-            // Use the shared sample-cost helper. Bug parity with
-            // DayDetail / LiveActivity: prior `sourceCostUSD ?? 0`
-            // hand-roll silently dropped the calculate/auto-mode
-            // fallback to tokens × pricing.
-            v.cost += s.effectiveCostUSD(mode: mode)
-            byHour[h] = v
+            v.cost += row.totalCostUSD
+            byHour[row.hour] = v
             total += t
         }
         let bucketed = (0..<24).map { h -> Hour in
@@ -80,8 +78,7 @@ struct TodayTimelineCard: View {
         cached = Cached(
             hours: bucketed,
             peakHour: (peak?.tokens ?? 0) > 0 ? peak?.hour : nil,
-            totalTokens: total,
-            sampleCount: samples.count
+            totalTokens: total
         )
     }
 

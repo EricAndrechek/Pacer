@@ -134,6 +134,7 @@ public final class ScanCoordinator {
         public let scanProgress: JSONLScanner.ScanProgress
         public let persisterStats: SamplePersister.Stats
         public let recomputeStats: AggregateRecomputer.Stats
+        public let hourlyRecomputeStats: HourlyAggregateRecomputer.Stats
         public let projectRecomputeStats: ProjectAggregateRecomputer.Stats
         public let sessionRecomputeStats: SessionInfoRecomputer.Stats
         public let probeResult: StatsCacheProbe.ProbeResult?
@@ -523,6 +524,16 @@ public final class ScanCoordinator {
             activePersister.addDirtyProjectDates(recoveryProjectPairs)
             log("integrity: \(recoveryProjectPairs.count) (project,date) bucket(s) missing project aggregates - rebuilding")
         }
+        // Same recovery path for HourlyAggregate. Bootstraps the hourly
+        // rollup for users upgrading from a build that didn't have it
+        // (`TodayTimelineCard` and `LiveActivityCard` migrated off raw
+        // TokenSample walks onto this rollup). Empty after the first
+        // post-upgrade cycle.
+        let recoveryHourBuckets = activePersister.consumeMissingHourBuckets()
+        if !recoveryHourBuckets.isEmpty {
+            activePersister.addDirtyHourBuckets(recoveryHourBuckets)
+            log("integrity: \(recoveryHourBuckets.count) (date,hour,model) bucket(s) missing hourly aggregates - rebuilding")
+        }
         // Same recovery path for SessionInfo. Bootstraps the rollup
         // table for users upgrading from a build that didn't maintain
         // it; afterwards incremental scans only touch the sessions
@@ -609,6 +620,20 @@ public final class ScanCoordinator {
             container: container, context: context, mode: configuration.costMode)
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
 
+        // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
+        // chart) and LiveActivityCard (last-hour burn rate). Order
+        // doesn't matter relative to the daily/project/session
+        // recomputers — they all read from the same TokenSample
+        // snapshot, the dirty sets don't overlap, and the cycle's
+        // terminal save commits them together.
+        let hourlyRecomputer = HourlyAggregateRecomputer(
+            container: container,
+            context: context,
+            mode: configuration.costMode
+        )
+        let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
+            buckets: activePersister.dirtyHourBuckets)
+
         // Both recomputers below previously ignored cost mode entirely
         // — they summed `sample.sourceCostUSD ?? 0`, which silently
         // recorded $0 for every Claude Code line that didn't carry a
@@ -663,6 +688,7 @@ public final class ScanCoordinator {
         let cycleDidWork =
             cycleStats.inserted > 0
             || recomputeStats.aggregatesUpserted > 0
+            || hourlyRecomputeStats.aggregatesUpserted > 0
             || projectRecomputeStats.aggregatesUpserted > 0
             || sessionRecomputeStats.sessionsUpserted > 0
             || needsCostRebuild
@@ -718,6 +744,7 @@ public final class ScanCoordinator {
             scanProgress: result.progress,
             persisterStats: cycleStats,
             recomputeStats: recomputeStats,
+            hourlyRecomputeStats: hourlyRecomputeStats,
             projectRecomputeStats: projectRecomputeStats,
             sessionRecomputeStats: sessionRecomputeStats,
             probeResult: probeResult,
@@ -882,7 +909,7 @@ public final class ScanCoordinator {
     /// twice (duplication was a cosmetic bug in earlier versions).
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
     }
 }
 
