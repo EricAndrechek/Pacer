@@ -78,7 +78,22 @@ public final class ScanCoordinator {
     ///         sub-project drill-down has SOMETHING to bucket on
     ///         even for historical rows. New rows after this set the
     ///         field at insert time, with the true pre-canonical cwd.
-    public static let currentPathCanonicalizationVersion = "3"
+    /// - "4" — Sibling-worktree merge now prefers the **main** worktree
+    ///         (`.git/` is a directory) over secondary worktrees
+    ///         (`.git` is a file pointing at
+    ///         `<main>/.git/worktrees/<name>`), regardless of which
+    ///         worktree the user touched most recently. The previous
+    ///         "most-recently-active wins" rule was producing the
+    ///         wrong direction for layouts like
+    ///         `~/Code/repo` + `~/Code/repo.issue-160` (the main repo
+    ///         got aliased into the worktree, so Projects showed the
+    ///         feature-branch name instead of the repo name). The
+    ///         migration calls `ProjectGitRootAutoAliaser.
+    ///         reconcileSiblingMergeAliases()` once on this bump to
+    ///         delete existing aliases that point at a non-main
+    ///         sibling; the regular `run()` then re-creates them in
+    ///         the corrected direction.
+    public static let currentPathCanonicalizationVersion = "4"
 
     /// Meta key for the aliases-table fingerprint. The fingerprint is
     /// `sha-of(sourcePath→canonicalPath rows, sorted)`; on mismatch
@@ -428,6 +443,29 @@ public final class ScanCoordinator {
         // alias loading so the new rows participate in the
         // fingerprint check (and the migration that follows).
         let autoAliaser = ProjectGitRootAutoAliaser(context: context)
+
+        // One-shot reconciliation when the canonicalization rule has
+        // changed. Today's "4" bump flips the sibling-merge canonical
+        // selector from "most-recently-active" to "main worktree
+        // first" — see `currentPathCanonicalizationVersion` history.
+        // Without this pass, aliases already written under the old
+        // rule survive forever because the regular sibling-merge pass
+        // filters out already-aliased paths.
+        //
+        // Cheap on a fresh DB (no aliases to walk). On an upgraded DB
+        // it walks the alias table once, deletes the wrong-direction
+        // rows, and lets `run()` below re-create them under the new
+        // rule. Sample re-attribution happens later in the same cycle
+        // when `canonicalizeProjectPaths` notices the alias
+        // fingerprint changed.
+        let storedPathVersionPreRun = try fetchMeta(ClaudeCodeMetaKey.pathCanonicalizationVersion)
+        if storedPathVersionPreRun != Self.currentPathCanonicalizationVersion {
+            let reconciled = try autoAliaser.reconcileSiblingMergeAliases()
+            if reconciled > 0 {
+                log("auto-alias: reconciled \(reconciled) sibling-merge alias(es) under rule v\(Self.currentPathCanonicalizationVersion)")
+            }
+        }
+
         let candidatePaths = try fetchDistinctProjectPaths()
         let autoAliasResult = try await autoAliaser.run(candidatePaths: candidatePaths)
         if autoAliasResult.aliasesAdded > 0 {

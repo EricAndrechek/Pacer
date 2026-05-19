@@ -117,6 +117,44 @@ import Testing
         #expect(suggestions.isEmpty)
     }
 
+    // MARK: - isMainWorktree
+
+    /// `.git` directory = main worktree.
+    @Test func isMainWorktreeTrueForGitDirectory() throws {
+        let repoRoot = try makeTempRepo(subdirs: [])
+        defer { try? FileManager.default.removeItem(at: repoRoot) }
+        #expect(ProjectGitRootScanner.isMainWorktree(repoRoot.path) == true)
+    }
+
+    /// `.git` as a regular file (the `gitdir: …` pointer shape git
+    /// uses for `git worktree add`-ed secondary worktrees) is NOT a
+    /// main worktree — even though `findGitRoot` treats it as a root
+    /// for sample-attribution purposes.
+    @Test func isMainWorktreeFalseForGitFile() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "gitdir: /other/.git/worktrees/foo".write(
+            to: dir.appendingPathComponent(".git"),
+            atomically: true,
+            encoding: .utf8
+        )
+        #expect(ProjectGitRootScanner.isMainWorktree(dir.path) == false)
+    }
+
+    /// No `.git` at all → not a main worktree (not a git repo at all).
+    @Test func isMainWorktreeFalseForNoGit() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(ProjectGitRootScanner.isMainWorktree(dir.path) == false)
+    }
+
+    /// Nonexistent path returns false rather than crashing on a stat
+    /// failure — the alias graph keeps probes around even after a
+    /// folder has been deleted on disk.
+    @Test func isMainWorktreeFalseForMissingPath() {
+        #expect(ProjectGitRootScanner.isMainWorktree("/does/not/exist/wherever") == false)
+    }
+
     // MARK: - helpers
 
     private func makeTempDir() throws -> URL {

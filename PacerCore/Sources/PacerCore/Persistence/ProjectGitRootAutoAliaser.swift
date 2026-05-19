@@ -182,18 +182,16 @@ public final class ProjectGitRootAutoAliaser {
         let groupedByOrigin = Dictionary(grouping: groupable, by: { $0.originURL })
 
         if groupedByOrigin.values.contains(where: { $0.count >= 2 }) {
-            // Activity index — pick the most-recently-active root
-            // as the canonical for each sibling group. Fall back to
-            // alphabetical order if neither has activity yet
-            // (highly unusual but defensively handled).
+            // Canonical selection — see `pickCanonical` for the rule.
+            // The short version: prefer the main worktree (`.git` is
+            // a directory) over secondary worktrees (`.git` is a file
+            // pointing at `<main>/.git/worktrees/<name>`). Tie-break
+            // on most-recently-active, then alphabetical for full
+            // determinism.
             let lastActive = try loadLastActiveByPath()
             for (_, group) in groupedByOrigin where group.count >= 2 {
-                let canonical = group.max { lhs, rhs in
-                    let l = lastActive[lhs.path] ?? .distantPast
-                    let r = lastActive[rhs.path] ?? .distantPast
-                    if l != r { return l < r }
-                    return lhs.path > rhs.path
-                }!
+                let canonical = Self.pickCanonical(
+                    in: group, pathOf: { $0.path }, lastActive: lastActive)
                 for entry in group where entry.path != canonical.path {
                     do {
                         _ = try manager.upsert(
@@ -257,4 +255,119 @@ public final class ProjectGitRootAutoAliaser {
         }
         return out
     }
+
+    /// Canonical-selection rule for a sibling-worktree group.
+    ///
+    /// Order of precedence:
+    ///   1. **Main worktree wins.** `.git/` as a directory means
+    ///      this path is the repo's primary working tree — a stable
+    ///      identity whose directory name describes the repo, not a
+    ///      feature branch. Secondary worktrees (`git worktree add`)
+    ///      have `.git` as a file pointing at
+    ///      `<main>/.git/worktrees/<name>` and tend to be named for
+    ///      ephemeral things (`repo.issue-160`, `repo.feature-x`).
+    ///   2. Most-recently-active wins. Used when zero or multiple
+    ///      mains exist in the group (multiple mains: the user has
+    ///      independent clones of the same remote — pick whichever
+    ///      they're using).
+    ///   3. Alphabetical (descending so the comparator's `>` is
+    ///      consistent with the rest of the function) for full
+    ///      determinism on ties.
+    ///
+    /// Generic over the element type — the run-pass uses tuples, the
+    /// reconcile pass uses persistent `ProjectPathProbe` rows. Path
+    /// access is supplied by the caller.
+    static func pickCanonical<T>(
+        in group: [T],
+        pathOf: (T) -> String,
+        lastActive: [String: Date]
+    ) -> T {
+        return group.max { lhs, rhs in
+            let lPath = pathOf(lhs)
+            let rPath = pathOf(rhs)
+            let lMain = ProjectGitRootScanner.isMainWorktree(lPath)
+            let rMain = ProjectGitRootScanner.isMainWorktree(rPath)
+            if lMain != rMain { return !lMain }
+            let l = lastActive[lPath] ?? .distantPast
+            let r = lastActive[rPath] ?? .distantPast
+            if l != r { return l < r }
+            return lPath > rPath
+        }!
+    }
+
+    /// One-shot reconciliation pass. Walks every existing
+    /// `ProjectPathAlias` row and re-evaluates it under the current
+    /// `pickCanonical` rule. Deletes aliases that point AT a
+    /// non-main worktree when a main worktree exists in the same
+    /// origin-URL sibling group — the regular sibling-merge pass in
+    /// `run()` will then re-create the missing edge in the correct
+    /// direction.
+    ///
+    /// Wired by `ScanCoordinator` to fire once when
+    /// `pathCanonicalizationVersion` bumps to "4". Without this
+    /// pass, the rule change only affects future probes — the
+    /// `WaveHouse → WaveHouse.issue-160` alias written under the
+    /// old "most recently active" rule would stay forever because
+    /// the sibling-merge pass's filter (`!aliasesAfterGitRoot.
+    /// contains($0.path)`) skips already-aliased paths.
+    ///
+    /// **Surgical by design.** We only delete an alias when:
+    ///   - both endpoints are root probes (`probe.gitRoot ==
+    ///     probe.path`) with the same `originURL` — i.e., this
+    ///     alias was *itself* a sibling-merge result, not a
+    ///     git-root rollup or a user-set rename, AND
+    ///   - the alias's current canonical is NOT the main worktree
+    ///     of the sibling group, AND a main worktree DOES exist
+    ///     among the siblings.
+    /// Aliases that already point at the correct canonical are
+    /// left untouched, so this is a no-op on a healthy DB.
+    ///
+    /// Returns the count of aliases deleted (for logging).
+    @discardableResult
+    public func reconcileSiblingMergeAliases() throws -> Int {
+        let probes = try loadAllProbes()
+        let allAliases = try context.fetch(FetchDescriptor<ProjectPathAlias>())
+
+        // Build origin → [root probe] index for "is there a main in
+        // this group" lookups. Only consider probes whose path is
+        // their own gitRoot AND that carry an originURL — those are
+        // the population the sibling-merge pass considers.
+        var rootsByOrigin: [String: [ProjectPathProbe]] = [:]
+        for probe in probes.values {
+            guard let gitRoot = probe.gitRoot, gitRoot == probe.path,
+                  let origin = probe.originURL, !origin.isEmpty
+            else { continue }
+            rootsByOrigin[origin, default: []].append(probe)
+        }
+
+        var deleted = 0
+        for alias in allAliases {
+            guard let sourceProbe = probes[alias.sourcePath],
+                  let canonicalProbe = probes[alias.canonicalPath],
+                  let sourceRoot = sourceProbe.gitRoot,
+                  let canonicalRoot = canonicalProbe.gitRoot,
+                  sourceRoot == alias.sourcePath,
+                  canonicalRoot == alias.canonicalPath,
+                  let sourceOrigin = sourceProbe.originURL, !sourceOrigin.isEmpty,
+                  let canonicalOrigin = canonicalProbe.originURL,
+                  sourceOrigin == canonicalOrigin
+            else { continue }
+
+            // Both endpoints are sibling root probes. Does the
+            // current canonical match the new rule?
+            let siblings = rootsByOrigin[sourceOrigin] ?? []
+            let groupHasMain = siblings.contains { ProjectGitRootScanner.isMainWorktree($0.path) }
+            let canonicalIsMain = ProjectGitRootScanner.isMainWorktree(alias.canonicalPath)
+            if groupHasMain, !canonicalIsMain {
+                context.delete(alias)
+                deleted += 1
+            }
+        }
+
+        if deleted > 0 {
+            try context.save()
+        }
+        return deleted
+    }
 }
+

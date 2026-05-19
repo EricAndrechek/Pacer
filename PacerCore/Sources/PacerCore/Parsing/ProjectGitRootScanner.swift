@@ -124,6 +124,26 @@ public enum ProjectGitRootScanner {
         return nil
     }
 
+    /// True iff `<path>/.git` exists *as a directory* — the on-disk
+    /// signature of a repo's **main** working tree. Secondary worktrees
+    /// created by `git worktree add` have `.git` as a file containing
+    /// a `gitdir:` pointer back to `<main>/.git/worktrees/<name>`; the
+    /// main one has the actual `.git` directory.
+    ///
+    /// Used by `ProjectGitRootAutoAliaser`'s sibling-merge pass to
+    /// pick the canonical path: the main worktree is the stable
+    /// identity of the repo (its directory name reflects the project,
+    /// not a feature branch), so it should win regardless of which
+    /// worktree the user touched most recently.
+    public static func isMainWorktree(_ path: String) -> Bool {
+        let gitURL = URL(fileURLWithPath: path).appendingPathComponent(".git").path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: gitURL, isDirectory: &isDir) else {
+            return false
+        }
+        return isDir.boolValue
+    }
+
     /// Strip trailing slashes. Both `/Users/eric/Code/Pacer/` and
     /// `/Users/eric/Code/Pacer` should compare equal for the
     /// "already-canonical" check.
