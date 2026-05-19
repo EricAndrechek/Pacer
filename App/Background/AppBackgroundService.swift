@@ -116,7 +116,7 @@ final class AppBackgroundService {
 
     private func startPricingRefreshTask() {
         guard pricingRefreshTask == nil else { return }
-        pricingRefreshTask = Task { [weak self] in
+        pricingRefreshTask = Task {
             // Re-check the cache age before every attempt — a previous
             // run of this task might have refreshed before launch and
             // a fresh launch shouldn't immediately re-fetch.
@@ -144,8 +144,15 @@ final class AppBackgroundService {
                         // re-renders with the new prices for samples
                         // landing after this point. Existing aggregate
                         // rows keep the cost that was current when they
-                        // were recomputed.
-                        await self?.postPricingRefreshed()
+                        // were recomputed. Hop to main because most
+                        // observers register on `.main` and posting off-
+                        // main would deliver on the poster's queue.
+                        await MainActor.run {
+                            NotificationCenter.default.post(
+                                name: .pacerPricingDidRefresh,
+                                object: nil
+                            )
+                        }
                     }
                 }
 
@@ -171,15 +178,6 @@ final class AppBackgroundService {
                 }
             }
         }
-    }
-
-    /// Hop to the main actor and post `.pacerPricingDidRefresh` so
-    /// views observing the cost-mode/pricing snapshot can refresh
-    /// without polling. Tiny payload — nothing to send beyond the
-    /// notification itself.
-    @MainActor
-    private func postPricingRefreshed() {
-        NotificationCenter.default.post(name: .pacerPricingDidRefresh, object: nil)
     }
 
     // MARK: - Immediate-scan trigger

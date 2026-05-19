@@ -35,6 +35,7 @@ struct DashboardView: View {
             DailyCostChartCard(onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
+            MonthlyForecastCard()
         }
         .pacerModalNavigation(root: $modalRoot)
     }

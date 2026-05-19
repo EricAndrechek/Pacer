@@ -45,17 +45,18 @@ struct HeroStripCard: View {
     /// Last 7 calendar days for the "vs avg" trend chip on the cost
     /// tile. ≤ 50 rows.
     @Query private var weekAggregates: [DailyAggregate]
-    /// Latest rate-limit samples per window. We only ever look at
-    /// `.first { $0.window == ... }`, so cap the fetch at the most
-    /// recent few rows — without this the OAuth poller's growing
-    /// history would force a full materialization on every save.
+    /// Recent rate-limit samples — sized to cover both windows' worth
+    /// of history for `BurnRate.project()` (the lookback default is
+    /// 90 min, at 5-min OAuth cadence that's ~18 rows per window).
+    /// 80 covers ~3 hours of both windows together with headroom for
+    /// status-line bursts that bypass the 5-min cadence.
     @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
 
     private static let recentRateLimits: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
-        d.fetchLimit = 8
+        d.fetchLimit = 80
         return d
     }()
 
@@ -92,6 +93,21 @@ struct HeroStripCard: View {
 
     private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
     private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
+
+    /// Burn-rate projection for one window, derived from the recent
+    /// `rateLimits` rows. Returns nil when we don't have enough signal
+    /// to project (too few samples, span too short, or non-positive
+    /// slope). Computed in the view body — the rate-limits @Query has
+    /// fetchLimit=80 so this never iterates more than ~80 small rows.
+    private func projection(forWindow window: String) -> BurnRate.Projection? {
+        // `rateLimits` is sorted desc by sampledAt; convert to the
+        // primitive's Sample value type and let it sort internally.
+        let samples = rateLimits
+            .filter { $0.window == window }
+            .map { BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage) }
+        let resetsAt = rateLimits.first { $0.window == window }?.resetsAt
+        return BurnRate.project(samples: samples, resetsAt: resetsAt)
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -156,11 +172,12 @@ struct HeroStripCard: View {
                     now: Date(), resetsAt: resets, windowDuration: duration
                 ) * 100
                 let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                let burn = projection(forWindow: s.window)
                 // Chip moved to its own row below the % line so it
                 // can't ever wrap mid-word ("behi nd") when the tile
-                // gets narrow. Layout: hero %, then a single status
-                // line that combines the chip and the resets-in time.
-                VStack(alignment: .leading, spacing: 8) {
+                // gets narrow. Layout: hero %, status row, optional
+                // burn-rate forecast row.
+                VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text("\(Int(s.usedPercentage.rounded()))%")
                             .font(.system(size: 32, weight: .semibold, design: .rounded))
@@ -183,6 +200,7 @@ struct HeroStripCard: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+                    burnRow(burn)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -194,6 +212,56 @@ struct HeroStripCard: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+
+    /// Optional burn-rate row inside a pace tile. Renders only when
+    /// `BurnRate.project()` returned a result with a positive slope.
+    /// When a limit hit is projected within the window, prefix with
+    /// "→ limit at HH:MM" so the user sees the wall-clock impact at a
+    /// glance; otherwise just the rate. Tint red when projecting a
+    /// pre-reset hit.
+    @ViewBuilder
+    private func burnRow(_ projection: BurnRate.Projection?) -> some View {
+        if let projection, projection.slopePercentPerHour > 0 {
+            let rateText = "+\(formatSlope(projection.slopePercentPerHour))%/hr"
+            HStack(spacing: 6) {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(projection.willHitLimitBeforeReset ? Color.red : Color.secondary)
+                if let projected = projection.projectedFullAt {
+                    Text("\(rateText) · limit \(pacerRelative(projected, style: .short))")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                } else {
+                    Text(rateText)
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        } else {
+            // Empty placeholder of the same vertical footprint so the
+            // tile height matches its sibling whose burn rate did
+            // surface — otherwise the HStack's equal-height layout
+            // would stretch the shorter tile and look misaligned.
+            Text(" ")
+                .font(.system(size: 11))
+                .opacity(0)
+        }
+    }
+
+    /// Round burn-rate slope for display: integer when ≥10, one
+    /// decimal place otherwise. Avoids the "0.428%/hr" precision that
+    /// looks more authoritative than the linear extrapolation deserves.
+    private func formatSlope(_ pctPerHour: Double) -> String {
+        if pctPerHour >= 10 {
+            return String(format: "%.0f", pctPerHour)
+        } else {
+            return String(format: "%.1f", pctPerHour)
         }
     }
 
