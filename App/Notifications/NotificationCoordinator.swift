@@ -373,6 +373,66 @@ public final class NotificationCoordinator {
         markNotified(key: key, in: context)
     }
 
+    /// Custom user-defined alert rule. Dedup keyed on rule id + date
+    /// so an over-threshold day only notifies once. A new day fresh-
+    /// fires the rule.
+    public func handleCustomRuleUpdate(
+        ruleId: String,
+        ruleName: String,
+        metric: String,
+        currentValue: Double,
+        threshold: Double,
+        date: String,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard threshold > 0 else { return }
+        guard currentValue >= threshold else { return }
+
+        let key = "notif.customRule.\(ruleId).\(date)"
+        if alreadyNotified(key: key, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer alert: \(ruleName)"
+        content.body = Self.formatRuleBody(
+            metric: metric,
+            currentValue: currentValue,
+            threshold: threshold
+        )
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: key, in: context)
+    }
+
+    private static func formatRuleBody(
+        metric: String,
+        currentValue: Double,
+        threshold: Double
+    ) -> String {
+        if AlertRuleMetric.isCurrency(metric) {
+            return String(
+                format: "%@ reached %@ (threshold %@).",
+                AlertRuleMetric.label(for: metric),
+                pacerCost(currentValue),
+                pacerCost(threshold)
+            )
+        } else {
+            return String(
+                format: "%@ reached %@ (threshold %@).",
+                AlertRuleMetric.label(for: metric),
+                pacerTokens(Int64(currentValue)),
+                pacerTokens(Int64(threshold))
+            )
+        }
+    }
+
     // MARK: - Cycle dedup helpers (keyed via ClaudeCodeMeta)
 
     /// Returns true if we've already notified for this key. Returns

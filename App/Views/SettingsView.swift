@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import PacerCore
 import PacerUI
 
@@ -31,6 +32,7 @@ struct SettingsView: View {
                     RateLimitAlertsCard()
                     DailyCostAlertCard()
                     ResetAlertCard()
+                    CustomRulesCard()
                     DailySummaryCard()
                     NotificationTestCard()
                 }
@@ -640,6 +642,120 @@ private struct DailyCostAlertCard: View {
                     }
                     .disabled(!dailyCostEnabled)
                 }
+            }
+        }
+    }
+}
+
+// MARK: - Custom alert rules
+
+private struct CustomRulesCard: View {
+    @Environment(\.modelContext) private var context
+    @Query(sort: \AlertRule.createdAt) private var rules: [AlertRule]
+    @State private var draftMetric: String = AlertRuleMetric.weeklyCost
+    @State private var draftName: String = ""
+    @State private var draftThreshold: Double = 100
+
+    var body: some View {
+        PacerCard("Custom alerts", content: {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(rules, id: \.id) { rule in
+                    RuleRow(rule: rule) {
+                        context.delete(rule)
+                        try? context.save()
+                    }
+                    Divider().opacity(0.3)
+                }
+                addRow
+            }
+        }, footer: {
+            Text("Add rules for metrics not covered by the built-in toggles — weekly cost, daily tokens, etc. Each fires at most once per day per rule.")
+        })
+    }
+
+    @ViewBuilder
+    private var addRow: some View {
+        HStack(spacing: 12) {
+            TextField("Name", text: $draftName)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 120)
+            Picker("", selection: $draftMetric) {
+                ForEach(AlertRuleMetric.all, id: \.self) { metric in
+                    Text(AlertRuleMetric.label(for: metric)).tag(metric)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 180)
+            thresholdField
+            Spacer()
+            Button("Add") {
+                let trimmed = draftName.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty, draftThreshold > 0 else { return }
+                context.insert(AlertRule(
+                    name: trimmed,
+                    metric: draftMetric,
+                    thresholdValue: draftThreshold
+                ))
+                try? context.save()
+                draftName = ""
+                draftThreshold = 100
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(draftName.trimmingCharacters(in: .whitespaces).isEmpty || draftThreshold <= 0)
+        }
+    }
+
+    @ViewBuilder
+    private var thresholdField: some View {
+        if AlertRuleMetric.isCurrency(draftMetric) {
+            HStack(spacing: 2) {
+                Text("$").foregroundStyle(.secondary)
+                TextField("Threshold", value: $draftThreshold, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
+            }
+        } else {
+            TextField("Threshold", value: $draftThreshold, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 100)
+        }
+    }
+
+    private struct RuleRow: View {
+        @Bindable var rule: AlertRule
+        let onRemove: () -> Void
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Toggle("", isOn: $rule.enabled)
+                    .labelsHidden()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rule.name)
+                        .font(.system(size: 13, weight: .medium))
+                    Text("\(AlertRuleMetric.label(for: rule.metric)) ≥ \(formatThreshold)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
+                Button(role: .destructive) {
+                    onRemove()
+                } label: {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Remove rule")
+            }
+        }
+
+        private var formatThreshold: String {
+            if AlertRuleMetric.isCurrency(rule.metric) {
+                return pacerCost(rule.thresholdValue)
+            } else {
+                return pacerTokens(Int64(rule.thresholdValue))
             }
         }
     }

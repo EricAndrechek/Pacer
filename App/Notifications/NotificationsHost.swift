@@ -29,6 +29,14 @@ struct NotificationsHost: View {
     @Query private var projectAggregatesWindow: [ProjectDailyAggregate]
     /// Configured budgets. Small table — typically 0-10 rows.
     @Query private var budgets: [ProjectBudget]
+    /// User-defined alert rules. Small table — typically 0-10 rows.
+    @Query private var rules: [AlertRule]
+    /// Rolling 7-day DailyAggregate window for weekly-cost rule
+    /// evaluation. Today's portion is already loaded via
+    /// `todayAggregates`; the extra 6 days here are bounded by the
+    /// `(date >= weekAgo)` predicate so materialization stays ≤ ~50
+    /// rows.
+    @Query private var weekAggregates: [DailyAggregate]
 
     @Environment(\.modelContext) private var context
 
@@ -70,6 +78,33 @@ struct NotificationsHost: View {
                 $0.date >= weekAgo && $0.date <= today
             }
         )
+        _weekAggregates = Query(
+            filter: #Predicate<DailyAggregate> {
+                $0.date >= weekAgo && $0.date <= today
+            }
+        )
+    }
+
+    // Compute the change-detection fingerprints in computed properties
+    // — pre-Swift-6 the type inferencer could chew through a long
+    // `.onChange` chain in milliseconds; the @Query / SwiftData macros
+    // inflated the per-modifier inference cost enough that the same
+    // chain now times out. Hoisting the .reduce(0, +) expressions
+    // breaks the chain into separate type-checking islands.
+    private var fiveHourFingerprint: PersistentIdentifier? {
+        samples.first { $0.window == "five_hour" }?.persistentModelID
+    }
+    private var sevenDayFingerprint: PersistentIdentifier? {
+        samples.first { $0.window == "seven_day" }?.persistentModelID
+    }
+    private var todayCostFingerprint: Double {
+        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+    }
+    private var projectWindowFingerprint: Double {
+        projectAggregatesWindow.reduce(0) { $0 + $1.totalCostUSD }
+    }
+    private var weekCostFingerprint: Double {
+        weekAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
 
     var body: some View {
@@ -77,24 +112,11 @@ struct NotificationsHost: View {
         // hold @Query subscriptions so the onChange handlers fire.
         Color.clear
             .frame(width: 0, height: 0)
-            .onChange(of: samples.first { $0.window == "five_hour" }?.persistentModelID) {
-                handleFiveHour()
-            }
-            .onChange(of: samples.first { $0.window == "seven_day" }?.persistentModelID) {
-                handleSevenDay()
-            }
-            .onChange(of: todayAggregates.map(\.totalCostUSD).reduce(0, +)) {
-                handleDailyCost()
-            }
-            // Total-of-totals fingerprint: a single Double covering
-            // every (project, date) cost in the window. Cheap to
-            // compute (≤70 rows), and any project's spend rising
-            // changes the fingerprint → dispatch. The coordinator's
-            // (projectPath, period, date) dedup keeps a sustained
-            // over-budget day from re-notifying.
-            .onChange(of: projectAggregatesWindow.map(\.totalCostUSD).reduce(0, +)) {
-                handleProjectBudgets()
-            }
+            .onChange(of: fiveHourFingerprint) { handleFiveHour() }
+            .onChange(of: sevenDayFingerprint) { handleSevenDay() }
+            .onChange(of: todayCostFingerprint) { handleDailyCost() }
+            .onChange(of: projectWindowFingerprint) { handleProjectBudgets() }
+            .onChange(of: weekCostFingerprint) { handleCustomRules() }
             .task {
                 // Seed lastSeen from existing data so we don't fire a
                 // notification just because the app launched while
@@ -259,6 +281,45 @@ struct NotificationsHost: View {
                         context: context
                     )
                 }
+            }
+        }
+    }
+
+    /// Evaluate every active custom alert rule against the current
+    /// aggregate snapshot and dispatch on threshold breach. Rule
+    /// types we don't recognize are silently skipped (forward-
+    /// compatibility with future builds).
+    private func handleCustomRules() {
+        let today = TokenSample.formatDate(Date())
+        let todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+        let todayTokens = todayAggregates.reduce(0) {
+            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+        }
+        let weekCost = weekAggregates.reduce(0) { $0 + $1.totalCostUSD }
+
+        for rule in rules where rule.enabled {
+            let currentValue: Double?
+            switch rule.metric {
+            case AlertRuleMetric.todayCost:
+                currentValue = todayCost
+            case AlertRuleMetric.weeklyCost:
+                currentValue = weekCost
+            case AlertRuleMetric.todayTokens:
+                currentValue = Double(todayTokens)
+            default:
+                currentValue = nil
+            }
+            guard let value = currentValue else { continue }
+            Task { @MainActor [context] in
+                await NotificationCoordinator.shared.handleCustomRuleUpdate(
+                    ruleId: rule.id,
+                    ruleName: rule.name,
+                    metric: rule.metric,
+                    currentValue: value,
+                    threshold: rule.thresholdValue,
+                    date: today,
+                    context: context
+                )
             }
         }
     }

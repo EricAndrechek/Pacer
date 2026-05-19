@@ -90,6 +90,7 @@ public enum PacerStore {
             ProjectPathAlias.self,
             ProjectPathProbe.self,
             ProjectBudget.self,
+            AlertRule.self,
             configurations: configuration
         )
     }
