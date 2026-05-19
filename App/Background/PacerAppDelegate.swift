@@ -239,6 +239,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         backgroundService.start()
         installWindowObservers()
         installMenuBar()
+        installGlobalHotkey()
         // Warm the shared sample-cost cache so views (LiveActivity,
         // DayDetail, TodayTimeline) can compute per-sample cost
         // synchronously without each having to async-load its own
@@ -668,6 +669,43 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func menuOpenMainWindow() {
+        ensureMainWindowVisible()
+    }
+
+    /// Register the global hotkey (⌥⌘P by default) and observe its
+    /// press notification. Called once from
+    /// `applicationDidFinishLaunching`. Registration is best-effort —
+    /// a chord collision with another app leaves Pacer reachable via
+    /// the menu bar / Dock but skips the hotkey.
+    private func installGlobalHotkey() {
+        HotkeyManager.shared.registerDefaultHotkey()
+        NotificationCenter.default.addObserver(
+            forName: .pacerHotkeyToggleWindow,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.toggleMainWindow()
+            }
+        }
+    }
+
+    /// Hotkey behavior: if the main window is already key + frontmost,
+    /// hide it. Otherwise bring it forward. Matches the user
+    /// expectation for menu-bar app shortcuts (1Password, Raycast,
+    /// Bartender all do this).
+    private func toggleMainWindow() {
+        let mainWindow = NSApp.windows.first { $0.canBecomeMain && !($0 is NSPanel) }
+        if let window = mainWindow,
+           window.isKeyWindow,
+           window.isVisible,
+           NSApp.isActive {
+            window.orderOut(nil)
+            // Closing the last window flips us back to .accessory
+            // via the willCloseNotification observer; nothing else
+            // to do here.
+            return
+        }
         ensureMainWindowVisible()
     }
 
