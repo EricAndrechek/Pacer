@@ -137,6 +137,51 @@ enum ProjectMetric: String, CaseIterable, Identifiable {
 
 private struct ProjectsContent: View {
     @Query private var aggregates: [ProjectDailyAggregate]
+    /// Singleton-row probe that fires exactly once per completed scan
+    /// cycle. Drives the cache refresh below — far cheaper than
+    /// recomputing `allRows` on every SwiftData notification.
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
+    /// Per-path probe rows (small table, ~one per known project)
+    /// drive the git/no-git badge on each row. The auto-aliaser
+    /// maintains this table during the scan cycle.
+    @Query private var probes: [ProjectPathProbe]
+    @Environment(\.modelContext) private var modelContext
+
+    /// Pending one-tap merge from the "Merge into → X" submenu.
+    /// Driving a `.confirmationDialog` off this state — the user has
+    /// already picked both sides via the submenu, so opening a full
+    /// editor sheet (the old behavior) was needless friction. A
+    /// single confirm click is enough; mistakes are recoverable from
+    /// Settings → Project Aliases.
+    @State private var pendingQuickMerge: QuickMerge?
+    /// Drives the bulk-merge sheet (multi-source picker). Reachable
+    /// from the card-header button OR from a row's "Merge with
+    /// others…" context-menu item.
+    @State private var bulkMergeDraft: BulkMergeDraft?
+    @State private var aliasError: String?
+
+    /// Cached group/sort pipeline output. Recomputed in `refreshAllRows`
+    /// only when the scan cycle ticks or the user changes range / sort
+    /// — NOT on every body render. With thousands of
+    /// `ProjectDailyAggregate` rows on a power user's DB, the dictionary
+    /// bucketing + sort was the dominant per-frame CPU cost (every
+    /// mouse-move into a chart that captures hover triggered a rebuild).
+    @State private var cachedAllRows: [ProjectRow] = []
+    /// Filtered + searched derivative. Separate cache so keystrokes in
+    /// the search field only re-run the filter, not the whole
+    /// bucket+sort pass. Debounced from search text to avoid recomputing
+    /// on every individual character.
+    @State private var cachedFilteredRows: [ProjectRow] = []
+    @State private var debouncedSearch: String = ""
+    @State private var searchDebounceTask: Task<Void, Never>?
+    /// Candidate canonical paths for the "Merge into…" submenu. Used
+    /// to be filtered per row inside the context menu (O(rows²) per
+    /// table render — the dominant scroll-lag cost on a list of any
+    /// size). Now derived once in `refreshAllRows` and consulted by
+    /// each row's menu builder via path-equality skip, dropping the
+    /// per-render filter to O(rows).
+    @State private var cachedMergeCandidates: [ProjectRow] = []
 
     let rangeSince: Date?
     let searchText: String
@@ -205,10 +250,34 @@ private struct ProjectsContent: View {
         let sessionCount: Int
         let lastActive: Date
         let modelCount: Int
+        /// Folded into the row at `refreshAllRows` time so badge
+        /// rendering doesn't do per-row filesystem syscalls during
+        /// a scroll pass.
+        let status: ProjectStatusBadge.State
         var id: String { path }
     }
 
-    private var allRows: [ProjectRow] {
+    /// A pending source→canonical pair waiting on the user's confirm
+    /// click in `.confirmationDialog`. Lighter than the old
+    /// `AliasDraft` sheet because no editing is exposed — the user
+    /// already specified both sides via the context-menu submenu.
+    struct QuickMerge: Equatable {
+        let source: String
+        let canonical: String
+    }
+
+    /// Public accessor for code paths that still read directly (the
+    /// "Merge into…" submenu needs the full list of known projects).
+    /// Returns the cached snapshot; do NOT compute fresh here — that
+    /// would defeat the cache's purpose.
+    private var allRows: [ProjectRow] { cachedAllRows }
+
+    /// Rebuild the `cachedAllRows` snapshot. Called on appear, on
+    /// scan-meta tick, and whenever sort/range changes invalidate the
+    /// existing snapshot. O(aggregates) — typically thousands of rows
+    /// on a power user's DB; runs at most once per scan cycle now
+    /// instead of once per body render.
+    private func refreshAllRows() {
         struct Acc {
             var cost: Double = 0
             var input: Int64 = 0
@@ -230,8 +299,21 @@ private struct ProjectsContent: View {
             if r.lastActive > a.lastActive { a.lastActive = r.lastActive }
             byProject[r.projectPath] = a
         }
+        // Index probes once for the badge derivation below. Small
+        // table (~one row per known project) so the dict build is
+        // ~microseconds.
+        let probeByPath = Dictionary(uniqueKeysWithValues: probes.map { ($0.path, $0) })
+        let fm = FileManager.default
         let unsorted = byProject.map { (key, a) in
-            ProjectRow(
+            // Per-row fs check folded into the cache build so scroll
+            // and hover passes don't trigger syscalls. The cost is
+            // one `fileExists` per project (~50 typical) per scan
+            // tick, well under a millisecond total.
+            let exists = fm.fileExists(atPath: key)
+            let status = projectStatusBadgeState(
+                for: key, probesByPath: probeByPath, existsOnDisk: exists
+            )
+            return ProjectRow(
                 path: key,
                 displayName: pacerShortPath(key),
                 cost: a.cost,
@@ -241,10 +323,36 @@ private struct ProjectsContent: View {
                 totalTokens: a.input + a.output + a.cacheRead,
                 sessionCount: a.sessionCount,
                 lastActive: a.lastActive,
-                modelCount: a.modelCount
+                modelCount: a.modelCount,
+                status: status
             )
         }
-        return apply(sort: sort, descending: descending, to: unsorted)
+        cachedAllRows = apply(sort: sort, descending: descending, to: unsorted)
+        // Pre-build the merge-candidate list once. Each row's context
+        // menu used to do `allRows.filter { $0.path != row.path && ... }`
+        // — O(rows) per row, O(rows²) per table render. With the
+        // candidates cached, the menu just skips the one current row
+        // at iteration time and is O(rows) total per render.
+        cachedMergeCandidates = cachedAllRows.filter {
+            $0.path != ProjectDailyAggregate.unknownProjectPath
+        }
+        refreshFilteredRows()
+    }
+
+    /// Filter the cached snapshot by the (debounced) search needle.
+    /// Cheap — O(cachedAllRows), no per-row recompute — but worth
+    /// caching too so view body never does string lowercasing.
+    private func refreshFilteredRows() {
+        let needle = debouncedSearch.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else {
+            cachedFilteredRows = cachedAllRows
+            return
+        }
+        let lower = needle.lowercased()
+        cachedFilteredRows = cachedAllRows.filter {
+            $0.path.lowercased().contains(lower) ||
+            $0.displayName.lowercased().contains(lower)
+        }
     }
 
     private func apply(sort: ProjectSort, descending: Bool, to rows: [ProjectRow]) -> [ProjectRow] {
@@ -277,14 +385,7 @@ private struct ProjectsContent: View {
     }
 
     private var rows: [ProjectRow] {
-        let needle = searchText.trimmingCharacters(in: .whitespaces)
-        let base = allRows
-        guard !needle.isEmpty else { return base }
-        let lower = needle.lowercased()
-        return base.filter {
-            $0.path.lowercased().contains(lower) ||
-            $0.displayName.lowercased().contains(lower)
-        }
+        cachedFilteredRows
     }
 
     var body: some View {
@@ -304,6 +405,142 @@ private struct ProjectsContent: View {
                     projectListCard
                 }
             }
+        }
+        .sheet(item: $bulkMergeDraft) { draft in
+            BulkMergeSheet(
+                knownPaths: allRows.map(\.path).filter { $0 != ProjectDailyAggregate.unknownProjectPath },
+                initialCanonical: draft.canonical,
+                initialSources: draft.sources
+            )
+        }
+        // Quick-merge confirmation. The user already picked both
+        // sides from the context-menu submenu — a full editor sheet
+        // there was three extra clicks (open / focus Save / close)
+        // for no actual editing. `.confirmationDialog` gives the
+        // single Yes/No moment the action needs.
+        .confirmationDialog(
+            quickMergePrompt,
+            isPresented: Binding(get: { pendingQuickMerge != nil }, set: { if !$0 { pendingQuickMerge = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingQuickMerge
+        ) { merge in
+            Button("Merge") {
+                quickMerge(merge)
+            }
+            Button("Cancel", role: .cancel) { pendingQuickMerge = nil }
+        } message: { merge in
+            Text("Existing samples for \(pacerShortPath(merge.source)) will be re-attributed to \(pacerShortPath(merge.canonical)) on the next scan cycle. You can undo from Settings → Project Aliases.")
+        }
+        .alert(
+            "Could not merge",
+            isPresented: Binding(get: { aliasError != nil }, set: { if !$0 { aliasError = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(aliasError ?? "")
+        }
+        // Cache refresh triggers. We rebuild `cachedAllRows` only when
+        // something that *could* change its contents fires: a scan
+        // committed new data, the user picked a different range / sort
+        // / direction, or the view just appeared. Hover state changes
+        // and chart re-renders no longer trigger the O(aggregates)
+        // bucket+sort pipeline.
+        .onAppear { refreshAllRows() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
+        .onChange(of: rangeSince) { _, _ in refreshAllRows() }
+        .onChange(of: sort) { _, _ in refreshAllRows() }
+        .onChange(of: descending) { _, _ in refreshAllRows() }
+        // Probe count drives the badge state. Refreshing on count
+        // change picks up the very first probe write (first scan
+        // after install) plus any churn from the user clearing the
+        // probe table to force a re-walk.
+        .onChange(of: probes.count) { _, _ in refreshAllRows() }
+        // Search debounce: re-filter ~200ms after the last keystroke
+        // rather than on every character. Filtering is cheap relative
+        // to `refreshAllRows`, so a short debounce is enough.
+        .onChange(of: searchText) { _, newValue in
+            searchDebounceTask?.cancel()
+            searchDebounceTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+                debouncedSearch = newValue
+                refreshFilteredRows()
+            }
+        }
+    }
+
+    /// Submenu listing every other project as a possible canonical.
+    /// Selecting one fires a confirmation dialog (NOT the alias
+    /// editor) — both paths are already known by the time the user
+    /// drilled this far into the menu, so a tight Yes/No prompt is
+    /// all the action needs. The shared `ProjectPathAliasManager.upsert`
+    /// still runs cycle/self-alias validation; errors surface in the
+    /// "Could not merge" alert.
+    ///
+    /// "Merge with others…" beneath the submenu opens the bulk-merge
+    /// sheet with this row preselected as the canonical, for the
+    /// "I've got 5+ derivative paths to fold into Pacer" case.
+    ///
+    /// Iterates `cachedMergeCandidates` (built once in `refreshAllRows`)
+    /// rather than re-filtering `allRows` per row — the previous
+    /// shape was O(rows²) per table render, which was the dominant
+    /// cause of scroll lag on a project list of any size.
+    @ViewBuilder
+    private func mergeIntoMenu(for row: ProjectRow) -> some View {
+        if row.path != ProjectDailyAggregate.unknownProjectPath
+            && cachedMergeCandidates.count > 1 {
+            Menu("Merge into…") {
+                ForEach(cachedMergeCandidates) { other in
+                    if other.path != row.path {
+                        Button(other.displayName) {
+                            pendingQuickMerge = QuickMerge(
+                                source: row.path,
+                                canonical: other.path
+                            )
+                        }
+                    }
+                }
+            }
+            Button("Merge others into this…") {
+                bulkMergeDraft = BulkMergeDraft(
+                    canonical: row.path,
+                    sources: []
+                )
+            }
+            .help("Open the bulk-merge dialog with this project preselected as the canonical.")
+        }
+    }
+
+    /// The confirmation-dialog title. SwiftUI re-reads this whenever
+    /// `pendingQuickMerge` changes, so keep it a pure derivation.
+    private var quickMergePrompt: String {
+        guard let m = pendingQuickMerge else { return "" }
+        return "Merge \(pacerShortPath(m.source)) into \(pacerShortPath(m.canonical))?"
+    }
+
+    private func quickMerge(_ merge: QuickMerge) {
+        let manager = ProjectPathAliasManager(context: modelContext)
+        do {
+            try manager.upsert(sourcePath: merge.source, canonicalPath: merge.canonical)
+            pendingQuickMerge = nil
+            aliasError = nil
+            // Same as the bulk path: kick a scan cycle now so the
+            // user doesn't sit waiting for the watcher backstop to
+            // notice the alias-fingerprint drift.
+            NotificationCenter.default.post(name: .pacerRequestImmediateScan, object: nil)
+        } catch let error as ProjectPathAliasManager.AliasError {
+            pendingQuickMerge = nil
+            switch error {
+            case .selfAlias:
+                aliasError = "Source and canonical paths must be different."
+            case .emptyPath:
+                aliasError = "Both paths are required."
+            case .wouldCreateCycle:
+                aliasError = "That mapping would create a loop with an existing alias."
+            }
+        } catch {
+            pendingQuickMerge = nil
+            aliasError = error.localizedDescription
         }
     }
 
@@ -488,43 +725,76 @@ private struct ProjectsContent: View {
     private var projectListCard: some View {
         PacerCard("All projects", trailing: {
             HStack(spacing: 10) {
+                // Quick entry into the bulk-merge dialog. Hidden when
+                // there's fewer than 2 real projects on screen — with
+                // 0 or 1 there's nothing to merge.
+                //
+                // `.fixedSize()` keeps the button at its natural width
+                // so it doesn't get truncated to "M..." when the
+                // time-range picker tries to claim its full 320pt
+                // ideal width. The picker now uses `maxWidth` so it
+                // shrinks rather than fighting the button for space.
+                if cachedMergeCandidates.count >= 2 {
+                    Button {
+                        bulkMergeDraft = BulkMergeDraft(canonical: "", sources: [])
+                    } label: {
+                        Label("Merge…", systemImage: "arrow.triangle.merge")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .controlSize(.small)
+                    .fixedSize()
+                    .help("Open the bulk-merge dialog: pick a canonical project and check every path that should fold into it.")
+                }
                 Picker("Time range", selection: rangeBinding) {
                     ForEach(TimeRange.allCases) { r in
                         Text(r.label).tag(r)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 320)
+                .frame(maxWidth: 320)
                 .controlSize(.small)
                 .labelsHidden()
             }
         }) {
+            // `LazyVStack` around the row `ForEach` so that on a project
+            // list of any size the cards below the card-bottom (and
+            // below the viewport) aren't realized. Each row carries a
+            // `HoverRow` (`.onHover` listener) and a `.contextMenu`
+            // whose body is built at row-construction time — for a
+            // user with 50+ projects, every scroll-induced re-eval was
+            // building 50+ context menus eagerly. With this lazy
+            // boundary, only the rows the user can actually see are
+            // built and laid out.
             VStack(alignment: .leading, spacing: 0) {
                 tableHeader
                 Divider().padding(.vertical, 4)
-                ForEach(rows) { row in
-                    HoverRow(action: {
-                        onSelectProject(row.path, row.displayName, rangeSince)
-                    }) {
-                        projectRow(row)
-                    }
-                    .contextMenu {
-                        Button("Open project") {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        HoverRow(action: {
                             onSelectProject(row.path, row.displayName, rangeSince)
+                        }) {
+                            projectRow(row)
                         }
-                        if row.path != ProjectDailyAggregate.unknownProjectPath {
-                            Button("Reveal in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting(
-                                    [URL(fileURLWithPath: row.path)]
-                                )
+                        .contextMenu {
+                            Button("Open project") {
+                                onSelectProject(row.path, row.displayName, rangeSince)
                             }
-                        }
-                        Divider()
-                        Button("Copy path") {
-                            pacerCopyToPasteboard(row.path)
-                        }
-                        Button("Copy display name") {
-                            pacerCopyToPasteboard(row.displayName)
+                            if row.path != ProjectDailyAggregate.unknownProjectPath {
+                                Button("Reveal in Finder") {
+                                    NSWorkspace.shared.activateFileViewerSelecting(
+                                        [URL(fileURLWithPath: row.path)]
+                                    )
+                                }
+                            }
+                            Divider()
+                            mergeIntoMenu(for: row)
+                            Divider()
+                            Button("Copy path") {
+                                pacerCopyToPasteboard(row.path)
+                            }
+                            Button("Copy display name") {
+                                pacerCopyToPasteboard(row.displayName)
+                            }
                         }
                     }
                 }
@@ -594,9 +864,12 @@ private struct ProjectsContent: View {
     private func projectRow(_ row: ProjectRow) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.displayName)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(row.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    ProjectStatusBadge(state: row.status)
+                }
                 Text(row.path)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)

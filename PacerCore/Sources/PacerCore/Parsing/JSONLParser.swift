@@ -33,22 +33,37 @@ public enum JSONLLineParser {
         return formatter
     }()
 
+    /// Hoisted to avoid one `JSONDecoder()` allocation per JSONL line —
+    /// on a full historical re-scan that's hundreds of thousands of
+    /// fewer allocations. `JSONDecoder` is `Sendable`, so no
+    /// `nonisolated(unsafe)` is needed. Settings are left at defaults;
+    /// if a future change needs `dateDecodingStrategy` or
+    /// `keyDecodingStrategy`, set them inside this initializer (before
+    /// any decode call) — never mutate the shared instance from a parse
+    /// path.
+    private static let decoder = JSONDecoder()
+
     /// Parse one JSONL line into an entry or nil. Pure function — no IO.
-    public static func parse(line: Data) -> ParsedUsageEntry? {
+    ///
+    /// `aliases` is the user-defined project-path remap consulted by
+    /// `ProjectPathCanonicalizer.canonicalize(_:aliases:)` after the
+    /// worktree-stripping pass. Pass `[:]` (the default) for "no user
+    /// aliases" — the worktree-strip behaviour is still applied.
+    public static func parse(line: Data, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
         guard !line.isEmpty,
-              let raw = try? JSONDecoder().decode(RawJSONLine.self, from: line)
+              let raw = try? decoder.decode(RawJSONLine.self, from: line)
         else {
             return nil
         }
-        return entry(from: raw)
+        return entry(from: raw, aliases: aliases)
     }
 
-    public static func parse(line: String) -> ParsedUsageEntry? {
+    public static func parse(line: String, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
         guard let data = line.data(using: .utf8) else { return nil }
-        return parse(line: data)
+        return parse(line: data, aliases: aliases)
     }
 
-    static func entry(from raw: RawJSONLine) -> ParsedUsageEntry? {
+    static func entry(from raw: RawJSONLine, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
         guard raw.type == "assistant" else { return nil }
         guard let model = raw.message?.model, !model.isEmpty else { return nil }
         if model == syntheticModelSentinel { return nil }
@@ -78,7 +93,12 @@ public enum JSONLLineParser {
             storedCostUSD: raw.costUSD,
             dedupKey: dedupKey,
             sessionId: raw.sessionId,
-            projectPath: raw.cwd.map { ProjectPathCanonicalizer.canonicalize($0) },
+            projectPath: raw.cwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
+            // Preserve the raw `cwd` for the sub-path drill-down. Even
+            // if the canonical path collapses many subdirs into one
+            // git-repo root, the original is still the source of truth
+            // about WHERE inside that repo a session ran.
+            originalProjectPath: raw.cwd,
             claudeCodeVersion: raw.version,
             isApiErrorMessage: raw.isApiErrorMessage ?? false
         )

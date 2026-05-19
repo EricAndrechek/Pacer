@@ -237,14 +237,21 @@ struct SessionDetailView: View {
         }
     }
 
-    /// Long-form date for the metadata card. Pinned to the user's
-    /// timezone so a 23:59 session doesn't read "tomorrow."
-    private static func dateLabel(_ date: Date) -> String {
+    /// Shared formatter for `dateLabel` — was constructed per call,
+    /// now reused across the metadata card's "First seen" / "Last
+    /// seen" rows (and any future surface that needs the same shape).
+    private static let dateLabelFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .medium
         f.timeStyle = .short
         f.timeZone = .current
-        return f.string(from: date)
+        return f
+    }()
+
+    /// Long-form date for the metadata card. Pinned to the user's
+    /// timezone so a 23:59 session doesn't read "tomorrow."
+    private static func dateLabel(_ date: Date) -> String {
+        dateLabelFormatter.string(from: date)
     }
 
     /// Walk `~/.claude/projects/*` looking for `<sessionId>.jsonl`.

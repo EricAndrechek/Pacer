@@ -13,6 +13,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         RateLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
+        ProjectPathAlias.self,
         configurations: config
     )
 }
@@ -44,7 +45,9 @@ private func makeAssistantLine(
     cache1h: Int = 0,
     storedCost: Double? = nil,
     messageId: String? = nil,
-    requestId: String? = nil
+    requestId: String? = nil,
+    cwd: String? = nil,
+    sessionId: String? = nil
 ) -> String {
     var fields: [String: Any] = [
         "type": "assistant",
@@ -65,6 +68,8 @@ private func makeAssistantLine(
     ]
     if let storedCost { fields["costUSD"] = storedCost }
     if let requestId { fields["requestId"] = requestId }
+    if let cwd { fields["cwd"] = cwd }
+    if let sessionId { fields["sessionId"] = sessionId }
     let cleaned = fields.compactMapValues { $0 is NSNull ? nil : $0 }
     return String(data: try! JSONSerialization.data(withJSONObject: cleaned), encoding: .utf8)!
 }
@@ -301,6 +306,76 @@ private func makeAssistantLine(
     let context = ModelContext(container)
     let count = try context.fetchCount(FetchDescriptor<RateLimitSample>())
     #expect(count >= 2, "expected the poller to insert at least one snapshot's worth of rows")
+}
+
+@MainActor
+@Test func coordinatorAliasMigrationMovesSamplesAndAggregates() async throws {
+    // End-to-end: persist samples under /old/path, add an alias
+    // /old/path → /new/path, run another cycle, verify samples and
+    // the ProjectDailyAggregate row both live under the new key.
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        inputTokens: 100, outputTokens: 50,
+        storedCost: 0.10,
+        messageId: "msg-rename", requestId: "req-rename",
+        cwd: "/Users/test/old-name",
+        sessionId: "sess-rename"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+
+    // First scan: ingest with the original cwd.
+    _ = try await coordinator.runOnce()
+    let context = ModelContext(container)
+
+    let samplesBefore = try context.fetch(FetchDescriptor<TokenSample>())
+    #expect(samplesBefore.count == 1)
+    #expect(samplesBefore[0].projectPath == "/Users/test/old-name")
+
+    let projAggsBefore = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+    #expect(projAggsBefore.count == 1)
+    #expect(projAggsBefore[0].projectPath == "/Users/test/old-name")
+
+    // User adds an alias via the manager.
+    let manager = ProjectPathAliasManager(context: context)
+    try manager.upsert(
+        sourcePath: "/Users/test/old-name",
+        canonicalPath: "/Users/test/new-name"
+    )
+
+    // Next scan picks up the alias fingerprint change and migrates.
+    _ = try await coordinator.runOnce()
+
+    let samplesAfter = try ModelContext(container).fetch(FetchDescriptor<TokenSample>())
+    #expect(samplesAfter.count == 1)
+    #expect(samplesAfter[0].projectPath == "/Users/test/new-name")
+
+    // ProjectDailyAggregate should now be keyed under the new path —
+    // the old bucket emptied + recomputer deleted it.
+    let projAggsAfter = try ModelContext(container).fetch(FetchDescriptor<ProjectDailyAggregate>())
+    #expect(projAggsAfter.count == 1)
+    #expect(projAggsAfter[0].projectPath == "/Users/test/new-name")
+
+    // SessionInfo also follows the rename.
+    let sessions = try ModelContext(container).fetch(FetchDescriptor<SessionInfo>())
+    #expect(sessions.count == 1)
+    #expect(sessions[0].projectPath == "/Users/test/new-name")
+
+    // Idempotent: a third scan with no further alias changes is a no-op
+    // for path migration — same samples, no double-move.
+    let thirdReport = try await coordinator.runOnce()
+    #expect(thirdReport.wasFullScan == false)
+    let samplesFinal = try ModelContext(container).fetch(FetchDescriptor<TokenSample>())
+    #expect(samplesFinal.count == 1)
+    #expect(samplesFinal[0].projectPath == "/Users/test/new-name")
 }
 
 @MainActor

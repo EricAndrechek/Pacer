@@ -10,7 +10,14 @@ import PacerCore
 /// crossings — without it, we'd post a banner every render while a
 /// sample sits above the threshold.
 struct NotificationsHost: View {
-    @Query(sort: \RateLimitSample.sampledAt, order: .reverse)
+    /// Cap the fetch to the most-recent N samples. The host only ever
+    /// looks at `.first` for each of two windows, so a limit of 8 is
+    /// more than enough to find both newest entries while bounding the
+    /// per-save refetch cost. Without the cap, every `@Query`
+    /// invalidation materialized every `RateLimitSample` row in the
+    /// store just to read one float — the same kind of cost
+    /// MenuBarLabel already addressed.
+    @Query(NotificationsHost.recentRateLimitDescriptor)
     private var samples: [RateLimitSample]
 
     @Query private var todayAggregates: [DailyAggregate]
@@ -20,6 +27,22 @@ struct NotificationsHost: View {
     @State private var lastSeenFiveHour: Double?
     @State private var lastSeenSevenDay: Double?
     @State private var lastSeenDailyCost: Double?
+    /// `persistentModelID` of the most recent sample we already
+    /// considered for each window. The `onChange` predicates below
+    /// use this to short-circuit when SwiftData re-notifies with no
+    /// new sample (e.g., because some unrelated row in the table
+    /// changed). Avoids the `handleFiveHour`/`handleSevenDay` round
+    /// trip when there's literally nothing new to react to.
+    @State private var lastConsideredFiveHourId: PersistentIdentifier?
+    @State private var lastConsideredSevenDayId: PersistentIdentifier?
+
+    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
 
     init() {
         let today = TokenSample.formatDate(Date())
@@ -67,6 +90,13 @@ struct NotificationsHost: View {
 
     private func handleFiveHour() {
         guard let latest = samples.first(where: { $0.window == "five_hour" }) else { return }
+        // Short-circuit if we already evaluated this exact sample.
+        // `@Query.onChange` can re-fire when an unrelated row changes
+        // and our `.first(where:)` happens to resolve to the same
+        // entity — without this guard we'd round-trip to the
+        // NotificationCoordinator on every such re-fire.
+        if latest.persistentModelID == lastConsideredFiveHourId { return }
+        lastConsideredFiveHourId = latest.persistentModelID
         let prev = lastSeenFiveHour
         lastSeenFiveHour = latest.usedPercentage
         Task { @MainActor in
@@ -82,6 +112,8 @@ struct NotificationsHost: View {
 
     private func handleSevenDay() {
         guard let latest = samples.first(where: { $0.window == "seven_day" }) else { return }
+        if latest.persistentModelID == lastConsideredSevenDayId { return }
+        lastConsideredSevenDayId = latest.persistentModelID
         let prev = lastSeenSevenDay
         lastSeenSevenDay = latest.usedPercentage
         Task { @MainActor in

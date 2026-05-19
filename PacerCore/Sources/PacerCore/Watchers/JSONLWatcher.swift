@@ -33,9 +33,63 @@ public actor JSONLWatcher {
     /// Outermost FS event arrival not yet flushed. The coalesce task
     /// reads this when it wakes up to decide whether to emit.
     private var pendingFSEventArrivedAt: Date?
+    /// Resolved root paths the live FSEventStream was started against.
+    /// Cached so `updateLiveCadence` can restart the stream with a new
+    /// latency without re-resolving roots.
+    private var liveRootPaths: [String] = []
+    /// Live coalesce window in nanoseconds. Used by `coalesceTrigger`
+    /// for its `Task.sleep` budget. Tunable at runtime via
+    /// `updateLiveCadence(latency:backstopInterval:)` so the
+    /// coordinator can widen the window when no user-facing window is
+    /// up and snap it back tight when one re-appears.
+    private var liveCoalesceNanos: UInt64 = 500_000_000
+    /// Live backstop interval — same dynamic update story as
+    /// `liveCoalesceNanos`. The backstop task reads this at the top of
+    /// each loop iteration, so the next sleep picks up the new value
+    /// without restarting the task.
+    private var liveBackstopSeconds: TimeInterval = 60
 
     public init(mode: Mode = .live(latencySeconds: 0.5, backstopInterval: 60)) {
         self.mode = mode
+        // Seed the dynamic knobs from the initial config so tests and
+        // production share the same start-state semantics.
+        if case .live(let lat, let backstop) = mode {
+            self.liveCoalesceNanos = UInt64(max(0, lat) * 1_000_000_000)
+            self.liveBackstopSeconds = backstop
+        }
+    }
+
+    /// Adjust the live-mode cadence at runtime. No-op in `.manual` mode
+    /// or when `start()` hasn't been called yet (FSEvents latency is
+    /// re-applied by tearing down and restarting the stream; backstop
+    /// picks up on its next sleep). The coordinator calls this when
+    /// the user opens / closes the main window so live-write latency
+    /// only stays tight while someone is actually watching.
+    public func updateLiveCadence(
+        latencySeconds: CFTimeInterval,
+        backstopInterval: TimeInterval
+    ) {
+        guard case .live = mode else { return }
+        liveCoalesceNanos = UInt64(max(0, latencySeconds) * 1_000_000_000)
+        liveBackstopSeconds = backstopInterval
+        // Restart FSEvents with the new latency if we already have a
+        // running stream. The wrapper's latency is set at create-time
+        // (FSEventStreamCreate) so we can't mutate it in place.
+        if fsEvents != nil, !liveRootPaths.isEmpty {
+            fsEvents?.stop()
+            fsEvents = nil
+            // Restart with the same handler shape used in startLive
+            // — we hop back into the actor to coalesce, same as before.
+            let watcher = FSEventStreamWrapper(handler: { [weak self] _ in
+                guard let self else { return }
+                Task { await self.coalesceTrigger() }
+            })
+            if watcher.start(paths: liveRootPaths, latencySeconds: latencySeconds) {
+                fsEvents = watcher
+            } else {
+                Log.write("JSONLWatcher", "FSEventStream failed to restart at latency=\(latencySeconds); relying on backstop only")
+            }
+        }
     }
 
     /// Returns the trigger stream. Call this BEFORE `start()` so the
@@ -70,6 +124,7 @@ public actor JSONLWatcher {
         coalesceTask = nil
         continuation?.finish()
         continuation = nil
+        liveRootPaths = []
     }
 
     /// Test hook: emit a synthetic trigger as if from FSEvents. Only
@@ -88,6 +143,7 @@ public actor JSONLWatcher {
     ) {
         let pathStrings = roots.map { $0.projectsDirectory.path }
         guard !pathStrings.isEmpty else { return }
+        liveRootPaths = pathStrings
 
         // FSEvents: arms `coalesceTrigger()` on every batch of
         // file-system events. The handler hops back into the actor
@@ -103,29 +159,41 @@ public actor JSONLWatcher {
             Log.write("JSONLWatcher", "FSEventStream failed to start; relying on backstop only")
         }
 
-        // 60s backstop. Always emits — no coalesce — so even if FSEvents
-        // drops events, the consumer sees something to process.
+        // Backstop loop reads the live interval at the top of each
+        // iteration so `updateLiveCadence` picks up before the next
+        // sleep. Initial value comes from the seeded `mode`.
+        liveBackstopSeconds = backstopInterval
         backstopTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(backstopInterval * 1_000_000_000))
+                guard let interval = await self?.currentBackstopSeconds() else { return }
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 if Task.isCancelled { return }
                 await self?.emitDirect()
             }
         }
     }
 
+    /// Actor-local read for the backstop loop. Avoids `self?` capture
+    /// shenanigans in the Task's `Task.sleep` argument.
+    private func currentBackstopSeconds() -> TimeInterval {
+        liveBackstopSeconds
+    }
+
     /// Called from the FS callback when any path-changed event arrives.
     /// Sets a pending timestamp and (re)arms the coalesce task. If
     /// further events arrive within the coalesce window, the task is
     /// restarted — only the trailing edge fires a trigger.
+    ///
+    /// Coalesce window is read from `liveCoalesceNanos`, which
+    /// `updateLiveCadence` can widen when the main window is hidden —
+    /// no point in sub-second latency to update a UI that nobody is
+    /// looking at.
     private func coalesceTrigger() {
         pendingFSEventArrivedAt = Date()
+        let nanos = liveCoalesceNanos
         coalesceTask?.cancel()
         coalesceTask = Task { [weak self] in
-            // 500ms window. Burst writes (many JSONL appends in quick
-            // succession) collapse into a single trigger; isolated
-            // writes still fire after 500ms latency.
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: nanos)
             if Task.isCancelled { return }
             await self?.flushPending()
         }

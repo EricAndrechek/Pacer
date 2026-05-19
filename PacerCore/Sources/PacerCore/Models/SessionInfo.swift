@@ -14,6 +14,11 @@ import SwiftData
 /// precomputed set instead of iterating raw samples on display.
 @Model
 public final class SessionInfo {
+    // Sessions list views filter by `projectPath`; the day-detail
+    // modal filters by `(firstSeenAt, lastSeenAt)` overlap on a
+    // date. Index both so those predicates are range scans.
+    #Index<SessionInfo>([\.projectPath], [\.lastSeenAt])
+
     @Attribute(.unique) public var sessionId: String
     public var firstSeenAt: Date
     public var lastSeenAt: Date

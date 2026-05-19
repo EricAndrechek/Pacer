@@ -205,7 +205,7 @@ struct DailyChartWidgetView: View {
 }
 
 struct DailyChartWidget: Widget {
-    let kind: String = "DailyChartWidget"
+    let kind: String = WidgetKinds.dailyChart
 
     var body: some WidgetConfiguration {
         AppIntentConfiguration(

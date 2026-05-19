@@ -35,9 +35,18 @@ public enum PacerStore {
         let configuration = ModelConfiguration(url: url)
         // All targets (Pacer app, PacerDaemon, PacerWidgets) open the
         // same on-disk container, so the schema list here must include
-        // every @Model type we want to read or write anywhere. Adding a
-        // new model means listing it here AND coming up with a
-        // migration plan if there's user data in the wild.
+        // every @Model type we want to read or write anywhere.
+        //
+        // **Schema evolution:** Pacer relies on SwiftData's implicit
+        // lightweight migration — safe for added optional fields and
+        // added @Model types. Anything heavier (added NON-optional
+        // field without default, removed field, renamed field, type
+        // change on an existing field) requires a `VersionedSchema` +
+        // `SchemaMigrationPlan` here; otherwise the container open
+        // crashes on first launch for users with existing data. The
+        // `showFatalContainerError` alert in `PacerAppDelegate` is the
+        // user-facing safety net, but the right fix is to add the
+        // migration plan before shipping the schema change.
         //
         // Heartbeat lingers from M1 as our App Group sanity check; it
         // gets removed when the M6 dashboard takes over verification.
@@ -50,6 +59,8 @@ public enum PacerStore {
             SessionInfo.self,
             ClaudeCodeMeta.self,
             JSONLFileCursor.self,
+            ProjectPathAlias.self,
+            ProjectPathProbe.self,
             configurations: configuration
         )
     }

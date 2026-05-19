@@ -71,7 +71,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
 
     func placeholder(in context: Context) -> TopProjectsEntry {
         let rows = [
-            ("ccmac",       342.10),
+            ("Pacer",       342.10),
             ("public-blog", 156.40),
             ("example-proj",      88.75),
             ("openexp",      42.30),
@@ -316,7 +316,7 @@ struct TopProjectsWidgetView: View {
 // MARK: - Configuration
 
 struct TopProjectsWidget: Widget {
-    let kind: String = "TopProjectsWidget"
+    let kind: String = WidgetKinds.topProjects
 
     var body: some WidgetConfiguration {
         AppIntentConfiguration(

@@ -1,0 +1,184 @@
+import Foundation
+import SwiftData
+
+/// CRUD for the user-facing `ProjectPathAlias` table.
+///
+/// This is the *intent* layer — write operations validate the alias
+/// graph (no self-loops, no immediate cycles, both paths non-empty)
+/// and record the change. The *effect* layer is `ScanCoordinator`,
+/// which detects the aliases fingerprint changed since the last scan
+/// and migrates `TokenSample.projectPath` + recomputes affected
+/// `ProjectDailyAggregate` and `SessionInfo` rows on its next cycle.
+///
+/// Why the split: writes happen on the main thread from a Settings or
+/// context-menu interaction; the migration touches every TokenSample
+/// and must coordinate with the live FSEvents watcher. The manager
+/// stays cheap and synchronous; the scan coordinator owns the heavy
+/// rebuild. Callers that want the migration to run immediately (e.g.,
+/// after the user clicks "Merge") can call
+/// `scanCoordinator.runOnce()` themselves; otherwise the next scan
+/// cycle picks it up on its own.
+@MainActor
+public final class ProjectPathAliasManager {
+
+    public enum AliasError: Error, Equatable, Sendable {
+        /// Source and canonical paths must be distinct.
+        case selfAlias(path: String)
+        /// Either path is empty after trim. We don't normalize for
+        /// trailing slashes — that's the caller's responsibility —
+        /// but empty-string aliases are nonsense.
+        case emptyPath
+        /// Adding this alias would create a cycle (A→B, B→A).
+        /// Detected by walking the existing graph from the new
+        /// canonical and checking whether it reaches the source.
+        case wouldCreateCycle(source: String, canonical: String)
+    }
+
+    private let context: ModelContext
+
+    public init(context: ModelContext) {
+        self.context = context
+    }
+
+    /// Snapshot of the alias table as `[sourcePath: canonicalPath]`.
+    /// Suitable for passing to `ProjectPathCanonicalizer.canonicalize`.
+    public func snapshot() throws -> [String: String] {
+        let rows = try context.fetch(FetchDescriptor<ProjectPathAlias>())
+        var out: [String: String] = [:]
+        out.reserveCapacity(rows.count)
+        for row in rows {
+            out[row.sourcePath] = row.canonicalPath
+        }
+        return out
+    }
+
+    /// Every row, sorted by `createdAt` descending (newest first) for
+    /// stable UI ordering.
+    public func listSortedByRecency() throws -> [ProjectPathAlias] {
+        let descriptor = FetchDescriptor<ProjectPathAlias>(
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        return try context.fetch(descriptor)
+    }
+
+    /// Add or update an alias.
+    ///
+    /// - `sourcePath` and `canonicalPath` are stored verbatim. The
+    ///   caller is responsible for normalizing (typically passing the
+    ///   value that `ProjectPathCanonicalizer.canonicalize` would
+    ///   produce — that's the same key the scanner persists for
+    ///   unaliased samples).
+    /// - If an alias already exists with this `sourcePath`, the
+    ///   canonical is overwritten and `createdAt` is refreshed.
+    /// - Throws if the alias would self-loop, contains empty paths, or
+    ///   would create a cycle with the existing graph.
+    @discardableResult
+    public func upsert(sourcePath: String, canonicalPath: String) throws -> ProjectPathAlias {
+        let result = try upsertWithoutSaving(sourcePath: sourcePath, canonicalPath: canonicalPath)
+        try context.save()
+        return result
+    }
+
+    /// Bulk variant of `upsert`. Validates each entry against the
+    /// current graph + previously-accepted entries in this call, then
+    /// commits the whole batch with a SINGLE `context.save()`.
+    ///
+    /// Why this exists: the bulk-merge UI used to do N `upsert` calls,
+    /// each with its own `context.save()` and its own @Query
+    /// notification storm. With even a handful of selected sources
+    /// that was beachball-grade on the main thread. One save at the
+    /// end pays the disk-flush + notification cost once.
+    ///
+    /// Returns a per-entry result so the caller can surface granular
+    /// errors. Entries that fail validation are skipped (not inserted)
+    /// — successful entries still get committed, so a partial-failure
+    /// run isn't all-or-nothing.
+    public struct UpsertResult {
+        public let source: String
+        public let error: AliasError?
+        public var ok: Bool { error == nil }
+    }
+
+    @discardableResult
+    public func upsertMany(_ entries: [(source: String, canonical: String)]) throws -> [UpsertResult] {
+        var results: [UpsertResult] = []
+        results.reserveCapacity(entries.count)
+        var anySuccess = false
+        for entry in entries {
+            do {
+                _ = try upsertWithoutSaving(sourcePath: entry.source, canonicalPath: entry.canonical)
+                results.append(UpsertResult(source: entry.source, error: nil))
+                anySuccess = true
+            } catch let err as AliasError {
+                results.append(UpsertResult(source: entry.source, error: err))
+            }
+        }
+        // Only pay the save cost if at least one row was committed.
+        // An all-failure batch (e.g., every source would create a
+        // cycle) leaves the context clean.
+        if anySuccess {
+            try context.save()
+        }
+        return results
+    }
+
+    /// Insert or update an alias row but DON'T `context.save()`.
+    /// Callers (single `upsert`, batched `upsertMany`) save when their
+    /// batch boundary is correct. Validates against the *committed-
+    /// plus-pending* graph by reading via `context.fetch`, which
+    /// surfaces unsaved inserts in the same context — so the cycle
+    /// check in a batch correctly considers earlier entries from the
+    /// same call.
+    @discardableResult
+    private func upsertWithoutSaving(sourcePath: String, canonicalPath: String) throws -> ProjectPathAlias {
+        let s = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let c = canonicalPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !c.isEmpty else { throw AliasError.emptyPath }
+        guard s != c else { throw AliasError.selfAlias(path: s) }
+        try assertNoCycle(source: s, canonical: c)
+
+        let descriptor = FetchDescriptor<ProjectPathAlias>(
+            predicate: #Predicate<ProjectPathAlias> { $0.sourcePath == s }
+        )
+        if let existing = try context.fetch(descriptor).first {
+            existing.canonicalPath = c
+            existing.createdAt = Date()
+            return existing
+        }
+        let row = ProjectPathAlias(sourcePath: s, canonicalPath: c)
+        context.insert(row)
+        return row
+    }
+
+    /// Remove an alias. Idempotent — removing a non-existent alias is
+    /// a no-op rather than an error, so the UI's confirm-then-delete
+    /// path doesn't race with a parallel re-fetch.
+    public func remove(sourcePath: String) throws {
+        let descriptor = FetchDescriptor<ProjectPathAlias>(
+            predicate: #Predicate<ProjectPathAlias> { $0.sourcePath == sourcePath }
+        )
+        for row in try context.fetch(descriptor) {
+            context.delete(row)
+        }
+        try context.save()
+    }
+
+    /// Throws `.wouldCreateCycle` if adding `source → canonical` would
+    /// produce a cycle when combined with the existing alias graph.
+    /// Walks from `canonical` forward following the existing edges and
+    /// returns once it (a) reaches `source` (cycle), (b) loops back to
+    /// a path it has already visited (existing cycle — surprising, but
+    /// non-fatal), or (c) exhausts the chain (clean).
+    private func assertNoCycle(source: String, canonical: String) throws {
+        let current = try snapshot()
+        var node = canonical
+        var visited: Set<String> = []
+        while let next = current[node] {
+            if next == source {
+                throw AliasError.wouldCreateCycle(source: source, canonical: canonical)
+            }
+            if !visited.insert(node).inserted { return }
+            node = next
+        }
+    }
+}

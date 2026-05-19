@@ -64,4 +64,92 @@ import Testing
             ) == "/Users/eric/foo"
         )
     }
+
+    // MARK: - User-defined aliases
+
+    @Test func aliasResolvesAfterWorktreeStrip() {
+        // The folder-rename case: ccmac → Pacer.
+        let aliases = [
+            "/Users/eric/Code/public-projects/ccmac":
+                "/Users/eric/Code/public-projects/Pacer",
+        ]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize(
+                "/Users/eric/Code/public-projects/ccmac",
+                aliases: aliases
+            ) == "/Users/eric/Code/public-projects/Pacer"
+        )
+    }
+
+    @Test func aliasAppliesAfterWorktreeStripping() {
+        // Worktree strip happens FIRST, so the alias matches the
+        // post-strip path. Without this ordering an alias would have
+        // to mention every worktree subpath separately.
+        let aliases = [
+            "/Users/eric/Code/ccmac": "/Users/eric/Code/Pacer",
+        ]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize(
+                "/Users/eric/Code/ccmac/.claude/worktrees/agent-abc/src",
+                aliases: aliases
+            ) == "/Users/eric/Code/Pacer"
+        )
+    }
+
+    @Test func aliasChainResolvesTransitively() {
+        // A → B → C should resolve to C.
+        let aliases = [
+            "/path/A": "/path/B",
+            "/path/B": "/path/C",
+        ]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize("/path/A", aliases: aliases) == "/path/C"
+        )
+        #expect(
+            ProjectPathCanonicalizer.canonicalize("/path/B", aliases: aliases) == "/path/C"
+        )
+    }
+
+    @Test func aliasUnmappedPathPassesThrough() {
+        let aliases = ["/path/A": "/path/B"]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize("/path/elsewhere", aliases: aliases)
+                == "/path/elsewhere"
+        )
+    }
+
+    @Test func aliasCycleTerminatesSafely() {
+        // A → B → A. canonicalize must not loop forever or crash; it
+        // returns SOME path (the cycle's visit order determines which).
+        let aliases = [
+            "/path/A": "/path/B",
+            "/path/B": "/path/A",
+        ]
+        let result = ProjectPathCanonicalizer.canonicalize("/path/A", aliases: aliases)
+        #expect(result == "/path/A" || result == "/path/B")
+    }
+
+    @Test func aliasSelfLoopIsNoOp() {
+        // The manager API rejects self-aliases at write time, but the
+        // canonicalizer's job is to be defensive against bad state on
+        // disk — round-trip a self-alias as identity.
+        let aliases = ["/path/X": "/path/X"]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize("/path/X", aliases: aliases) == "/path/X"
+        )
+    }
+
+    @Test func siblingWorktreeAlias() {
+        // The use case the regex CAN'T handle: a worktree at a sibling
+        // directory rather than inside the parent repo.
+        let aliases = [
+            "/Users/eric/Code/repo-feature-x": "/Users/eric/Code/repo",
+        ]
+        #expect(
+            ProjectPathCanonicalizer.canonicalize(
+                "/Users/eric/Code/repo-feature-x",
+                aliases: aliases
+            ) == "/Users/eric/Code/repo"
+        )
+    }
 }

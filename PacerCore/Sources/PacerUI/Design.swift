@@ -1,4 +1,5 @@
 import SwiftUI
+import PacerCore
 
 /// Shared design tokens + lightweight view primitives. Centralizing
 /// them here keeps every card / metric / chip in lock-step on radii,
@@ -257,6 +258,12 @@ public struct FreshnessPulse: View {
     /// repeating halo animation is decorative, the colored dot alone
     /// communicates freshness just as well without motion.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Window-visibility tracker. When the main window isn't on
+    /// screen, the TimelineView still kept ticking and re-rendering
+    /// at 12fps — meaningful CPU for a decorative halo with no
+    /// audience. Pausing here drops it to zero work while the user is
+    /// using another app.
+    @State private var visibility = PacerWindowVisibility.shared
 
     public init(state: Freshness) {
         self.state = state
@@ -271,7 +278,9 @@ public struct FreshnessPulse: View {
         }
     }
 
-    private var shouldPulse: Bool { state == .live && !reduceMotion }
+    private var shouldPulse: Bool {
+        state == .live && !reduceMotion && visibility.isMainWindowVisible
+    }
 
     public var body: some View {
         // Wall-clock driven via TimelineView: the halo's phase is a
@@ -280,7 +289,15 @@ public struct FreshnessPulse: View {
         // restart the animation mid-cycle or leave the halo and dot
         // out of phase. `paused: !shouldPulse` lets the timeline go
         // quiet when there's nothing to animate.
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !shouldPulse)) { context in
+        //
+        // 12 fps over a 1.4s cycle = ~17 frames per halo, still smooth
+        // for a slow ease-out scale. The prior 30 fps was 2.5× the
+        // wall-clock work for no perceptual benefit — the halo expands
+        // ~5px total and fades over ~1s, so ~10 frames is the eye's
+        // discrimination floor here. With FreshnessPulse rendered in
+        // both the menu-bar item and the toolbar, dropping it cut a
+        // noticeable chunk of idle CPU when the window is open.
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !shouldPulse)) { context in
             let raw = shouldPulse ? cycleRaw(at: context.date) : 0
             // ease-out scale: ring accelerates outward early in the
             // cycle, settles near max as it fades.
@@ -347,7 +364,24 @@ public struct PageScaffold<Trailing: View, Content: View>: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+            // `LazyVStack` defers each card's view body — and crucially
+            // its `@Query` subscription — until that card is in the
+            // viewport. Previously the dashboard's 7+ cards all
+            // subscribed eagerly: every SwiftData save invalidated
+            // every `@Query` on every card, even ones below the fold.
+            // With the lazy stack, off-screen cards aren't realized,
+            // their queries aren't subscribed, and the user's hot path
+            // (the top half of the page) gets all the SwiftData
+            // notification budget.
+            //
+            // Trade-off: scrolling a previously-off-screen card back
+            // into view re-runs its `onAppear` cache refresh. The
+            // cache populates in the same frame as the cards we
+            // already had (in cycle ms terms), so the visible churn
+            // is minor and only happens on demand. The header stays
+            // outside the lazy stack so the page title doesn't
+            // disappear on scroll.
+            LazyVStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
                 header
                 content()
             }

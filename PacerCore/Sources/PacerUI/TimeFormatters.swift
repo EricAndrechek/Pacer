@@ -77,6 +77,12 @@ public func pacerWeekdayShort(_ date: Date) -> String {
 /// default "in 0 seconds" / "0 seconds ago" output near zero. Anything
 /// within 5 seconds clamps to a single reader-friendly word: future →
 /// "now", past → "just now". Used by every freshness/reset chip.
+///
+/// `RelativeDateTimeFormatter` is genuinely expensive to construct
+/// (locale + calendar + ICU formatter init); on a list view that
+/// re-evaluated this per row per scroll frame it was a measurable
+/// scroll-lag contributor. Cached per `UnitsStyle` so the hot calls
+/// reuse the same instance.
 public func pacerRelative(
     _ date: Date,
     style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated
@@ -85,9 +91,8 @@ public func pacerRelative(
     if abs(interval) < 5 {
         return interval >= 0 ? "now" : "just now"
     }
-    let f = RelativeDateTimeFormatter()
-    f.unitsStyle = style
-    return f.localizedString(for: date, relativeTo: Date())
+    return Cached.relativeFormatter(for: style)
+        .localizedString(for: date, relativeTo: Date())
 }
 
 // MARK: - Reset caption
@@ -144,4 +149,38 @@ private enum Cached {
         f.dateFormat = "EEE H:mm"
         return f
     }()
+    /// One formatter per `UnitsStyle` Pacer uses. The `pacerRelative`
+    /// hot path was constructing a fresh `RelativeDateTimeFormatter`
+    /// on every call (~ms-level cost from locale + calendar + ICU
+    /// init), which shows up as a real per-row scroll cost on the
+    /// Projects list. Cached on first access.
+    nonisolated(unsafe) private static let relativeAbbreviated: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+    nonisolated(unsafe) private static let relativeShort: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+    nonisolated(unsafe) private static let relativeFull: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f
+    }()
+    nonisolated(unsafe) private static let relativeSpellOut: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .spellOut
+        return f
+    }()
+    static func relativeFormatter(for style: RelativeDateTimeFormatter.UnitsStyle) -> RelativeDateTimeFormatter {
+        switch style {
+        case .abbreviated: return relativeAbbreviated
+        case .short:       return relativeShort
+        case .full:        return relativeFull
+        case .spellOut:    return relativeSpellOut
+        @unknown default:  return relativeAbbreviated
+        }
+    }
 }

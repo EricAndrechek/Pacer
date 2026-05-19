@@ -67,7 +67,7 @@ struct LiveActivityCard: View {
             // dance with a process-wide cache warmed at app launch.
             s.costLastHour += sample.effectiveCostUSD(mode: mode)
             s.sampleCount += 1
-            if s.lastSampleAt == nil || sample.sampledAt > s.lastSampleAt! {
+            if sample.sampledAt > (s.lastSampleAt ?? .distantPast) {
                 s.lastSampleAt = sample.sampledAt
             }
         }

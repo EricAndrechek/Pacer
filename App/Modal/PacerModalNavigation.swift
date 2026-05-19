@@ -65,6 +65,13 @@ public enum PacerModalDestination: Hashable, Identifiable {
 /// Closure-shaped value plumbed through the environment so drill-down
 /// views can append to the parent's stack without owning the stack
 /// themselves. Mirrors SwiftUI's own `DismissAction` shape.
+///
+/// `@unchecked Sendable` is correct here: the closure is constructed
+/// on MainActor (inside `PacerModalNavigationModifier.body`) and only
+/// ever called from MainActor view code that pulled this action out of
+/// the environment. Every read and write of the underlying stack runs
+/// MainActor-isolated; the unchecked annotation only suppresses Swift
+/// 6's inability to infer closure Sendability automatically.
 public struct PacerModalPushAction: @unchecked Sendable {
     fileprivate let push: (PacerModalDestination) -> Void
     public func callAsFunction(_ destination: PacerModalDestination) {
@@ -92,6 +99,10 @@ public extension EnvironmentValues {
 /// render a back chevron; detail views generally don't touch it
 /// directly. Optional in the public API — `nil` means "no parent" (the
 /// view is the modal's root).
+///
+/// `@unchecked Sendable` carries the same justification as
+/// `PacerModalPushAction`: the closure is created and invoked only on
+/// MainActor.
 public struct PacerModalBackAction: @unchecked Sendable {
     fileprivate let pop: () -> Void
     public func callAsFunction() { pop() }

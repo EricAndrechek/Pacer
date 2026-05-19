@@ -447,4 +447,14 @@ extension Notification.Name {
     /// Button inside .background turned out to miss keystrokes) while
     /// keeping `selection` private to ContentView.
     static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
+
+    /// Fired by UI surfaces that just made a change requiring the
+    /// scan coordinator to re-apply canonicalization or re-derive
+    /// aggregates immediately — e.g. the bulk-merge sheet committing
+    /// N new aliases. AppBackgroundService observes this and kicks
+    /// `ScanCoordinator.runOnce()` so the user doesn't sit through
+    /// the watcher's backstop interval waiting for their merge to
+    /// take effect. Cheap to over-fire: the coordinator already
+    /// skips overlapping cycles.
+    static let pacerRequestImmediateScan = Notification.Name("PacerRequestImmediateScan")
 }

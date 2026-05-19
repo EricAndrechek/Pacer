@@ -38,6 +38,12 @@ struct HistoryView: View {
 /// launches via App Group `UserDefaults`.
 private struct LifetimeSummaryCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    /// Singleton-row probe — fires once per completed scan cycle so
+    /// the totals walk below runs at most once per cycle instead of
+    /// once per body render (the surrounding tile grid had hover
+    /// states that re-rendered on every mouse-over pre-cache).
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     @AppStorage("pacer.history.summaryRange", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.all.rawValue
@@ -59,7 +65,11 @@ private struct LifetimeSummaryCard: View {
         var firstDate: String?
     }
 
-    private var totals: Totals {
+    @State private var cachedTotals = Totals()
+
+    private var totals: Totals { cachedTotals }
+
+    private func refreshTotals() {
         var t = Totals()
         var dates = Set<String>()
         var models = Set<String>()
@@ -78,7 +88,7 @@ private struct LifetimeSummaryCard: View {
         t.distinctDays = dates.count
         t.distinctModels = models.count
         t.firstDate = minDate
-        return t
+        cachedTotals = t
     }
 
     private var cardTitle: String {
@@ -135,6 +145,9 @@ private struct LifetimeSummaryCard: View {
                 }
             }
         }
+        .onAppear { refreshTotals() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshTotals() }
+        .onChange(of: rangeRaw) { _, _ in refreshTotals() }
     }
 }
 
@@ -142,8 +155,12 @@ private struct LifetimeSummaryCard: View {
 
 private struct MonthlyChartCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     @State private var selectedMonth: String?
+    @State private var cachedMonthly: [MonthBucket] = []
+    @State private var cachedTotal: Double = 0
 
     private struct MonthBucket: Identifiable {
         let month: String  // YYYY-MM
@@ -151,7 +168,13 @@ private struct MonthlyChartCard: View {
         var id: String { month }
     }
 
-    private var monthly: [MonthBucket] {
+    private var monthly: [MonthBucket] { cachedMonthly }
+
+    /// Rebuild `cachedMonthly` from a Dictionary-grouping walk over
+    /// every aggregate. Used to run on every body render — and the
+    /// `chart` view referenced `monthly` independently from `body`,
+    /// effectively doubling the cost. Now runs once per scan tick.
+    private func refreshMonthly() {
         var totals: [String: Double] = [:]
         for row in aggregates {
             guard row.date.count >= 7 else { continue }
@@ -160,11 +183,12 @@ private struct MonthlyChartCard: View {
         }
         let sorted = totals.keys.sorted()
         let last12 = sorted.suffix(12)
-        return last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
+        cachedMonthly = last12.map { MonthBucket(month: $0, cost: totals[$0] ?? 0) }
+        cachedTotal = cachedMonthly.reduce(0) { $0 + $1.cost }
     }
 
     var body: some View {
-        let total = monthly.reduce(0) { $0 + $1.cost }
+        let total = cachedTotal
         PacerCard("Last 12 months", trailing: {
             if let selectedMonth, let row = monthly.first(where: { $0.month == selectedMonth }) {
                 HStack(spacing: 8) {
@@ -190,6 +214,8 @@ private struct MonthlyChartCard: View {
                 chart
             }
         }
+        .onAppear { refreshMonthly() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshMonthly() }
     }
 
     private var chart: some View {
@@ -288,6 +314,8 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 
 private struct TopDaysCard: View {
     @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     let onDayTap: (String) -> Void
 
@@ -298,6 +326,14 @@ private struct TopDaysCard: View {
 
     @AppStorage("pacer.history.topDaysRange", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.all.rawValue
+
+    /// Cached output of the rollup + sort pipeline. Previously
+    /// `sortedRows` and `visibleRows` were computed properties, with
+    /// `body` accessing both — and `visibleRows` itself accessed
+    /// `sortedRows` again — so a single render walked every aggregate
+    /// three times. Cached now; refreshes on scan tick + sort/range
+    /// changes.
+    @State private var cachedSortedRows: [DayRow] = []
 
     private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
     private var rangeBinding: Binding<TimeRange> {
@@ -321,10 +357,21 @@ private struct TopDaysCard: View {
         var id: String { date }
     }
 
-    /// Days inside the active range (cutoff is `range.since`),
-    /// sorted by the user's chosen field. The full set lets us print
-    /// "showing N of M" and lets "Show more" extend without resorting.
-    private var sortedRows: [DayRow] {
+    /// Days inside the active range, sorted by the user's chosen
+    /// field. Reads from the `@State` cache.
+    private var sortedRows: [DayRow] { cachedSortedRows }
+
+    /// Slice the sorted set rendered in the body. Capped at 10 by
+    /// default; the toggle reveals the rest up to 100.
+    private var visibleRows: [DayRow] {
+        let all = cachedSortedRows
+        if showAll {
+            return Array(all.prefix(min(all.count, 100)))
+        }
+        return Array(all.prefix(10))
+    }
+
+    private func refreshSortedRows() {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
         let cutoff = range.since.flatMap { TokenSample.formatDate($0) }
         for row in aggregates {
@@ -344,18 +391,7 @@ private struct TopDaysCard: View {
         case .cost:
             sorted = rows.sorted { $0.cost < $1.cost }
         }
-        return descending ? sorted.reversed() : Array(sorted)
-    }
-
-    /// Slice the sorted set rendered in the body. Capped at 10 by
-    /// default; the toggle reveals the rest in chunks of 25 so the
-    /// reveal isn't an instant 1000-row dump on long histories.
-    private var visibleRows: [DayRow] {
-        let all = sortedRows
-        if showAll {
-            return Array(all.prefix(min(all.count, 100)))
-        }
-        return Array(all.prefix(10))
+        cachedSortedRows = descending ? sorted.reversed() : Array(sorted)
     }
 
     var body: some View {
@@ -423,8 +459,15 @@ private struct TopDaysCard: View {
                         Spacer().frame(width: 16)
                     }
                     Divider().padding(.vertical, 2)
-                    ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
-                        topRow(idx: idx, row: row, maxCost: maxCost)
+                    // Lazy inner stack so the "Show top 100" expansion
+                    // doesn't realize all 100 `HoverRow`s + context
+                    // menus at once. Same pattern applied to
+                    // `ProjectsView`'s row list — defers off-screen
+                    // rows until scrolled into view.
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
+                            topRow(idx: idx, row: row, maxCost: maxCost)
+                        }
                     }
                     if all.count > 10 {
                         HStack {
@@ -450,6 +493,11 @@ private struct TopDaysCard: View {
                 }
             }
         }
+        .onAppear { refreshSortedRows() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshSortedRows() }
+        .onChange(of: rangeRaw) { _, _ in refreshSortedRows() }
+        .onChange(of: sortRaw) { _, _ in refreshSortedRows() }
+        .onChange(of: descending) { _, _ in refreshSortedRows() }
     }
 
     @ViewBuilder
@@ -501,15 +549,28 @@ private struct TopDaysCard: View {
     }
 
     /// `2026-04-30` → `Thu Apr 30`. Compact + day-of-week so the user
-    /// can spot patterns ("oh I always burn on Wednesdays").
+    /// can spot patterns ("oh I always burn on Wednesdays"). The two
+    /// `DateFormatter` instances are now static — previously this
+    /// function allocated both per call, and `topRow` calls it for
+    /// every row on every render. With up to 100 visible rows under
+    /// "Show top 100" plus context-menu re-evaluations, that was
+    /// thousands of allocations per scroll.
+    private static let prettyDateInFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = .current
+        return f
+    }()
+    private static let prettyDateOutFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE MMM d"
+        f.timeZone = .current
+        return f
+    }()
+
     private func prettyDate(_ ymd: String) -> String {
-        let inFmt = DateFormatter()
-        inFmt.dateFormat = "yyyy-MM-dd"
-        inFmt.timeZone = .current
-        guard let d = inFmt.date(from: ymd) else { return ymd }
-        let outFmt = DateFormatter()
-        outFmt.dateFormat = "EEE MMM d"
-        outFmt.timeZone = .current
-        return outFmt.string(from: d)
+        guard let d = Self.prettyDateInFmt.date(from: ymd) else { return ymd }
+        return Self.prettyDateOutFmt.string(from: d)
     }
 }

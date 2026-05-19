@@ -38,7 +38,7 @@ struct PaceChartCard: View {
         for s in samples {
             if s.window == "five_hour" { b.fiveHour.append(s) }
             else if s.window == "seven_day" { b.sevenDay.append(s) }
-            if b.latest == nil || s.sampledAt > b.latest!.sampledAt { b.latest = s }
+            if s.sampledAt > (b.latest?.sampledAt ?? .distantPast) { b.latest = s }
         }
         return b
     }

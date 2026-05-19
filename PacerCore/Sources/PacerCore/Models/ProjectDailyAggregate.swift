@@ -19,6 +19,13 @@ import SwiftData
 /// "(unknown)" path so they still get a bucket.
 @Model
 public final class ProjectDailyAggregate {
+    // Hot predicate: views filter on `date >= cutoff` for the
+    // selected time range. Without an index, SQLite scans the full
+    // table on every refetch. The compound `(date, projectPath)`
+    // index also helps `(date, projectPath)` lookups during the
+    // aggregate recomputer's upsert path.
+    #Index<ProjectDailyAggregate>([\.date], [\.date, \.projectPath])
+
     @Attribute(.unique) public var projectDateKey: String
     public var projectPath: String
     public var date: String   // YYYY-MM-DD, same shape as TokenSample.date

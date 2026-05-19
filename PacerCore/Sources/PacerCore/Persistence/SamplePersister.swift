@@ -224,7 +224,9 @@ public final class SamplePersister {
     /// same one-pass scan we already do at preload, just without
     /// subtracting the existing aggregate set.
     public func markEverySampleDirty() throws {
-        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        var descriptor = FetchDescriptor<TokenSample>()
+        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId]
+        let samples = try context.fetch(descriptor)
         for sample in samples {
             dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
@@ -251,19 +253,31 @@ public final class SamplePersister {
     /// parent path. Caller is responsible for triggering the
     /// recomputer.
     @discardableResult
-    public func canonicalizeProjectPaths() throws -> Int {
+    public func canonicalizeProjectPaths(aliases: [String: String] = [:]) throws -> Int {
         let samples = try context.fetch(FetchDescriptor<TokenSample>())
         var changedCount = 0
         for sample in samples {
-            guard let original = sample.projectPath else { continue }
-            let canonical = ProjectPathCanonicalizer.canonicalize(original)
-            guard canonical != original else { continue }
+            guard let pre = sample.projectPath else { continue }
+            // Backfill `originalProjectPath` whenever it's nil. The
+            // pre-migration `projectPath` is the best historical
+            // value we have for this row — for samples inserted
+            // before the field existed it IS the original cwd
+            // (because canonicalization wasn't applied yet, or was
+            // applied identically), and for samples that have
+            // already been canonicalized it's the canonical form,
+            // which is at least correct as a fallback the
+            // drill-down can group by.
+            if sample.originalProjectPath == nil {
+                sample.originalProjectPath = pre
+            }
+            let canonical = ProjectPathCanonicalizer.canonicalize(pre, aliases: aliases)
+            guard canonical != pre else { continue }
             sample.projectPath = canonical
             // Both ends of the change need recompute: the old bucket
             // emptied (so the recomputer deletes it) and the new
             // bucket gets the migrated samples.
             dirtyProjectDates.insert(ProjectDatePair(
-                projectPath: original, date: sample.date))
+                projectPath: pre, date: sample.date))
             dirtyProjectDates.insert(ProjectDatePair(
                 projectPath: canonical, date: sample.date))
             if let sid = sample.sessionId, !sid.isEmpty {
@@ -274,17 +288,96 @@ public final class SamplePersister {
         return changedCount
     }
 
+    /// Scoped variant of `canonicalizeProjectPaths` — only touches
+    /// samples whose current `projectPath` matches one of the
+    /// alias source paths.
+    ///
+    /// Why both exist: the full walk is needed on
+    /// `pathCanonicalizationVersion` bumps (the canonicalizer code
+    /// itself changed; every sample needs re-evaluation). For an
+    /// alias-fingerprint mismatch driven by a user merge or the
+    /// auto-aliaser, only the new sources' samples can have
+    /// changed mapping — fetching by predicate on the indexed
+    /// `projectPath` column is orders of magnitude faster than
+    /// materializing every TokenSample row.
+    ///
+    /// Does NOT backfill `originalProjectPath` — that's a one-shot
+    /// migration handled by the full walk on the version bump.
+    @discardableResult
+    public func canonicalizeAffectedSamples(aliases: [String: String]) throws -> Int {
+        guard !aliases.isEmpty else { return 0 }
+        // The aliases dict is keyed by post-worktree-strip source
+        // paths. Samples that have those exact strings in their
+        // `projectPath` are the only ones that could resolve to a
+        // new canonical now.
+        let sources = Array(aliases.keys)
+        // `#Predicate` allows only one expression; coerce nil to ""
+        // (which can never be in `sources` because alias upsert
+        // rejects empty paths) so we can do a flat `contains` check.
+        let descriptor = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { sample in
+                sources.contains(sample.projectPath ?? "")
+            }
+        )
+        let samples = try context.fetch(descriptor)
+        var changedCount = 0
+        for sample in samples {
+            guard let pre = sample.projectPath else { continue }
+            let canonical = ProjectPathCanonicalizer.canonicalize(pre, aliases: aliases)
+            guard canonical != pre else { continue }
+            sample.projectPath = canonical
+            dirtyProjectDates.insert(ProjectDatePair(
+                projectPath: pre, date: sample.date))
+            dirtyProjectDates.insert(ProjectDatePair(
+                projectPath: canonical, date: sample.date))
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+            }
+            changedCount += 1
+        }
+        return changedCount
+    }
+
+    /// Mirror of `canonicalizeProjectPaths` for SessionInfo rows.
+    /// SessionInfo carries its own `projectPath` column (denormalized
+    /// for fast queries) and the recomputer can rebuild it from
+    /// underlying samples — but only if the session ids are dirty.
+    /// When an alias mutates only `TokenSample.projectPath`, the
+    /// SessionInfo recomputer will pick up the new path automatically
+    /// once we mark the affected session ids dirty. This helper does
+    /// the marking; the recomputer handles the actual rewrite.
+    public func markSessionsDirtyForAliasChange() throws {
+        var descriptor = FetchDescriptor<TokenSample>()
+        descriptor.propertiesToFetch = [\.sessionId]
+        let samples = try context.fetch(descriptor)
+        for sample in samples {
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+            }
+        }
+    }
+
     private func preloadFromStore() throws {
-        // SwiftData doesn't expose partial-attribute fetch (CD's
-        // NSDictionaryResultType has no equivalent), so we materialize
-        // every TokenSample to read its dedupKey. On a 500K-row store
-        // this allocates ~500K @Model objects but they're discarded as
-        // soon as we've extracted the key — autoreleasepool keeps peak
-        // memory bounded. We also collect the (date, model) and
-        // (projectPath, date) pairs in the same pass — it's free
-        // given we already have the row in hand, and it lets us detect
-        // missing-aggregate gaps for both rollup tables below.
-        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        // SwiftData materializes every row in a `FetchDescriptor`
+        // result as a full `@Model` object by default. With ~500K
+        // TokenSample rows on a power user's DB, that's 500K object
+        // allocations + 500K Foundation/Core-Data property
+        // resolutions just to read five attributes — the dominant
+        // cost of the first scan cycle's setup. macOS 14+'s
+        // `propertiesToFetch` tells SwiftData to faulting-skip all
+        // attributes EXCEPT the listed ones, so reading the un-fetched
+        // ones triggers a fault (none of the loops below touch any
+        // unlisted attribute).
+        //
+        // We collect (date, model) and (projectPath, date) pairs in
+        // the same pass — free given we already have the row in hand,
+        // and it lets us detect missing-aggregate gaps for both
+        // rollup tables below.
+        var sampleDescriptor = FetchDescriptor<TokenSample>()
+        sampleDescriptor.propertiesToFetch = [
+            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId
+        ]
+        let samples = try context.fetch(sampleDescriptor)
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
         var sampleSessionIds: Set<String> = []
@@ -302,24 +395,29 @@ public final class SamplePersister {
 
         // Pairs that have aggregate rows already are *not* gaps; only
         // the difference needs recompute. Aggregate counts are small
-        // (per (date, model) and per (project, date)).
-        let aggregates = try context.fetch(FetchDescriptor<DailyAggregate>())
+        // (per (date, model) and per (project, date)) but still slim
+        // the fetch — `DailyAggregate` carries 10+ numeric columns
+        // we don't need here.
+        var aggDesc = FetchDescriptor<DailyAggregate>()
+        aggDesc.propertiesToFetch = [\.date, \.model]
         var aggregatePairs: Set<DateModelPair> = []
-        for agg in aggregates {
+        for agg in try context.fetch(aggDesc) {
             aggregatePairs.insert(DateModelPair(date: agg.date, model: agg.model))
         }
         missingAggregatePairs = samplePairs.subtracting(aggregatePairs)
 
-        let projectAggregates = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+        var projAggDesc = FetchDescriptor<ProjectDailyAggregate>()
+        projAggDesc.propertiesToFetch = [\.projectPath, \.date]
         var projectAggregatePairs: Set<ProjectDatePair> = []
-        for agg in projectAggregates {
+        for agg in try context.fetch(projAggDesc) {
             projectAggregatePairs.insert(ProjectDatePair(projectPath: agg.projectPath, date: agg.date))
         }
         missingProjectAggregatePairs = sampleProjectPairs.subtracting(projectAggregatePairs)
 
-        let sessions = try context.fetch(FetchDescriptor<SessionInfo>())
+        var sessDesc = FetchDescriptor<SessionInfo>()
+        sessDesc.propertiesToFetch = [\.sessionId]
         var sessionRowIds: Set<String> = []
-        for s in sessions { sessionRowIds.insert(s.sessionId) }
+        for s in try context.fetch(sessDesc) { sessionRowIds.insert(s.sessionId) }
         missingSessionIds = sampleSessionIds.subtracting(sessionRowIds)
     }
 }

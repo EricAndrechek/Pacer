@@ -64,8 +64,7 @@ enum CSVExporter {
                 byDate[r.date] = a
             }
             var csv = "date,input_tokens,output_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,total_cost_usd\n"
-            for date in byDate.keys.sorted() {
-                let a = byDate[date]!
+            for (date, a) in byDate.sorted(by: { $0.key < $1.key }) {
                 csv += "\(date),\(a.input),\(a.output),\(a.cacheRead),\(a.cache5m),\(a.cache1h),\(format(a.cost))\n"
             }
             runSavePanelAndWrite(
@@ -112,8 +111,7 @@ enum CSVExporter {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
             var csv = "project_path,input_tokens,output_tokens,cache_read_tokens,sessions,last_seen,total_cost_usd\n"
-            for path in byProject.keys.sorted() {
-                let a = byProject[path]!
+            for (path, a) in byProject.sorted(by: { $0.key < $1.key }) {
                 let lastSeen = a.lastSeen > .distantPast ? formatter.string(from: a.lastSeen) : ""
                 csv += "\(escape(path)),\(a.input),\(a.output),\(a.cacheRead),\(a.sessions.count),\(lastSeen),\(format(a.cost))\n"
             }
@@ -150,6 +148,11 @@ enum CSVExporter {
         guard response == .OK, let url = panel.url else { return }
         do {
             try contents.write(to: url, atomically: true, encoding: .utf8)
+            // Reveal in Finder so the user can confirm the export
+            // landed and grab it without re-navigating to wherever they
+            // saved it. Matches the post-save behavior of most native
+            // macOS export flows (Numbers, Preview, Pages).
+            NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             presentError("Couldn't write file: \(error.localizedDescription)")
         }

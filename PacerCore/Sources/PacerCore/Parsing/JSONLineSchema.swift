@@ -29,9 +29,47 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     public let dedupKey: String?
 
     public let sessionId: String?
+    /// Canonicalized project path — what aggregation and queries
+    /// bucket on. Worktree segments stripped + user aliases applied.
     public let projectPath: String?
+    /// The raw `cwd` Claude Code wrote in the JSONL line, BEFORE any
+    /// canonicalization or alias resolution. Preserved so the
+    /// project-detail view can show a sub-path breakdown (e.g. which
+    /// subdirs of a git repo the user worked in) even after the
+    /// canonical path collapsed them all into the repo root.
+    ///
+    /// Nil iff the JSONL line had no `cwd` — same condition that
+    /// makes `projectPath` nil.
+    public let originalProjectPath: String?
     public let claudeCodeVersion: String?
     public let isApiErrorMessage: Bool
+
+    /// Explicit init — defaulting `originalProjectPath` keeps old
+    /// test fixtures compiling without touching their named-argument
+    /// call sites.
+    public init(
+        timestamp: Date,
+        model: String,
+        breakdown: TokenBreakdown,
+        storedCostUSD: Double? = nil,
+        dedupKey: String? = nil,
+        sessionId: String? = nil,
+        projectPath: String? = nil,
+        originalProjectPath: String? = nil,
+        claudeCodeVersion: String? = nil,
+        isApiErrorMessage: Bool = false
+    ) {
+        self.timestamp = timestamp
+        self.model = model
+        self.breakdown = breakdown
+        self.storedCostUSD = storedCostUSD
+        self.dedupKey = dedupKey
+        self.sessionId = sessionId
+        self.projectPath = projectPath
+        self.originalProjectPath = originalProjectPath
+        self.claudeCodeVersion = claudeCodeVersion
+        self.isApiErrorMessage = isApiErrorMessage
+    }
 }
 
 /// The five billable token categories Anthropic prices independently:

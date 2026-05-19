@@ -26,8 +26,15 @@ struct DailyCostChartCard: View {
 
     @Query(sort: \DailyAggregate.date, order: .reverse)
     private var aggregates: [DailyAggregate]
+    /// Singleton-row probe — fires once per scan cycle. Drives the
+    /// `Derived` cache refresh so the Dictionary(grouping:) +
+    /// `.sorted()` + `.suffix(30)` pipeline runs at most once per
+    /// cycle instead of on every body render / hover event.
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     @State private var selectedDate: String?
+    @State private var cachedDerived = Derived(dailyTotals: [], annotateDates: [], totalCost: 0)
 
     private struct Derived {
         let dailyTotals: [DailyTotal]
@@ -35,7 +42,7 @@ struct DailyCostChartCard: View {
         let totalCost: Double
     }
 
-    private var derived: Derived {
+    private func refreshDerived() {
         let grouped = Dictionary(grouping: aggregates, by: \.date)
         let sortedDates = grouped.keys.sorted()
         let lastN = sortedDates.suffix(30)
@@ -48,7 +55,7 @@ struct DailyCostChartCard: View {
             )
         }
         let topThree = Set(totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date))
-        return Derived(
+        cachedDerived = Derived(
             dailyTotals: totals,
             annotateDates: topThree,
             totalCost: totals.reduce(0) { $0 + $1.cost }
@@ -56,7 +63,7 @@ struct DailyCostChartCard: View {
     }
 
     var body: some View {
-        let d = derived
+        let d = cachedDerived
         PacerCard("Last 30 days", trailing: {
             // Hover swaps "total $X.X" for the selected day's date + cost
             // — surfacing the info up here means the chart's plot area
@@ -87,6 +94,8 @@ struct DailyCostChartCard: View {
                 chart(annotateDates: d.annotateDates, totals: d.dailyTotals)
             }
         }
+        .onAppear { refreshDerived() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
     }
 
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {

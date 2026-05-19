@@ -64,7 +64,7 @@ struct LiveSessionProvider: TimelineProvider {
         LiveSessionEntry(
             date: Date(),
             session: .init(
-                projectDisplayName: "ccmac",
+                projectDisplayName: "Pacer",
                 totalTokens: 142_300,
                 costUSD: 4.12,
                 topModel: "sonnet-4-6",
@@ -259,7 +259,7 @@ struct LiveSessionWidgetView: View {
 // MARK: - Configuration
 
 struct LiveSessionWidget: Widget {
-    let kind: String = "LiveSessionWidget"
+    let kind: String = WidgetKinds.liveSession
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: LiveSessionProvider()) { entry in

@@ -62,9 +62,15 @@ public actor JSONLScanner {
     /// Scan one or more roots, streaming new `ParsedUsageEntry` values
     /// to the caller. The caller passes in the known cursors and is
     /// responsible for persisting the returned `updatedCursors`.
+    ///
+    /// `aliases` is the user-defined project-path remap applied at
+    /// parse time. The default `[:]` keeps the worktree-stripping
+    /// canonicalization but applies no user remaps — fine for tests
+    /// and for any caller that hasn't loaded aliases yet.
     public func scan(
         roots: [ClaudePathResolver.ResolvedRoot],
         cursors: [String: CursorState] = [:],
+        aliases: [String: String] = [:],
         emit: @Sendable (ParsedUsageEntry) async -> Void
     ) async throws -> ScanResult {
         let candidates = collectCandidates(roots: roots, cursors: cursors)
@@ -110,7 +116,7 @@ public actor JSONLScanner {
                     from: c.url,
                     startingAt: startOffset
                 ) { lineData in
-                    guard let entry = JSONLLineParser.parse(line: lineData) else { return }
+                    guard let entry = JSONLLineParser.parse(line: lineData, aliases: aliases) else { return }
                     entriesParsed += 1
                     if let key = entry.dedupKey {
                         if !seen.insert(key).inserted {

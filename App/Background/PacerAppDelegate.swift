@@ -48,6 +48,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     let container: ModelContainer
     let backgroundService: AppBackgroundService
 
+    /// Observer lifecycle note: every `NSObjectProtocol` we stash on
+    /// this delegate (`windowObservers`, `menuBarPrefObserver`) is added
+    /// once in `applicationDidFinishLaunching` / `installMenuBar`. The
+    /// delegate itself is process-lived (created by SwiftUI at app
+    /// launch, destroyed only when the process exits), so explicit
+    /// `removeObserver` would never fire under normal use — process
+    /// teardown unregisters every observer automatically.
+    /// If this class ever becomes non-process-lived (a test harness
+    /// instantiating multiple delegates, a hypothetical "restart in
+    /// place" feature), add an `isolated deinit` that calls
+    /// `NotificationCenter.default.removeObserver(_:)` on each entry.
     private var windowObservers: [NSObjectProtocol] = []
 
     // Menu-bar status item state. We own the NSStatusItem directly
@@ -400,11 +411,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             if !window.canBecomeMain { return false }
             return true
         }
+        let hasVisibleMain = !visibleMainWindows.isEmpty
         let target: NSApplication.ActivationPolicy =
-            visibleMainWindows.isEmpty ? .accessory : .regular
+            hasVisibleMain ? .regular : .accessory
         if NSApp.activationPolicy() != target {
             NSApp.setActivationPolicy(target)
         }
+        // Publish to the shared visibility monitor too. ScanCoordinator
+        // widens its watcher cadence when hidden, and `FreshnessPulse`
+        // stops its TimelineView — both keep the always-running app
+        // from burning CPU on UI nobody can see.
+        PacerWindowVisibility.shared.setMainWindowVisible(hasVisibleMain)
     }
 
     // MARK: - Menu bar (custom NSStatusItem)

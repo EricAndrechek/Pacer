@@ -14,6 +14,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         SessionInfo.self,
         ClaudeCodeMeta.self,
         JSONLFileCursor.self,
+        ProjectPathAlias.self,
         configurations: config
     )
 }

@@ -60,7 +60,7 @@ private func locateCcusageSnapshot() -> URL? {
         .deletingLastPathComponent() // PacerCoreTests/
         .deletingLastPathComponent() // Tests/
         .deletingLastPathComponent() // PacerCore/
-        .deletingLastPathComponent() // ccmac/
+        .deletingLastPathComponent() // Pacer/
     let candidate = projectRoot.appendingPathComponent("docs/research/ccusage-outputs/daily.json")
     return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
 }

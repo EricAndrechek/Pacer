@@ -15,6 +15,26 @@ import SwiftData
 /// (`apps/ccusage/src/data-loader.ts:530-540`).
 @Model
 public final class TokenSample {
+    // Indexes for the predicates Pacer actually evaluates.
+    //
+    // - `dedupKey` alone: the persister's per-cycle dedup pass loads
+    //   every key into memory once, but ad-hoc queries (and the
+    //   alias-migration's `projectPath` walks) benefit too.
+    // - `sessionId`: SessionInfoRecomputer fetches per-session
+    //   samples; without an index this was a full-table scan per
+    //   session id, with hundreds of session ids per migration.
+    // - `(date, model)` compound: AggregateRecomputer's per-pair
+    //   upsert path. The date column also helps any view-level
+    //   range filter that lands on TokenSample directly.
+    // - `projectPath`: alias-migration walks filter by exact match;
+    //   also helps any future view that queries samples by project.
+    #Index<TokenSample>(
+        [\.dedupKey],
+        [\.sessionId],
+        [\.date, \.model],
+        [\.projectPath]
+    )
+
     public var sampledAt: Date
     /// `YYYY-MM-DD` in the user's local timezone at the moment the entry
     /// was written. Pre-formatted so daily aggregation is a string-equality
@@ -44,7 +64,24 @@ public final class TokenSample {
     /// daily costs inflate 2–3× for active users.
     public var dedupKey: String?
     public var sessionId: String?
+    /// Canonicalized project path. Mutated by alias migrations as
+    /// the user's alias graph changes — always reflects the current
+    /// canonical for this sample's cwd.
     public var projectPath: String?
+    /// The raw `cwd` that Claude Code wrote in the JSONL line.
+    /// Set once at insert time, **never** rewritten by alias
+    /// migrations. Together with the alias graph, this is what lets
+    /// `ProjectDetailView` show a sub-path breakdown (e.g.
+    /// `local/potato` and `integrations/homeassistant` inside the
+    /// `support-infra` repo) — the canonical path alone has lost
+    /// that information.
+    ///
+    /// Nil for rows that were inserted before this field existed.
+    /// `SamplePersister.preloadFromStore` backfills those at startup
+    /// (`originalProjectPath := projectPath`) so the field reads
+    /// non-nil for every row from the user's perspective, even if
+    /// historical samples lose their pre-canonicalization detail.
+    public var originalProjectPath: String?
     public var ccVersion: String?
 
     public init(
@@ -60,6 +97,7 @@ public final class TokenSample {
         dedupKey: String? = nil,
         sessionId: String? = nil,
         projectPath: String? = nil,
+        originalProjectPath: String? = nil,
         ccVersion: String? = nil
     ) {
         self.sampledAt = sampledAt
@@ -74,6 +112,7 @@ public final class TokenSample {
         self.dedupKey = dedupKey
         self.sessionId = sessionId
         self.projectPath = projectPath
+        self.originalProjectPath = originalProjectPath
         self.ccVersion = ccVersion
     }
 }
@@ -131,6 +170,7 @@ extension TokenSample {
             dedupKey: entry.dedupKey,
             sessionId: entry.sessionId,
             projectPath: entry.projectPath,
+            originalProjectPath: entry.originalProjectPath,
             ccVersion: entry.claudeCodeVersion
         )
     }

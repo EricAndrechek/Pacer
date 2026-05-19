@@ -13,6 +13,13 @@ import SwiftData
 /// straightforwardly (unlike `TokenSample.dedupKey`).
 @Model
 public final class DailyAggregate {
+    // `date >= cutoff` is the predicate used by ModelsView,
+    // DashboardView's hero strip, and the heatmap; index it so a
+    // 90-day filter is a range scan instead of a full-table sweep.
+    // Compound `(date, model)` accelerates the recomputer's per-pair
+    // upserts too.
+    #Index<DailyAggregate>([\.date], [\.date, \.model])
+
     @Attribute(.unique) public var dateModelKey: String
     public var date: String
     public var model: String

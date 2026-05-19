@@ -21,6 +21,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         RateLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
+        ProjectPathAlias.self,
         configurations: config
     )
 }
@@ -194,6 +195,29 @@ private func makeInMemoryContainer() throws -> ModelContainer {
     let fetched = try context.fetch(FetchDescriptor<ClaudeCodeMeta>())
     #expect(fetched.count == 1)
     #expect(fetched[0].value == "2")
+}
+
+@MainActor
+@Test func projectPathAliasUniqueOnSourcePath() throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+
+    context.insert(ProjectPathAlias(
+        sourcePath: "/old/path",
+        canonicalPath: "/new/path"
+    ))
+    try context.save()
+
+    // Upsert: same sourcePath → new canonical replaces old.
+    context.insert(ProjectPathAlias(
+        sourcePath: "/old/path",
+        canonicalPath: "/different/path"
+    ))
+    try context.save()
+
+    let fetched = try context.fetch(FetchDescriptor<ProjectPathAlias>())
+    #expect(fetched.count == 1)
+    #expect(fetched[0].canonicalPath == "/different/path")
 }
 
 @MainActor

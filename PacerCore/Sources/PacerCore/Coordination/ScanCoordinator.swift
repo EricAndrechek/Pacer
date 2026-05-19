@@ -66,7 +66,27 @@ public final class ScanCoordinator {
     /// - "1" — strip `/.claude/worktrees/<id>` and `/.worktrees/<id>`
     ///         segments so subagent worktrees attribute back to the
     ///         parent project.
-    public static let currentPathCanonicalizationVersion = "1"
+    /// - "2" — `ProjectPathCanonicalizer` now consults a user-defined
+    ///         `ProjectPathAlias` table after the worktree-strip pass.
+    ///         Forced migration re-canonicalizes every existing
+    ///         TokenSample with the current alias map and rebuilds
+    ///         affected `ProjectDailyAggregate` rows under the new
+    ///         keys.
+    /// - "3" — `TokenSample.originalProjectPath` added. The migration
+    ///         also backfills `originalProjectPath` for every row
+    ///         where it's nil (copies from `projectPath`) so the
+    ///         sub-project drill-down has SOMETHING to bucket on
+    ///         even for historical rows. New rows after this set the
+    ///         field at insert time, with the true pre-canonical cwd.
+    public static let currentPathCanonicalizationVersion = "3"
+
+    /// Meta key for the aliases-table fingerprint. The fingerprint is
+    /// `sha-of(sourcePath→canonicalPath rows, sorted)`; on mismatch
+    /// the next scan re-canonicalizes every TokenSample with the new
+    /// alias map. This is what makes "user adds/removes an alias"
+    /// trigger an automatic data migration on the next scan cycle —
+    /// `pathCanonicalizationVersion` only covers code-driven changes.
+    private static let aliasesFingerprintMetaKey = "aliases_fingerprint"
 
     public struct Configuration: Sendable {
         public var costMode: CostMode
@@ -172,6 +192,88 @@ public final class ScanCoordinator {
         return try await runScanCycle()
     }
 
+    /// Outcome summary for `runAliasMigrationOnly`. Smaller than the
+    /// full `ScanReport` because the fast-path doesn't touch JSONLs
+    /// or the cost-recompute meta — just alias-driven re-attribution.
+    public struct AliasMigrationReport: Sendable {
+        public let aliasesChanged: Bool
+        public let samplesRecanonicalized: Int
+        public let projectAggregatesUpserted: Int
+        public let sessionsUpserted: Int
+        public let durationSeconds: TimeInterval
+    }
+
+    /// Fast-path migration triggered by a user merge action (the
+    /// `.pacerRequestImmediateScan` notification). Re-runs the
+    /// alias-fingerprint check, re-canonicalizes only the affected
+    /// samples (via `SamplePersister.canonicalizeAffectedSamples`),
+    /// and recomputes the dirty project / session rollups.
+    ///
+    /// **Doesn't** scan JSONLs, walk FSEvents, or do auto-aliasing.
+    /// Those happen on the next regular cycle. The trade-off: any
+    /// brand-new JSONL lines written between the merge and the next
+    /// cycle won't be visible until that cycle, but the user's
+    /// merge becomes visible immediately without the multi-second
+    /// scan-cycle block we used to pay.
+    @discardableResult
+    public func runAliasMigrationOnly() async throws -> AliasMigrationReport {
+        let started = Date()
+        let aliases = try loadAliases()
+        let aliasesFingerprint = Self.fingerprint(aliases: aliases)
+        let storedAliasFingerprint = try fetchMeta(Self.aliasesFingerprintMetaKey)
+        guard storedAliasFingerprint != aliasesFingerprint else {
+            // Nothing actually changed — possible if the user did
+            // multiple notification-posters in quick succession.
+            return AliasMigrationReport(
+                aliasesChanged: false,
+                samplesRecanonicalized: 0,
+                projectAggregatesUpserted: 0,
+                sessionsUpserted: 0,
+                durationSeconds: Date().timeIntervalSince(started)
+            )
+        }
+        let activePersister = try persister ?? makePersister()
+        if persister == nil { persister = activePersister }
+        activePersister.clearDirtyPairs()
+        let changed = try activePersister.canonicalizeAffectedSamples(aliases: aliases)
+        // Mark sessions tied to any altered sample as dirty so the
+        // SessionInfo rollup catches up.
+        if changed > 0 {
+            try activePersister.markSessionsDirtyForAliasChange()
+        }
+        let projectRecomputer = ProjectAggregateRecomputer(
+            container: container, context: context, mode: configuration.costMode)
+        let projectStats = try await projectRecomputer.recompute(
+            pairs: activePersister.dirtyProjectDates)
+        let sessionRecomputer = SessionInfoRecomputer(
+            container: container, context: context, mode: configuration.costMode)
+        let sessionStats = try await sessionRecomputer.recompute(
+            sessionIds: activePersister.dirtySessionIds)
+        try writeMeta(Self.aliasesFingerprintMetaKey, value: aliasesFingerprint)
+        if context.hasChanges {
+            try context.save()
+        }
+        // Project-attribution shifted (samples re-bucketed under new
+        // project paths) — kick widgets whose display keys off project
+        // (TopProjects, LiveSession's project name). No new samples,
+        // so `samplesChanged` stays false; widgets that key off totals
+        // / sessions still re-pull via `projectAttributionChanged`.
+        if changed > 0 {
+            postScanCycleSummary(ScanCycleSummary(
+                projectAttributionChanged: true
+            ))
+        }
+        let report = AliasMigrationReport(
+            aliasesChanged: true,
+            samplesRecanonicalized: changed,
+            projectAggregatesUpserted: projectStats.aggregatesUpserted,
+            sessionsUpserted: sessionStats.sessionsUpserted,
+            durationSeconds: Date().timeIntervalSince(started)
+        )
+        log("alias-migration: changed=\(changed) proj=\(projectStats.aggregatesUpserted) sess=\(sessionStats.sessionsUpserted) in \(String(format: "%.0f", report.durationSeconds * 1000))ms")
+        return report
+    }
+
     /// Runs the initial scan, then blocks watching for change events.
     /// Returns when the watcher stream ends (typically on `stop()`).
     public func runForever() async throws {
@@ -187,6 +289,12 @@ public final class ScanCoordinator {
             log("startup scan failed: \(error)")
         }
         await watcher.start(roots: resolvedRoots)
+        // Apply whatever visibility state we already have at startup —
+        // a login-at-launch invocation has no window, so this widens
+        // the watcher's FSEvent latency immediately and saves wakeups
+        // until the user actually opens the dashboard.
+        applyVisibilityCadence(visible: PacerWindowVisibility.shared.isMainWindowVisible)
+        installVisibilityObserver()
 
         // OAuth poller runs independently from the JSONL watcher loop.
         // Each subsystem owns its own cadence; if the network is down
@@ -221,6 +329,87 @@ public final class ScanCoordinator {
         if let oauthPoller {
             await oauthPoller.stop()
         }
+        visibilityObservationTask?.cancel()
+        visibilityObservationTask = nil
+    }
+
+    // MARK: - Visibility-aware cadence
+
+    /// Tracks `PacerWindowVisibility.shared.isMainWindowVisible` and
+    /// drives the watcher's latency + backstop knobs accordingly.
+    /// Cancelled in `stop()`.
+    private var visibilityObservationTask: Task<Void, Never>?
+
+    /// FSEvent latency (live coalesce) and backstop interval applied
+    /// when the user has a main window open. Snappy — sub-second
+    /// reactivity, 60s sanity-check sweep.
+    private static let visibleLatency: CFTimeInterval = 0.5
+    private static let visibleBackstop: TimeInterval = 60
+
+    /// Same knobs when there's no visible main window. Latency widens
+    /// so burst writes during an active Claude Code session don't wake
+    /// the scan loop every half-second; backstop widens to a 5-minute
+    /// sweep that's enough to keep aggregates fresh-ish for the
+    /// menu-bar item without spinning the CPU.
+    ///
+    /// Menu-bar chips (today cost, 5h%, 7d%, active model) update on
+    /// scan completion, so at 5-minute cadence they may lag by up to
+    /// 5 minutes when no window is open — acceptable for a glance
+    /// summary, and the moment the user re-opens the dashboard we
+    /// snap back to live cadence and re-render.
+    private static let hiddenLatency: CFTimeInterval = 5.0
+    private static let hiddenBackstop: TimeInterval = 300
+
+    private func installVisibilityObserver() {
+        // Observation framework's `withObservationTracking` re-fires
+        // once per write; we wrap in a loop so the observation
+        // persists across changes. The body reads
+        // `isMainWindowVisible` to register the dependency.
+        visibilityObservationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let visible = withObservationTracking {
+                    PacerWindowVisibility.shared.isMainWindowVisible
+                } onChange: {
+                    // No body — the loop re-enters and re-reads.
+                }
+                self?.applyVisibilityCadence(visible: visible)
+                // Suspend until the next change. We use a small
+                // continuation-style park by awaiting a one-shot Task
+                // that completes when the observation onChange fires.
+                // Simpler approach: poll on a short Task.sleep — but
+                // that defeats the purpose. Instead, recreate the
+                // observation: `withObservationTracking` registers
+                // once and onChange fires once. We need a primitive
+                // that yields the next value; use AsyncStream.
+                await Self.nextVisibilityChange()
+            }
+        }
+    }
+
+    /// Bridges the `Observation` API's one-shot `onChange` into an
+    /// awaitable. Returns when the next mutation to
+    /// `isMainWindowVisible` lands.
+    @MainActor
+    private static func nextVisibilityChange() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            withObservationTracking {
+                _ = PacerWindowVisibility.shared.isMainWindowVisible
+            } onChange: {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func applyVisibilityCadence(visible: Bool) {
+        let latency = visible ? Self.visibleLatency : Self.hiddenLatency
+        let backstop = visible ? Self.visibleBackstop : Self.hiddenBackstop
+        Task { [watcher] in
+            await watcher.updateLiveCadence(
+                latencySeconds: latency,
+                backstopInterval: backstop
+            )
+        }
+        log("watcher cadence: window \(visible ? "visible" : "hidden") → latency=\(latency)s backstop=\(Int(backstop))s")
     }
 
     // MARK: - Internal
@@ -229,6 +418,29 @@ public final class ScanCoordinator {
         scanInFlight = true
         defer { scanInFlight = false }
         let started = Date()
+
+        // Auto-aliasing pass: walk up from each known project path
+        // looking for the nearest `.git`, and write the resulting
+        // `path → repoRoot` rows into the alias table. The
+        // `ProjectPathProbe` table tracks "already considered" so we
+        // don't re-walk on every cycle, and user deletions of
+        // auto-generated aliases stick across launches. Runs BEFORE
+        // alias loading so the new rows participate in the
+        // fingerprint check (and the migration that follows).
+        let autoAliaser = ProjectGitRootAutoAliaser(context: context)
+        let candidatePaths = try fetchDistinctProjectPaths()
+        let autoAliasResult = try await autoAliaser.run(candidatePaths: candidatePaths)
+        if autoAliasResult.aliasesAdded > 0 {
+            log("auto-alias: probed \(autoAliasResult.pathsProbed) path(s), added \(autoAliasResult.aliasesAdded) alias(es)")
+        }
+
+        // Load user-defined project-path aliases once per cycle. Cheap
+        // (small table, ~tens of rows max), and folding the load into
+        // the cycle keeps the canonicalizer stateless. The fingerprint
+        // is checked further down against the on-disk value to decide
+        // whether to trigger a migration pass.
+        let aliases = try loadAliases()
+        let aliasesFingerprint = Self.fingerprint(aliases: aliases)
 
         let lastVersion = try fetchMeta(ClaudeCodeMetaKey.scanVersion)
         let isFullScan = (lastVersion != Self.currentScanVersion)
@@ -297,20 +509,40 @@ public final class ScanCoordinator {
         }
 
         // Path-canonicalization migration. Walks every TokenSample,
-        // re-applies the worktree-stripping canonicalizer in place,
-        // and folds both the old and new (project, date) pairs into
-        // dirtyProjectDates so the project-aggregate recomputer
-        // moves the rollup over. We need this in addition to the
-        // scanVersion-driven full re-scan because the scan's
-        // dedup-skip path bypasses field updates on existing rows.
+        // re-applies the worktree-stripping canonicalizer (plus the
+        // user's current alias map) in place, and folds both the old
+        // and new (project, date) pairs into dirtyProjectDates so the
+        // project-aggregate recomputer moves the rollup over. We need
+        // this in addition to the scanVersion-driven full re-scan
+        // because the scan's dedup-skip path bypasses field updates on
+        // existing rows.
+        //
+        // Two triggers fire this pass:
+        //   1. Code-driven canonicalization rule change
+        //      (`pathCanonicalizationVersion` mismatch).
+        //   2. User-driven alias change (`aliasesFingerprint`
+        //      mismatch). The fingerprint check is what makes
+        //      add/edit/delete an alias re-attribute existing samples
+        //      on the next scan without any per-row UI plumbing.
+        let storedPathVersion = try fetchMeta(ClaudeCodeMetaKey.pathCanonicalizationVersion)
+        let storedAliasFingerprint = try fetchMeta(Self.aliasesFingerprintMetaKey)
         let needsPathMigration = (
-            try fetchMeta(ClaudeCodeMetaKey.pathCanonicalizationVersion)
-            != Self.currentPathCanonicalizationVersion
+            storedPathVersion != Self.currentPathCanonicalizationVersion
+            || storedAliasFingerprint != aliasesFingerprint
         )
         if needsPathMigration {
-            let changed = try activePersister.canonicalizeProjectPaths()
+            let changed = try activePersister.canonicalizeProjectPaths(aliases: aliases)
             if changed > 0 {
-                log("integrity: canonicalized \(changed) sample(s) — worktree paths now attribute to parent projects")
+                log("integrity: canonicalized \(changed) sample(s) — worktree+alias mapping updated")
+            }
+            // Even when no TokenSample.projectPath changed, the alias
+            // graph may have changed in a way that requires SessionInfo
+            // re-rollup (e.g., the source path had no samples yet, but
+            // future ones will). Mark all sessions dirty as a cheap
+            // belt-and-braces; the recomputer is idempotent and this
+            // path only fires when the user touches the alias table.
+            if storedAliasFingerprint != aliasesFingerprint {
+                try activePersister.markSessionsDirtyForAliasChange()
             }
         }
         let beforeStats = activePersister.stats
@@ -323,6 +555,7 @@ public final class ScanCoordinator {
         let result = try await scanner.scan(
             roots: resolvedRoots,
             cursors: cursors,
+            aliases: aliases,
             emit: { entry in await sink.consume(entry) }
         )
         try sink.throwIfError()
@@ -373,26 +606,74 @@ public final class ScanCoordinator {
         // Bookkeeping. Always write incremental cursor (even on full
         // scan, so the next run is incremental). scanVersion gates
         // future full re-scans on parser changes.
-        try writeMeta(ClaudeCodeMetaKey.scanVersion, value: Self.currentScanVersion)
-        try writeMeta(
-            ClaudeCodeMetaKey.costRecomputeVersion,
-            value: Self.currentCostRecomputeVersion
-        )
-        try writeMeta(
-            ClaudeCodeMetaKey.pathCanonicalizationVersion,
-            value: Self.currentPathCanonicalizationVersion
-        )
-        try writeMeta(
-            ClaudeCodeMetaKey.lastIncrementalScanAt,
-            value: ISO8601DateFormatter.shared.string(from: started)
-        )
-        if isFullScan {
+        //
+        // **Save-skip optimization** — if nothing in this cycle
+        // actually mutated user data (no inserts, no recomputed
+        // aggregates, no recomputed sessions, no migration), skip the
+        // meta-writes-and-save entirely. Each `context.save()` fires
+        // SwiftData change notifications which cause every visible
+        // `@Query` to refetch — even when there's nothing new to
+        // show. Backstop ticks during idle periods were the worst
+        // offenders here: a 60s backstop with zero file changes still
+        // triggered a full chart refresh storm.
+        //
+        // `wroteMeta` is set only when we actually wrote something
+        // user-visible; cursor updates are persisted unconditionally
+        // because they're bounded (one file = one cursor row) and
+        // never trigger view refetches (no view binds to
+        // `JSONLFileCursor`).
+        let cycleDidWork =
+            cycleStats.inserted > 0
+            || recomputeStats.aggregatesUpserted > 0
+            || projectRecomputeStats.aggregatesUpserted > 0
+            || sessionRecomputeStats.sessionsUpserted > 0
+            || needsCostRebuild
+            || needsPathMigration
+        if cycleDidWork || isFullScan {
+            try writeMeta(ClaudeCodeMetaKey.scanVersion, value: Self.currentScanVersion)
             try writeMeta(
-                ClaudeCodeMetaKey.lastFullScanAt,
+                ClaudeCodeMetaKey.costRecomputeVersion,
+                value: Self.currentCostRecomputeVersion
+            )
+            try writeMeta(
+                ClaudeCodeMetaKey.pathCanonicalizationVersion,
+                value: Self.currentPathCanonicalizationVersion
+            )
+            try writeMeta(
+                Self.aliasesFingerprintMetaKey,
+                value: aliasesFingerprint
+            )
+            try writeMeta(
+                ClaudeCodeMetaKey.lastIncrementalScanAt,
                 value: ISO8601DateFormatter.shared.string(from: started)
             )
+            if isFullScan {
+                try writeMeta(
+                    ClaudeCodeMetaKey.lastFullScanAt,
+                    value: ISO8601DateFormatter.shared.string(from: started)
+                )
+            }
         }
-        try context.save()
+        // SwiftData's save still fires notifications even when we
+        // didn't write any meta keys (cursor updates also dirty the
+        // context). Skip when nothing's pending so views bound to
+        // anything in the schema don't get woken up.
+        if context.hasChanges {
+            try context.save()
+        }
+
+        // Tell out-of-process consumers (WidgetKit, mainly — it doesn't
+        // observe SwiftData @Query) that user-visible data shifted.
+        // Gated on `cycleDidWork` so cursor-only saves don't burn the
+        // widget reload budget, and on `needsPathMigration` so an
+        // alias-driven re-attribution refreshes the project columns
+        // even when no new TokenSamples landed.
+        if cycleDidWork {
+            postScanCycleSummary(ScanCycleSummary(
+                samplesChanged: true,
+                projectAttributionChanged: needsPathMigration
+            ))
+        }
 
         return ScanReport(
             wasFullScan: isFullScan,
@@ -453,6 +734,62 @@ public final class ScanCoordinator {
         for row in rows {
             context.delete(row)
         }
+    }
+
+    private func loadAliases() throws -> [String: String] {
+        let descriptor = FetchDescriptor<ProjectPathAlias>()
+        let rows = try context.fetch(descriptor)
+        var out: [String: String] = [:]
+        out.reserveCapacity(rows.count)
+        for row in rows {
+            out[row.sourcePath] = row.canonicalPath
+        }
+        return out
+    }
+
+    /// Distinct project paths Pacer has seen so far. Sourced from
+    /// the `ProjectDailyAggregate` rollup (smaller than walking
+    /// `TokenSample`) and used as the candidate set for
+    /// auto-aliasing. Filters out the synthetic "(unknown)" bucket
+    /// so we don't try to walk a non-path.
+    private func fetchDistinctProjectPaths() throws -> [String] {
+        var descriptor = FetchDescriptor<ProjectDailyAggregate>()
+        descriptor.propertiesToFetch = [\.projectPath]
+        let rows = try context.fetch(descriptor)
+        var set: Set<String> = []
+        set.reserveCapacity(rows.count)
+        for row in rows where row.projectPath != ProjectDailyAggregate.unknownProjectPath {
+            set.insert(row.projectPath)
+        }
+        return Array(set)
+    }
+
+    /// Deterministic fingerprint of an alias dictionary. Stable across
+    /// process restarts; changes whenever any key/value differs. Used
+    /// to detect "user changed an alias" between scans without
+    /// requiring the UI to flip a meta flag.
+    static func fingerprint(aliases: [String: String]) -> String {
+        if aliases.isEmpty { return "empty" }
+        // Sort the pairs so insertion order doesn't matter.
+        let sorted = aliases.sorted { $0.key < $1.key }
+        let joined = sorted.map { "\($0.key)\u{001F}\($0.value)" }.joined(separator: "\u{001E}")
+        // Simple stable hash. Cryptographic strength not required — we
+        // only care that two equal alias maps produce equal strings
+        // and unequal ones don't. `String.hashValue` would do but
+        // Swift's hash is randomized per-process; this stays stable
+        // across restarts.
+        return Self.fnv1aHex(joined)
+    }
+
+    /// FNV-1a 64-bit hash of the joined string, rendered as hex. Tiny,
+    /// stable across processes, no external dependency.
+    private static func fnv1aHex(_ s: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in s.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100_0000_01b3
+        }
+        return String(hash, radix: 16)
     }
 
     private func fetchMeta(_ key: String) throws -> String? {

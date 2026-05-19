@@ -35,6 +35,7 @@ struct SettingsView: View {
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
+                    ProjectAliasesCard()
                     DatabaseCard()
                     LogsCard()
                 }
@@ -466,6 +467,8 @@ private struct RateLimitAlertsCard: View {
     }
 
     private func openNotificationsSettings() {
+        // Apple-documented preferences URL scheme; both literals are
+        // guaranteed to parse, so the force-unwraps cannot fail.
         let direct = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!
         if NSWorkspace.shared.open(direct) {
             return

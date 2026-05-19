@@ -227,7 +227,7 @@ struct PaceGaugesWidgetView: View {
 }
 
 struct PaceGaugesWidget: Widget {
-    let kind: String = "PaceGaugesWidget"
+    let kind: String = WidgetKinds.paceGauges
 
     var body: some WidgetConfiguration {
         AppIntentConfiguration(

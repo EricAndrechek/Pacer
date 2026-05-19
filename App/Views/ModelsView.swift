@@ -69,6 +69,13 @@ enum ModelsSort: String, CaseIterable, Identifiable {
 
 private struct ModelsContent: View {
     @Query private var aggregates: [DailyAggregate]
+    /// Singleton-row probe that fires exactly once per completed scan
+    /// cycle. Drives the cache refresh below so the O(aggregates)
+    /// rollup runs at most once per cycle instead of once per body
+    /// render (hover-driven re-renders on the donut were doing it on
+    /// every mouse move pre-cache).
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
 
     let sort: ModelsSort
     let descending: Bool
@@ -78,6 +85,28 @@ private struct ModelsContent: View {
     /// Callback to the page-level modal navigator when a chart bar
     /// is tapped — opens that day's day-detail modal.
     let onSelectDay: (String) -> Void
+
+    /// Cached per-model rollup. Recomputed in `refreshDerived` on
+    /// scan-meta tick, sort change, or appear — not on every body
+    /// render. The trade-off vs. the previous "always compute" pattern:
+    /// a tab switch into Models renders an empty grid for ~1 frame
+    /// before `.onAppear` populates the cache. Worth it: pre-cache,
+    /// every hover on the donut re-walked the `aggregates` array.
+    @State private var cachedRows: [ModelRow] = []
+    /// Same cache treatment for the trend chart's per-(date, model)
+    /// flat list. Cheap to recompute (just a `.map`) but adds up when
+    /// it fires on every render of the trend card.
+    @State private var cachedDailyMix: [DailyMix] = []
+    /// Pre-bucketed `[date: [(model, tokens)] sorted desc]` lookup so
+    /// `hoveredTrendDay` is an O(1) dict access instead of an O(N)
+    /// `filter().sorted().map()` walk over `dailyMix`. The walk fired
+    /// on every chart-hover tick — when the user dragged across the
+    /// bar chart, that was a re-walk per mouse-move sample.
+    @State private var cachedTrendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
+    /// Cached cumulative-angle table for the share donut. Small N,
+    /// but rebuilt on every chart-hover-induced re-render; trivial
+    /// to cache alongside `cachedRows`.
+    @State private var cachedShareCumulative: [(row: ModelRow, max: Double)] = []
 
     init(
         range: TimeRange,
@@ -129,7 +158,16 @@ private struct ModelsContent: View {
         var id: String { "\(date)|\(model)" }
     }
 
-    private var rows: [ModelRow] {
+    private var rows: [ModelRow] { cachedRows }
+    private var dailyMix: [DailyMix] { cachedDailyMix }
+
+    /// Rebuild `cachedRows` (per-model rollup + sort) and
+    /// `cachedDailyMix` (per-day flat list for the trend chart) from
+    /// the current `aggregates` snapshot. Called on appear, scan-meta
+    /// tick, and whenever sort/direction changes. O(aggregates) — used
+    /// to run on every body render which compounded with every chart
+    /// hover.
+    private func refreshDerived() {
         struct Acc {
             var cost: Double = 0
             var input: Int64 = 0
@@ -185,16 +223,20 @@ private struct ModelsContent: View {
             if primary(rhs, lhs) { return false }
             return lhs.model < rhs.model
         }
-        return descending ? sorted.reversed() : sorted
-    }
+        cachedRows = descending ? sorted.reversed() : sorted
 
-    /// Re-derived from `aggregates` on every body call. `rows` already
-    /// follows this pattern, so dropping the @State cache here keeps
-    /// the two derivations consistent — and means a tab switch into
-    /// Models doesn't render an empty trend chart for one frame before
-    /// .onAppear refreshes it.
-    private var dailyMix: [DailyMix] {
-        aggregates.map {
+        // Pre-build the share donut's cumulative-angle table here so
+        // the per-hover `body` doesn't have to.
+        var running = 0.0
+        var cumulative: [(row: ModelRow, max: Double)] = []
+        cumulative.reserveCapacity(cachedRows.count)
+        for r in cachedRows {
+            running += Double(r.totalTokens)
+            cumulative.append((r, running))
+        }
+        cachedShareCumulative = cumulative
+
+        cachedDailyMix = aggregates.map {
             DailyMix(
                 date: $0.date,
                 model: $0.model,
@@ -202,6 +244,20 @@ private struct ModelsContent: View {
                 tokens: $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
             )
         }
+        // Bucket dailyMix by date once so the trend-chart hover
+        // tooltip is an O(1) lookup. Per-date entries are pre-sorted
+        // by tokens descending — same order the previous computed
+        // property produced.
+        var buckets: [String: [(model: String, tokens: Int64)]] = [:]
+        for entry in cachedDailyMix {
+            buckets[entry.date, default: []].append(
+                (model: entry.displayName, tokens: entry.tokens)
+            )
+        }
+        for key in buckets.keys {
+            buckets[key]?.sort { $0.tokens > $1.tokens }
+        }
+        cachedTrendBuckets = buckets
     }
 
     var body: some View {
@@ -216,6 +272,13 @@ private struct ModelsContent: View {
                 }
             }
         }
+        // Cache refresh triggers — see `refreshDerived` for what runs.
+        // Hover events on charts / table rows no longer cause the
+        // O(aggregates) rollup to re-run.
+        .onAppear { refreshDerived() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+        .onChange(of: sort) { _, _ in refreshDerived() }
+        .onChange(of: descending) { _, _ in refreshDerived() }
     }
 
     private var emptyState: some View {
@@ -228,19 +291,10 @@ private struct ModelsContent: View {
 
     @State private var hoveredShareAngle: Double?
 
-    /// Sorted-by-cumulative-angle table for the share donut. Derived
-    /// directly from `rows` (a handful of models) — cheap enough to
-    /// rebuild on each body call, and avoids the empty-then-populated
-    /// flash the previous @State cache caused on tab mount.
+    /// Sorted-by-cumulative-angle table for the share donut. Built
+    /// once in `refreshDerived` alongside the per-model rollup.
     private var shareCumulative: [(row: ModelRow, max: Double)] {
-        var running = 0.0
-        var built: [(row: ModelRow, max: Double)] = []
-        built.reserveCapacity(rows.count)
-        for r in rows {
-            running += Double(r.totalTokens)
-            built.append((r, running))
-        }
-        return built
+        cachedShareCumulative
     }
 
     private var shareTotalTokens: Int64 {
@@ -333,15 +387,14 @@ private struct ModelsContent: View {
 
     @State private var trendHoverDate: String?
 
-    /// Per-day, per-model totals for the hovered date. Empty when no
-    /// hover; otherwise a ranked list of (model, tokens) for the day.
+    /// Per-day, per-model totals for the hovered date. O(1) lookup
+    /// into the pre-bucketed `cachedTrendBuckets` — the previous
+    /// version did filter+sort+map on every hover tick.
     private var hoveredTrendDay: (date: String, slices: [(model: String, tokens: Int64)])? {
-        guard let h = trendHoverDate else { return nil }
-        let entries = dailyMix.filter { $0.date == h }
-        guard !entries.isEmpty else { return nil }
-        let slices = entries
-            .sorted { $0.tokens > $1.tokens }
-            .map { (model: $0.displayName, tokens: $0.tokens) }
+        guard let h = trendHoverDate,
+              let slices = cachedTrendBuckets[h],
+              !slices.isEmpty
+        else { return nil }
         return (h, slices)
     }
 

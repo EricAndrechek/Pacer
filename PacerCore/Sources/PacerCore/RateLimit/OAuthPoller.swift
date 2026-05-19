@@ -292,6 +292,7 @@ public actor OAuthPoller {
         let captured = snapshot
         await MainActor.run {
             let context = ModelContext(container)
+            var wroteAnyWindow = false
             if let window = captured.fiveHour {
                 context.insert(RateLimitSample(
                     sampledAt: captured.sampledAt,
@@ -300,6 +301,7 @@ public actor OAuthPoller {
                     resetsAt: window.resetsAt,
                     source: RateLimitSource.oauth
                 ))
+                wroteAnyWindow = true
             }
             if let window = captured.sevenDay {
                 context.insert(RateLimitSample(
@@ -309,9 +311,20 @@ public actor OAuthPoller {
                     resetsAt: window.resetsAt,
                     source: RateLimitSource.oauth
                 ))
+                wroteAnyWindow = true
             }
             do {
                 try context.save()
+                // Tell WidgetKit consumers (pace widgets, mainly) that
+                // a fresh sample landed. The widget extension doesn't
+                // observe SwiftData @Query — without an explicit kick
+                // its timelines refresh on their own ~5min cadence,
+                // which is half the OAuth poll cadence and feels stale.
+                if wroteAnyWindow {
+                    postScanCycleSummary(ScanCycleSummary(
+                        rateLimitsChanged: true
+                    ))
+                }
             } catch {
                 // Disk full / migration mid-flight — log to stderr and
                 // move on. The next successful poll will write fresh

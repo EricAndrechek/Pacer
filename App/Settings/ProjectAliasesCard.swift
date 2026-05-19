@@ -1,0 +1,444 @@
+import SwiftUI
+import SwiftData
+import PacerCore
+import PacerUI
+
+/// Settings → Data → Project Aliases card.
+///
+/// The card lists every `ProjectPathAlias` row (newest first) and lets
+/// the user add new ones, edit existing ones, and delete them. Each
+/// write goes through `ProjectPathAliasManager.upsert/remove` so cycle
+/// + self-alias validation runs uniformly. Once the alias table
+/// changes, the next `ScanCoordinator` cycle picks up the fingerprint
+/// drift and re-attributes existing `TokenSample.projectPath` rows
+/// automatically — no plumbing needed here beyond writing the row.
+///
+/// Also surfaces the **auto-suggest** UI driven by
+/// `ProjectGitOriginScanner`: if two visible project paths share a
+/// `.git/config remote.origin.url`, we offer a one-click "Merge"
+/// shortcut that calls `upsert(source: smallerSamples, canonical:
+/// largerSamples)`. The scan reads `.git/config` files only and is
+/// async, cached for the lifetime of the view.
+struct ProjectAliasesCard: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: [SortDescriptor(\ProjectPathAlias.createdAt, order: .reverse)])
+    private var aliases: [ProjectPathAlias]
+    /// All known project paths (from `ProjectDailyAggregate`) — used as
+    /// the canonical picker source AND as input to the git-origin
+    /// auto-suggest pass.
+    @Query private var projectAggregates: [ProjectDailyAggregate]
+
+    @State private var showingEditor: AliasDraft?
+    /// Drives the bulk-merge sheet ("Merge multiple…" button). Empty
+    /// id when nil so the sheet isn't presented; payload otherwise.
+    @State private var bulkMergeDraft: BulkMergeDraft?
+    @State private var lastError: String?
+    /// Git-remote suggestions — paths that share the same `git
+    /// remote origin url` but live at different on-disk locations.
+    /// These stay opt-in because they're often legitimate (sibling
+    /// worktrees the user wants tracked separately), unlike the
+    /// git-root sub-path rollup which is silent + automatic in the
+    /// scan coordinator.
+    @State private var suggestions: [ProjectGitOriginScanner.Suggestion] = []
+    @State private var suggestionsLoaded = false
+    @State private var dismissedSuggestionKeys: Set<String> = []
+
+    /// All project paths Pacer has seen, deduplicated. Drives both the
+    /// "canonical" picker in the editor and the git-origin auto-suggest
+    /// pass below.
+    private var knownProjectPaths: [String] {
+        var set: Set<String> = []
+        for agg in projectAggregates {
+            if agg.projectPath != ProjectDailyAggregate.unknownProjectPath {
+                set.insert(agg.projectPath)
+            }
+        }
+        return set.sorted()
+    }
+
+    var body: some View {
+        PacerCard("Project aliases", trailing: {
+            HStack(spacing: 8) {
+                // Bulk merge first — it's the higher-leverage action
+                // for the common "renamed a repo, want to fold N
+                // historical paths into the new canonical" task.
+                // Hidden when there's nothing to merge yet (no projects
+                // means the bulk dialog would be empty).
+                if knownProjectPaths.count >= 2 {
+                    Button {
+                        bulkMergeDraft = BulkMergeDraft(canonical: "", sources: [])
+                    } label: {
+                        Label("Merge multiple…", systemImage: "arrow.triangle.merge")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .controlSize(.small)
+                    .help("Pick one canonical, check every path that should fold into it. Creates all aliases at once.")
+                }
+                Button {
+                    showingEditor = AliasDraft(
+                        mode: .new,
+                        sourcePath: "",
+                        canonicalPath: ""
+                    )
+                } label: {
+                    Label("Add alias", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .controlSize(.small)
+            }
+        }, content: {
+            VStack(alignment: .leading, spacing: 12) {
+                if aliases.isEmpty {
+                    emptyState
+                } else {
+                    aliasTable
+                }
+                if !suggestionsVisible.isEmpty {
+                    Divider().opacity(0.4)
+                    suggestionList
+                }
+                if let lastError {
+                    Text(lastError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }, footer: {
+            Text("Remap a project path so its usage attributes elsewhere — useful after renaming a folder, splitting worktrees into a sibling directory, or restoring a SwiftData backup from another machine. Pacer re-scans existing data on the next collection cycle (within seconds).")
+        })
+        .sheet(item: $showingEditor) { draft in
+            AliasEditorSheet(
+                draft: draft,
+                knownPaths: knownProjectPaths,
+                onSave: { source, canonical in save(source: source, canonical: canonical, replacing: draft.replacing) }
+            )
+        }
+        .sheet(item: $bulkMergeDraft) { draft in
+            BulkMergeSheet(
+                knownPaths: knownProjectPaths,
+                initialCanonical: draft.canonical.isEmpty ? nil : draft.canonical,
+                initialSources: draft.sources
+            )
+        }
+        .task(id: knownProjectPaths) {
+            await reloadSuggestions()
+        }
+    }
+
+    // MARK: - Empty state
+
+    private var emptyState: some View {
+        Text("No aliases yet. Add one to merge a renamed or moved project into its current path.")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .padding(.vertical, 4)
+    }
+
+    // MARK: - Alias rows
+
+    private var aliasTable: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(aliases) { alias in
+                AliasRow(
+                    sourcePath: alias.sourcePath,
+                    canonicalPath: alias.canonicalPath,
+                    onEdit: {
+                        showingEditor = AliasDraft(
+                            mode: .edit,
+                            sourcePath: alias.sourcePath,
+                            canonicalPath: alias.canonicalPath,
+                            replacing: alias.sourcePath
+                        )
+                    },
+                    onDelete: { delete(sourcePath: alias.sourcePath) }
+                )
+            }
+        }
+    }
+
+    // MARK: - Auto-suggest
+
+    private var suggestionsVisible: [ProjectGitOriginScanner.Suggestion] {
+        suggestions.filter { !dismissedSuggestionKeys.contains($0.id) }
+    }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Eyebrow(text: "Suggested by git remote")
+            ForEach(suggestionsVisible) { suggestion in
+                SuggestionRow(
+                    suggestion: suggestion,
+                    onAccept: {
+                        save(
+                            source: suggestion.suggestedSource,
+                            canonical: suggestion.suggestedCanonical,
+                            replacing: nil
+                        )
+                        dismissedSuggestionKeys.insert(suggestion.id)
+                    },
+                    onDismiss: { dismissedSuggestionKeys.insert(suggestion.id) }
+                )
+            }
+        }
+    }
+
+    private func reloadSuggestions() async {
+        // Don't re-scan if we just did. Switching tabs back into
+        // Settings re-fires `.task`, which would otherwise re-do the
+        // disk reads for free.
+        if suggestionsLoaded { return }
+        let aliasedSources = Set(aliases.map(\.sourcePath))
+        let result = await ProjectGitOriginScanner.suggest(
+            projectPaths: knownProjectPaths,
+            existingAliasedSources: aliasedSources
+        )
+        await MainActor.run {
+            self.suggestions = result
+            self.suggestionsLoaded = true
+        }
+    }
+
+    // MARK: - Mutation
+
+    private func save(source: String, canonical: String, replacing: String?) {
+        let manager = ProjectPathAliasManager(context: modelContext)
+        do {
+            // If this is an edit whose sourcePath changed, remove the
+            // old row first so we don't strand it behind the new one.
+            if let replacing, replacing != source {
+                try manager.remove(sourcePath: replacing)
+            }
+            try manager.upsert(sourcePath: source, canonicalPath: canonical)
+            lastError = nil
+            showingEditor = nil
+        } catch let error as ProjectPathAliasManager.AliasError {
+            lastError = error.userMessage
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func delete(sourcePath: String) {
+        let manager = ProjectPathAliasManager(context: modelContext)
+        do {
+            try manager.remove(sourcePath: sourcePath)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Row
+
+private struct AliasRow: View {
+    let sourcePath: String
+    let canonicalPath: String
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(pacerShortPath(sourcePath))
+                        .font(.callout)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Text(pacerShortPath(canonicalPath))
+                        .font(.callout)
+                }
+                Text("\(sourcePath) → \(canonicalPath)")
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button("Edit", action: onEdit)
+                .controlSize(.small)
+                .opacity(hovering ? 1.0 : 0.0)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove alias")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct SuggestionRow: View {
+    let suggestion: ProjectGitOriginScanner.Suggestion
+    let onAccept: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(pacerShortPath(suggestion.suggestedSource))
+                        .font(.callout)
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                    Text(pacerShortPath(suggestion.suggestedCanonical))
+                        .font(.callout)
+                }
+                Text("Both have remote: \(suggestion.originURL)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button("Merge", action: onAccept)
+                .controlSize(.small)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.borderless)
+            .help("Dismiss this suggestion (won't reappear until the app restarts)")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+    }
+}
+
+// MARK: - Editor sheet
+
+/// Sheet for adding or editing an alias. Two text fields with optional
+/// "pick from known projects" menus, plus a Save/Cancel pair. Used both
+/// from Settings and from the Projects-view "Merge into…" context menu.
+struct AliasDraft: Identifiable {
+    enum Mode { case new, edit, merge }
+    let id = UUID()
+    let mode: Mode
+    var sourcePath: String
+    var canonicalPath: String
+    /// When non-nil, this row is replacing an existing alias whose
+    /// `sourcePath` may or may not match the new value. Used by
+    /// `ProjectAliasesCard.save` to remove the old row in edit-mode.
+    var replacing: String?
+
+    init(mode: Mode, sourcePath: String, canonicalPath: String, replacing: String? = nil) {
+        self.mode = mode
+        self.sourcePath = sourcePath
+        self.canonicalPath = canonicalPath
+        self.replacing = replacing
+    }
+}
+
+struct AliasEditorSheet: View {
+    let draft: AliasDraft
+    let knownPaths: [String]
+    let onSave: (_ source: String, _ canonical: String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var sourcePath: String = ""
+    @State private var canonicalPath: String = ""
+
+    private var title: String {
+        switch draft.mode {
+        case .new:   return "Add project alias"
+        case .edit:  return "Edit project alias"
+        case .merge: return "Merge project into"
+        }
+    }
+
+    private var isValid: Bool {
+        let s = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let c = canonicalPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !s.isEmpty && !c.isEmpty && s != c
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title)
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Source path (existing samples attribute here)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("/Users/you/Code/old-name", text: $sourcePath)
+                        .textFieldStyle(.roundedBorder)
+                    if draft.mode != .merge {
+                        Menu {
+                            ForEach(knownPaths, id: \.self) { path in
+                                Button(pacerShortPath(path)) { sourcePath = path }
+                            }
+                        } label: {
+                            Image(systemName: "list.bullet")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .frame(width: 24)
+                        .help("Pick from known projects")
+                    }
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Canonical path (samples will move here)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("/Users/you/Code/new-name", text: $canonicalPath)
+                        .textFieldStyle(.roundedBorder)
+                    Menu {
+                        ForEach(knownPaths, id: \.self) { path in
+                            Button(pacerShortPath(path)) { canonicalPath = path }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 24)
+                    .help("Pick from known projects")
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                Button("Save") {
+                    onSave(
+                        sourcePath.trimmingCharacters(in: .whitespacesAndNewlines),
+                        canonicalPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isValid)
+            }
+        }
+        .padding(20)
+        .frame(width: 540)
+        .onAppear {
+            sourcePath = draft.sourcePath
+            canonicalPath = draft.canonicalPath
+        }
+    }
+}
+
+// MARK: - User-facing error messages
+
+private extension ProjectPathAliasManager.AliasError {
+    var userMessage: String {
+        switch self {
+        case .selfAlias:
+            return "Source and canonical paths must be different."
+        case .emptyPath:
+            return "Both paths are required."
+        case .wouldCreateCycle:
+            return "That mapping would create a loop with an existing alias."
+        }
+    }
+}

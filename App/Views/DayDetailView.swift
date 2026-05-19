@@ -78,10 +78,14 @@ struct DayDetailView: View {
     private struct Cached {
         var totals = Totals()
         var projectRows: [ProjectRow] = []
+        var sortedAggregates: [DailyAggregate] = []
+        var sortedProjectRows: [ProjectRow] = []
     }
 
     private var totals: Totals { cached.totals }
     private var projectRows: [ProjectRow] { cached.projectRows }
+    private var sortedAggregates: [DailyAggregate] { cached.sortedAggregates }
+    private var sortedProjectRows: [ProjectRow] { cached.sortedProjectRows }
 
     @MainActor
     private func refreshCache() {
@@ -125,21 +129,70 @@ struct DayDetailView: View {
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
         }
 
-        cached = Cached(totals: t, projectRows: rows)
-
         // Refresh the donut hover index. Pre-sorts by cost desc and
         // builds the cumulative-angle table in one pass so hover
         // ticks are O(rows) over an already-built array.
-        let sorted = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
+        let sortedByCost = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
         var running = 0.0
         var built: [(agg: DailyAggregate, max: Double)] = []
-        built.reserveCapacity(sorted.count)
-        for agg in sorted {
+        built.reserveCapacity(sortedByCost.count)
+        for agg in sortedByCost {
             running += agg.totalCostUSD
             built.append((agg, running))
         }
-        sortedAggsByCost = sorted
+        sortedAggsByCost = sortedByCost
         aggCumulative = built
+
+        // Pre-sort the models + projects tables. Used to be computed
+        // properties (`sortedAggregates`, `sortedProjectRows`) read
+        // from `body` — re-sorted on every chart hover and every
+        // unrelated state change. Cached now and recomputed only
+        // when scan data or sort prefs change.
+        cached = Cached(
+            totals: t,
+            projectRows: rows,
+            sortedAggregates: applyModelsSort(to: aggregates),
+            sortedProjectRows: applyProjectsSort(to: rows)
+        )
+    }
+
+    private func applyModelsSort(to source: [DailyAggregate]) -> [DailyAggregate] {
+        let primary: (DailyAggregate, DailyAggregate) -> Bool
+        switch modelsSort {
+        case .name:
+            primary = { $0.model < $1.model }
+        case .tokens:
+            let totalTokens: (DailyAggregate) -> Int64 = {
+                $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
+            }
+            primary = { totalTokens($0) < totalTokens($1) }
+        case .cost:
+            primary = { $0.totalCostUSD < $1.totalCostUSD }
+        }
+        let sorted = source.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.model < rhs.model
+        }
+        return modelsSortDescending ? sorted.reversed() : sorted
+    }
+
+    private func applyProjectsSort(to source: [ProjectRow]) -> [ProjectRow] {
+        let primary: (ProjectRow, ProjectRow) -> Bool
+        switch projectsSort {
+        case .name:
+            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        case .tokens:
+            primary = { $0.tokens < $1.tokens }
+        case .cost:
+            primary = { $0.cost < $1.cost }
+        }
+        let sorted = source.sorted { lhs, rhs in
+            if primary(lhs, rhs) { return true }
+            if primary(rhs, lhs) { return false }
+            return lhs.path < rhs.path
+        }
+        return projectsSortDescending ? sorted.reversed() : sorted
     }
 
     var body: some View {
@@ -156,19 +209,39 @@ struct DayDetailView: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // Sort-pref changes need a re-sort but not a re-fetch — the
+        // cache's `sortedAggregates`/`sortedProjectRows` are the only
+        // affected slices. Reusing `refreshCache()` is fine; it's
+        // bounded by the modal's small aggregate count.
+        .onChange(of: modelsSortRaw) { _, _ in refreshCache() }
+        .onChange(of: modelsSortDescending) { _, _ in refreshCache() }
+        .onChange(of: projectsSortRaw) { _, _ in refreshCache() }
+        .onChange(of: projectsSortDescending) { _, _ in refreshCache() }
     }
+
+    /// Static formatters used by `prettyDate`. The previous version
+    /// allocated both `DateFormatter` instances per call, and
+    /// `prettyDate` is read from `body` so every state change in the
+    /// modal (chart hover, sort change) re-allocated them.
+    private static let prettyDateInputFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = .current
+        return f
+    }()
+    private static let prettyDateOutputFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .full
+        f.timeZone = .current
+        return f
+    }()
 
     /// `2026-04-30` → `Thursday, April 30, 2026`. Falls back to the raw
     /// key on parse failure.
     private var prettyDate: String {
-        let inputFmt = DateFormatter()
-        inputFmt.dateFormat = "yyyy-MM-dd"
-        inputFmt.timeZone = .current
-        guard let d = inputFmt.date(from: date) else { return date }
-        let outFmt = DateFormatter()
-        outFmt.dateStyle = .full
-        outFmt.timeZone = .current
-        return outFmt.string(from: d)
+        guard let d = Self.prettyDateInputFmt.date(from: date) else { return date }
+        return Self.prettyDateOutputFmt.string(from: d)
     }
 
     private var summaryCard: some View {
@@ -263,28 +336,8 @@ struct DayDetailView: View {
         Binding(get: { projectsSort }, set: { projectsSortRaw = $0.rawValue })
     }
 
-    private var sortedAggregates: [DailyAggregate] {
-        // All sorts pin a deterministic tiebreaker (the model name) so
-        // a column of equal values doesn't reshuffle each scan tick.
-        let primary: (DailyAggregate, DailyAggregate) -> Bool
-        switch modelsSort {
-        case .name:
-            primary = { $0.model < $1.model }
-        case .tokens:
-            let totalTokens: (DailyAggregate) -> Int64 = {
-                $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
-            }
-            primary = { totalTokens($0) < totalTokens($1) }
-        case .cost:
-            primary = { $0.totalCostUSD < $1.totalCostUSD }
-        }
-        let sorted = aggregates.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.model < rhs.model
-        }
-        return modelsSortDescending ? sorted.reversed() : sorted
-    }
+    // `sortedAggregates` lives in `cached.sortedAggregates`; the
+    // build is in `applyModelsSort(to:)`.
 
     /// Tap handler on a day-detail project row: push the project's
     /// detail view onto the parent modal's NavigationStack so the
@@ -297,23 +350,8 @@ struct DayDetailView: View {
         push(.project(path: row.path, displayName: row.displayName, since: nil))
     }
 
-    private var sortedProjectRows: [ProjectRow] {
-        let primary: (ProjectRow, ProjectRow) -> Bool
-        switch projectsSort {
-        case .name:
-            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        case .tokens:
-            primary = { $0.tokens < $1.tokens }
-        case .cost:
-            primary = { $0.cost < $1.cost }
-        }
-        let sorted = projectRows.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.path < rhs.path
-        }
-        return projectsSortDescending ? sorted.reversed() : sorted
-    }
+    // `sortedProjectRows` lives in `cached.sortedProjectRows`; the
+    // build is in `applyProjectsSort(to:)`.
 
     @State private var hoveredAggAngle: Double?
 

@@ -114,7 +114,7 @@ struct TodayCostWidgetView: View {
 }
 
 struct TodayCostWidget: Widget {
-    let kind: String = "TodayCostWidget"
+    let kind: String = WidgetKinds.todayCost
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: TodayCostProvider()) { entry in

@@ -383,7 +383,7 @@ struct PaceChartWidgetView: View {
 // MARK: - Configuration
 
 struct PaceChartWidget: Widget {
-    let kind: String = "PaceChartWidget"
+    let kind: String = WidgetKinds.paceChart
 
     var body: some WidgetConfiguration {
         // `AppIntentConfiguration` swaps the static layout for a user-

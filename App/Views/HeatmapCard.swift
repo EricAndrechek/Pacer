@@ -22,9 +22,21 @@ struct HeatmapCard: View {
     /// the same source the day-detail modal pulls from. Iterating
     /// every session once and bucketing across the day(s) it touched
     /// is N (sessions) rather than D × N (days × sessions).
+    ///
+    /// Predicate-bounded to the heatmap's visible window so we don't
+    /// pull thousands of historical `SessionInfo` rows that the grid
+    /// can't display anyway. The previous unbounded query
+    /// materialized every session in the table on every view
+    /// creation — including on tab-switch back into History, where
+    /// it dominated the re-mount cost.
     @Query private var sessions: [SessionInfo]
     @Query(HeatmapCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
+    /// Suppress the decorative tooltip fade when the user has Reduce
+    /// Motion enabled. The tooltip is informational, not load-bearing —
+    /// snapping in is fine; respecting the system preference matters
+    /// more than the polish of the fade.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Persisted in App Group `UserDefaults` so the user's chosen
     /// coloring survives launches. Lives next to other view-state
@@ -40,6 +52,18 @@ struct HeatmapCard: View {
     init(weekCount: Int = 52, onDayTap: @escaping (String) -> Void) {
         self.weekCount = weekCount
         self.onDayTap = onDayTap
+        // Bound the session query to "sessions whose lastSeenAt falls
+        // inside the visible heatmap window." The default 52-week
+        // grid extends back 52*7 days from today; the `lastSeenAt`
+        // index added in the schema makes this a range scan instead
+        // of a full-table fetch. A few extra days of leeway covers
+        // sessions that span midnight on the window boundary.
+        let cal = Calendar(identifier: .iso8601)
+        let cutoff = cal.date(byAdding: .day, value: -(weekCount * 7 + 7), to: Date())
+            ?? Date(timeIntervalSince1970: 0)
+        _sessions = Query(
+            filter: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoff }
+        )
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -71,13 +95,44 @@ struct HeatmapCard: View {
     /// Pre-built grid + max-cap that the body reads from. Recomputed
     /// only when the underlying data changes (via `scanMeta` tick) so
     /// hover/scroll over the card don't re-iterate.
+    ///
+    /// `monthLabels` and `activeDaysByMetric` were moved in here from
+    /// per-render helpers — `monthLabel(for:)` used to create a
+    /// `Calendar(identifier: .iso8601)` per cell on every redraw, and
+    /// `summaryFooter` flatMap+filter+count'd the whole grid on every
+    /// render. Pre-computing both turns those into O(1) lookups.
     private struct Cached {
         var grid: [[Cell?]] = []
         var maxByMetric: [ProjectMetric: Double] = [:]
         var totalsByMetric: [ProjectMetric: Double] = [:]
+        /// Parallel to `grid` indexes — `monthLabels[i]` is the column
+        /// header text for week `i`, or nil for "same month as the
+        /// previous column".
+        var monthLabels: [String?] = []
+        /// Count of cells in the grid whose value for the metric > 0.
+        /// Pre-counted because `summaryFooter` shows "across N days"
+        /// for the *active* metric, and the picker change isn't a
+        /// data-change event.
+        var activeDaysByMetric: [ProjectMetric: Int] = [:]
     }
 
     private var grid: [[Cell?]] { cached.grid }
+
+    /// Shared Calendar / month-name table. Calendar instantiation is
+    /// non-trivially expensive (locale + tz resolution); making it
+    /// static dropped HeatmapCard hover render time materially.
+    private static let isoCalendar = Calendar(identifier: .iso8601)
+    private static let monthNames = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    /// Shared date formatter for YYYY-MM-DD keying. Was being re-built
+    /// every `refreshCache()` call and twice inside the session-bucket
+    /// loop.
+    private static let dateKeyFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 
     private func refreshCache() {
         // Per-day rollup: cost + tokens come from DailyAggregate;
@@ -105,15 +160,11 @@ struct HeatmapCard: View {
         // multi-day sessions get counted on each day they were active,
         // matching the day-detail predicate exactly.
         let bucketCal = Calendar.current
-        let bucketFmt = DateFormatter()
-        bucketFmt.locale = Locale(identifier: "en_US_POSIX")
-        bucketFmt.timeZone = .current
-        bucketFmt.dateFormat = "yyyy-MM-dd"
         for s in sessions {
             var day = bucketCal.startOfDay(for: s.firstSeenAt)
             let lastDay = bucketCal.startOfDay(for: s.lastSeenAt)
             while day <= lastDay {
-                let key = bucketFmt.string(from: day)
+                let key = Self.dateKeyFmt.string(from: day)
                 var acc = byDate[key] ?? Acc()
                 acc.sessions.insert(s.sessionId)
                 byDate[key] = acc
@@ -122,7 +173,7 @@ struct HeatmapCard: View {
             }
         }
 
-        let cal = Calendar(identifier: .iso8601)
+        let cal = Self.isoCalendar
         let today = cal.startOfDay(for: Date())
         guard let thisMonday = cal.date(from: cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: today)),
               let firstMonday = cal.date(byAdding: .weekOfYear, value: -(weekCount - 1), to: thisMonday)
@@ -130,11 +181,6 @@ struct HeatmapCard: View {
             cached = Cached()
             return
         }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
 
         var weeks: [[Cell?]] = []
         for w in 0..<weekCount {
@@ -146,7 +192,7 @@ struct HeatmapCard: View {
                 if day > today {
                     week.append(nil); continue
                 }
-                let key = formatter.string(from: day)
+                let key = Self.dateKeyFmt.string(from: day)
                 let acc = byDate[key] ?? Acc()
                 week.append(Cell(
                     date: day, dateKey: key,
@@ -158,17 +204,52 @@ struct HeatmapCard: View {
             weeks.append(week)
         }
 
+        // Precompute the column-header month label for each week —
+        // moves a per-cell Calendar lookup out of the render path.
+        // `monthLabels[i]` is non-nil when this column's first Monday
+        // is in a different month than the previous column's Monday.
+        var monthLabels: [String?] = []
+        monthLabels.reserveCapacity(weeks.count)
+        var lastMonth: Int = 0
+        for (idx, week) in weeks.enumerated() {
+            guard let monday = week.compactMap({ $0?.date }).first else {
+                monthLabels.append(nil)
+                continue
+            }
+            let month = cal.component(.month, from: monday)
+            if idx == 0 || month != lastMonth {
+                monthLabels.append(Self.monthNames[month - 1])
+                lastMonth = month
+            } else {
+                monthLabels.append(nil)
+            }
+        }
+
         // 95th-percentile cap per metric so a single outlier doesn't
         // wash out the rest of the year. Same algorithm as before but
         // now run independently for each metric so switching metric
-        // gives a usable color scale immediately.
+        // gives a usable color scale immediately. Also pre-count
+        // active days per metric so the summary footer doesn't walk
+        // the grid on every render.
         var maxByMetric: [ProjectMetric: Double] = [:]
         var totalsByMetric: [ProjectMetric: Double] = [:]
+        var activeDaysByMetric: [ProjectMetric: Int] = [:]
+        let flatCells = weeks.flatMap { $0 }.compactMap { $0 }
         for m in ProjectMetric.allCases {
-            var values = weeks.flatMap { $0 }
-                .compactMap { $0?.value(for: m) }
-                .filter { $0 > 0 }
-            totalsByMetric[m] = values.reduce(0, +)
+            var values: [Double] = []
+            values.reserveCapacity(flatCells.count)
+            var total: Double = 0
+            var activeCount = 0
+            for cell in flatCells {
+                let v = cell.value(for: m)
+                if v > 0 {
+                    values.append(v)
+                    total += v
+                    activeCount += 1
+                }
+            }
+            totalsByMetric[m] = total
+            activeDaysByMetric[m] = activeCount
             if values.isEmpty {
                 maxByMetric[m] = 1
             } else {
@@ -180,7 +261,9 @@ struct HeatmapCard: View {
         cached = Cached(
             grid: weeks,
             maxByMetric: maxByMetric,
-            totalsByMetric: totalsByMetric
+            totalsByMetric: totalsByMetric,
+            monthLabels: monthLabels,
+            activeDaysByMetric: activeDaysByMetric
         )
     }
 
@@ -234,7 +317,7 @@ struct HeatmapCard: View {
                         )
                         .allowsHitTesting(false)
                         .transition(.opacity)
-                        .animation(.easeOut(duration: 0.12), value: hoveredCellId)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hoveredCellId)
                         .zIndex(10)
                     }
                 }
@@ -275,14 +358,12 @@ struct HeatmapCard: View {
     }
 
     /// "$6,123 across 47 days" — GitHub-style summary line under the
-    /// heatmap. Updates with the metric.
+    /// heatmap. Updates with the metric. Both `total` and `activeDays`
+    /// are O(1) lookups into the `Cached` snapshot now — used to do a
+    /// fresh flatMap+compactMap+filter+count on every render.
     private var summaryFooter: some View {
         let total = cached.totalsByMetric[metric] ?? 0
-        let activeDays = cached.grid
-            .flatMap { $0 }
-            .compactMap { $0 }
-            .filter { $0.value(for: metric) > 0 }
-            .count
+        let activeDays = cached.activeDaysByMetric[metric] ?? 0
         return HStack(spacing: 4) {
             Text(formatTotal(total, kind: metric))
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
@@ -337,19 +418,14 @@ struct HeatmapCard: View {
         }
     }
 
+    /// O(1) lookup into the parallel `monthLabels` cache built in
+    /// `refreshCache()`. Previous body of this function created a fresh
+    /// `Calendar(identifier: .iso8601)` every call and was invoked once
+    /// per grid column on every render — `~52 calls × Calendar
+    /// instantiation` per hover state change adds up fast.
     private func monthLabel(for index: Int) -> String? {
-        let names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        let cal = Calendar(identifier: .iso8601)
-        guard let monday = grid[index].compactMap({ $0?.date }).first else { return nil }
-        let month = cal.component(.month, from: monday)
-        if index == 0 {
-            return names[month - 1]
-        }
-        guard let prevMonday = grid[index - 1].compactMap({ $0?.date }).first else {
-            return names[month - 1]
-        }
-        let prevMonth = cal.component(.month, from: prevMonday)
-        return month == prevMonth ? nil : names[month - 1]
+        guard cached.monthLabels.indices.contains(index) else { return nil }
+        return cached.monthLabels[index]
     }
 
     /// Weekday column: Mon/Wed/Fri text on rows 0/2/4, blank on the
