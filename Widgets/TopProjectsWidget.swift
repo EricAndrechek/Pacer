@@ -100,7 +100,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
     private func currentEntry(configuration: TopProjectsConfigurationIntent) -> TopProjectsEntry {
         let range = configuration.range
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             // Push the date filter into the FetchDescriptor so SwiftData
             // uses the `(date, projectPath)` index instead of fetching

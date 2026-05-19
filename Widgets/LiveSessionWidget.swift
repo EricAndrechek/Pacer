@@ -86,7 +86,7 @@ struct LiveSessionProvider: TimelineProvider {
 
     private func currentEntry() -> LiveSessionEntry {
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             var descriptor = FetchDescriptor<SessionInfo>(
                 sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]

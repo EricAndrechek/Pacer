@@ -70,7 +70,7 @@ struct DailyChartProvider: AppIntentTimelineProvider {
 
     private func currentEntry(range: LookbackRangeOption) -> DailyChartEntry {
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             // Predicate-scoped fetch — on a power user's 2-year DB the
             // unbounded form materialized ~3650 rows (730 days × 5

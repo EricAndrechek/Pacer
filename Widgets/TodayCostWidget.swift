@@ -35,7 +35,7 @@ struct TodayCostProvider: TimelineProvider {
 
     private func currentEntry() -> TodayCostEntry {
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             let today = TokenSample.formatDate(Date())
             let descriptor = FetchDescriptor<DailyAggregate>(

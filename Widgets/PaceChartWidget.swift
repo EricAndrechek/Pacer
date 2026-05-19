@@ -75,7 +75,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
 
     private func currentEntry(window: PaceWindowOption) -> PaceChartEntry {
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             // 8-day window covers the longest cycle (7d) plus headroom
             // for the most-recent 5h cycle; same shape PaceChartCard

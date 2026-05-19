@@ -129,7 +129,7 @@ struct ProjectQuery: EntityQuery {
     }
 
     func suggestedEntities() async throws -> [ProjectEntity] {
-        let container = try PacerStore.makeModelContainer()
+        let container = try PacerStore.sharedModelContainer()
         let context = ModelContext(container)
         let descriptor = FetchDescriptor<ProjectDailyAggregate>(
             sortBy: [SortDescriptor(\.date, order: .reverse)]

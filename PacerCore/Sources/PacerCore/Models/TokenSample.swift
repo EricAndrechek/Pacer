@@ -28,11 +28,21 @@ public final class TokenSample {
     //   range filter that lands on TokenSample directly.
     // - `projectPath`: alias-migration walks filter by exact match;
     //   also helps any future view that queries samples by project.
+    // - `sampledAt`: LiveActivityCard's `latestSampleProbe`
+    //   (fetchLimit=1, sortBy sampledAt desc) was doing a full-table
+    //   sort on every render to find the most-recent sample for the
+    //   freshness chip. With ~500K rows on a power user's DB that's
+    //   ~5ms each time — cheap individually but compounds across
+    //   live-activity refreshes. The index makes it instant.
+    //   HourlyAggregateRecomputer also predicates on `sampledAt`
+    //   indirectly via the calendar-hour filter inside the per-pair
+    //   path, so this index helps that scan-tick work too.
     #Index<TokenSample>(
         [\.dedupKey],
         [\.sessionId],
         [\.date, \.model],
-        [\.projectPath]
+        [\.projectPath],
+        [\.sampledAt]
     )
 
     public var sampledAt: Date

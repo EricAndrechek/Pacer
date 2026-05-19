@@ -30,6 +30,32 @@ public enum PacerStore {
         try sharedContainerURL().appendingPathComponent(storeFileName)
     }
 
+    /// Process-wide cached container for the widget extension's read
+    /// path. Each widget provider used to call `makeModelContainer()`
+    /// per refresh; opening the SQLite store + validating schema is a
+    /// heavy operation (50–200ms) that has no business firing on every
+    /// 5-minute widget refresh. Apple documents `ModelContainer` as
+    /// thread-safe and intended to be shared, so caching is a strict
+    /// upgrade.
+    ///
+    /// The app process should keep using `makeModelContainer()`
+    /// directly because `PacerAppDelegate` constructs the container
+    /// once at startup with explicit ownership semantics — sharing the
+    /// same `_cachedContainer` between the app's setup path and a
+    /// future widget query path inside the same process would be a
+    /// footgun.
+    nonisolated(unsafe) private static var _cachedContainer: ModelContainer?
+    private static let containerLock = NSLock()
+
+    public static func sharedModelContainer() throws -> ModelContainer {
+        containerLock.lock()
+        defer { containerLock.unlock() }
+        if let cached = _cachedContainer { return cached }
+        let new = try makeModelContainer()
+        _cachedContainer = new
+        return new
+    }
+
     public static func makeModelContainer() throws -> ModelContainer {
         let url = try storeURL()
         let configuration = ModelConfiguration(url: url)

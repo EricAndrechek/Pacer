@@ -52,7 +52,7 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
 
     private func currentEntry(window: PaceWindowOption) -> PaceGaugesEntry {
         do {
-            let container = try PacerStore.makeModelContainer()
+            let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             var descriptor = FetchDescriptor<RateLimitSample>(
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
