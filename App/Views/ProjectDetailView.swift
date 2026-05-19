@@ -65,10 +65,15 @@ struct ProjectDetailView: View {
     /// previous version walked every aggregate on every render.
     @State private var cachedTotals = Totals()
     /// Bucket sums keyed by `originalProjectPath`. Computed in one
-    /// pass over `samples`, same shape as the other cached
+    /// pass over the fetched samples, same shape as the other cached
     /// derivations. Empty / one-element when there's no drill-down
     /// to show.
     @State private var cachedSubprojects: [SubprojectRow] = []
+    /// Cost mode. Reactive @AppStorage so the Subprojects card
+    /// re-buckets immediately when the user toggles modes in
+    /// Settings (same pattern LiveActivityCard uses).
+    @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
+    private var costModeRaw: String = CostMode.auto.rawValue
 
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
@@ -203,22 +208,23 @@ struct ProjectDetailView: View {
     }
 
     /// Bucket `TokenSample`s for this project by `originalProjectPath`
-    /// to build the Subprojects card. Cost uses `sourceCostUSD`
-    /// directly (what Claude Code reported) rather than recomputing
-    /// from tokens — keeps this view dependency-light and good enough
-    /// for the "which subdirs ate the budget" question; the
-    /// project-level totals card still uses the precise recomputed
-    /// cost.
+    /// to build the Subprojects card. Cost uses the shared
+    /// `effectiveCostUSD(mode:)` helper — same path
+    /// `ProjectDailyAggregate.totalCostUSD` follows — so subprojects
+    /// don't undercount when Claude Code didn't write `sourceCostUSD`
+    /// on the JSONL line (older builds, some entry types). Without
+    /// this every row of a `calculate`-mode user reads as $0.
     ///
     /// Why a manual fetch instead of `@Query`: a `@Query` for samples
-    /// was the cause of a freeze-the-whole-modal bug. Every body
-    /// re-evaluation (which happens on every scan-cycle save, every
-    /// ~2s) accessed `samples.count` for `.onChange(of:)`, and
-    /// SwiftData re-fetched/decoded the full set on every access —
-    /// `sample` showed `samples.getter` consuming 67% of main-thread
-    /// time. A manual fetch runs only when this function is called
-    /// (onAppear + onChange(of: aggregates.count)), not on every body
-    /// pass.
+    /// was the cause of a freeze-the-whole-modal bug. SwiftData's
+    /// @Query for TokenSample re-fetched and decoded the full result
+    /// set on every body access (`samples.getter` was 67% of
+    /// main-thread time in a `sample` trace), and the modal's body
+    /// re-evaluates on every scan-cycle save (~2s) via the other
+    /// @Query bindings. A manual fetch driven by `.onAppear`,
+    /// aggregate count changes, the cost-mode setting, and the
+    /// `pacerScanCycleDidComplete` notification gives the same live-
+    /// update behavior with zero per-render cost.
     private func refreshSubprojects() {
         struct Acc {
             var tokens: Int64 = 0
@@ -242,13 +248,17 @@ struct ProjectDetailView: View {
         sampleDesc.propertiesToFetch = [
             \.projectPath,
             \.originalProjectPath,
+            \.model,
             \.inputTokens,
             \.outputTokens,
             \.cacheReadTokens,
+            \.cacheCreation5mTokens,
+            \.cacheCreation1hTokens,
             \.sourceCostUSD,
             \.sessionId,
         ]
         let samples = (try? modelContext.fetch(sampleDesc)) ?? []
+        let mode = CostMode(rawValue: costModeRaw) ?? .auto
         var byPath: [String: Acc] = [:]
         for s in samples {
             // Fall back to the canonical when originalProjectPath
@@ -259,7 +269,7 @@ struct ProjectDetailView: View {
             let key = s.originalProjectPath ?? projectPath
             var a = byPath[key] ?? Acc()
             a.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
-            a.cost += s.sourceCostUSD ?? 0
+            a.cost += s.effectiveCostUSD(mode: mode)
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             byPath[key] = a
         }
@@ -347,16 +357,31 @@ struct ProjectDetailView: View {
             if !sessionRows.isEmpty { sessionsCard }
         }
         .onAppear { refreshDerived() }
-        // `aggregates.count` is the cheap stable trigger for "new
-        // data landed for this project" — the recomputer writes a
-        // ProjectDailyAggregate row whenever samples for this project
-        // change, so this catches both fresh scans and alias merges.
-        // refreshDerived() chains into refreshSubprojects(), so the
-        // Subprojects card stays in sync without a separate samples
-        // observer (a previous `.onChange(of: samples.count)` was
-        // accessing a @Query that re-fetched on every body render,
-        // freezing the modal — see refreshSubprojects()).
+        // `aggregates.count` ticks on the FIRST sample of a new day
+        // for this project; refreshDerived() recomputes
+        // dailySeries / modelSlices / totals from the @Query result
+        // and chains into refreshSubprojects().
         .onChange(of: aggregates.count) { _, _ in refreshDerived() }
+        // Live updates within an existing day: the scan coordinator
+        // posts `pacerScanCycleDidComplete` whenever a cycle actually
+        // wrote new data. Filter to cycles that touched samples or
+        // re-attributed projects — rate-limit-only cycles don't
+        // change the Subprojects card. The aggregates @Query handles
+        // its own re-fetch; only Subprojects needs the explicit
+        // refresh because its source (raw TokenSample) is no longer
+        // a @Query (see refreshSubprojects).
+        .onReceive(NotificationCenter.default.publisher(
+            for: .pacerScanCycleDidComplete
+        )) { note in
+            guard let summary = note.object as? ScanCycleSummary else { return }
+            if summary.samplesChanged || summary.projectAttributionChanged {
+                refreshSubprojects()
+            }
+        }
+        // Cost-mode toggle in Settings must re-bucket the
+        // Subprojects card — `effectiveCostUSD(mode:)` flips between
+        // stored / calculated / auto fallbacks.
+        .onChange(of: costModeRaw) { _, _ in refreshSubprojects() }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
                 knownPaths: knownProjectPathsForBulkMerge,
