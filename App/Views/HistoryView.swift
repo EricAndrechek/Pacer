@@ -36,8 +36,34 @@ struct HistoryView: View {
 /// without leaving the History tab — answering the user's "I want to
 /// see totals per year/month/etc" feedback. Range persists across
 /// launches via App Group `UserDefaults`.
+///
+/// Card vs Content split is the `.id(range)` trick: the outer Card owns
+/// the range picker and the @AppStorage that drives it; the inner
+/// Content takes `range` as an init argument and scopes its @Query
+/// accordingly. `.id(range)` on the content forces SwiftData to
+/// re-create the @Query each time the user picks a different range —
+/// which is the only way to push the range predicate into the fetch
+/// layer instead of filtering 700+ rows in memory on every scan tick.
 private struct LifetimeSummaryCard: View {
-    @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    @AppStorage("pacer.history.summaryRange", store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.all.rawValue
+
+    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
+
+    var body: some View {
+        LifetimeSummaryContent(range: range, rangeBinding: rangeBinding)
+            .id(range)
+    }
+}
+
+private struct LifetimeSummaryContent: View {
+    let range: TimeRange
+    let rangeBinding: Binding<TimeRange>
+
+    @Query private var aggregates: [DailyAggregate]
     /// Singleton-row probe — fires once per completed scan cycle so
     /// the totals walk below runs at most once per cycle instead of
     /// once per body render (the surrounding tile grid had hover
@@ -45,14 +71,25 @@ private struct LifetimeSummaryCard: View {
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    @AppStorage("pacer.history.summaryRange", store: PacerSettings.store)
-    private var rangeRaw: String = TimeRange.all.rawValue
-
-    private var range: TimeRange {
-        TimeRange(rawValue: rangeRaw) ?? .all
-    }
-    private var rangeBinding: Binding<TimeRange> {
-        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    init(range: TimeRange, rangeBinding: Binding<TimeRange>) {
+        self.range = range
+        self.rangeBinding = rangeBinding
+        if let since = range.since {
+            let cutoffString = TokenSample.formatDate(since)
+            _aggregates = Query(
+                filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+                sort: \DailyAggregate.date,
+                order: .reverse
+            )
+        } else {
+            // `.all` still needs every row — but we can't show
+            // "lifetime since YYYY-MM-DD" without it. Acceptable
+            // because (a) .all is opt-in, and (b) it's still cached
+            // behind a scan-meta tick so the walk runs once per cycle.
+            _aggregates = Query(
+                sort: \DailyAggregate.date, order: .reverse
+            )
+        }
     }
 
     private struct Totals {
@@ -74,9 +111,10 @@ private struct LifetimeSummaryCard: View {
         var dates = Set<String>()
         var models = Set<String>()
         var minDate: String?
-        let cutoff = range.since.flatMap { TokenSample.formatDate($0) }
+        // The @Query is already range-scoped via init, so no in-memory
+        // cutoff filter is needed here. Walking `aggregates` is just
+        // "sum + collect distinct" over the scoped slice.
         for row in aggregates {
-            if let cutoff, row.date < cutoff { continue }
             t.cost += row.totalCostUSD
             t.input += row.inputTokens
             t.output += row.outputTokens
@@ -147,7 +185,6 @@ private struct LifetimeSummaryCard: View {
         }
         .onAppear { refreshTotals() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshTotals() }
-        .onChange(of: rangeRaw) { _, _ in refreshTotals() }
     }
 }
 
@@ -329,10 +366,6 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 }
 
 private struct TopDaysCard: View {
-    @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
-    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
-    private var scanMeta: [ClaudeCodeMeta]
-
     let onDayTap: (String) -> Void
 
     @AppStorage("pacer.history.topDaysSort", store: PacerSettings.store)
@@ -343,28 +376,89 @@ private struct TopDaysCard: View {
     @AppStorage("pacer.history.topDaysRange", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.all.rawValue
 
+    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
+    private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
+    private var sortBinding: Binding<TopDaysSort> {
+        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
+    }
+
+    var body: some View {
+        // Card+Content split with `.id(range)` so the @Query gets
+        // re-created with a range-scoped predicate when the user
+        // changes the time window — same pattern as LifetimeSummaryCard.
+        // Sort changes happen inside the content view and reuse the
+        // same fetched slice without re-fetching.
+        TopDaysContent(
+            range: range,
+            sort: sort,
+            descending: descending,
+            onDayTap: onDayTap,
+            rangeBinding: rangeBinding,
+            sortBinding: sortBinding,
+            descendingBinding: $descending
+        )
+        .id(range)
+    }
+}
+
+private struct TopDaysContent: View {
+    let range: TimeRange
+    let sort: TopDaysSort
+    let descending: Bool
+    let onDayTap: (String) -> Void
+    let rangeBinding: Binding<TimeRange>
+    let sortBinding: Binding<TopDaysSort>
+    let descendingBinding: Binding<Bool>
+
+    @Query private var aggregates: [DailyAggregate]
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
+
+    init(
+        range: TimeRange,
+        sort: TopDaysSort,
+        descending: Bool,
+        onDayTap: @escaping (String) -> Void,
+        rangeBinding: Binding<TimeRange>,
+        sortBinding: Binding<TopDaysSort>,
+        descendingBinding: Binding<Bool>
+    ) {
+        self.range = range
+        self.sort = sort
+        self.descending = descending
+        self.onDayTap = onDayTap
+        self.rangeBinding = rangeBinding
+        self.sortBinding = sortBinding
+        self.descendingBinding = descendingBinding
+        if let since = range.since {
+            let cutoffString = TokenSample.formatDate(since)
+            _aggregates = Query(
+                filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+                sort: \DailyAggregate.date,
+                order: .reverse
+            )
+        } else {
+            _aggregates = Query(
+                sort: \DailyAggregate.date, order: .reverse
+            )
+        }
+    }
+
     /// Cached output of the rollup + sort pipeline. Previously
     /// `sortedRows` and `visibleRows` were computed properties, with
     /// `body` accessing both — and `visibleRows` itself accessed
     /// `sortedRows` again — so a single render walked every aggregate
-    /// three times. Cached now; refreshes on scan tick + sort/range
-    /// changes.
+    /// three times. Cached now; refreshes on scan tick + sort changes
+    /// (range changes are handled by the outer `.id(range)` re-init).
     @State private var cachedSortedRows: [DayRow] = []
-
-    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
-    private var rangeBinding: Binding<TimeRange> {
-        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
-    }
 
     /// Toggle to reveal the next 90 (showing top 100). The user flagged
     /// "showing top 10 silently" — now there's a chip in the header
     /// indicating "showing N of M" plus a Show more / Show less link.
     @State private var showAll: Bool = false
-
-    private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
-    private var sortBinding: Binding<TopDaysSort> {
-        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
-    }
 
     private struct DayRow: Identifiable {
         let date: String
@@ -388,10 +482,10 @@ private struct TopDaysCard: View {
     }
 
     private func refreshSortedRows() {
+        // The @Query is already range-scoped via init, so no in-memory
+        // cutoff filter is needed — walk the scoped slice directly.
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
-        let cutoff = range.since.flatMap { TokenSample.formatDate($0) }
         for row in aggregates {
-            if let cutoff, row.date < cutoff { continue }
             var v = byDate[row.date] ?? (0, 0)
             v.cost += row.totalCostUSD
             v.tokens += row.inputTokens + row.outputTokens + row.cacheReadTokens
@@ -453,7 +547,7 @@ private struct TopDaysCard: View {
                             field: TopDaysSort.date,
                             alignment: .leading,
                             active: sortBinding,
-                            descending: $descending,
+                            descending: descendingBinding,
                             defaultDescending: false
                         ).frame(width: 140, alignment: .leading)
                         Spacer()
@@ -462,14 +556,14 @@ private struct TopDaysCard: View {
                             field: TopDaysSort.tokens,
                             alignment: .trailing,
                             active: sortBinding,
-                            descending: $descending
+                            descending: descendingBinding
                         ).frame(width: 80)
                         SortableColumnHeader(
                             "Cost",
                             field: TopDaysSort.cost,
                             alignment: .trailing,
                             active: sortBinding,
-                            descending: $descending
+                            descending: descendingBinding
                         ).frame(width: 80)
                         // Reserve space for the row's chevron column.
                         Spacer().frame(width: 16)
@@ -511,8 +605,9 @@ private struct TopDaysCard: View {
         }
         .onAppear { refreshSortedRows() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshSortedRows() }
-        .onChange(of: rangeRaw) { _, _ in refreshSortedRows() }
-        .onChange(of: sortRaw) { _, _ in refreshSortedRows() }
+        // Range changes are handled by the outer `.id(range)` re-init,
+        // so we only need to re-sort on sort / descending changes here.
+        .onChange(of: sort) { _, _ in refreshSortedRows() }
         .onChange(of: descending) { _, _ in refreshSortedRows() }
     }
 
