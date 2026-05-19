@@ -30,35 +30,6 @@ struct LiveSessionEntry: TimelineEntry {
     }
 }
 
-enum LiveSessionActivity {
-    case active
-    case recent
-    case idle
-
-    static func from(lastSeen: Date, now: Date = Date()) -> LiveSessionActivity {
-        let age = now.timeIntervalSince(lastSeen)
-        if age <= 300 { return .active }
-        if age <= 3600 { return .recent }
-        return .idle
-    }
-
-    var color: Color {
-        switch self {
-        case .active: return .green
-        case .recent: return .yellow
-        case .idle:   return .secondary
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .active: return "active"
-        case .recent: return "recent"
-        case .idle:   return "idle"
-        }
-    }
-}
-
 struct LiveSessionProvider: TimelineProvider {
     func placeholder(in context: Context) -> LiveSessionEntry {
         LiveSessionEntry(

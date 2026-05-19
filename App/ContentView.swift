@@ -345,6 +345,7 @@ private struct SidebarItem: View {
 private struct ToolbarFreshness: View {
     @Query(ToolbarFreshness.tokenProbe) private var tokens: [TokenSample]
     @Query(ToolbarFreshness.rateLimitProbe) private var rateLimits: [RateLimitSample]
+    @Query(ToolbarFreshness.sessionProbe) private var sessions: [SessionInfo]
     @Query private var scanMeta: [ClaudeCodeMeta]
 
     init() {
@@ -363,6 +364,30 @@ private struct ToolbarFreshness: View {
         d.fetchLimit = 1
         return d
     }()
+
+    /// Most-recent session row for the live-activity overlay. Cap to
+    /// 1 — same probe pattern as the other two; we only ever read
+    /// `firstSeenAt` / `lastSeenAt` from `.first`.
+    private static let sessionProbe: FetchDescriptor<SessionInfo> = {
+        var d = FetchDescriptor<SessionInfo>(sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
+        d.fetchLimit = 1
+        return d
+    }()
+
+    /// `.active` when the latest SessionInfo's lastSeenAt is within
+    /// `LiveSessionActivity.activeThreshold`. We only ever surface
+    /// the active state in the toolbar — recent/idle is covered by
+    /// the regular freshness label.
+    private var sessionActivity: LiveSessionActivity? {
+        sessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
+    }
+
+    /// Wall-clock elapsed since the active session began. nil when
+    /// there's no active session.
+    private var activeSessionElapsed: TimeInterval? {
+        guard let s = sessions.first, sessionActivity == .active else { return nil }
+        return Date().timeIntervalSince(s.firstSeenAt)
+    }
 
     private var lastActivity: Date? {
         let candidates: [Date?] = [
@@ -391,6 +416,13 @@ private struct ToolbarFreshness: View {
     }
 
     private var label: String {
+        // When Claude Code is actively generating, prefer the session-
+        // centric label — the wall-clock data freshness is implicit
+        // from the active session. "active · 3m" is more informative
+        // than "live" because it includes the elapsed time.
+        if let elapsed = activeSessionElapsed {
+            return "active · \(Self.formatElapsedShort(elapsed))"
+        }
         switch freshness {
         case .live:        return "live"
         case .recent, .stale:
@@ -400,9 +432,26 @@ private struct ToolbarFreshness: View {
         }
     }
 
+    /// "3m" / "1h 12m" — compact form for the toolbar pill where we
+    /// can't spare horizontal space for "3 min" / "1 hour 12 min".
+    private static func formatElapsedShort(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m" }
+        return "<1m"
+    }
+
     /// Long-form tooltip on hover so the user can see the exact
     /// timestamp without parsing the relative label.
     private var tooltip: String {
+        if sessionActivity == .active, let s = sessions.first {
+            let f = DateFormatter()
+            f.dateStyle = .none
+            f.timeStyle = .medium
+            return "Active Claude Code session — started \(f.string(from: s.firstSeenAt))"
+        }
         if let last = lastActivity {
             let f = DateFormatter()
             f.dateStyle = .short

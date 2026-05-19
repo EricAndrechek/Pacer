@@ -33,6 +33,13 @@ struct MenuBarLabel: View {
     @Query(MenuBarLabel.recentTokenSampleDescriptor)
     private var recentSamples: [TokenSample]
 
+    /// Most-recent session (by lastSeenAt). Drives the small leading-
+    /// edge dot that shows when Claude Code is actively generating —
+    /// the "is something happening right now" signal that the user
+    /// can spot in the menu bar without opening the popover.
+    @Query(MenuBarLabel.recentSessionDescriptor)
+    private var recentSessions: [SessionInfo]
+
     init() {
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
@@ -51,6 +58,14 @@ struct MenuBarLabel: View {
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private static let recentSessionDescriptor: FetchDescriptor<SessionInfo> = {
+        var d = FetchDescriptor<SessionInfo>(
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
@@ -160,6 +175,13 @@ struct MenuBarLabel: View {
         recentSamples.first.map { pacerShortModel($0.model) }
     }
 
+    /// `.active` when the most-recent session row was touched within the
+    /// last five minutes (Claude is currently generating). Drives the
+    /// small leading-edge dot.
+    private var sessionActivity: LiveSessionActivity? {
+        recentSessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
+    }
+
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
     /// it's the only window chip on screen, the prefix is redundant;
     /// when 7-day is also visible, the prefix removes ambiguity.
@@ -173,6 +195,9 @@ struct MenuBarLabel: View {
     /// hover for the "everything else."
     private var tooltip: String {
         var parts: [String] = []
+        if sessionActivity == .active {
+            parts.append("Claude active")
+        }
         if let f = fiveHour {
             parts.append("5h: \(Int(f.usedPercentage.rounded()))%")
         }
@@ -199,6 +224,14 @@ struct MenuBarLabel: View {
         // subview's). Spacing between chips comes from `HStack`'s
         // own `spacing:`.
         HStack(spacing: 6) {
+            // Live-session dot is leading-most so it reads as a
+            // status indicator before any chip content. Only renders
+            // when activity == .active so the menu bar stays calm
+            // in the common case where nothing is running. Reduce-
+            // motion suppresses the pulse but the dot still shows.
+            if sessionActivity == .active {
+                ActivityDot(reduceMotion: reduceMotion)
+            }
             ForEach(chips) { chip in
                 chipView(chip)
             }
@@ -309,6 +342,43 @@ private extension UsageBand {
         case .orange: return 2
         case .red:    return 3
         }
+    }
+}
+
+/// Small green dot for the menu bar that means "Claude Code is
+/// actively generating." Renders only when the most-recent
+/// `SessionInfo.lastSeenAt` is within the `LiveSessionActivity.active`
+/// threshold. A subtle 1-second pulse helps the dot read as live
+/// state rather than a static decoration — suppressed under Reduce
+/// Motion.
+private struct ActivityDot: View {
+    let reduceMotion: Bool
+    @State private var pulsing = false
+
+    var body: some View {
+        // 8pt fits comfortably alongside chip text (~13pt) without
+        // dominating the menu bar. The slight outline catches it
+        // against a near-green wallpaper.
+        Circle()
+            .fill(LiveSessionActivity.active.color)
+            .frame(width: 7, height: 7)
+            .overlay(
+                Circle()
+                    .stroke(Color.black.opacity(0.18), lineWidth: 0.5)
+            )
+            .opacity(pulsing ? 0.55 : 1.0)
+            .scaleEffect(pulsing ? 0.85 : 1.0)
+            .animation(
+                reduceMotion
+                    ? .default
+                    : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
+                value: pulsing
+            )
+            .onAppear {
+                guard !reduceMotion else { return }
+                pulsing = true
+            }
+            .accessibilityHidden(true)
     }
 }
 
