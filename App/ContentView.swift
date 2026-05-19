@@ -388,13 +388,6 @@ private struct ToolbarFreshness: View {
         sessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
     }
 
-    /// Wall-clock elapsed since the active session began. nil when
-    /// there's no active session.
-    private var activeSessionElapsed: TimeInterval? {
-        guard let s = sessions.first, sessionActivity == .active else { return nil }
-        return Date().timeIntervalSince(s.firstSeenAt)
-    }
-
     private var lastActivity: Date? {
         let candidates: [Date?] = [
             tokens.first?.sampledAt,
@@ -422,12 +415,17 @@ private struct ToolbarFreshness: View {
     }
 
     private var label: String {
-        // When Claude Code is actively generating, prefer the session-
-        // centric label — the wall-clock data freshness is implicit
-        // from the active session. "active · 3m" is more informative
-        // than "live" because it includes the elapsed time.
-        if let elapsed = activeSessionElapsed {
-            return "active · \(Self.formatElapsedShort(elapsed))"
+        // "active" specifically means Claude Code is generating right
+        // now (most-recent SessionInfo.lastSeenAt within 5 min). The
+        // prior version of this label included an elapsed-since-
+        // session-start duration ("active · 9h 0m") — but the
+        // most-recent session by `lastSeenAt` flips between rows when
+        // the user has multiple long-running sessions in flight, so
+        // the duration jumped between unrelated session start times.
+        // "active" alone is unambiguous; the tooltip carries the
+        // detail for a hover.
+        if sessionActivity == .active {
+            return "active"
         }
         switch freshness {
         case .live:        return "live"
@@ -438,17 +436,6 @@ private struct ToolbarFreshness: View {
         }
     }
 
-    /// "3m" / "1h 12m" — compact form for the toolbar pill where we
-    /// can't spare horizontal space for "3 min" / "1 hour 12 min".
-    private static func formatElapsedShort(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        if minutes > 0 { return "\(minutes)m" }
-        return "<1m"
-    }
-
     /// Long-form tooltip on hover so the user can see the exact
     /// timestamp without parsing the relative label.
     private var tooltip: String {
@@ -456,7 +443,7 @@ private struct ToolbarFreshness: View {
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .medium
-            return "Active Claude Code session — started \(f.string(from: s.firstSeenAt))"
+            return "Claude Code active — last write \(f.string(from: s.lastSeenAt))"
         }
         if let last = lastActivity {
             let f = DateFormatter()
