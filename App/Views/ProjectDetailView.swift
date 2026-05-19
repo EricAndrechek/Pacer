@@ -30,14 +30,6 @@ struct ProjectDetailView: View {
     /// under the modal subtitle. Scoped via `init` so SwiftData
     /// only fetches the one row we care about (path-keyed unique).
     @Query private var probesForThisProject: [ProjectPathProbe]
-    /// TokenSamples scoped to this project + time range. Used only
-    /// for the Subprojects drill-down — we need per-row
-    /// `originalProjectPath` to bucket sub-directories, which the
-    /// `ProjectDailyAggregate` rollup has already collapsed away.
-    /// Lightweight in practice: `TokenSample` carries an index on
-    /// `projectPath`, so this filter is an indexed range scan, not
-    /// a full-table walk.
-    @Query private var samples: [TokenSample]
     /// Every project path Pacer has seen — drives the "Merge this
     /// into…" submenu. Light because we only fetch `projectPath`
     /// from the rollup, not the wide aggregate columns.
@@ -83,23 +75,6 @@ struct ProjectDetailView: View {
         self.displayName = displayName
         self.since = since
         let path = projectPath
-        // Slim TokenSample descriptor: the Subprojects card only
-        // reads 6 fields (originalProjectPath, projectPath, three
-        // token counts, sourceCostUSD, sessionId). Listing them in
-        // `propertiesToFetch` lets SwiftData faulting-skip the rest
-        // — for a busy project that's the difference between
-        // materializing 15 properties per row vs. 7. On every
-        // SwiftData save the @Query re-fetches, so this directly
-        // affects scroll perf in the modal.
-        let sampleProperties: [PartialKeyPath<TokenSample>] = [
-            \TokenSample.projectPath,
-            \TokenSample.originalProjectPath,
-            \TokenSample.inputTokens,
-            \TokenSample.outputTokens,
-            \TokenSample.cacheReadTokens,
-            \TokenSample.sourceCostUSD,
-            \TokenSample.sessionId,
-        ]
         if let cutoffDate = since {
             let cutoffString = TokenSample.formatDate(cutoffDate)
             _aggregates = Query(
@@ -115,13 +90,6 @@ struct ProjectDetailView: View {
                 sort: \.lastSeenAt,
                 order: .reverse
             )
-            var sampleDesc = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> {
-                    $0.projectPath == path && $0.date >= cutoffString
-                }
-            )
-            sampleDesc.propertiesToFetch = sampleProperties
-            _samples = Query(sampleDesc)
         } else {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.projectPath == path },
@@ -132,11 +100,6 @@ struct ProjectDetailView: View {
                 sort: \.lastSeenAt,
                 order: .reverse
             )
-            var sampleDesc = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.projectPath == path }
-            )
-            sampleDesc.propertiesToFetch = sampleProperties
-            _samples = Query(sampleDesc)
         }
         // The "all project paths" query for the merge submenu: only
         // need projectPath. Without `propertiesToFetch` SwiftData
@@ -239,18 +202,53 @@ struct ProjectDetailView: View {
         refreshSubprojects()
     }
 
-    /// Bucket `samples` by `originalProjectPath` to build the
-    /// Subprojects card. Cost uses `sourceCostUSD` directly (what
-    /// Claude Code reported) rather than recomputing from tokens —
-    /// keeps this view dependency-light and good enough for the
-    /// "which subdirs ate the budget" question; the project-level
-    /// totals card still uses the precise recomputed cost.
+    /// Bucket `TokenSample`s for this project by `originalProjectPath`
+    /// to build the Subprojects card. Cost uses `sourceCostUSD`
+    /// directly (what Claude Code reported) rather than recomputing
+    /// from tokens — keeps this view dependency-light and good enough
+    /// for the "which subdirs ate the budget" question; the
+    /// project-level totals card still uses the precise recomputed
+    /// cost.
+    ///
+    /// Why a manual fetch instead of `@Query`: a `@Query` for samples
+    /// was the cause of a freeze-the-whole-modal bug. Every body
+    /// re-evaluation (which happens on every scan-cycle save, every
+    /// ~2s) accessed `samples.count` for `.onChange(of:)`, and
+    /// SwiftData re-fetched/decoded the full set on every access —
+    /// `sample` showed `samples.getter` consuming 67% of main-thread
+    /// time. A manual fetch runs only when this function is called
+    /// (onAppear + onChange(of: aggregates.count)), not on every body
+    /// pass.
     private func refreshSubprojects() {
         struct Acc {
             var tokens: Int64 = 0
             var cost: Double = 0
             var sessions: Set<String> = []
         }
+        let path = projectPath
+        var sampleDesc: FetchDescriptor<TokenSample>
+        if let cutoffDate = since {
+            let cutoffString = TokenSample.formatDate(cutoffDate)
+            sampleDesc = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> {
+                    $0.projectPath == path && $0.date >= cutoffString
+                }
+            )
+        } else {
+            sampleDesc = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.projectPath == path }
+            )
+        }
+        sampleDesc.propertiesToFetch = [
+            \.projectPath,
+            \.originalProjectPath,
+            \.inputTokens,
+            \.outputTokens,
+            \.cacheReadTokens,
+            \.sourceCostUSD,
+            \.sessionId,
+        ]
+        let samples = (try? modelContext.fetch(sampleDesc)) ?? []
         var byPath: [String: Acc] = [:]
         for s in samples {
             // Fall back to the canonical when originalProjectPath
@@ -349,16 +347,16 @@ struct ProjectDetailView: View {
             if !sessionRows.isEmpty { sessionsCard }
         }
         .onAppear { refreshDerived() }
-        // SwiftData @Query exposes the result array directly; comparing
-        // `aggregates.count` is a cheap stable-ish trigger that fires
-        // when new rows land. (Comparing the array itself would trigger
-        // an Equatable conformance check across every row.)
+        // `aggregates.count` is the cheap stable trigger for "new
+        // data landed for this project" — the recomputer writes a
+        // ProjectDailyAggregate row whenever samples for this project
+        // change, so this catches both fresh scans and alias merges.
+        // refreshDerived() chains into refreshSubprojects(), so the
+        // Subprojects card stays in sync without a separate samples
+        // observer (a previous `.onChange(of: samples.count)` was
+        // accessing a @Query that re-fetched on every body render,
+        // freezing the modal — see refreshSubprojects()).
         .onChange(of: aggregates.count) { _, _ in refreshDerived() }
-        // Sample count drives the Subprojects card; recompute when
-        // new samples arrive (e.g. immediate post-merge scan) so the
-        // breakdown stays in sync without waiting on the user to
-        // close/reopen the modal.
-        .onChange(of: samples.count) { _, _ in refreshSubprojects() }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
                 knownPaths: knownProjectPathsForBulkMerge,
