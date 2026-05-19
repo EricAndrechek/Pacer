@@ -307,19 +307,26 @@ public final class SamplePersister {
     public func canonicalizeAffectedSamples(aliases: [String: String]) throws -> Int {
         guard !aliases.isEmpty else { return 0 }
         // The aliases dict is keyed by post-worktree-strip source
-        // paths. Samples that have those exact strings in their
-        // `projectPath` are the only ones that could resolve to a
+        // paths. Samples whose `projectPath` matches one of those
+        // strings exactly are the only ones that could resolve to a
         // new canonical now.
-        let sources = Array(aliases.keys)
-        // `#Predicate` allows only one expression; coerce nil to ""
-        // (which can never be in `sources` because alias upsert
-        // rejects empty paths) so we can do a flat `contains` check.
-        let descriptor = FetchDescriptor<TokenSample>(
-            predicate: #Predicate<TokenSample> { sample in
-                sources.contains(sample.projectPath ?? "")
-            }
-        )
-        let samples = try context.fetch(descriptor)
+        //
+        // We fetch per-source instead of a single `IN`. SwiftData's
+        // SQL generator rejects `sources.contains(sample.projectPath ?? "")`
+        // as `bad LHS` — it wraps the optional column in TERNARY and
+        // can't put TERNARY on the left of IN. The per-source shape
+        // `$0.projectPath == source` is the same predicate used in
+        // `ProjectAggregateRecomputer` and uses the projectPath
+        // index; with typical alias-dict sizes (dozens of entries)
+        // the round-trip cost is negligible.
+        var samples: [TokenSample] = []
+        for source in aliases.keys {
+            let s = source
+            let descriptor = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.projectPath == s }
+            )
+            samples.append(contentsOf: try context.fetch(descriptor))
+        }
         var changedCount = 0
         for sample in samples {
             guard let pre = sample.projectPath else { continue }

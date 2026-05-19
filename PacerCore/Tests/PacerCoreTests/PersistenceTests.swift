@@ -220,6 +220,45 @@ private func makeEntry(
     #expect(try otherContext.fetchCount(FetchDescriptor<TokenSample>()) == 2)
 }
 
+// Regression: a user merging two projects with many sources used to
+// crash SwiftData's SQL generator. The predicate used
+// `sources.contains(sample.projectPath ?? "")`, which compiled fine
+// but threw NSInvalidArgumentException
+// ("unimplemented SQL generation for predicate ... bad LHS") at fetch
+// time because SwiftData can't put a TERNARY on the left side of IN.
+// Mix matching, non-matching, and nil-projectPath rows so the
+// per-source iteration has to filter all three.
+@MainActor
+@Test func samplePersisterCanonicalizesAffectedSamplesWithManySources() throws {
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+
+    let pathA = "/Users/eric/Code/work/projA"
+    let pathB = "/Users/eric/Code/work/projB"
+    let unrelated = "/Users/eric/Code/work/other"
+    _ = try persister.insert(makeEntry(dedup: "a:1", projectPath: pathA))
+    _ = try persister.insert(makeEntry(dedup: "b:1", projectPath: pathB))
+    _ = try persister.insert(makeEntry(dedup: "c:1", projectPath: unrelated))
+    _ = try persister.insert(makeEntry(dedup: "d:1", projectPath: nil))
+    try persister.flush()
+
+    // Both A and B alias to the same canonical. The unrelated and
+    // nil-path rows must be untouched.
+    let canonical = "/Users/eric/Code/work/canonical"
+    let aliases = [pathA: canonical, pathB: canonical]
+    let changed = try persister.canonicalizeAffectedSamples(aliases: aliases)
+    #expect(changed == 2)
+
+    let samples = try context.fetch(
+        FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.dedupKey)])
+    )
+    #expect(samples[0].projectPath == canonical)
+    #expect(samples[1].projectPath == canonical)
+    #expect(samples[2].projectPath == unrelated)
+    #expect(samples[3].projectPath == nil)
+}
+
 // MARK: - AggregateRecomputer
 
 @MainActor
