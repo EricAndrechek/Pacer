@@ -10,6 +10,27 @@ import SwiftData
 /// data divergence between sources.
 @Model
 public final class RateLimitSample {
+    // Hot predicates the read path actually uses:
+    //   - `sortBy(\.sampledAt, .reverse) + fetchLimit: N` is the
+    //     "give me the most recent samples" shape used by HeroStrip,
+    //     MenuBarLabel, MenuStatusContent, NotificationsHost, and all
+    //     three pace widgets. Without an index, every refetch was a
+    //     full-table sort.
+    //   - `predicate: sampledAt >= cutoff` is used by PaceChartCard
+    //     and PaceChartWidget for the 8-day window. Range scan over
+    //     the same index.
+    //   - The compound `(sampledAt, window)` helps the inner-loop
+    //     bucketing where the chart code filters to one window key
+    //     after fetching.
+    // The OAuth poller writes 2 rows every 5 minutes; after a year
+    // that's ~200K rows. The unindexed scans were the longest-running
+    // queries in the read path; they just weren't visible because
+    // each one was sub-10ms.
+    #Index<RateLimitSample>(
+        [\.sampledAt],
+        [\.sampledAt, \.window]
+    )
+
     public var sampledAt: Date
     /// `"five_hour"` or `"seven_day"`. String rather than enum so old
     /// rows don't fail to decode if we add a new window kind later
