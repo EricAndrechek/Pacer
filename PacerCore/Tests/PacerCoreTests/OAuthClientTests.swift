@@ -119,6 +119,73 @@ import Testing
         #expect(req?.httpMethod == "GET")
     }
 
+    // MARK: - extra_usage decoding
+
+    @Test func extraUsageAsTopLevelNumber() async {
+        let body = #"""
+        {
+          "five_hour": {"utilization": 1, "resets_at": ""},
+          "extra_usage": 250
+        }
+        """#
+        let c = client(keychain: goodKeychain(), respond: { _ in self.http(200, body: body) })
+        guard case .success(let snap) = await c.fetchUsage() else {
+            Issue.record("expected success"); return
+        }
+        #expect(snap.extraUsageCents == 250)
+    }
+
+    @Test func extraUsageAsObjectWithCents() async {
+        let body = #"""
+        {
+          "five_hour": {"utilization": 1, "resets_at": ""},
+          "extra_usage": {"amount_cents": 425}
+        }
+        """#
+        let c = client(keychain: goodKeychain(), respond: { _ in self.http(200, body: body) })
+        guard case .success(let snap) = await c.fetchUsage() else {
+            Issue.record("expected success"); return
+        }
+        #expect(snap.extraUsageCents == 425)
+    }
+
+    @Test func extraUsageAsObjectWithDollars() async {
+        let body = #"""
+        {
+          "five_hour": {"utilization": 1, "resets_at": ""},
+          "extra_usage": {"amount": 2.50}
+        }
+        """#
+        let c = client(keychain: goodKeychain(), respond: { _ in self.http(200, body: body) })
+        guard case .success(let snap) = await c.fetchUsage() else {
+            Issue.record("expected success"); return
+        }
+        #expect(snap.extraUsageCents == 250)
+    }
+
+    @Test func extraUsageAbsentSurfacesNil() async {
+        let body = #"{"five_hour":{"utilization":1,"resets_at":""}}"#
+        let c = client(keychain: goodKeychain(), respond: { _ in self.http(200, body: body) })
+        guard case .success(let snap) = await c.fetchUsage() else {
+            Issue.record("expected success"); return
+        }
+        #expect(snap.extraUsageCents == nil)
+    }
+
+    @Test func extraUsageUnrecognizedShapeSurfacesNil() async {
+        let body = #"""
+        {
+          "five_hour": {"utilization": 1, "resets_at": ""},
+          "extra_usage": {"strange_key": "$1.23"}
+        }
+        """#
+        let c = client(keychain: goodKeychain(), respond: { _ in self.http(200, body: body) })
+        guard case .success(let snap) = await c.fetchUsage() else {
+            Issue.record("expected success"); return
+        }
+        #expect(snap.extraUsageCents == nil)
+    }
+
     @Test func usesInjectedNowForSampledAt() async {
         let fixed = Date(timeIntervalSince1970: 1_800_000_000)
         let body = #"{"five_hour":{"utilization":1,"resets_at":""}}"#

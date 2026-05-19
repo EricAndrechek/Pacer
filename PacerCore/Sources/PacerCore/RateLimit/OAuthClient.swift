@@ -188,13 +188,50 @@ public struct OAuthClient: Sendable {
             throw DecodeError(detail: "top level was not a JSON object")
         }
         // The endpoint also returns seven_day_opus, seven_day_sonnet,
-        // extra_usage, etc. — deliberately ignored per the design;
-        // surfacing more would just be noise we can't render usefully.
+        // and a handful of internal-codename fields we deliberately
+        // ignore. `extra_usage` is the one extra field worth surfacing
+        // — Max-plan users can exceed quota at metered rates and want
+        // to see that spend.
         return RateLimitSnapshot(
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
-            sevenDay: decodeWindow(top["seven_day"])
+            sevenDay: decodeWindow(top["seven_day"]),
+            extraUsageCents: Self.decodeExtraUsage(top["extra_usage"])
         )
+    }
+
+    /// Parse `extra_usage`. Shape is undocumented — be tolerant. We
+    /// accept:
+    /// - a number (treated as cents, matching `usage_cents` convention)
+    /// - a dict with `amount_cents` / `cents` (number, cents)
+    /// - a dict with `amount` / `usd` (number, dollars → cents)
+    /// Anything else returns nil, in which case the dashboard chip
+    /// stays hidden. Defensive parse beats throwing a decode error
+    /// for an optional field.
+    static func decodeExtraUsage(_ raw: Any?) -> Int? {
+        if let n = numericValue(raw) {
+            return Int(n.rounded())
+        }
+        guard let dict = raw as? [String: Any] else { return nil }
+        if let cents = numericValue(dict["amount_cents"]) ?? numericValue(dict["cents"]) {
+            return Int(cents.rounded())
+        }
+        if let dollars = numericValue(dict["amount"]) ?? numericValue(dict["usd"]) {
+            return Int((dollars * 100).rounded())
+        }
+        return nil
+    }
+
+    /// Coerce JSON numeric variants (`Double` / `Int` / `NSNumber`) to
+    /// a single Double. Strings are deliberately not accepted —
+    /// Anthropic's other numeric fields are emitted as numbers, so
+    /// receiving a string is a schema change we want to surface as
+    /// nil rather than silently parse.
+    private static func numericValue(_ raw: Any?) -> Double? {
+        if let v = raw as? Double { return v }
+        if let v = raw as? Int { return Double(v) }
+        if let v = raw as? NSNumber { return v.doubleValue }
+        return nil
     }
 
     private func decodeWindow(_ raw: Any?) -> RateLimitWindow? {

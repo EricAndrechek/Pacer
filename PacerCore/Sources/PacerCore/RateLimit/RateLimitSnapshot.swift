@@ -28,11 +28,22 @@ public struct RateLimitSnapshot: Sendable, Equatable {
     public let sampledAt: Date
     public let fiveHour: RateLimitWindow?
     public let sevenDay: RateLimitWindow?
+    /// Anthropic's `extra_usage` field — additional spend beyond plan
+    /// quota, denominated in USD cents. Surfaced for Max-plan users
+    /// who can exceed quota at metered rates. nil when the response
+    /// omits the field or it's a shape we don't recognize.
+    public let extraUsageCents: Int?
 
-    public init(sampledAt: Date, fiveHour: RateLimitWindow?, sevenDay: RateLimitWindow?) {
+    public init(
+        sampledAt: Date,
+        fiveHour: RateLimitWindow?,
+        sevenDay: RateLimitWindow?,
+        extraUsageCents: Int? = nil
+    ) {
         self.sampledAt = sampledAt
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.extraUsageCents = extraUsageCents
     }
 }
 

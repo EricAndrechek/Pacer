@@ -34,6 +34,11 @@ public enum PacerPreferenceKeys {
     public static let sevenDayThresholdsCSV  = "pacer.notifications.sevenDayThresholds"
     public static let notifyOnDailyCost      = "pacer.notifications.dailyCost"
     public static let dailyCostThresholdUSD  = "pacer.notifications.dailyCostThreshold"
+    /// Fire a banner when a rate-limit window resets (utilization drops
+    /// from a meaningful level to near-zero and the resetsAt boundary
+    /// moves forward). Useful for users who pace work around the 5-hour
+    /// window — they can be told "OK, you can keep going."
+    public static let notifyOnReset          = "pacer.notifications.reset"
     /// Once-a-day "you spent X today" banner. Independent of the
     /// daily-cost ceiling above — that one fires when the threshold
     /// is exceeded; this one is purely informational at a chosen

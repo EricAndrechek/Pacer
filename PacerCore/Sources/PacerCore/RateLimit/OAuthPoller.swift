@@ -313,6 +313,19 @@ public actor OAuthPoller {
                 ))
                 wroteAnyWindow = true
             }
+            // Extra-usage is account-level (not per-window), so we
+            // write at most one row per snapshot when the field was
+            // present. nil means Anthropic omitted the field for this
+            // account — leave the prior row in place, don't overwrite
+            // with a phantom zero.
+            if let cents = captured.extraUsageCents {
+                context.insert(ExtraUsageSample(
+                    sampledAt: captured.sampledAt,
+                    amountCents: cents,
+                    source: RateLimitSource.oauth
+                ))
+                wroteAnyWindow = true
+            }
             do {
                 try context.save()
                 // Tell WidgetKit consumers (pace widgets, mainly) that

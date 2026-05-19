@@ -23,6 +23,17 @@ struct HeroStripCard: View {
     /// today" entry point.
     let onTodayTap: (() -> Void)?
 
+    /// User's daily-cost notification toggle. Surfaced inside the
+    /// cost tile as a budget progress bar when enabled — the user
+    /// has opted into "I care about this number," so showing them
+    /// visual feedback (not just an after-the-fact banner) is
+    /// honest. When disabled, no bar — keeps the tile clean for
+    /// users who haven't configured a budget.
+    @AppStorage(PacerSettings.Key.notifyOnDailyCost, store: PacerSettings.store)
+    private var dailyBudgetEnabled: Bool = false
+    @AppStorage(PacerSettings.Key.dailyCostThresholdUSD, store: PacerSettings.store)
+    private var dailyBudgetUSD: Double = 50
+
     init(onTodayTap: (() -> Void)? = nil) {
         self.onTodayTap = onTodayTap
         let todayString = TokenSample.formatDate(Date())
@@ -51,6 +62,10 @@ struct HeroStripCard: View {
     /// covers ~2 hours of both windows together with headroom for
     /// status-line bursts that bypass the 5-min cadence.
     @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
+    /// Most-recent `extra_usage` sample. Only meaningful for Max-plan
+    /// users who can exceed quota; nil for everyone else. fetchLimit
+    /// = 1 keeps the materialization bounded.
+    @Query(HeroStripCard.recentExtraUsage) private var extraUsages: [ExtraUsageSample]
     /// Scan-meta probe — used as the "data changed" tick that triggers
     /// the @State cache refresh. Per AGENTS.md performance invariants,
     /// every derived value heavier than O(N=10) lives in @State and is
@@ -62,6 +77,14 @@ struct HeroStripCard: View {
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         d.fetchLimit = 48
+        return d
+    }()
+
+    private static let recentExtraUsage: FetchDescriptor<ExtraUsageSample> = {
+        var d = FetchDescriptor<ExtraUsageSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
         return d
     }()
 
@@ -88,6 +111,11 @@ struct HeroStripCard: View {
         var sevenDay: SampleSnapshot?
         var fiveHourBurn: BurnRate.Projection?
         var sevenDayBurn: BurnRate.Projection?
+        /// Latest `extra_usage` value in USD. nil when Anthropic
+        /// omitted the field; zero when we received it but it's at
+        /// zero (no overage yet). Both render as "no chip"; we
+        /// distinguish in the code path so we know whether to log.
+        var extraUsageUSD: Double?
     }
 
     /// Sendable extract of the rate-limit row's display-relevant fields.
@@ -125,6 +153,9 @@ struct HeroStripCard: View {
         }
         next.fiveHourBurn = projection(forWindow: "five_hour")
         next.sevenDayBurn = projection(forWindow: "seven_day")
+        if let latest = extraUsages.first {
+            next.extraUsageUSD = latest.amountUSD
+        }
         cached = next
     }
 
@@ -190,12 +221,66 @@ struct HeroStripCard: View {
                     if let ratio = cached.weekDeltaRatio {
                         trendChip(ratio: ratio)
                     }
+                    if let extra = cached.extraUsageUSD, extra > 0 {
+                        // Max-plan overage. Tint orange (significant but
+                        // not catastrophic — at Anthropic's metered
+                        // rates a few dollars over isn't an emergency).
+                        Chip(
+                            text: "+\(pacerCost(extra)) over",
+                            systemImage: "plus.forwardslash.minus",
+                            tint: .orange,
+                            size: .compact
+                        )
+                        .fixedSize()
+                    }
                     Text("\(pacerTokens(cached.todayTokens)) tokens")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+                if dailyBudgetEnabled, dailyBudgetUSD > 0 {
+                    budgetBar
+                }
             }
+        }
+    }
+
+    /// Progress bar showing today's cost as a fraction of the user's
+    /// configured daily budget. Tints green (<80%), orange (≥80%),
+    /// red (≥100%). The label says "$12 / $50 (24%)" — both raw and
+    /// percentage so the user doesn't have to mental-math either
+    /// side from the other.
+    @ViewBuilder
+    private var budgetBar: some View {
+        let ratio = dailyBudgetUSD > 0 ? cached.todayCost / dailyBudgetUSD : 0
+        let displayRatio = min(1.0, max(0, ratio))
+        let pctText = "\(Int((ratio * 100).rounded()))%"
+        let tint: Color =
+            ratio >= 1.0 ? .red :
+            ratio >= 0.8 ? .orange : .green
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text("\(pacerCost(cached.todayCost)) / \(pacerCost(dailyBudgetUSD))")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                Text(pctText)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(tint)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 4)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(tint)
+                        .frame(width: geo.size.width * displayRatio, height: 4)
+                }
+            }
+            .frame(height: 4)
         }
     }
 

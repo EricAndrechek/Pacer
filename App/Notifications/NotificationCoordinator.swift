@@ -239,6 +239,63 @@ public final class NotificationCoordinator {
         markNotified(key: key, in: context)
     }
 
+    /// "Your window just reset" detection. Fires when the rolling
+    /// window rolled over: previous utilization was meaningful (≥ this
+    /// threshold), current utilization is near-zero, AND `resetsAt`
+    /// moved forward (proving a real cycle boundary crossed — not just
+    /// an unrelated dip in the same cycle).
+    ///
+    /// Dedup is keyed on the NEW `resetsAt` so we fire at most once
+    /// per cycle even when the OAuth poller writes multiple low
+    /// samples back-to-back as the new window starts at zero.
+    public static let resetPreviousHigh: Double = 50
+    public static let resetCurrentLow: Double = 10
+
+    public func handleRateLimitReset(
+        window: String,
+        currentPct: Double,
+        previousPct: Double?,
+        resetsAt: Date?,
+        previousResetsAt: Date?,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard defaults.bool(forKey: PacerSettings.Key.notifyOnReset) else { return }
+        guard let previousPct, previousPct >= Self.resetPreviousHigh else { return }
+        guard currentPct <= Self.resetCurrentLow else { return }
+        guard let resetsAt, let previousResetsAt, resetsAt > previousResetsAt else {
+            // No reset boundary movement — could be the same cycle's
+            // utilization dipping (server-side accounting recompute).
+            // Without the resetsAt advance we don't have proof the
+            // cycle actually rolled.
+            return
+        }
+
+        let cycleKey = "notif.reset.\(window).\(ISO8601DateFormatter().string(from: resetsAt))"
+        if alreadyNotified(key: cycleKey, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        content.title = "Pacer \(label) limit reset"
+        content.body = "You're back to \(Int(currentPct.rounded()))%. Next reset \(Self.formatRelative(resetsAt))."
+        content.sound = nil  // informational — no need to startle
+        content.interruptionLevel = .passive
+
+        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: cycleKey, in: context)
+    }
+
+    private static func formatRelative(_ date: Date) -> String {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f.localizedString(for: date, relativeTo: Date())
+    }
+
     /// Today's-cost ceiling notification. Fires once per day-and-threshold
     /// pair so re-launching the app doesn't re-notify.
     public func handleDailyCostUpdate(

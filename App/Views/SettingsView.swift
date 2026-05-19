@@ -30,6 +30,7 @@ struct SettingsView: View {
                 SettingsSection("Notifications") {
                     RateLimitAlertsCard()
                     DailyCostAlertCard()
+                    ResetAlertCard()
                     DailySummaryCard()
                     NotificationTestCard()
                 }
@@ -641,6 +642,21 @@ private struct DailyCostAlertCard: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Reset notifications
+
+private struct ResetAlertCard: View {
+    @AppStorage(PacerSettings.Key.notifyOnReset, store: PacerSettings.store)
+    private var resetEnabled: Bool = false
+
+    var body: some View {
+        PacerCard("Reset notifications", content: {
+            Toggle("Notify when a rate-limit window resets", isOn: $resetEnabled)
+        }, footer: {
+            Text("Fires when the 5-hour or 7-day window rolls over (usage drops near zero and the next reset moves forward). Quiet, informational banner — useful for pacing work around the rolling window.")
+        })
     }
 }
 

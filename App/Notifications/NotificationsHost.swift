@@ -27,6 +27,13 @@ struct NotificationsHost: View {
     @State private var lastSeenFiveHour: Double?
     @State private var lastSeenSevenDay: Double?
     @State private var lastSeenDailyCost: Double?
+    /// Most recent `resetsAt` we saw for each window. Reset detection
+    /// fires when the new sample's `resetsAt` is strictly later than
+    /// this — strong signal the cycle actually rolled over (vs the
+    /// utilization just dipping mid-cycle from a server-side rollup
+    /// recompute).
+    @State private var lastSeenFiveHourResetsAt: Date?
+    @State private var lastSeenSevenDayResetsAt: Date?
     /// `persistentModelID` of the most recent sample we already
     /// considered for each window. The `onChange` predicates below
     /// use this to short-circuit when SwiftData re-notifies with no
@@ -69,9 +76,11 @@ struct NotificationsHost: View {
                 // already over threshold.
                 if let f = samples.first(where: { $0.window == "five_hour" }) {
                     lastSeenFiveHour = f.usedPercentage
+                    lastSeenFiveHourResetsAt = f.resetsAt
                 }
                 if let s = samples.first(where: { $0.window == "seven_day" }) {
                     lastSeenSevenDay = s.usedPercentage
+                    lastSeenSevenDayResetsAt = s.resetsAt
                 }
                 lastSeenDailyCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
                 await NotificationCoordinator.shared.requestAuthorizationIfNeeded()
@@ -97,14 +106,24 @@ struct NotificationsHost: View {
         // NotificationCoordinator on every such re-fire.
         if latest.persistentModelID == lastConsideredFiveHourId { return }
         lastConsideredFiveHourId = latest.persistentModelID
-        let prev = lastSeenFiveHour
+        let prevPct = lastSeenFiveHour
+        let prevResetsAt = lastSeenFiveHourResetsAt
         lastSeenFiveHour = latest.usedPercentage
+        lastSeenFiveHourResetsAt = latest.resetsAt
         Task { @MainActor in
             await NotificationCoordinator.shared.handleRateLimitUpdate(
                 window: "five_hour",
                 currentPct: latest.usedPercentage,
-                previousPct: prev,
+                previousPct: prevPct,
                 resetsAt: latest.resetsAt,
+                context: context
+            )
+            await NotificationCoordinator.shared.handleRateLimitReset(
+                window: "five_hour",
+                currentPct: latest.usedPercentage,
+                previousPct: prevPct,
+                resetsAt: latest.resetsAt,
+                previousResetsAt: prevResetsAt,
                 context: context
             )
         }
@@ -114,14 +133,24 @@ struct NotificationsHost: View {
         guard let latest = samples.first(where: { $0.window == "seven_day" }) else { return }
         if latest.persistentModelID == lastConsideredSevenDayId { return }
         lastConsideredSevenDayId = latest.persistentModelID
-        let prev = lastSeenSevenDay
+        let prevPct = lastSeenSevenDay
+        let prevResetsAt = lastSeenSevenDayResetsAt
         lastSeenSevenDay = latest.usedPercentage
+        lastSeenSevenDayResetsAt = latest.resetsAt
         Task { @MainActor in
             await NotificationCoordinator.shared.handleRateLimitUpdate(
                 window: "seven_day",
                 currentPct: latest.usedPercentage,
-                previousPct: prev,
+                previousPct: prevPct,
                 resetsAt: latest.resetsAt,
+                context: context
+            )
+            await NotificationCoordinator.shared.handleRateLimitReset(
+                window: "seven_day",
+                currentPct: latest.usedPercentage,
+                previousPct: prevPct,
+                resetsAt: latest.resetsAt,
+                previousResetsAt: prevResetsAt,
                 context: context
             )
         }

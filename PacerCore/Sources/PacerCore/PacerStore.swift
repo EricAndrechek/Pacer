@@ -83,6 +83,7 @@ public enum PacerStore {
             HourlyAggregate.self,
             ProjectDailyAggregate.self,
             RateLimitSample.self,
+            ExtraUsageSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,
             JSONLFileCursor.self,

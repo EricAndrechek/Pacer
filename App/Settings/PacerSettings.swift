@@ -123,6 +123,7 @@ public enum PacerSettings {
         public static let sevenDayThresholdsCSV  = PacerPreferenceKeys.sevenDayThresholdsCSV
         public static let notifyOnDailyCost      = PacerPreferenceKeys.notifyOnDailyCost
         public static let dailyCostThresholdUSD  = PacerPreferenceKeys.dailyCostThresholdUSD
+        public static let notifyOnReset          = PacerPreferenceKeys.notifyOnReset
         public static let notifyDailySummary     = PacerPreferenceKeys.notifyDailySummary
         public static let dailySummaryHour       = PacerPreferenceKeys.dailySummaryHour
         public static let costMode               = PacerPreferenceKeys.costMode
@@ -147,6 +148,7 @@ public enum PacerSettings {
         Key.sevenDayThresholdsCSV: "75",
         Key.notifyOnDailyCost:     false,
         Key.dailyCostThresholdUSD: 50.0,
+        Key.notifyOnReset:         false,
         Key.notifyDailySummary:    false,
         Key.dailySummaryHour:      21,
         Key.costMode:              "auto",
