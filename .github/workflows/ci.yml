@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same ref on new pushes — saves runner
+# minutes while iterating.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pacercore-test:
+    name: PacerCore tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      # Standalone SPM package — no Xcode project required for the
+      # PacerCore + PacerUI tests. Runs in well under a minute on the
+      # standard runner.
+      - name: Run PacerCore tests
+        working-directory: PacerCore
+        run: swift test --parallel
+
+  app-build:
+    name: App + widgets verify build
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # Unsigned compile-only build — same flags `make verify` uses
+      # locally. We don't run signed builds in CI because the Developer
+      # ID cert lives on the maintainer's machine; signed + notarized
+      # builds happen in a release workflow (TBD).
+      #
+      # `xcbeautify` is preinstalled on the macos-15 runner image; if
+      # that ever changes the `|| cat` fallback keeps the build's exit
+      # code authoritative without losing log lines.
+      - name: Build Pacer.app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pacer.xcodeproj \
+            -scheme Pacer \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build \
+            | (xcbeautify --renderer github-actions || cat)
+
+      - name: Build PacerWidgets.appex
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pacer.xcodeproj \
+            -scheme PacerWidgets \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build \
+            | (xcbeautify --renderer github-actions || cat)

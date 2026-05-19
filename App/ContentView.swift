@@ -457,4 +457,11 @@ extension Notification.Name {
     /// take effect. Cheap to over-fire: the coordinator already
     /// skips overlapping cycles.
     static let pacerRequestImmediateScan = Notification.Name("PacerRequestImmediateScan")
+
+    /// Fired by `AppBackgroundService` after the 24h LiteLLM pricing
+    /// refresh writes a new snapshot. Views bound to per-model cost
+    /// columns can subscribe to re-render with the new prices; existing
+    /// rollup rows keep their already-recorded cost (pricing changes
+    /// only affect samples added after this point).
+    static let pacerPricingDidRefresh = Notification.Name("PacerPricingDidRefresh")
 }

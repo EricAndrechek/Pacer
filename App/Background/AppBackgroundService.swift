@@ -34,6 +34,12 @@ final class AppBackgroundService {
     /// on their own internal timeline policy, gated by WidgetKit's
     /// budget, which can leave them tens of minutes stale.
     private let widgetRefreshCoordinator = WidgetRefreshCoordinator()
+    /// Background task that periodically refreshes the LiteLLM pricing
+    /// snapshot. Independent of the scan loop because its cadence (24h)
+    /// is two orders of magnitude longer than scan cycles (5–60s) and
+    /// entangling them would make the scan path responsible for
+    /// network/CDN fallibility.
+    private var pricingRefreshTask: Task<Void, Never>?
 
     init(container: ModelContainer) {
         self.container = container
@@ -75,6 +81,7 @@ final class AppBackgroundService {
 
         installImmediateScanObserver()
         widgetRefreshCoordinator.start()
+        startPricingRefreshTask()
     }
 
     func stop() async {
@@ -91,6 +98,88 @@ final class AppBackgroundService {
             immediateScanObserver = nil
         }
         widgetRefreshCoordinator.stop()
+        pricingRefreshTask?.cancel()
+        pricingRefreshTask = nil
+    }
+
+    // MARK: - Pricing refresh
+
+    /// 24h cadence for the pricing JSON refresh. LiteLLM ships updates
+    /// frequently but each one only affects costs of *future* samples
+    /// — historical aggregates keep the cost that was current when they
+    /// were computed. Faster cadence isn't worth the bandwidth.
+    private static let pricingRefreshInterval: TimeInterval = 24 * 3600
+    /// How long to wait after a refresh attempt that didn't produce a
+    /// usable snapshot (network down, decode failure, empty result).
+    /// One hour matches typical CDN outage recovery windows.
+    private static let pricingRetryInterval: TimeInterval = 3600
+
+    private func startPricingRefreshTask() {
+        guard pricingRefreshTask == nil else { return }
+        pricingRefreshTask = Task { [weak self] in
+            // Re-check the cache age before every attempt — a previous
+            // run of this task might have refreshed before launch and
+            // a fresh launch shouldn't immediately re-fetch.
+            while !Task.isCancelled {
+                let age = PricingTable.cacheAge()
+                let stale: Bool
+                switch age {
+                case .none: stale = true
+                case .some(let a): stale = a >= Self.pricingRefreshInterval
+                }
+
+                var refreshed = false
+                if stale {
+                    let count = await PricingTable.shared.modelCount()
+                    refreshed = await PricingTable.shared.refresh()
+                    if refreshed {
+                        await SampleCostCache.reload()
+                        let after = await PricingTable.shared.modelCount()
+                        Log.write(
+                            "AppBackground",
+                            "pricing refresh ok: \(count) → \(after) model(s)"
+                        )
+                        // Notify any view bound to the pricing snapshot
+                        // (model breakdowns, per-model today) so it
+                        // re-renders with the new prices for samples
+                        // landing after this point. Existing aggregate
+                        // rows keep the cost that was current when they
+                        // were recomputed.
+                        await self?.postPricingRefreshed()
+                    }
+                }
+
+                // Compute next-sleep based on whichever path we took:
+                // - successful refresh → full 24h until the next cache
+                //   age check would flag stale
+                // - skipped (cache still fresh) → sleep the remaining
+                //   time until 24h
+                // - failed refresh → retry after 1h
+                let delay: TimeInterval
+                if stale && !refreshed {
+                    delay = Self.pricingRetryInterval
+                } else {
+                    let nextAge = PricingTable.cacheAge() ?? 0
+                    delay = max(60, Self.pricingRefreshInterval - nextAge)
+                }
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(delay * 1_000_000_000)
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    /// Hop to the main actor and post `.pacerPricingDidRefresh` so
+    /// views observing the cost-mode/pricing snapshot can refresh
+    /// without polling. Tiny payload — nothing to send beyond the
+    /// notification itself.
+    @MainActor
+    private func postPricingRefreshed() {
+        NotificationCenter.default.post(name: .pacerPricingDidRefresh, object: nil)
     }
 
     // MARK: - Immediate-scan trigger

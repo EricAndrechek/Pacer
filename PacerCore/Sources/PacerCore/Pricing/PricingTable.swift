@@ -38,33 +38,96 @@ public actor PricingTable {
 
     private var pricingByModel: [String: LiteLLMModelPricing] = [:]
     private var loadedAt: Date?
+    /// `true` when the active in-memory snapshot came from the refreshed
+    /// cache file (or a direct refresh in this process); `false` when
+    /// we fell back to the build-embedded JSON. Lets the refresh task
+    /// decide whether the cache file is authoritative.
+    private var loadedFromCache: Bool = false
 
     public init() {}
 
-    /// Load from the embedded snapshot if not already loaded. Cheap to
-    /// call repeatedly. The runtime refresh path is `refresh()`.
-    public func ensureLoaded() async throws {
+    /// Load if not already loaded. Prefers the refreshed cache file in
+    /// the App Group container (written by `refresh()`); falls back to
+    /// the build-embedded snapshot. Cheap to call repeatedly.
+    ///
+    /// `cacheURL` overrides the App Group path — used by tests, and
+    /// available to any future surface that wants to load from an
+    /// explicit location.
+    public func ensureLoaded(cacheURL: URL? = nil) async throws {
         if !pricingByModel.isEmpty { return }
-        try loadEmbedded()
+        try loadFromCacheOrEmbedded(cacheURL: cacheURL)
     }
 
     /// Force-reload from the embedded snapshot. Used by tests.
     public func reloadEmbedded() throws {
-        try loadEmbedded()
+        try loadEmbedded(skipCache: true)
     }
 
     /// Fetch fresh pricing from LiteLLM's URL. On success, atomically
-    /// replace the in-memory table; on failure, keep the existing
-    /// (possibly embedded) data. Fail-soft is the right default —
-    /// stale-but-real pricing beats broken pricing.
-    public func refresh(urlSession: URLSession = .shared) async {
+    /// replace the in-memory table AND write the raw JSON to
+    /// `cacheURL` so a subsequent launch picks up the new prices
+    /// without needing the network. On failure, keep the existing
+    /// (possibly embedded) data — stale-but-real pricing beats broken
+    /// pricing.
+    ///
+    /// Returns `true` only when the refresh produced a non-empty
+    /// decoded table; callers can use this to decide whether to log /
+    /// reload the per-process cost cache.
+    @discardableResult
+    public func refresh(
+        urlSession: URLSession = .shared,
+        cacheURL: URL? = nil
+    ) async -> Bool {
         do {
             let (data, _) = try await urlSession.data(from: Self.liteLLMURL)
             let decoded = try Self.decode(data: data)
-            replace(with: decoded)
+            guard !decoded.isEmpty else {
+                Log.write("PricingTable", "refresh: decoded 0 models — keeping existing snapshot")
+                return false
+            }
+            // Persist the raw payload (not the decoded dict) so the
+            // next launch reads from a real LiteLLM file shape and
+            // gets the same decode-and-skip-bad-entries behavior the
+            // embedded path uses.
+            let destination = cacheURL ?? Self.cacheFileURL()
+            if let destination {
+                do {
+                    try FileManager.default.createDirectory(
+                        at: destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try data.write(to: destination, options: [.atomic])
+                } catch {
+                    Log.write("PricingTable", "cache write failed (\(error)) — keeping in-memory only")
+                }
+            }
+            replace(with: decoded, fromCache: true)
+            return true
         } catch {
             Log.write("PricingTable", "refresh failed (\(error)) — keeping existing snapshot")
+            return false
         }
+    }
+
+    /// Cache-file path in the App Group container. nil when the
+    /// container isn't available (sandboxed test runners). The cache
+    /// lives alongside `pacer.sqlite` so app + widget both see updates.
+    public static func cacheFileURL() -> URL? {
+        try? PacerStore.sharedContainerURL()
+            .appendingPathComponent("litellm-pricing.cache.json")
+    }
+
+    /// File-system mtime of the cached pricing JSON, or nil when no
+    /// cache file exists yet (fresh install or App Group unavailable).
+    /// Callers compare against `Date()` to decide whether the cache is
+    /// stale enough to warrant a refresh.
+    public static func cacheAge(at url: URL? = nil) -> TimeInterval? {
+        guard let cacheURL = url ?? cacheFileURL(),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: cacheURL.path),
+              let mtime = attrs[.modificationDate] as? Date else {
+            return nil
+        }
+        return Date().timeIntervalSince(mtime)
     }
 
     /// Look up a model. Returns nil only if no candidate match exists
@@ -138,18 +201,35 @@ public actor PricingTable {
 
     // MARK: - Private
 
-    private func loadEmbedded() throws {
+    /// Pick the freshest available snapshot: cache file first, embedded
+    /// JSON as fallback. The cache file is only trusted if it decodes
+    /// to a non-empty table — a truncated download or corruption falls
+    /// through to embedded without surfacing as a user-visible failure.
+    private func loadFromCacheOrEmbedded(cacheURL: URL? = nil) throws {
+        let url = cacheURL ?? Self.cacheFileURL()
+        if let url,
+           let data = try? Data(contentsOf: url),
+           let decoded = try? Self.decode(data: data),
+           !decoded.isEmpty {
+            replace(with: decoded, fromCache: true)
+            return
+        }
+        try loadEmbedded(skipCache: true)
+    }
+
+    private func loadEmbedded(skipCache: Bool) throws {
         guard let url = Bundle.module.url(forResource: "litellm-pricing", withExtension: "json") else {
             throw PricingTableError.embeddedSnapshotMissing
         }
         let data = try Data(contentsOf: url)
         let decoded = try Self.decode(data: data)
-        replace(with: decoded)
+        replace(with: decoded, fromCache: false)
     }
 
-    private func replace(with decoded: [String: LiteLLMModelPricing]) {
+    private func replace(with decoded: [String: LiteLLMModelPricing], fromCache: Bool) {
         pricingByModel = decoded
         loadedAt = Date()
+        loadedFromCache = fromCache
     }
 
     /// Top-level decode of LiteLLM's JSON. The file is a flat
