@@ -156,10 +156,35 @@ struct MenuBarLabel: View {
             }
         case .dot:
             return "circle.fill"
+        case .activityRings:
+            // Unused — `.activityRings` renders an ActivityRings view
+            // instead of an SF Symbol. Returning a value keeps the
+            // switch exhaustive without forcing a runtime guard
+            // around the symbol-name property.
+            return "circle.fill"
         }
     }
 
     // MARK: - Chip data
+
+    /// Activity-ring data for the menu-bar icon when `MenuBarIconStyle
+    /// == .activityRings`. Outer = 5h, inner = 7d. nil samples render
+    /// as empty tracks (still distinguishable as rings) rather than
+    /// vanishing entirely.
+    private var ringsForMenuBar: [ActivityRings.Ring] {
+        let fiveHourPct = fiveHour?.usedPercentage ?? 0
+        let sevenDayPct = sevenDay?.usedPercentage ?? 0
+        return [
+            ActivityRings.Ring(
+                progress: fiveHourPct / 100,
+                color: UsageBand(percentage: fiveHourPct).color
+            ),
+            ActivityRings.Ring(
+                progress: sevenDayPct / 100,
+                color: UsageBand(percentage: sevenDayPct).color
+            )
+        ]
+    }
 
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
@@ -259,21 +284,38 @@ struct MenuBarLabel: View {
     private func chipView(_ chip: PacerSettings.MenuBarChip) -> some View {
         switch chip {
         case .icon:
-            // `.monochrome` (not `.palette`) so the SF Symbol renders
-            // in one solid tint — `gauge.with.dots.needle.*percent`
-            // has a body layer that `.palette` was painting with
-            // `.secondary.opacity(0.5)`, which read as "greyed out"
-            // even at full health. Monochrome with `bandColor` makes
-            // the whole icon read at full strength like Battery /
-            // Wi-Fi when the band is green.
-            Image(systemName: symbolName)
-                .symbolRenderingMode(.monochrome)
-                .foregroundStyle(bandColor)
-                .scaleEffect(pulse ? 1.15 : 1.0)
-                .animation(
-                    .spring(response: 0.35, dampingFraction: 0.55),
-                    value: pulse
-                )
+            if iconStyle == .activityRings {
+                // Apple Watch-style dual-ring icon. Outer = 5h, inner
+                // = 7d. 14pt fits the menu-bar height comfortably
+                // alongside chip text without crowding adjacent
+                // items. Each ring's color is band-driven so the
+                // icon escalates the same way the gauge/dot styles
+                // would.
+                ActivityRings(rings: ringsForMenuBar)
+                    .frame(width: 14, height: 14)
+                    .scaleEffect(pulse ? 1.15 : 1.0)
+                    .animation(
+                        .spring(response: 0.35, dampingFraction: 0.55),
+                        value: pulse
+                    )
+            } else {
+                // `.monochrome` (not `.palette`) so the SF Symbol
+                // renders in one solid tint — the gauge needle
+                // family has a body layer that `.palette` was
+                // painting with `.secondary.opacity(0.5)`, which read
+                // as "greyed out" even at full health. Monochrome
+                // with `bandColor` makes the whole icon read at full
+                // strength like Battery / Wi-Fi when the band is
+                // green.
+                Image(systemName: symbolName)
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(bandColor)
+                    .scaleEffect(pulse ? 1.15 : 1.0)
+                    .animation(
+                        .spring(response: 0.35, dampingFraction: 0.55),
+                        value: pulse
+                    )
+            }
 
         case .fiveHourPct:
             percentChip(

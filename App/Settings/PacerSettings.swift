@@ -44,14 +44,16 @@ public enum PacerSettings {
         case gaugeNeedle  = "gauge_needle"
         case ringFill     = "ring_fill"
         case dot          = "dot"
+        case activityRings = "activity_rings"
 
         public var id: String { rawValue }
 
         public var label: String {
             switch self {
-            case .gaugeNeedle:  return "Gauge needle"
-            case .ringFill:     return "Ring fill"
-            case .dot:          return "Status dot"
+            case .gaugeNeedle:    return "Gauge needle"
+            case .ringFill:       return "Ring fill"
+            case .dot:            return "Status dot"
+            case .activityRings:  return "Activity rings"
             }
         }
     }
