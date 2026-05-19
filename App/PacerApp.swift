@@ -141,13 +141,23 @@ struct PacerApp: App {
                     )
                 }
                 .keyboardShortcut("4", modifiers: .command)
+                Button("ROI") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.roi
+                    )
+                }
+                .keyboardShortcut("5", modifiers: .command)
+                // Settings intentionally has no numbered shortcut here —
+                // ⌘, (replaced via CommandGroup .appSettings above)
+                // remains the single source of truth, and the sidebar's
+                // pinned Settings row is the click target.
                 Button("Settings") {
                     NotificationCenter.default.post(
                         name: .pacerSelectDestination,
                         object: ContentView.Destination.settings
                     )
                 }
-                .keyboardShortcut("5", modifiers: .command)
             }
             // Replace the default Help menu with one that points at
             // useful local destinations. Apple-default "Pacer Help"

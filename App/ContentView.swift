@@ -24,7 +24,7 @@ struct ContentView: View {
     /// always reset to Dashboard on relaunch — annoying for users who
     /// live in History or Projects.
     enum Destination: String, Hashable, Identifiable, CaseIterable {
-        case dashboard, history, projects, models, settings
+        case dashboard, history, projects, models, roi, settings
         var id: String { rawValue }
 
         var title: String {
@@ -33,6 +33,7 @@ struct ContentView: View {
             case .history:   return "History"
             case .projects:  return "Projects"
             case .models:    return "Models"
+            case .roi:       return "ROI"
             case .settings:  return "Settings"
             }
         }
@@ -48,6 +49,9 @@ struct ContentView: View {
             case .history:   return "calendar"
             case .projects:  return selected ? "folder.fill"    : "folder"
             case .models:    return selected ? "cpu.fill"       : "cpu"
+            case .roi:       return selected
+                                 ? "chart.line.uptrend.xyaxis.circle.fill"
+                                 : "chart.line.uptrend.xyaxis"
             case .settings:  return selected ? "gearshape.fill" : "gearshape"
             }
         }
@@ -167,6 +171,7 @@ struct ContentView: View {
                         SidebarItem(destination: .history, selection: selection)
                         SidebarItem(destination: .projects, selection: selection)
                         SidebarItem(destination: .models, selection: selection)
+                        SidebarItem(destination: .roi, selection: selection)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -226,7 +231,7 @@ struct ContentView: View {
     /// usage views into Settings every time you reach the bottom of
     /// "Activity."
     private func moveSelection(by delta: Int) {
-        let order: [Destination] = [.dashboard, .history, .projects, .models, .settings]
+        let order: [Destination] = [.dashboard, .history, .projects, .models, .roi, .settings]
         let current = selection.wrappedValue
         guard let idx = order.firstIndex(of: current) else {
             selection.wrappedValue = .dashboard
@@ -263,6 +268,7 @@ struct ContentView: View {
         case .history:   HistoryView()
         case .projects:  ProjectsView()
         case .models:    ModelsView()
+        case .roi:       ROIView()
         case .settings:  SettingsView()
         }
     }

@@ -102,7 +102,12 @@ public enum ProjectGitRootScanner {
     ///   `.git/worktrees/<id>`; the working dir IS the canonical
     ///   root for samples taken inside it, so we don't follow the
     ///   pointer)
-    static func findGitRoot(from path: String, home: String) async -> String? {
+    ///
+    /// Public so ROI view can reuse the same lookup — it has the
+    /// same set of project paths and the same "skip if no git
+    /// ancestor" semantics, so duplicating the walk in the view
+    /// would invite drift.
+    public static func findGitRoot(from path: String, home: String) async -> String? {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
