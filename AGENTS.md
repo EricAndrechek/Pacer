@@ -26,6 +26,12 @@ See `docs/design.md` for the full v1 design.
   ~2,900 LOC covering OAuth/Keychain, JSONL parsing, SQLite schema,
   pace charts, and pricing primitives. The Swift port mirrors this
   closely.
+- **`AGENTS.md` → "Performance — invariants and patterns"** (below) —
+  read before adding ANY `@Query`, `FetchDescriptor`, computed view
+  property, widget provider, or new rollup table. Codifies hard-won
+  rules from five rounds of read-path optimization. The rules look
+  nitpicky in isolation; in aggregate they're what keeps the app
+  responsive while the in-process scan loop is firing every 5–60s.
 
 ## Non-negotiable correctness rules
 
@@ -334,18 +340,22 @@ of them. Mentioned here so future agents don't repeat them:
    non-empty" probe.
 
    For views that legitimately need to *aggregate* across many
-   TokenSamples (Projects, ProjectDetail, History), don't iterate
-   raw samples in body — even off-main-thread iteration of 30k rows
-   is hundreds of ms of wall-clock latency on every scan tick. The
-   pattern is: precompute a view-ready rollup table, maintained by
-   the in-process scan's recomputer in the write path, keyed by the
-   dimension the view groups on. We have three:
+   TokenSamples (Projects, ProjectDetail, History, Today's hour
+   timeline, Live activity burn rate), don't iterate raw samples in
+   body — even off-main-thread iteration of 30k rows is hundreds of
+   ms of wall-clock latency on every scan tick. The pattern is:
+   precompute a view-ready rollup table, maintained by the in-process
+   scan's recomputer in the write path, keyed by the dimension the
+   view groups on. We have four:
    `DailyAggregate` (date × model) — backs Today / DailyCost /
-   History / Models; `ProjectDailyAggregate` (project × date) —
-   backs Projects / ProjectDetail's summary, daily series, models
-   donut; and `SessionInfo` (per session) — backs ProjectDetail's
-   sessions list. Add another `@Model` + recomputer if a future
-   view needs a new grouping.
+   History / Models; `HourlyAggregate` (date × hour × model) —
+   backs `TodayTimelineCard` (24-bar hour-of-day chart) and
+   `LiveActivityCard` (last-hour burn rate);
+   `ProjectDailyAggregate` (project × date) — backs Projects /
+   ProjectDetail's summary, daily series, models donut, and
+   DayDetailView's per-project breakdown; and `SessionInfo` (per
+   session) — backs ProjectDetail's sessions list. Add another
+   `@Model` + recomputer if a future view needs a new grouping.
    Views then just `@Query` the small precomputed table and group
    in the body — sub-10ms over hundreds of rows. Don't add a
    `RollupWorker`-style background actor on top of a precomputed
@@ -353,14 +363,15 @@ of them. Mentioned here so future agents don't repeat them:
    every view had its own rollup.
 
    Recomputers are wired into `ScanCoordinator.runScanCycle` in this
-   order: `AggregateRecomputer` → `ProjectAggregateRecomputer` →
-   `SessionInfoRecomputer`, all reading the same `dirty*` sets the
-   `SamplePersister` collected during inserts. None of them call
-   `context.save()` themselves on the per-pair (main-context) path;
-   the cycle's terminal save in `ScanCoordinator` commits everything
-   (cursors + meta + every recomputer's changes) in one shot. That
-   collapses steady-state cycles to 1-2 saves/cycle, which halves
-   the `@Query` re-fire fan-out on every scan tick.
+   order: `AggregateRecomputer` → `HourlyAggregateRecomputer` →
+   `ProjectAggregateRecomputer` → `SessionInfoRecomputer`, all
+   reading the same `dirty*` sets the `SamplePersister` collected
+   during inserts. None of them call `context.save()` themselves on
+   the per-pair (main-context) path; the cycle's terminal save in
+   `ScanCoordinator` commits everything (cursors + meta + every
+   recomputer's changes) in one shot. That collapses steady-state
+   cycles to 1-2 saves/cycle, which halves the `@Query` re-fire
+   fan-out on every scan tick.
 
    Each recomputer has a per-pair main-thread path (used for
    incremental scans, ≤64 dirty entries) and a bulk
@@ -379,9 +390,16 @@ of them. Mentioned here so future agents don't repeat them:
    The `consumeMissing*` recovery paths on `SamplePersister` are
    the bootstrap for newly-added rollup tables: on first scan after
    a schema bump, every existing TokenSample's (date, model) /
-   (project, date) / sessionId is folded into the dirty set and
-   the recomputer rebuilds the table. One-shot; subsequent cycles
-   see no gaps.
+   (date, hour, model) / (project, date) / sessionId is folded into
+   the dirty set and the recomputer rebuilds the table. One-shot;
+   subsequent cycles see no gaps. When adding a new rollup, wire a
+   matching `consumeMissing*` + `addDirty*` pair so users upgrading
+   from a build without the table get a one-cycle bootstrap.
+
+   See the **Performance — invariants and patterns** section below
+   for the full set of read-path rules the rollup tables are just
+   one piece of (query scoping, fetchLimit, indexes, body work,
+   widget container reuse).
 5. **macOS Sequoia 15+ App Management prompt — RESOLVED 2026-05-07.**
    The fix was the App Group identifier format, not the architecture.
    Sequoia gates the legacy `group.<bundleid>` prefix; the modern
@@ -451,6 +469,112 @@ relearn:
    We may want to give `JSONLScanner` an `AsyncThrowingStream` API in
    addition to the callback form so consumers can iterate naturally.
 
+## Performance — invariants and patterns
+
+The view + widget read path hit several hard performance problems during
+M1–M5 and they all converged on the same handful of patterns. Every new
+view, widget, query, and rollup should follow them. Re-litigating any of
+these wastes effort and risks regressing user-visible cost — search the
+git log for "Views/Widgets: scope @Query" or "HourlyAggregate" or
+"PacerStore + widgets" for the commits that established them.
+
+### Default to scoped fetches; nothing should fetch then filter
+
+- **Always predicate-scope `@Query` and `FetchDescriptor`** to the rows
+  the view actually renders. Don't fetch everything and filter in memory.
+  Chart cards (`DailyCostChartCard`, `DailyChartWidget`,
+  `MonthlyChartCard`) all used to do `fetch-all + .suffix(N)` and were
+  materializing 700+ rows per scan tick for charts that show 30.
+- **For runtime-variable ranges** (a card with a 7d / 30d / 90d / all
+  picker), use the **Card+Content split with `.id(range)`** pattern.
+  The outer Card owns the range `@AppStorage` and picker UI; the inner
+  Content takes `range` as an init argument and configures the @Query
+  predicate accordingly. `.id(range)` on the Content forces re-init
+  when the user picks a new window — the only way to bind a runtime
+  value into a property-initialized @Query. See
+  `HistoryView.LifetimeSummaryCard` / `TopDaysCard` and `ModelsView`.
+- **Probe queries get `fetchLimit = 1`.** "Is the table empty?" /
+  "what's the latest sample?" checks must cap the fetch. Without it,
+  every SwiftData save materializes the whole table just to answer the
+  question — see `WelcomeCard`, `LiveActivityCard.latestSampleProbe`,
+  `LiveSessionWidget`.
+
+### Body work — cache derived values; never iterate raw rows in a view
+
+- **Computed properties re-run on every body pass.** Hover state, sort
+  changes, parent re-renders all trigger body re-fires. Anything more
+  expensive than O(N=10) belongs in a `@State` cache refreshed via
+  `.onChange(of: scanMeta.first?.value)` — the scan-meta tick is the
+  canonical "data changed" signal. Pattern in `TodayTimelineCard`,
+  `HeatmapCard`, `ModelsView`, `ProjectsView`, `ProjectDetailView`.
+- **Never iterate raw `TokenSample`s in a view body.** Always go
+  through a rollup. The four rollups (`DailyAggregate`,
+  `HourlyAggregate`, `ProjectDailyAggregate`, `SessionInfo`) cover
+  every aggregation any production view needs. If you find yourself
+  reaching for `@Query<TokenSample>` in a non-modal view, stop and
+  ask whether a rollup can answer the question.
+- **Cost fields on rollup tables are already mode-applied** by the
+  recomputer. Don't call `effectiveCostUSD(mode:)` per row from a
+  view body unless you're explicitly working with raw TokenSamples
+  (Subprojects card is the one accepted exception — modal-only,
+  predicate-bounded to one project).
+- **Modal views that need raw samples** (`ProjectDetailView`'s
+  Subprojects card) should use a manual `context.fetch` with
+  `propertiesToFetch` slimmed to the columns the rollup actually
+  reads, scoped tight via predicate, and gated on the relevant scan
+  notification (`pacerScanCycleDidComplete` filtered to
+  `samplesChanged`) — not @Query, which re-materializes the result
+  set on every save.
+
+### Indexes — match every sort and predicate
+
+- **Add `#Index` for any column used in a sort or predicate.** All
+  rollup `@Model` types and `TokenSample` have indexes for the
+  predicates they're actually queried with; `RateLimitSample` was
+  unindexed for nearly a year before we caught that every "most recent
+  sample" probe was a full-table scan. SwiftData lightweight
+  migration handles index additions cleanly — no `VersionedSchema`
+  needed.
+- Compound indexes for compound predicates (`(date, model)` for the
+  recomputer's per-pair upsert, `(sampledAt, window)` for the
+  rate-limit window-filter sweep).
+
+### Widget extension — share one ModelContainer
+
+- **Use `PacerStore.sharedModelContainer()`, not `makeModelContainer()`,
+  from widget providers.** Container open is 50–200ms of SQLite open +
+  schema validation; doing it per refresh is documented anti-pattern.
+  The cached singleton is process-wide within the widget extension.
+  The app process keeps using `makeModelContainer()` at startup because
+  `PacerAppDelegate` owns container lifecycle explicitly.
+
+### Adding a new rollup table
+
+If a new view legitimately needs a grouping no existing rollup covers,
+add a new rollup following the template. The full set of touchpoints:
+
+1. **`@Model` type** in `PacerCore/Sources/PacerCore/Models/` — `@Attribute(.unique)` PK string `"date|model|..."`, `#Index` for every column used in a predicate or sort, columns mirror the rollup's metric needs (tokens, totalCostUSD, sampleCount). Register in `PacerStore.makeModelContainer()`'s schema list.
+2. **Dirty-set in `SamplePersister`** — `dirtyXBuckets: Set<...Triple>` populated by `insert(_:)`, also from `markEverySampleDirty()` (cost-recompute version bump), cleared in `clearDirtyPairs()`. Add `addDirtyXBuckets(_:)` for external folding.
+3. **Recovery drain** — `missingXBuckets: Set<...>` computed during `preloadFromStore()` as `sampleXBuckets.subtracting(existingRollupXBuckets)`. `consumeMissingXBuckets()` returns and clears, one-shot.
+4. **Recomputer** in `PacerCore/Sources/PacerCore/Persistence/` — `@MainActor` class with per-pair path, plus a sister `@ModelActor` worker for the bulk path above the 64-pair threshold. Cost mode + `PricingTable` threaded through both paths; per-entry cost summation (not sum-tokens-then-price; see comment in `AggregateRecomputer` for the ccusage-parity reasoning).
+5. **Wire into `ScanCoordinator.runScanCycle`** — drain the missing set into the dirty set, log the recovery line, run the recomputer in the existing sequence, include its stats in `ScanReport` and `cycleDidWork`, add to `formatReport`.
+6. **Tests** in `PacerCoreTests/` — single insert→dirty, clearDirty, recomputer single-bucket, multi-bucket, multi-model-within-bucket, upsert-on-second-pass, missing-bucket-bootstrap. Float-cost expects need an epsilon (`abs(actual - expected) < 1e-9`).
+7. **Update the in-memory test container** in `PersistenceTests.swift` and `ScanCoordinatorTests.swift` so the new `@Model` registers.
+
+### Before adding new view / widget / query code
+
+Ask:
+1. Will this fetch fire per scan tick (every 5–60s when active)?
+2. Will it materialize more rows than the view actually renders?
+3. Is there an existing rollup table that covers the grouping?
+4. Should derived values be `@State` cached behind a scan-meta tick?
+5. Does any predicate or sort hit an unindexed column?
+6. (Widgets) Is this calling `makeModelContainer()` instead of `sharedModelContainer()`?
+
+If you can answer "yes" to (1) and (2), or "no" to (3), or "yes" to (5)
+or (6), you're about to add a hot path. Either scope the query, route
+through a rollup, add an index, or push the work to a recomputer.
+
 ## Engineering standard
 
 The level of paranoia in M1/M2 sets the bar — keep it or raise it:
@@ -474,3 +598,17 @@ The level of paranoia in M1/M2 sets the bar — keep it or raise it:
 - **No backwards-compatibility hacks.** This is a fresh project; if
   a refactor is right, do the refactor cleanly. Don't leave
   `// removed` comments or rename-shim layers.
+- **Performance is a first-class invariant, not an afterthought.**
+  Every `@Query`, `FetchDescriptor`, computed property, and per-row
+  loop in a view body fires on a scan tick. The cost of *each* is
+  small; the cost of *not noticing* compounds into the kind of bug
+  we already fixed twice (40k-row materializations turning a 200ms
+  scan into 6 minutes; 3000-sample per-row `effectiveCostUSD` walks
+  per scan tick). Before adding a fetch or a loop in the read path,
+  walk through the "Before adding new view / widget / query code"
+  checklist in **Performance — invariants and patterns** above. If
+  unsure whether a pattern is hot, profile by counting: rows the
+  fetch returns × fire rate (scan tick, hover, body re-eval) ×
+  per-row work. Anything above ~1ms per scan tick belongs behind a
+  `@State` cache + scan-meta tick refresh; anything above 100 rows
+  iterated belongs in a rollup.
