@@ -89,6 +89,7 @@ public enum PacerStore {
             JSONLFileCursor.self,
             ProjectPathAlias.self,
             ProjectPathProbe.self,
+            ProjectBudget.self,
             configurations: configuration
         )
     }

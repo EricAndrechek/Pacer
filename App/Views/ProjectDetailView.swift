@@ -75,11 +75,19 @@ struct ProjectDetailView: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
+    /// Budget row for this project — at most one, by `@Attribute(.unique)`
+    /// on `ProjectBudget.projectPath`. fetchLimit isn't necessary
+    /// because the predicate is path-keyed unique.
+    @Query private var budgetRows: [ProjectBudget]
+
     init(projectPath: String, displayName: String, since: Date?) {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
         let path = projectPath
+        _budgetRows = Query(
+            filter: #Predicate<ProjectBudget> { $0.projectPath == path }
+        )
         if let cutoffDate = since {
             let cutoffString = TokenSample.formatDate(cutoffDate)
             _aggregates = Query(
@@ -345,6 +353,7 @@ struct ProjectDetailView: View {
                 Spacer()
             }
             summaryCard
+            budgetCard
             if !dailySeries.isEmpty { dailyChartCard }
             // Subprojects card lands between the daily chart and the
             // model breakdown — it's a structural break-out ("what
@@ -512,6 +521,45 @@ struct ProjectDetailView: View {
             pendingMergeTarget = nil
             mergeError = error.localizedDescription
         }
+    }
+
+    // MARK: - Budget card
+
+    private var budget: ProjectBudget? { budgetRows.first }
+
+    /// Today's cost for this project, from the existing `aggregates`
+    /// @Query. Cheap because `aggregates` is already path-scoped and
+    /// typically ≤90 rows.
+    private var todayCost: Double {
+        let today = TokenSample.formatDate(Date())
+        return aggregates
+            .filter { $0.date == today }
+            .reduce(0) { $0 + $1.totalCostUSD }
+    }
+
+    /// Rolling 7-day cost for this project from `aggregates`.
+    private var weekCost: Double {
+        let weekAgo = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+        )
+        return aggregates
+            .filter { $0.date >= weekAgo }
+            .reduce(0) { $0 + $1.totalCostUSD }
+    }
+
+    @ViewBuilder
+    private var budgetCard: some View {
+        PacerCard("Budget", content: {
+            BudgetEditor(
+                projectPath: projectPath,
+                existing: budget,
+                todayCost: todayCost,
+                weekCost: weekCost,
+                context: modelContext
+            )
+        }, footer: {
+            Text("Set a daily or weekly cap to trigger a Pacer notification when this project's cost exceeds the limit. Master notifications must also be enabled in Settings.")
+        })
     }
 
     private var summaryCard: some View {
@@ -817,5 +865,165 @@ struct ProjectDetailView: View {
                 }
             )
         }
+    }
+}
+
+// MARK: - Budget editor
+
+/// Inline editor + progress display for one project's `ProjectBudget`.
+/// Write-through to SwiftData on every commit (TextField onSubmit /
+/// Toggle binding) so the user doesn't have to hit a save button —
+/// matches how the rest of Pacer's settings persist.
+///
+/// nil / 0 limits are stored as nil (no cap at that period). The
+/// master `enabled` toggle pauses both daily AND weekly notifications
+/// without zeroing out the thresholds.
+private struct BudgetEditor: View {
+    let projectPath: String
+    let existing: ProjectBudget?
+    let todayCost: Double
+    let weekCost: Double
+    let context: ModelContext
+
+    /// Local mirror of persisted state. We sync from `existing` on
+    /// appear and on `.id`-change, then write back through `commit()`
+    /// so SwiftUI bindings don't fight live SwiftData updates.
+    @State private var enabled: Bool = false
+    @State private var dailyLimitText: String = ""
+    @State private var weeklyLimitText: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle("Enable budget for this project", isOn: $enabled)
+                .onChange(of: enabled) { _, _ in commit() }
+
+            HStack(spacing: 16) {
+                limitField(label: "Daily limit", value: $dailyLimitText)
+                limitField(label: "Weekly limit", value: $weeklyLimitText)
+            }
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.5)
+
+            if enabled, let limit = dailyLimit, limit > 0 {
+                progressRow(label: "Today", current: todayCost, limit: limit)
+            }
+            if enabled, let limit = weeklyLimit, limit > 0 {
+                progressRow(label: "Last 7 days", current: weekCost, limit: limit)
+            }
+        }
+        .onAppear { syncFromPersisted() }
+        .onChange(of: existing?.persistentModelID) { _, _ in syncFromPersisted() }
+    }
+
+    @ViewBuilder
+    private func limitField(label: String, value: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .tracking(0.5)
+            HStack(spacing: 4) {
+                Text("$")
+                    .foregroundStyle(.secondary)
+                TextField("0", text: value)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .frame(width: 80)
+                    .onSubmit { commit() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func progressRow(label: String, current: Double, limit: Double) -> some View {
+        let ratio = limit > 0 ? current / limit : 0
+        let displayRatio = min(1.0, max(0, ratio))
+        let pct = "\(Int((ratio * 100).rounded()))%"
+        let tint: Color =
+            ratio >= 1.0 ? .red :
+            ratio >= 0.8 ? .orange : .green
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(pacerCost(current)) / \(pacerCost(limit))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Text(pct)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(tint)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 4)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(tint)
+                        .frame(width: geo.size.width * displayRatio, height: 4)
+                }
+            }
+            .frame(height: 4)
+        }
+    }
+
+    // MARK: - State syncing
+
+    private var dailyLimit: Double? {
+        let trimmed = dailyLimitText.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let v = Double(trimmed), v > 0 else { return nil }
+        return v
+    }
+
+    private var weeklyLimit: Double? {
+        let trimmed = weeklyLimitText.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let v = Double(trimmed), v > 0 else { return nil }
+        return v
+    }
+
+    private func syncFromPersisted() {
+        if let existing {
+            enabled = existing.enabled
+            dailyLimitText = existing.dailyLimitUSD.map { String(format: "%.2f", $0) } ?? ""
+            weeklyLimitText = existing.weeklyLimitUSD.map { String(format: "%.2f", $0) } ?? ""
+        } else {
+            enabled = false
+            dailyLimitText = ""
+            weeklyLimitText = ""
+        }
+    }
+
+    private func commit() {
+        let daily = dailyLimit
+        let weekly = weeklyLimit
+        // No-budget state — neither limit set AND toggle off. Tear
+        // down the row so the table stays clean.
+        if !enabled, daily == nil, weekly == nil {
+            if let existing {
+                context.delete(existing)
+                try? context.save()
+            }
+            return
+        }
+        if let existing {
+            existing.enabled = enabled
+            existing.dailyLimitUSD = daily
+            existing.weeklyLimitUSD = weekly
+            existing.updatedAt = Date()
+        } else {
+            context.insert(ProjectBudget(
+                projectPath: projectPath,
+                dailyLimitUSD: daily,
+                weeklyLimitUSD: weekly,
+                enabled: enabled
+            ))
+        }
+        try? context.save()
     }
 }

@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Invisible view that observes RateLimitSample inserts and dispatches
 /// to NotificationCoordinator. Mounted alongside the main window so it
@@ -21,6 +22,13 @@ struct NotificationsHost: View {
     private var samples: [RateLimitSample]
 
     @Query private var todayAggregates: [DailyAggregate]
+    /// Per-project rollups for the last 7 days — covers both the
+    /// daily-budget check (today's slice) and weekly-budget check
+    /// (whole window). Predicate runs against the indexed
+    /// `(projectPath, date)` keys.
+    @Query private var projectAggregatesWindow: [ProjectDailyAggregate]
+    /// Configured budgets. Small table — typically 0-10 rows.
+    @Query private var budgets: [ProjectBudget]
 
     @Environment(\.modelContext) private var context
 
@@ -53,7 +61,15 @@ struct NotificationsHost: View {
 
     init() {
         let today = TokenSample.formatDate(Date())
+        let weekAgo = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+        )
         _todayAggregates = Query(filter: #Predicate<DailyAggregate> { $0.date == today })
+        _projectAggregatesWindow = Query(
+            filter: #Predicate<ProjectDailyAggregate> {
+                $0.date >= weekAgo && $0.date <= today
+            }
+        )
     }
 
     var body: some View {
@@ -69,6 +85,15 @@ struct NotificationsHost: View {
             }
             .onChange(of: todayAggregates.map(\.totalCostUSD).reduce(0, +)) {
                 handleDailyCost()
+            }
+            // Total-of-totals fingerprint: a single Double covering
+            // every (project, date) cost in the window. Cheap to
+            // compute (≤70 rows), and any project's spend rising
+            // changes the fingerprint → dispatch. The coordinator's
+            // (projectPath, period, date) dedup keeps a sustained
+            // over-budget day from re-notifying.
+            .onChange(of: projectAggregatesWindow.map(\.totalCostUSD).reduce(0, +)) {
+                handleProjectBudgets()
             }
             .task {
                 // Seed lastSeen from existing data so we don't fire a
@@ -171,6 +196,70 @@ struct NotificationsHost: View {
                 date: today,
                 context: context
             )
+        }
+    }
+
+    /// For every active project budget, sum the matching cost (today
+    /// or week-to-date), compare to the configured limit, and dispatch
+    /// to NotificationCoordinator on a breach. The coordinator's
+    /// per-(project, period, date) dedup is the only thing keeping us
+    /// from re-firing on every aggregate update once a project is
+    /// over its budget — without it the same breach would notify on
+    /// every scan tick.
+    private func handleProjectBudgets() {
+        let today = TokenSample.formatDate(Date())
+        let cal = Calendar.current
+        let weekAgo = TokenSample.formatDate(
+            cal.date(byAdding: .day, value: -6, to: Date()) ?? Date()
+        )
+
+        // Aggregate sum per (projectPath, period). Single pass.
+        var todayByProject: [String: Double] = [:]
+        var weekByProject: [String: Double] = [:]
+        for row in projectAggregatesWindow {
+            if row.date == today {
+                todayByProject[row.projectPath, default: 0] += row.totalCostUSD
+            }
+            if row.date >= weekAgo && row.date <= today {
+                weekByProject[row.projectPath, default: 0] += row.totalCostUSD
+            }
+        }
+
+        for budget in budgets where budget.isActive {
+            let displayName = pacerShortPath(budget.projectPath)
+            if let limit = budget.dailyLimitUSD,
+               let cost = todayByProject[budget.projectPath],
+               cost >= limit {
+                Task { @MainActor [context] in
+                    await NotificationCoordinator.shared.handleProjectBudgetUpdate(
+                        projectPath: budget.projectPath,
+                        displayName: displayName,
+                        currentCost: cost,
+                        limit: limit,
+                        period: "day",
+                        date: today,
+                        context: context
+                    )
+                }
+            }
+            if let limit = budget.weeklyLimitUSD,
+               let cost = weekByProject[budget.projectPath],
+               cost >= limit {
+                // Use the week-end (today) as the dedup date so the
+                // banner re-fires next time the rolling 7-day window
+                // crosses the limit again on a different day.
+                Task { @MainActor [context] in
+                    await NotificationCoordinator.shared.handleProjectBudgetUpdate(
+                        projectPath: budget.projectPath,
+                        displayName: displayName,
+                        currentCost: cost,
+                        limit: limit,
+                        period: "week",
+                        date: today,
+                        context: context
+                    )
+                }
+            }
         }
     }
 

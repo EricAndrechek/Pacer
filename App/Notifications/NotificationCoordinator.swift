@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 import UserNotifications
 import PacerCore
+import PacerUI
 
 /// Posts local notifications when rate-limit usage or daily cost crosses
 /// user-configured thresholds. The actual posting only happens while the
@@ -318,6 +319,52 @@ public final class NotificationCoordinator {
         let content = UNMutableNotificationContent()
         content.title = "Pacer spend warning"
         content.body = String(format: "Today's cost reached $%.2f (threshold $%.2f).", currentCost, threshold)
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: key, in: context)
+    }
+
+    /// Per-project budget breach. Fires once per (project, period,
+    /// date) so a sustained over-budget day doesn't re-notify each
+    /// time the recomputer touches the project's aggregate. Period
+    /// is `"day"` or `"week"` — the caller decides which window the
+    /// current cost compares against.
+    public func handleProjectBudgetUpdate(
+        projectPath: String,
+        displayName: String,
+        currentCost: Double,
+        limit: Double,
+        period: String,
+        date: String,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard limit > 0 else { return }
+        guard currentCost >= limit else { return }
+
+        // Dedup key includes the date so a new day fresh-fires. Per-
+        // period so daily + weekly breaches don't suppress each other
+        // when both cross on the same calendar day.
+        let key = "notif.projectBudget.\(period).\(projectPath).\(date)"
+        if alreadyNotified(key: key, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        content.title = "Pacer project budget"
+        let periodLabel = period == "week" ? "weekly" : "daily"
+        content.body = String(
+            format: "%@ %@ budget reached %@ (limit %@).",
+            displayName,
+            periodLabel,
+            pacerCost(currentCost),
+            pacerCost(limit)
+        )
         content.sound = .default
         content.interruptionLevel = .timeSensitive
 
