@@ -27,11 +27,13 @@ struct DashboardView: View {
         ) {
             WelcomeCard()
             HeroStripCard(onTodayTap: openToday)
+            AdvisorCard()
             PaceChartCard()
             LiveActivityCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
+            WeeklyComparisonCard()
             DailyCostChartCard(onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
