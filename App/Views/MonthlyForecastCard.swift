@@ -17,40 +17,51 @@ import PacerUI
 /// minimum-data threshold.
 struct MonthlyForecastCard: View {
     @Query private var aggregates: [DailyAggregate]
+    @Query(MonthlyForecastCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    /// Cached projection refreshed on scan-meta tick. The in-body
+    /// view code never iterates `aggregates`; it reads `cached`.
+    @State private var cached: MonthlyForecast.Projection?
 
     init() {
-        // Fetch a 60-day predicate window that comfortably covers the
-        // current month plus a few days either side. The
-        // `MonthlyForecast` primitive filters internally to "starts
-        // with current YYYY-MM-" so an over-fetch is correct and
-        // simpler than tracking the month boundary in the predicate.
-        // ~60 days × ~5 model rows/day = ≤300 rows materialized — well
-        // under any concerning threshold.
-        let now = Date()
+        // Predicate is anchored at the first day of the current month —
+        // anything older isn't read by `MonthlyForecast.compute` so
+        // materializing it would just be waste. Previously we fetched
+        // 60 days (~300 rows) every time any DailyAggregate row
+        // changed; this drops materialization to ~current-month-so-far
+        // × ~5 model rows/day (≤155 max, usually <80).
         let cal = Calendar.current
-        let lowerBound = cal.date(byAdding: .day, value: -60, to: now) ?? now
-        let lowerStr = TokenSample.formatDate(lowerBound)
+        let now = Date()
+        let firstOfMonth: Date
+        if let interval = cal.dateInterval(of: .month, for: now) {
+            firstOfMonth = interval.start
+        } else {
+            firstOfMonth = now
+        }
+        let lowerStr = TokenSample.formatDate(firstOfMonth)
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
         )
     }
 
-    private var dailyCosts: [String: Double] {
-        // Collapse per-model rows into a single (date → total) map.
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    private func refreshCache() {
         var byDate: [String: Double] = [:]
         for row in aggregates {
             byDate[row.date, default: 0] += row.totalCostUSD
         }
-        return byDate
-    }
-
-    private var projection: MonthlyForecast.Projection? {
-        MonthlyForecast.compute(dailyCosts: dailyCosts)
+        cached = MonthlyForecast.compute(dailyCosts: byDate)
     }
 
     var body: some View {
         PacerCard("This month") {
-            if let p = projection {
+            if let p = cached {
                 content(p)
             } else {
                 Text("Not enough data yet — a projection appears once Pacer has seen at least \(MonthlyForecast.minDaysWithData) active days this month.")
@@ -58,6 +69,8 @@ struct MonthlyForecastCard: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ViewBuilder

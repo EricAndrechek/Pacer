@@ -47,33 +47,88 @@ struct HeroStripCard: View {
     @Query private var weekAggregates: [DailyAggregate]
     /// Recent rate-limit samples — sized to cover both windows' worth
     /// of history for `BurnRate.project()` (the lookback default is
-    /// 90 min, at 5-min OAuth cadence that's ~18 rows per window).
-    /// 80 covers ~3 hours of both windows together with headroom for
+    /// 90 min, at 5-min OAuth cadence that's ~18 rows per window). 48
+    /// covers ~2 hours of both windows together with headroom for
     /// status-line bursts that bypass the 5-min cadence.
     @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
+    /// Scan-meta probe — used as the "data changed" tick that triggers
+    /// the @State cache refresh. Per AGENTS.md performance invariants,
+    /// every derived value heavier than O(N=10) lives in @State and is
+    /// only recomputed when this value flips, NOT on every body pass.
+    @Query(HeroStripCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     private static let recentRateLimits: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
-        d.fetchLimit = 80
+        d.fetchLimit = 48
         return d
     }()
 
-    private var todayCost: Double {
-        todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    // MARK: - @State cache (refreshed on scan-meta tick)
+
+    /// Snapshot of every derived value the body reads. Refreshed in
+    /// `refreshCache()` from the @Query data; the body itself never
+    /// iterates rate-limit rows or week aggregates.
+    @State private var cached = Cached()
+
+    private struct Cached {
+        var todayCost: Double = 0
+        var todayTokens: Int64 = 0
+        var weekDeltaRatio: Double?
+        var weekDeltaActiveDays: Int = 0
+        var fiveHour: SampleSnapshot?
+        var sevenDay: SampleSnapshot?
+        var fiveHourBurn: BurnRate.Projection?
+        var sevenDayBurn: BurnRate.Projection?
     }
 
-    private var todayTokens: Int64 {
-        todayAggregates.reduce(0) {
+    /// Sendable extract of the rate-limit row's display-relevant fields.
+    /// SwiftData @Model classes aren't Sendable, so we copy what we
+    /// need into a plain struct at refresh time.
+    private struct SampleSnapshot {
+        let window: String
+        let usedPercentage: Double
+        let resetsAt: Date?
+    }
+
+    private func refreshCache() {
+        var next = Cached()
+        next.todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
+        next.todayTokens = todayAggregates.reduce(0) {
             $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
         }
+        if let (ratio, activeDays) = computeWeekDelta() {
+            next.weekDeltaRatio = ratio
+            next.weekDeltaActiveDays = activeDays
+        }
+        if let s = rateLimits.first(where: { $0.window == "five_hour" }) {
+            next.fiveHour = SampleSnapshot(
+                window: s.window,
+                usedPercentage: s.usedPercentage,
+                resetsAt: s.resetsAt
+            )
+        }
+        if let s = rateLimits.first(where: { $0.window == "seven_day" }) {
+            next.sevenDay = SampleSnapshot(
+                window: s.window,
+                usedPercentage: s.usedPercentage,
+                resetsAt: s.resetsAt
+            )
+        }
+        next.fiveHourBurn = projection(forWindow: "five_hour")
+        next.sevenDayBurn = projection(forWindow: "seven_day")
+        cached = next
     }
 
-    /// Today vs the last 6 days' average (only counting active days, so
-    /// a vacation week doesn't dilute the average to zero). Returns nil
-    /// when prior context is too thin to be meaningful.
-    private var weekDelta: (ratio: Double, activeDays: Int)? {
+    private func computeWeekDelta() -> (ratio: Double, activeDays: Int)? {
         let todayString = TokenSample.formatDate(Date())
         var todayCost = 0.0
         var priorByDate: [String: Double] = [:]
@@ -91,17 +146,9 @@ struct HeroStripCard: View {
         return (todayCost / avg, active.count)
     }
 
-    private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
-    private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
-
-    /// Burn-rate projection for one window, derived from the recent
-    /// `rateLimits` rows. Returns nil when we don't have enough signal
-    /// to project (too few samples, span too short, or non-positive
-    /// slope). Computed in the view body — the rate-limits @Query has
-    /// fetchLimit=80 so this never iterates more than ~80 small rows.
+    /// One-window burn-rate projection. Same algorithm as before,
+    /// just moved out of the body so we can cache it.
     private func projection(forWindow window: String) -> BurnRate.Projection? {
-        // `rateLimits` is sorted desc by sampledAt; convert to the
-        // primitive's Sample value type and let it sort internally.
         let samples = rateLimits
             .filter { $0.window == window }
             .map { BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage) }
@@ -114,15 +161,19 @@ struct HeroStripCard: View {
             costTile
             paceTile(
                 label: "5-hour pace",
-                sample: fiveHour,
+                sample: cached.fiveHour,
+                burn: cached.fiveHourBurn,
                 duration: 5 * 3600
             )
             paceTile(
                 label: "7-day pace",
-                sample: sevenDay,
+                sample: cached.sevenDay,
+                burn: cached.sevenDayBurn,
                 duration: 7 * 86400
             )
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     // MARK: - Cost tile
@@ -130,16 +181,16 @@ struct HeroStripCard: View {
     private var costTile: some View {
         HeroTile(label: "Today", onTap: onTodayTap) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(pacerCost(todayCost))
+                Text(pacerCost(cached.todayCost))
                     .font(.system(size: 32, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                 HStack(spacing: 6) {
-                    if let (ratio, _) = weekDelta {
+                    if let ratio = cached.weekDeltaRatio {
                         trendChip(ratio: ratio)
                     }
-                    Text("\(pacerTokens(todayTokens)) tokens")
+                    Text("\(pacerTokens(cached.todayTokens)) tokens")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -165,14 +216,18 @@ struct HeroStripCard: View {
     // MARK: - Pace tile
 
     @ViewBuilder
-    private func paceTile(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
+    private func paceTile(
+        label: String,
+        sample: SampleSnapshot?,
+        burn: BurnRate.Projection?,
+        duration: TimeInterval
+    ) -> some View {
         HeroTile(label: label) {
             if let s = sample, let resets = s.resetsAt {
                 let pacePct = PaceMath.paceFraction(
                     now: Date(), resetsAt: resets, windowDuration: duration
                 ) * 100
                 let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
-                let burn = projection(forWindow: s.window)
                 // Chip moved to its own row below the % line so it
                 // can't ever wrap mid-word ("behi nd") when the tile
                 // gets narrow. Layout: hero %, status row, optional

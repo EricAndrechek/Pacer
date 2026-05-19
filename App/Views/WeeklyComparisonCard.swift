@@ -14,6 +14,13 @@ import PacerUI
 /// over ≤70 rows (14 × ~5 models/day) so it stays sub-millisecond.
 struct WeeklyComparisonCard: View {
     @Query private var aggregates: [DailyAggregate]
+    @Query(WeeklyComparisonCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    /// Cached totals refreshed on scan-meta tick. Per AGENTS.md, every
+    /// derived value heavier than O(N=10) belongs behind a @State
+    /// cache — the in-body group-by used to run on every body pass.
+    @State private var cachedThisWeek = WeekTotals()
+    @State private var cachedLastWeek = WeekTotals()
 
     init() {
         // 14-day window covering this week + last week. Predicate is
@@ -28,6 +35,13 @@ struct WeeklyComparisonCard: View {
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
         )
     }
+
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
 
     private struct WeekTotals {
         var cost: Double = 0
@@ -56,10 +70,11 @@ struct WeeklyComparisonCard: View {
         }
     }
 
-    /// Split DailyAggregate rows into "this week" (last 7 days including
-    /// today) and "last week" (previous 7 days). Days outside the
-    /// 14-day window are ignored.
-    private var totals: (thisWeek: WeekTotals, lastWeek: WeekTotals) {
+    /// Refresh the @State caches from the @Query rows. Called on
+    /// .onAppear and every scan-meta tick. The in-body view code only
+    /// reads `cachedThisWeek` / `cachedLastWeek` — never iterates
+    /// `aggregates` directly.
+    private func refreshCache() {
         let now = Date()
         let cal = Calendar.current
         let todayStr = TokenSample.formatDate(now)
@@ -73,7 +88,6 @@ struct WeeklyComparisonCard: View {
         var this = WeekTotals()
         var last = WeekTotals()
         for row in aggregates {
-            // ≥ weekAgoStr → this week; < weekAgoStr && ≥ 2weeksAgoStr → last week.
             let bucket: WeekTotalsKeyPath
             if row.date >= weekAgoStr && row.date <= todayStr {
                 bucket = .thisWeek
@@ -94,22 +108,24 @@ struct WeeklyComparisonCard: View {
             case .lastWeek: add(to: &last)
             }
         }
-        return (this, last)
+        cachedThisWeek = this
+        cachedLastWeek = last
     }
 
     private enum WeekTotalsKeyPath { case thisWeek, lastWeek }
 
     var body: some View {
-        let (thisWeek, lastWeek) = totals
         PacerCard("This week") {
-            if thisWeek.cost == 0 && lastWeek.cost == 0 {
+            if cachedThisWeek.cost == 0 && cachedLastWeek.cost == 0 {
                 Text("No usage in the last 14 days. Once Pacer has data for both this week and the prior week, comparisons appear here.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                content(thisWeek: thisWeek, lastWeek: lastWeek)
+                content(thisWeek: cachedThisWeek, lastWeek: cachedLastWeek)
             }
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ViewBuilder

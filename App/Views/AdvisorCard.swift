@@ -10,6 +10,13 @@ import PacerUI
 struct AdvisorCard: View {
     @Query private var todayAggregates: [DailyAggregate]
     @Query private var weekAggregates: [DailyAggregate]
+    @Query(AdvisorCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    /// Hints cached behind the scan-meta tick. Without this, the
+    /// in-body `UsageHints.compute` call was re-iterating today + week
+    /// aggregates on every body pass (hover, parent re-render, scroll)
+    /// even when nothing had actually changed.
+    @State private var cachedHints: [UsageHints.Hint] = []
 
     init() {
         let today = TokenSample.formatDate(Date())
@@ -27,8 +34,15 @@ struct AdvisorCard: View {
         )
     }
 
-    private var hints: [UsageHints.Hint] {
-        UsageHints.compute(
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    private func refreshCache() {
+        cachedHints = UsageHints.compute(
             todayByModel: todayAggregates.map(Self.toTotals),
             thisWeekByModel: weekAggregates.map(Self.toTotals)
         )
@@ -45,19 +59,29 @@ struct AdvisorCard: View {
     }
 
     var body: some View {
-        let h = hints
-        if !h.isEmpty {
-            PacerCard("Notice") {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(h.indices, id: \.self) { idx in
-                        hintRow(h[idx])
-                        if idx != h.indices.last {
-                            Divider().opacity(0.4)
+        // EmptyView'd entirely when no hints — kept inside a single
+        // container so .onAppear/.onChange land in the view tree at
+        // a stable identity. Without the wrapping Group, the
+        // .onAppear-attached PacerCard appears and disappears as
+        // hints flip in/out, which (a) tears down + rebuilds the
+        // SwiftData @Query subscriptions and (b) loses the
+        // .onChange observer mid-tick.
+        Group {
+            if !cachedHints.isEmpty {
+                PacerCard("Notice") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(cachedHints.indices, id: \.self) { idx in
+                            hintRow(cachedHints[idx])
+                            if idx != cachedHints.indices.last {
+                                Divider().opacity(0.4)
+                            }
                         }
                     }
                 }
             }
         }
+        .onAppear { refreshCache() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
     }
 
     @ViewBuilder

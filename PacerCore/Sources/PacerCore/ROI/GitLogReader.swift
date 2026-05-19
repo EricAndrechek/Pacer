@@ -42,42 +42,78 @@ public enum GitLogReader {
         case runFailure(String)
     }
 
+    /// How long to wait for a single `git` invocation before terminating
+    /// it. `git log --numstat` over a 90-day window completes in well
+    /// under a second on every repo I tested; 30 seconds is a generous
+    /// upper bound that still rescues the UI if something pathological
+    /// happens (a corrupt repo, a network-mounted directory that hangs
+    /// stat, etc.).
+    public static let perInvocationTimeoutSeconds: TimeInterval = 30
+
     /// Production runner — shells out to `/usr/bin/git`. Sandboxed
     /// callers will fail here; Pacer isn't sandboxed, so the spawn
     /// always works given an existing repo root.
+    ///
+    /// **Why the `Task.detached` + single-pipe shape:** the previous
+    /// implementation hung whenever git's output exceeded ~64KB. The
+    /// macOS pipe buffer is small; if nobody is reading the pipe while
+    /// the process writes, `write()` inside git blocks, the process
+    /// never exits, `terminationHandler` never fires, and the
+    /// continuation never resumes — ROI spins forever.
+    ///
+    /// The fix: drain the pipe with `readDataToEndOfFile()` BEFORE
+    /// waiting for the process to terminate. That call blocks reading
+    /// until the kernel signals EOF, which happens when the child
+    /// closes its end on exit. Because we're draining as data lands,
+    /// the kernel buffer never fills and the child never blocks. We
+    /// run this synchronously on a detached task so the blocking read
+    /// doesn't pin the MainActor.
+    ///
+    /// stdout + stderr share one pipe to dodge the dual-pipe deadlock
+    /// variant (drain order matters when both fill). For git's output
+    /// this is fine — on success we use the data as parser input; on
+    /// failure we use it as the error message.
     public static let systemRunner: Runner = { repoRoot, args in
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = args
-        process.currentDirectoryURL = repoRoot
+        return try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = args
+            process.currentDirectoryURL = repoRoot
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
 
-        return try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { proc in
-                // Drain stdout before resuming — readDataToEndOfFile
-                // blocks until EOF which is fine post-termination.
-                let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                if proc.terminationStatus == 0 {
-                    let s = String(data: data, encoding: .utf8) ?? ""
-                    continuation.resume(returning: s)
-                } else {
-                    let err = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    let msg = String(data: err, encoding: .utf8) ?? ""
-                    continuation.resume(throwing: ReaderError.runFailure(
-                        "git \(args.joined(separator: " ")) failed (\(proc.terminationStatus)): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))"
-                    ))
+            try process.run()
+
+            // Watchdog: terminate the subprocess if it overruns the
+            // per-invocation timeout. Without this, a hung `git log`
+            // (very rare, but possible — corrupt index, NFS path that
+            // hangs on lstat) would leak the Task forever.
+            let watchdog = Task { [weak process] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(perInvocationTimeoutSeconds * 1_000_000_000)
+                )
+                if process?.isRunning == true {
+                    process?.terminate()
                 }
             }
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: error)
+
+            // Drains as git writes — pipe never fills, git never blocks.
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            watchdog.cancel()
+
+            let status = process.terminationStatus
+            let text = String(data: data, encoding: .utf8) ?? ""
+            if status == 0 {
+                return text
+            } else {
+                throw ReaderError.runFailure(
+                    "git \(args.joined(separator: " ")) failed (\(status)): \(text.trimmingCharacters(in: .whitespacesAndNewlines))"
+                )
             }
-        }
+        }.value
     }
 
     /// Read commits authored since `since` from `repoRoot`. Returns an
