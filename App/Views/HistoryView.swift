@@ -154,9 +154,25 @@ private struct LifetimeSummaryCard: View {
 // MARK: - Monthly bar chart
 
 private struct MonthlyChartCard: View {
-    @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    /// Scoped to the chart's 12-month display window — the unbounded
+    /// query was loading every DailyAggregate row (730+ on a 2-year DB)
+    /// just so `refreshMonthly()` could group, sort, and `.suffix(12)`.
+    /// 13 months of leeway covers any partial first month inside the
+    /// chart's leftmost bar.
+    @Query private var aggregates: [DailyAggregate]
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
+
+    init() {
+        let cutoffString = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .month, value: -13, to: Date()) ?? .distantPast
+        )
+        _aggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+            sort: \DailyAggregate.date,
+            order: .reverse
+        )
+    }
 
     @State private var selectedMonth: String?
     @State private var cachedMonthly: [MonthBucket] = []

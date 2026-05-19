@@ -72,10 +72,17 @@ struct DailyChartProvider: AppIntentTimelineProvider {
         do {
             let container = try PacerStore.makeModelContainer()
             let context = ModelContext(container)
-            // Pull all aggregates desc by date and group/sum in-memory;
-            // SwiftData predicates over date strings would work but the
-            // small-N rollup here is cheap enough not to bother.
+            // Predicate-scoped fetch — on a power user's 2-year DB the
+            // unbounded form materialized ~3650 rows (730 days × 5
+            // models) on every 15-min widget refresh. The
+            // `(date)` index makes this a range scan; the in-memory
+            // group-by then runs over at most range.days × N_models
+            // rows.
+            let cutoffString = TokenSample.formatDate(
+                Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
+            )
             let descriptor = FetchDescriptor<DailyAggregate>(
+                predicate: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sortBy: [SortDescriptor(\.date, order: .reverse)]
             )
             let aggregates = try context.fetch(descriptor)

@@ -22,10 +22,23 @@ struct DailyCostChartCard: View {
 
     init(onDayTap: ((String) -> Void)? = nil) {
         self.onDayTap = onDayTap
+        // Scope the @Query to the chart's display window. Card renders
+        // exactly 30 days; the prior unbounded query materialized every
+        // DailyAggregate row (730+ on a 2-year DB) just so refreshDerived
+        // could `.suffix(30)` after grouping. With the predicate the
+        // fetch is 30 × N_models rows (~150 typical), using the
+        // existing `(date)` index for a range scan.
+        let cutoffString = TokenSample.formatDate(
+            Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+        )
+        _aggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+            sort: \DailyAggregate.date,
+            order: .reverse
+        )
     }
 
-    @Query(sort: \DailyAggregate.date, order: .reverse)
-    private var aggregates: [DailyAggregate]
+    @Query private var aggregates: [DailyAggregate]
     /// Singleton-row probe — fires once per scan cycle. Drives the
     /// `Derived` cache refresh so the Dictionary(grouping:) +
     /// `.sorted()` + `.suffix(30)` pipeline runs at most once per

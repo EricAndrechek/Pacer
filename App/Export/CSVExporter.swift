@@ -78,8 +78,16 @@ enum CSVExporter {
 
     static func projectTotals(context: ModelContext) {
         do {
-            let descriptor = FetchDescriptor<TokenSample>(
-                sortBy: [SortDescriptor(\.sampledAt)]
+            // Read from the precomputed `ProjectDailyAggregate` rollup
+            // instead of walking raw `TokenSample` rows. On a power
+            // user's DB the sample table can hit 500K rows; the rollup
+            // is at most N_projects × N_days (~3,650 typical). Cost is
+            // already applied at the user's current mode by
+            // `ProjectAggregateRecomputer`, so the CSV matches what
+            // the app shows by construction — no per-row pricing call
+            // on this code path.
+            let descriptor = FetchDescriptor<ProjectDailyAggregate>(
+                sortBy: [SortDescriptor(\.projectPath), SortDescriptor(\.date)]
             )
             let rows = try context.fetch(descriptor)
             struct Acc {
@@ -91,22 +99,23 @@ enum CSVExporter {
                 var lastSeen: Date = .distantPast
             }
             var byProject: [String: Acc] = [:]
-            // CSVs are exports of what the app shows the user; using
-            // the same shared sample-cost helper means the totals in
-            // the CSV match the dashboard exactly. (Previously this
-            // exporter used `sourceCostUSD ?? 0` and silently produced
-            // CSVs with $0 costs for any line CC didn't pre-cost.)
-            let mode = PacerPreferences.costMode()
-            for s in rows {
-                let key = s.projectPath ?? "(unknown)"
-                var a = byProject[key] ?? Acc()
-                a.input += s.inputTokens
-                a.output += s.outputTokens
-                a.cacheRead += s.cacheReadTokens
-                a.cost += s.effectiveCostUSD(mode: mode)
-                if let sid = s.sessionId { a.sessions.insert(sid) }
-                if s.sampledAt > a.lastSeen { a.lastSeen = s.sampledAt }
-                byProject[key] = a
+            let decoder = JSONDecoder()
+            for r in rows {
+                var a = byProject[r.projectPath] ?? Acc()
+                a.input += r.inputTokens
+                a.output += r.outputTokens
+                a.cacheRead += r.cacheReadTokens
+                a.cost += r.totalCostUSD
+                // Union session ids across this project's day buckets
+                // so a session that spans midnight isn't double-counted.
+                // The rollup's per-bucket sessionCount overcounts in
+                // that case (it's per-day); the JSON id list lets us
+                // dedup across days.
+                if let ids = try? decoder.decode([String].self, from: r.sessionIdsJSON) {
+                    a.sessions.formUnion(ids)
+                }
+                if r.lastActive > a.lastSeen { a.lastSeen = r.lastActive }
+                byProject[r.projectPath] = a
             }
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime]
@@ -120,7 +129,7 @@ enum CSVExporter {
                 contents: csv
             )
         } catch {
-            presentError("Couldn't read samples: \(error.localizedDescription)")
+            presentError("Couldn't read project aggregates: \(error.localizedDescription)")
         }
     }
 
