@@ -79,12 +79,16 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             let context = ModelContext(container)
             // 8-day window covers the longest cycle (7d) plus headroom
             // for the most-recent 5h cycle; same shape PaceChartCard
-            // uses on the dashboard.
+            // uses on the dashboard. The fetchLimit is generous (8d ×
+            // ~12 samples/hr × 2 windows ≈ 4600) but caps any future
+            // burst: a stuck poller or a backfill event won't blow up
+            // widget refresh memory.
             let cutoff = Date().addingTimeInterval(-8 * 86400)
-            let descriptor = FetchDescriptor<RateLimitSample>(
+            var descriptor = FetchDescriptor<RateLimitSample>(
                 predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
             )
+            descriptor.fetchLimit = 6000
             let rows = try context.fetch(descriptor)
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds)

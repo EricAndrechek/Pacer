@@ -17,7 +17,14 @@ struct HeatmapCard: View {
     let weekCount: Int
     let onDayTap: (String) -> Void
 
-    @Query(sort: \DailyAggregate.date, order: .reverse) private var aggregates: [DailyAggregate]
+    /// Daily rollups scoped to the heatmap's visible window — predicate
+    /// matches the sessions query below. The grid only ever renders
+    /// `weekCount * 7` cells, so materializing every historical
+    /// `DailyAggregate` was pure waste: a power user with 2+ years of
+    /// history was loading every old row into `refreshCache` only to
+    /// bucket-and-discard them when no cell matched. Sub-leading
+    /// `date` index makes the cutoff a range scan.
+    @Query private var aggregates: [DailyAggregate]
     /// Real distinct-session count per day comes from SessionInfo,
     /// the same source the day-detail modal pulls from. Iterating
     /// every session once and bucketing across the day(s) it touched
@@ -52,17 +59,23 @@ struct HeatmapCard: View {
     init(weekCount: Int = 52, onDayTap: @escaping (String) -> Void) {
         self.weekCount = weekCount
         self.onDayTap = onDayTap
-        // Bound the session query to "sessions whose lastSeenAt falls
-        // inside the visible heatmap window." The default 52-week
-        // grid extends back 52*7 days from today; the `lastSeenAt`
-        // index added in the schema makes this a range scan instead
-        // of a full-table fetch. A few extra days of leeway covers
-        // sessions that span midnight on the window boundary.
+        // Bound both queries to the visible heatmap window. The default
+        // 52-week grid extends back 52*7 days from today; both
+        // `DailyAggregate.date` (string YYYY-MM-DD with a #Index) and
+        // `SessionInfo.lastSeenAt` (Date) are indexed so the predicates
+        // are range scans. A few extra days of leeway covers
+        // sessions/aggregates that straddle midnight on the boundary.
         let cal = Calendar(identifier: .iso8601)
-        let cutoff = cal.date(byAdding: .day, value: -(weekCount * 7 + 7), to: Date())
+        let cutoffDate = cal.date(byAdding: .day, value: -(weekCount * 7 + 7), to: Date())
             ?? Date(timeIntervalSince1970: 0)
+        let cutoffString = TokenSample.formatDate(cutoffDate)
+        _aggregates = Query(
+            filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+            sort: \.date,
+            order: .reverse
+        )
         _sessions = Query(
-            filter: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoff }
+            filter: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoffDate }
         )
     }
 

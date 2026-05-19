@@ -102,14 +102,20 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
         do {
             let container = try PacerStore.makeModelContainer()
             let context = ModelContext(container)
-            let descriptor = FetchDescriptor<ProjectDailyAggregate>(
-                sortBy: [SortDescriptor(\.date, order: .reverse)]
-            )
-            let aggregates = try context.fetch(descriptor)
+            // Push the date filter into the FetchDescriptor so SwiftData
+            // uses the `(date, projectPath)` index instead of fetching
+            // every historical row and filtering in memory. On a busy
+            // install (~50 projects × 2 years = ~36k rows) this drops
+            // each 30-min widget refresh from a full-table fetch to a
+            // 7/30/90-day range scan.
             let cutoff = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
             )
-            let inRange = aggregates.filter { $0.date >= cutoff }
+            let descriptor = FetchDescriptor<ProjectDailyAggregate>(
+                predicate: #Predicate<ProjectDailyAggregate> { $0.date >= cutoff },
+                sortBy: [SortDescriptor(\.date, order: .reverse)]
+            )
+            let inRange = try context.fetch(descriptor)
 
             // Pinned-project focus mode: filter to that project's rows
             // only, build a per-day series for the sparkline.

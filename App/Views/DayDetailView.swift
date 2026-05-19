@@ -13,7 +13,15 @@ struct DayDetailView: View {
 
     @Environment(\.pacerModalPush) private var push
     @Query private var aggregates: [DailyAggregate]
-    @Query private var samples: [TokenSample]
+    /// Per-project rollup for this day. `ProjectDailyAggregate` is keyed
+    /// `(projectPath, date)` and already carries the per-bucket sums the
+    /// Projects card needs — we used to materialize every TokenSample
+    /// for the day and call `effectiveCostUSD` on each row, which on a
+    /// busy day (~3000 samples) dominated the modal's body cost every
+    /// scan tick. The rollup is maintained by `ProjectAggregateRecomputer`
+    /// with the same cost mode the recomputers everywhere use, so the
+    /// numbers stay consistent with Projects / ProjectDetail.
+    @Query private var projectAggregatesForDay: [ProjectDailyAggregate]
     @Query private var sessionRows: [SessionInfo]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
@@ -24,8 +32,8 @@ struct DayDetailView: View {
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == date }
         )
-        _samples = Query(
-            filter: #Predicate<TokenSample> { $0.date == date }
+        _projectAggregatesForDay = Query(
+            filter: #Predicate<ProjectDailyAggregate> { $0.date == date }
         )
         // Sessions that touched this day: overlap on [dayStart, dayEnd].
         // A session spanning multiple days shows up on every day it was
@@ -98,33 +106,22 @@ struct DayDetailView: View {
             t.cacheCreation += r.cacheCreation5mTokens + r.cacheCreation1hTokens
         }
 
-        struct Acc {
-            var cost: Double = 0
-            var tokens: Int64 = 0
-        }
-        let mode = PacerPreferences.costMode()
-        var byProject: [String: Acc] = [:]
-        for s in samples {
-            let key = s.projectPath ?? "(unknown)"
-            var a = byProject[key] ?? Acc()
-            // Single source of truth: TokenSample.effectiveCostUSD(mode:)
-            // applies the same calculate/auto/display logic the
-            // recomputers use, so the day modal shows the same number
-            // as Projects/Models/Dashboard for the same data.
-            a.cost += s.effectiveCostUSD(mode: mode)
-            a.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
-            byProject[key] = a
-        }
-        // Stable sort: by cost desc, with displayName as a deterministic
-        // tiebreaker so $0 rows don't shuffle on every scan tick.
-        let rows = byProject.map { (key, a) in
+        // Per-project rollup read straight from `ProjectDailyAggregate` —
+        // one row per (projectPath, date), with totals already summed
+        // and cost already applied at the user's current cost mode by
+        // `ProjectAggregateRecomputer`. No per-sample iteration, no
+        // pricing lookups on the body path.
+        let rows = projectAggregatesForDay.map { agg in
             ProjectRow(
-                path: key,
-                displayName: pacerShortPath(key),
-                cost: a.cost,
-                tokens: a.tokens
+                path: agg.projectPath,
+                displayName: pacerShortPath(agg.projectPath),
+                cost: agg.totalCostUSD,
+                tokens: agg.inputTokens + agg.outputTokens + agg.cacheReadTokens
             )
         }.sorted { lhs, rhs in
+            // Stable sort: by cost desc, with displayName as a
+            // deterministic tiebreaker so $0 rows don't shuffle on
+            // every scan tick.
             if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
         }
