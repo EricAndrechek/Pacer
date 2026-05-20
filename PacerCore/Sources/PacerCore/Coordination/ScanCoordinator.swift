@@ -245,6 +245,21 @@ public final class ScanCoordinator {
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
 
+    /// Last time we ran `StatsCacheProbe`. Used to throttle the probe
+    /// to once per `statsCacheProbeInterval` instead of every cycle —
+    /// the probe is a debug-view-only sanity check (never feeds
+    /// user-facing aggregates per StatsCacheProbe.swift's doc), and on
+    /// the live machine it's occasionally taken 278 ms when the
+    /// stats-cache.json was being written concurrently by Claude
+    /// Code. No reason to pay that cost every scan.
+    private var lastStatsCacheProbeAt: Date?
+
+    /// Minimum gap between StatsCacheProbe runs. 60 s matches the
+    /// other periodic-not-time-critical bookkeeping. Probe file
+    /// updates are lazy in Claude Code (lags by hours per its own
+    /// doc) so daily-granularity freshness is more than enough.
+    private static let statsCacheProbeInterval: TimeInterval = 60
+
     /// In-memory cache of `JSONLFileCursor` state, keyed by path.
     /// Populated lazily on first cycle via `loadCursorsCached()`, kept
     /// up-to-date by `saveCursors` (which writes through to disk).
@@ -868,14 +883,23 @@ public final class ScanCoordinator {
         phase.sessionRecomputeMs = tickMs()
 
         var probeResult: StatsCacheProbe.ProbeResult?
-        if let probe {
+        let probeNow = Date()
+        let probeThrottleExpired: Bool = {
+            guard let last = lastStatsCacheProbeAt else { return true }
+            return probeNow.timeIntervalSince(last) >= Self.statsCacheProbeInterval
+        }()
+        if let probe, probeThrottleExpired {
             do {
                 probeResult = try probe.probeAndStore(in: context)
+                lastStatsCacheProbeAt = probeNow
             } catch StatsCacheProbe.ProbeError.fileMissing {
                 // Not an error — fresh installs and Claude Code 1.x
-                // stats-cache absence both land here.
+                // stats-cache absence both land here. Mark as
+                // attempted so we don't spin retries on every cycle.
+                lastStatsCacheProbeAt = probeNow
             } catch {
                 log("stats-cache probe failed: \(error)")
+                lastStatsCacheProbeAt = probeNow
             }
         }
         phase.probeMs = tickMs()
