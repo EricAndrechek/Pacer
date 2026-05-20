@@ -161,27 +161,28 @@ private struct ProjectsContent: View {
     @State private var bulkMergeDraft: BulkMergeDraft?
     @State private var aliasError: String?
 
-    /// Cached group/sort pipeline output. Recomputed in `refreshAllRows`
-    /// only when the scan cycle ticks or the user changes range / sort
-    /// — NOT on every body render. With thousands of
-    /// `ProjectDailyAggregate` rows on a power user's DB, the dictionary
-    /// bucketing + sort was the dominant per-frame CPU cost (every
-    /// mouse-move into a chart that captures hover triggered a rebuild).
-    @State private var cachedAllRows: [ProjectRow] = []
+    /// Cached group/sort pipeline output. Populated via `.onAppear` /
+    /// `.onChange` on scan tick / sort. nil → body falls back to a
+    /// synchronous compute so the first render after a `.id(range)`
+    /// re-init never flashes an empty list while waiting for
+    /// `.onAppear` to fire. Hover-driven body re-fires (chart selection,
+    /// table row hover) skip the recompute because the cache is
+    /// populated by then.
+    @State private var cachedAllRows: [ProjectRow]?
     /// Filtered + searched derivative. Separate cache so keystrokes in
     /// the search field only re-run the filter, not the whole
     /// bucket+sort pass. Debounced from search text to avoid recomputing
     /// on every individual character.
-    @State private var cachedFilteredRows: [ProjectRow] = []
+    @State private var cachedFilteredRows: [ProjectRow]?
     @State private var debouncedSearch: String = ""
     @State private var searchDebounceTask: Task<Void, Never>?
     /// Candidate canonical paths for the "Merge into…" submenu. Used
     /// to be filtered per row inside the context menu (O(rows²) per
     /// table render — the dominant scroll-lag cost on a list of any
-    /// size). Now derived once in `refreshAllRows` and consulted by
+    /// size). Derived once alongside `cachedAllRows` and consulted by
     /// each row's menu builder via path-equality skip, dropping the
     /// per-render filter to O(rows).
-    @State private var cachedMergeCandidates: [ProjectRow] = []
+    @State private var cachedMergeCandidates: [ProjectRow]?
 
     let rangeSince: Date?
     let searchText: String
@@ -266,11 +267,18 @@ private struct ProjectsContent: View {
         let canonical: String
     }
 
-    /// Public accessor for code paths that still read directly (the
-    /// "Merge into…" submenu needs the full list of known projects).
-    /// Returns the cached snapshot; do NOT compute fresh here — that
-    /// would defeat the cache's purpose.
-    private var allRows: [ProjectRow] { cachedAllRows }
+    /// Public accessor used by `body` and the "Merge into…" submenu.
+    /// Falls back to a synchronous compute when the cache hasn't been
+    /// populated yet — that's the first render after a `.id(range)`
+    /// re-init, before `.onAppear` fires `refreshAllRows`.
+    private var allRows: [ProjectRow] {
+        cachedAllRows ?? computeAllRowsSync()
+    }
+
+    private var mergeCandidates: [ProjectRow] {
+        if let cached = cachedMergeCandidates { return cached }
+        return allRows.filter { $0.path != ProjectDailyAggregate.unknownProjectPath }
+    }
 
     /// Rebuild the `cachedAllRows` snapshot. Called on appear, on
     /// scan-meta tick, and whenever sort/range changes invalidate the
@@ -278,6 +286,25 @@ private struct ProjectsContent: View {
     /// on a power user's DB; runs at most once per scan cycle now
     /// instead of once per body render.
     private func refreshAllRows() {
+        let rows = computeAllRowsSync()
+        cachedAllRows = rows
+        // Pre-build the merge-candidate list once. Each row's context
+        // menu used to do `allRows.filter { $0.path != row.path && ... }`
+        // — O(rows) per row, O(rows²) per table render. With the
+        // candidates cached, the menu just skips the one current row
+        // at iteration time and is O(rows) total per render.
+        cachedMergeCandidates = rows.filter {
+            $0.path != ProjectDailyAggregate.unknownProjectPath
+        }
+        refreshFilteredRows()
+    }
+
+    /// Pure computation over `aggregates` + `probes` + `sort` +
+    /// `descending`. Used both by `refreshAllRows()` (writes to
+    /// `@State`) and by the `allRows` fallback when the cache hasn't
+    /// landed yet — that's the first render after a `.id(range)`
+    /// re-init, before `.onAppear` fires.
+    private func computeAllRowsSync() -> [ProjectRow] {
         struct Acc {
             var cost: Double = 0
             var input: Int64 = 0
@@ -327,29 +354,22 @@ private struct ProjectsContent: View {
                 status: status
             )
         }
-        cachedAllRows = apply(sort: sort, descending: descending, to: unsorted)
-        // Pre-build the merge-candidate list once. Each row's context
-        // menu used to do `allRows.filter { $0.path != row.path && ... }`
-        // — O(rows) per row, O(rows²) per table render. With the
-        // candidates cached, the menu just skips the one current row
-        // at iteration time and is O(rows) total per render.
-        cachedMergeCandidates = cachedAllRows.filter {
-            $0.path != ProjectDailyAggregate.unknownProjectPath
-        }
-        refreshFilteredRows()
+        return apply(sort: sort, descending: descending, to: unsorted)
     }
 
     /// Filter the cached snapshot by the (debounced) search needle.
     /// Cheap — O(cachedAllRows), no per-row recompute — but worth
     /// caching too so view body never does string lowercasing.
     private func refreshFilteredRows() {
-        let needle = debouncedSearch.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else {
-            cachedFilteredRows = cachedAllRows
-            return
-        }
-        let lower = needle.lowercased()
-        cachedFilteredRows = cachedAllRows.filter {
+        let source = cachedAllRows ?? computeAllRowsSync()
+        cachedFilteredRows = filter(rows: source, by: debouncedSearch)
+    }
+
+    private func filter(rows: [ProjectRow], by needle: String) -> [ProjectRow] {
+        let trimmed = needle.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return rows }
+        let lower = trimmed.lowercased()
+        return rows.filter {
             $0.path.lowercased().contains(lower) ||
             $0.displayName.lowercased().contains(lower)
         }
@@ -384,8 +404,12 @@ private struct ProjectsContent: View {
         return descending ? sorted.reversed() : sorted
     }
 
+    /// What the body actually renders. Falls back to a synchronous
+    /// filter when the cache hasn't landed yet so the first render
+    /// after a `.id(range)` re-init never shows an empty list.
     private var rows: [ProjectRow] {
-        cachedFilteredRows
+        if let cached = cachedFilteredRows { return cached }
+        return filter(rows: allRows, by: debouncedSearch)
     }
 
     var body: some View {
@@ -487,10 +511,11 @@ private struct ProjectsContent: View {
     /// cause of scroll lag on a project list of any size.
     @ViewBuilder
     private func mergeIntoMenu(for row: ProjectRow) -> some View {
+        let candidates = mergeCandidates
         if row.path != ProjectDailyAggregate.unknownProjectPath
-            && cachedMergeCandidates.count > 1 {
+            && candidates.count > 1 {
             Menu("Merge into…") {
-                ForEach(cachedMergeCandidates) { other in
+                ForEach(candidates) { other in
                     if other.path != row.path {
                         Button(other.displayName) {
                             pendingQuickMerge = QuickMerge(
@@ -734,7 +759,7 @@ private struct ProjectsContent: View {
                 // time-range picker tries to claim its full 320pt
                 // ideal width. The picker now uses `maxWidth` so it
                 // shrinks rather than fighting the button for space.
-                if cachedMergeCandidates.count >= 2 {
+                if mergeCandidates.count >= 2 {
                     Button {
                         bulkMergeDraft = BulkMergeDraft(canonical: "", sources: [])
                     } label: {

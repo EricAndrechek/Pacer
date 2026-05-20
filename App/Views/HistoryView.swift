@@ -64,12 +64,6 @@ private struct LifetimeSummaryContent: View {
     let rangeBinding: Binding<TimeRange>
 
     @Query private var aggregates: [DailyAggregate]
-    /// Singleton-row probe — fires once per completed scan cycle so
-    /// the totals walk below runs at most once per cycle instead of
-    /// once per body render (the surrounding tile grid had hover
-    /// states that re-rendered on every mouse-over pre-cache).
-    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
-    private var scanMeta: [ClaudeCodeMeta]
 
     init(range: TimeRange, rangeBinding: Binding<TimeRange>) {
         self.range = range
@@ -102,18 +96,19 @@ private struct LifetimeSummaryContent: View {
         var firstDate: String?
     }
 
-    @State private var cachedTotals = Totals()
-
-    private var totals: Totals { cachedTotals }
-
-    private func refreshTotals() {
+    /// Computed per body fire from the range-scoped `@Query`. No
+    /// `@State` cache — the previous design populated the cache via
+    /// `.onAppear`, which fires AFTER first body, so every `.id(range)`
+    /// re-init briefly rendered empty tiles before the cache landed.
+    /// The walk is O(aggregates) over a scoped slice (≤ ~5k rows even
+    /// on .all for multi-year users), which is sub-millisecond, and the
+    /// body only re-fires on range / scan-tick / @AppStorage changes
+    /// — no hover state in this card.
+    private var totals: Totals {
         var t = Totals()
         var dates = Set<String>()
         var models = Set<String>()
         var minDate: String?
-        // The @Query is already range-scoped via init, so no in-memory
-        // cutoff filter is needed here. Walking `aggregates` is just
-        // "sum + collect distinct" over the scoped slice.
         for row in aggregates {
             t.cost += row.totalCostUSD
             t.input += row.inputTokens
@@ -126,7 +121,7 @@ private struct LifetimeSummaryContent: View {
         t.distinctDays = dates.count
         t.distinctModels = models.count
         t.firstDate = minDate
-        cachedTotals = t
+        return t
     }
 
     private var cardTitle: String {
@@ -183,8 +178,6 @@ private struct LifetimeSummaryContent: View {
                 }
             }
         }
-        .onAppear { refreshTotals() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshTotals() }
     }
 }
 
@@ -414,8 +407,6 @@ private struct TopDaysContent: View {
     let descendingBinding: Binding<Bool>
 
     @Query private var aggregates: [DailyAggregate]
-    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
-    private var scanMeta: [ClaudeCodeMeta]
 
     init(
         range: TimeRange,
@@ -447,14 +438,6 @@ private struct TopDaysContent: View {
         }
     }
 
-    /// Cached output of the rollup + sort pipeline. Previously
-    /// `sortedRows` and `visibleRows` were computed properties, with
-    /// `body` accessing both — and `visibleRows` itself accessed
-    /// `sortedRows` again — so a single render walked every aggregate
-    /// three times. Cached now; refreshes on scan tick + sort changes
-    /// (range changes are handled by the outer `.id(range)` re-init).
-    @State private var cachedSortedRows: [DayRow] = []
-
     /// Toggle to reveal the next 90 (showing top 100). The user flagged
     /// "showing top 10 silently" — now there's a chip in the header
     /// indicating "showing N of M" plus a Show more / Show less link.
@@ -468,22 +451,13 @@ private struct TopDaysContent: View {
     }
 
     /// Days inside the active range, sorted by the user's chosen
-    /// field. Reads from the `@State` cache.
-    private var sortedRows: [DayRow] { cachedSortedRows }
-
-    /// Slice the sorted set rendered in the body. Capped at 10 by
-    /// default; the toggle reveals the rest up to 100.
-    private var visibleRows: [DayRow] {
-        let all = cachedSortedRows
-        if showAll {
-            return Array(all.prefix(min(all.count, 100)))
-        }
-        return Array(all.prefix(10))
-    }
-
-    private func refreshSortedRows() {
-        // The @Query is already range-scoped via init, so no in-memory
-        // cutoff filter is needed — walk the scoped slice directly.
+    /// field. Computed per body fire from the range-scoped `@Query` —
+    /// the previous `@State`-cached design populated on `.onAppear`,
+    /// which fires AFTER first body and made every `.id(range)` re-init
+    /// flash an empty list. The walk is O(aggregates) over a scoped
+    /// slice (≤ ~5k rows even on .all); HoverRow lives inside each row
+    /// so the parent body doesn't re-fire on row hover.
+    private var sortedRows: [DayRow] {
         var byDate: [String: (cost: Double, tokens: Int64)] = [:]
         for row in aggregates {
             var v = byDate[row.date] ?? (0, 0)
@@ -501,12 +475,14 @@ private struct TopDaysContent: View {
         case .cost:
             sorted = rows.sorted { $0.cost < $1.cost }
         }
-        cachedSortedRows = descending ? sorted.reversed() : Array(sorted)
+        return descending ? sorted.reversed() : Array(sorted)
     }
 
     var body: some View {
         let all = sortedRows
-        let visible = visibleRows
+        let visible: [DayRow] = showAll
+            ? Array(all.prefix(min(all.count, 100)))
+            : Array(all.prefix(10))
         let title: String = {
             switch sort {
             case .cost:    return "Most expensive days"
@@ -603,12 +579,6 @@ private struct TopDaysContent: View {
                 }
             }
         }
-        .onAppear { refreshSortedRows() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshSortedRows() }
-        // Range changes are handled by the outer `.id(range)` re-init,
-        // so we only need to re-sort on sort / descending changes here.
-        .onChange(of: sort) { _, _ in refreshSortedRows() }
-        .onChange(of: descending) { _, _ in refreshSortedRows() }
     }
 
     @ViewBuilder
