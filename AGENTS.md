@@ -32,6 +32,12 @@ See `docs/design.md` for the full v1 design.
   rules from five rounds of read-path optimization. The rules look
   nitpicky in isolation; in aggregate they're what keeps the app
   responsive while the in-process scan loop is firing every 5–60s.
+- **`docs/perf-tuning.md`** — current cycle-time / CPU state, the
+  measurement tooling (phase-timed scan log, `make perf-snapshot`),
+  every perf commit's mechanism + measured win, and the open
+  refactors that are deferred. Read before reintroducing animations,
+  per-cycle SwiftData fetches, or adding any new always-running
+  background work.
 
 ## Non-negotiable correctness rules
 
@@ -560,6 +566,51 @@ add a new rollup following the template. The full set of touchpoints:
 5. **Wire into `ScanCoordinator.runScanCycle`** — drain the missing set into the dirty set, log the recovery line, run the recomputer in the existing sequence, include its stats in `ScanReport` and `cycleDidWork`, add to `formatReport`.
 6. **Tests** in `PacerCoreTests/` — single insert→dirty, clearDirty, recomputer single-bucket, multi-bucket, multi-model-within-bucket, upsert-on-second-pass, missing-bucket-bootstrap. Float-cost expects need an epsilon (`abs(actual - expected) < 1e-9`).
 7. **Update the in-memory test container** in `PersistenceTests.swift` and `ScanCoordinatorTests.swift` so the new `@Model` registers.
+
+### Anti-patterns that hide behind benign SwiftUI/SwiftData APIs
+
+These all looked innocent in review and were caught only by `sample(1)`
+on the live process. Mechanisms are subtle enough that grep won't catch
+them — keep this list in mind on any new view/animation/save site.
+
+1. **`.repeatForever(autoreverses:)` in views hosted by `NSStatusItem`.**
+   Each frame triggers SwiftUI body re-eval → NSHostingView signals
+   content-change to its enclosing NSStatusItem → `_updateReplicants`
+   → `cacheDisplayInRect` rasterizes the whole status item to a
+   bitmap at 60 Hz. Cost is ~40 % of MainActor as long as the
+   animation runs. Removed the `ActivityDot` pulse for exactly this
+   reason; if you need a "live" indicator, the dot's mere presence
+   already conveys it, or use a `CALayer`-driven animation that
+   bypasses SwiftUI's per-frame body re-eval.
+2. **`TimelineView(.animation)` in views hosted by `NSToolbarItem`.**
+   Even with a fixed external frame and a transform-only effect
+   (`.scaleEffect`), each tick rebuilds the SwiftUI subtree →
+   NSHostingView size-change signal → `NSToolbarItem _scalableMinSize`
+   → AutoLayout pass on the whole toolbar item chain. `FreshnessPulse`
+   carried this cost continuously while the main window was open.
+   Same workaround if you need animation in a toolbar item.
+3. **Per-cycle `FetchDescriptor<X>()` with no predicate.** Even with
+   `propertiesToFetch` slimming, materializing a 1000-row table per
+   cycle is 70-150 ms under MainActor contention. Cache the dict in
+   memory at the first call site, write-through on updates. See
+   `ScanCoordinator.cursorsCache` for the pattern.
+4. **`await pricingTable.snapshot()` (or any actor hop) on a hot
+   recomputer path.** Each hop is ~150 ms under MainActor contention.
+   Read `SampleCostCache.current()` instead — process-wide nonisolated
+   Sendable snapshot warmed at app launch.
+5. **Coalesce timers that yield without checking their buffer.** If a
+   concurrent scan can drain the buffer between record time and flush
+   time, the yielded trigger fires an empty-buffer cycle → full FS
+   walk for nothing. `JSONLWatcher.flushPending` guards with
+   `guard !changedPaths.isEmpty` for this reason.
+6. **Reading sanity-check / debug-only probes per cycle.** The
+   `StatsCacheProbe` and `ProjectGitRootAutoAliaser` both fall in
+   this category — they're explicitly documented as "not feeding
+   user-facing data" but were running every cycle. Throttle to ≥60 s.
+7. **60-second backstop walks during quiet idle.** Modern FSEvents is
+   reliable enough that 5-min safety-net cadence is sufficient. A
+   ~900-file full walk per minute, times 24/7, is exactly the kind
+   of always-on CPU that puts a menu-bar app in the top-10.
 
 ### Before adding new view / widget / query code
 
