@@ -245,6 +245,15 @@ public final class ScanCoordinator {
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
 
+    /// In-memory cache of `JSONLFileCursor` state, keyed by path.
+    /// Populated lazily on first cycle via `loadCursorsCached()`, kept
+    /// up-to-date by `saveCursors` (which writes through to disk).
+    /// Eliminates the per-cycle full-table fetch (~1 K rows on a
+    /// populated install) that `prep` phase was paying every cycle.
+    /// Cleared on full re-scan (`deleteAllCursors`) so the next cycle
+    /// re-reads from a fresh disk state.
+    private var cursorsCache: [String: JSONLScanner.CursorState]?
+
     /// Last time we ran the auto-aliaser pass. Under heavy Claude
     /// Code activity the per-cycle SwiftData fetches inside
     /// `ProjectGitRootAutoAliaser.run` started landing in 1500-2000ms
@@ -628,7 +637,7 @@ public final class ScanCoordinator {
             try deleteAllCursors()
             cursors = [:]
         } else {
-            cursors = try loadCursors()
+            cursors = try loadCursorsCached()
         }
 
         let activePersister = try persister ?? makePersister()
@@ -968,7 +977,11 @@ public final class ScanCoordinator {
         try SamplePersister(context: context, saveBatchSize: configuration.saveBatchSize)
     }
 
-    private func loadCursors() throws -> [String: JSONLScanner.CursorState] {
+    /// Return the cached cursor map, loading from disk on first call.
+    /// Subsequent cycles reuse the cache — `saveCursors` mutates it
+    /// in lock-step with the disk writes so the two never drift.
+    private func loadCursorsCached() throws -> [String: JSONLScanner.CursorState] {
+        if let cached = cursorsCache { return cached }
         let descriptor = FetchDescriptor<JSONLFileCursor>()
         let rows = try context.fetch(descriptor)
         var out: [String: JSONLScanner.CursorState] = [:]
@@ -979,29 +992,37 @@ public final class ScanCoordinator {
                 lastSeenMtime: row.lastSeenMtime
             )
         }
+        cursorsCache = out
         return out
     }
 
+    /// Persist cursor updates to disk and mirror them into the cache.
+    /// Per-path fetch (one indexed lookup against `JSONLFileCursor.path
+    /// @Attribute(.unique)`) replaces the previous full-table fetch —
+    /// for a typical 1-3 updates per cycle that's a 1000× reduction
+    /// in rows pulled from SwiftData per scan.
     private func saveCursors(_ updates: [String: JSONLScanner.CursorState]) throws {
         guard !updates.isEmpty else { return }
-        let descriptor = FetchDescriptor<JSONLFileCursor>()
-        let existingRows = try context.fetch(descriptor)
-        var byPath: [String: JSONLFileCursor] = [:]
-        byPath.reserveCapacity(existingRows.count)
-        for row in existingRows {
-            byPath[row.path] = row
-        }
         for (path, state) in updates {
-            if let row = byPath[path] {
-                row.byteOffset = state.byteOffset
-                row.lastSeenMtime = state.lastSeenMtime
+            let pathLocal = path
+            let descriptor = FetchDescriptor<JSONLFileCursor>(
+                predicate: #Predicate<JSONLFileCursor> { $0.path == pathLocal }
+            )
+            if let existing = try context.fetch(descriptor).first {
+                existing.byteOffset = state.byteOffset
+                existing.lastSeenMtime = state.lastSeenMtime
             } else {
                 context.insert(JSONLFileCursor(
-                    path: path,
+                    path: pathLocal,
                     byteOffset: state.byteOffset,
                     lastSeenMtime: state.lastSeenMtime
                 ))
             }
+            // Mirror into cache so the next cycle's `loadCursorsCached`
+            // sees the same state. If we ever skip this update path
+            // (early-return etc.), the cache would drift — keep the
+            // mirror in lockstep with the disk write.
+            cursorsCache?[pathLocal] = state
         }
     }
 
@@ -1011,6 +1032,10 @@ public final class ScanCoordinator {
         for row in rows {
             context.delete(row)
         }
+        // Wipe the cache so the next cycle starts from an empty
+        // cursor state (which then re-populates from disk —
+        // empty until new scans write rows).
+        cursorsCache = [:]
     }
 
     private func loadAliases() throws -> [String: String] {
