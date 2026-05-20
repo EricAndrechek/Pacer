@@ -454,9 +454,19 @@ public final class ScanCoordinator {
     private var visibilityObservationTask: Task<Void, Never>?
 
     /// FSEvent latency (live coalesce) and backstop interval applied
-    /// when the user has a main window open. Snappy — sub-second
-    /// reactivity, 60s sanity-check sweep.
-    private static let visibleLatency: CFTimeInterval = 0.5
+    /// when the user has a main window open. 2 s coalesce is the
+    /// trade-off point where bursty Claude Code activity stops
+    /// thrashing SwiftData saves: a typical assistant turn writes
+    /// 3-8 JSONL lines within a 1-2 s window, and bundling them
+    /// into one scan + one save was measured (sample(1) on a busy
+    /// machine) to cut SwiftData background-thread CPU
+    /// proportionally — each save triggers a chain of
+    /// `NSPersistentStoreCoordinator` work, WAL writes, and
+    /// `@Query` refresh fan-out that no single 100-200 ms scan
+    /// cycle can amortize. The user-visible cost is ≤2 s lag on
+    /// dashboard updates, which is well within "live usage tracker"
+    /// expectations.
+    private static let visibleLatency: CFTimeInterval = 2.0
     private static let visibleBackstop: TimeInterval = 60
 
     /// Same knobs when there's no visible main window. Latency widens
