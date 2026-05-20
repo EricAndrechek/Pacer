@@ -344,6 +344,20 @@ public actor JSONLWatcher {
     private func flushPending() {
         guard pendingFSEventArrivedAt != nil else { return }
         pendingFSEventArrivedAt = nil
+        // Skip the yield if our `changedPaths` buffer is empty — the
+        // paths recorded by the FSEvent that armed this coalesce got
+        // drained by an in-flight scan that completed between record
+        // and flush. The drained paths are already being processed;
+        // yielding here would just produce an extra full-walk cycle
+        // because `ScanCoordinator.consumeChangedPaths()` would
+        // return empty. Without this guard the live machine showed
+        // ~30 spurious `files=0 skipped=915` cycles in 12 min during
+        // heavy Claude Code activity — each one ~1 s of full-tree
+        // scan for zero new data.
+        pathsLock.lock()
+        let hasPaths = !changedPaths.isEmpty
+        pathsLock.unlock()
+        guard hasPaths else { return }
         continuation?.yield(Date())
     }
 
