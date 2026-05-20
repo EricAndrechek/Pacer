@@ -157,12 +157,22 @@ public struct MetricTile: View {
                     .font(.system(size: size.fontSize, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.primary)
+                    // Hero values in narrow LazyVGrid columns hit the
+                    // column edge with 5-digit costs ("$10767") and
+                    // wrapped to a second line, which dragged the
+                    // label down and broke the row alignment. Clamp
+                    // to a single line and shrink in place instead;
+                    // the labels are short enough that they never
+                    // need scaling.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
                 ornament
             }
             Text(label.uppercased())
                 .font(size.labelFont)
                 .tracking(size == .hero ? 0.4 : 0.2)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             if let hint {
                 Text(hint)
                     .font(.caption2)

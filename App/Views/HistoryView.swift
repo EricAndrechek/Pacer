@@ -33,7 +33,7 @@ struct HistoryView: View {
     var body: some View {
         PageScaffold(
             "History",
-            subtitle: "Lifetime view of your usage.",
+            subtitle: "Totals, activity, and your most expensive days.",
             trailing: {
                 Picker("Time range", selection: rangeBinding) {
                     ForEach(TimeRange.allCases) { r in
