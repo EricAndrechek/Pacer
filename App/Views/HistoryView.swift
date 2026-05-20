@@ -77,8 +77,14 @@ private struct LifetimeSummaryCard: View {
     let range: TimeRange
 
     var body: some View {
+        // The `.id()` value is prefixed per-card so it can't collide
+        // with another `.id(range)` sibling in the same LazyVStack.
+        // Without the prefix, SwiftUI's identity system treated this
+        // card and TopDaysContent (which also re-init on range change)
+        // as the same view and dropped one — the bottom of the page
+        // was just empty space where TopDays should have rendered.
         LifetimeSummaryContent(range: range)
-            .id(range)
+            .id("lifetime-summary-\(range.rawValue)")
     }
 }
 
@@ -383,11 +389,9 @@ private struct TopDaysCard: View {
     }
 
     var body: some View {
-        // Card+Content split with `.id(range)` so the @Query gets
-        // re-created with a range-scoped predicate when the page-level
-        // range changes — same pattern as LifetimeSummaryCard. Sort
-        // changes happen inside the content view and reuse the same
-        // fetched slice without re-fetching.
+        // The `.id()` value is prefixed per-card so it can't collide
+        // with LifetimeSummary's own `.id(range)` sibling. See the
+        // matching comment on LifetimeSummaryCard for why.
         TopDaysContent(
             range: range,
             sort: sort,
@@ -396,7 +400,7 @@ private struct TopDaysCard: View {
             sortBinding: sortBinding,
             descendingBinding: $descending
         )
-        .id(range)
+        .id("top-days-\(range.rawValue)")
     }
 }
 
@@ -478,19 +482,20 @@ private struct TopDaysContent: View {
         return descending ? sorted.reversed() : Array(sorted)
     }
 
+    private var title: String {
+        switch sort {
+        case .cost:    return "Most expensive days"
+        case .tokens:  return "Heaviest token days"
+        case .date:    return descending ? "Most recent days" : "Earliest days"
+        }
+    }
+
     var body: some View {
         let all = sortedRows
         let visible: [DayRow] = showAll
             ? Array(all.prefix(min(all.count, 100)))
             : Array(all.prefix(10))
-        let title: String = {
-            switch sort {
-            case .cost:    return "Most expensive days"
-            case .tokens:  return "Heaviest token days"
-            case .date:    return descending ? "Most recent days" : "Earliest days"
-            }
-        }()
-        PacerCard(title, trailing: {
+        return PacerCard(title, trailing: {
             if !all.isEmpty {
                 Text("showing \(visible.count) of \(all.count)")
                     .font(.system(size: 11))
