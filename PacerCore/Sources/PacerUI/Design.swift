@@ -283,59 +283,33 @@ public struct FreshnessPulse: View {
     }
 
     public var body: some View {
-        // Wall-clock driven via TimelineView: the halo's phase is a
-        // pure function of `Date`, so SwiftUI rebuilding the toolbar
-        // item on tab switch (which torches the view's @State) can't
-        // restart the animation mid-cycle or leave the halo and dot
-        // out of phase. `paused: !shouldPulse` lets the timeline go
-        // quiet when there's nothing to animate.
+        // Static colored dot, NO TimelineView, NO animation.
         //
-        // 12 fps over a 1.4s cycle = ~17 frames per halo, still smooth
-        // for a slow ease-out scale. The prior 30 fps was 2.5× the
-        // wall-clock work for no perceptual benefit — the halo expands
-        // ~5px total and fades over ~1s, so ~10 frames is the eye's
-        // discrimination floor here. With FreshnessPulse rendered in
-        // both the menu-bar item and the toolbar, dropping it cut a
-        // noticeable chunk of idle CPU when the window is open.
-        TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: !shouldPulse)) { context in
-            let raw = shouldPulse ? cycleRaw(at: context.date) : 0
-            // ease-out scale: ring accelerates outward early in the
-            // cycle, settles near max as it fades.
-            let scalePhase = 1.0 - pow(1.0 - raw, 3)
-            // sin opacity: 0 → 0.85 → 0 over the cycle. Critically,
-            // opacity == 0 at *both* raw=0 and raw=1, so the
-            // boundary between cycles is invisible — there's no "pop"
-            // back to a bright ring at the start of each loop, which
-            // the previous .repeatForever(easeOut) animation produced
-            // because it reset opacity from 0 to 0.85 instantly.
-            let ringOpacity = sin(.pi * raw) * 0.85
-            // .overlay (not ZStack) so the halo is laid out *inside*
-            // the dot's own bounds — concentric by construction,
-            // independent of any HStack/ZStack alignment quirks that
-            // were rendering the halo visibly offset to the left of
-            // the dot in the previous implementation.
-            Circle()
-                .fill(color)
-                .overlay {
-                    Circle()
-                        .stroke(color.opacity(0.6), lineWidth: 1.2)
-                        .scaleEffect(1.0 + 0.55 * scalePhase)
-                        .opacity(ringOpacity)
-                        .allowsHitTesting(false)
-                }
-                .frame(width: 7, height: 7)
-        }
-        // Reserve consistent space in the toolbar pill no matter what
-        // the halo is doing — peak scale puts the ring at ~10.85pt
-        // (plus its 1.2pt stroke), comfortably inside this 14pt box.
-        .frame(width: 14, height: 14)
-    }
-
-    /// 0..1 linear ramp, looping every 1.4s, from wall-clock time.
-    private func cycleRaw(at date: Date) -> Double {
-        let period: Double = 1.4
-        return date.timeIntervalSinceReferenceDate
-            .truncatingRemainder(dividingBy: period) / period
+        // **Why no halo:** the previous `TimelineView(.animation(12fps))`
+        // halo measured ~25 % MainActor CPU in `sample(1)` when the
+        // main window was open and `state == .live`. The dominant cost
+        // was `[NSWindow updateConstraintsIfNeeded]` →
+        // `[NSToolbarItem _scalableMinSize]` running on every
+        // TimelineView tick — NSToolbarItem's AutoLayout chain
+        // re-validates whenever its hosted SwiftUI subtree rebuilds,
+        // even though FreshnessPulse's external 14×14 frame is fixed
+        // and the scaleEffect was purely a render transform. Going
+        // static eliminates the per-tick AppKit constraint pass while
+        // preserving the colored-dot freshness signal (the toolbar's
+        // accompanying "live" / "3m ago" text label is the primary
+        // signal anyway; the halo was decoration). `_ = visibility`
+        // keeps the `@State` reference alive so the type stays valid
+        // for a future re-introduction via a CALayer-driven animation
+        // that bypasses SwiftUI's per-frame body re-eval.
+        _ = visibility
+        _ = reduceMotion
+        return Circle()
+            .fill(color)
+            .frame(width: 7, height: 7)
+            // Reserve the same 14×14 footprint the prior halo
+            // implementation used so the toolbar pill's layout
+            // doesn't shift across the build.
+            .frame(width: 14, height: 14)
     }
 }
 
