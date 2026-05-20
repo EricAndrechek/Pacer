@@ -1,0 +1,469 @@
+name: Release
+
+# Tag-driven release. Push a `v0.2.0` tag and this workflow builds,
+# signs, notarizes, packages, signs the Sparkle update, publishes the
+# GitHub Release, and updates the appcast on the gh-pages branch.
+#
+# Required secrets (configure under Settings → Secrets and variables →
+# Actions). See docs/releasing.md for the exact value formats and
+# step-by-step setup.
+#
+#   MACOS_CERTIFICATE         — base64-encoded Developer ID Application
+#                                .p12 (exported from Keychain Access).
+#   MACOS_CERTIFICATE_PASSWORD — password used when exporting the .p12.
+#   KEYCHAIN_PASSWORD          — random password for the ephemeral CI keychain.
+#   APPLE_TEAM_ID              — 10-char Team ID (e.g. YZXWMJ5VBY).
+#   NOTARY_KEY_ID              — App Store Connect API key ID.
+#   NOTARY_ISSUER_ID           — App Store Connect issuer UUID.
+#   NOTARY_KEY_P8              — full contents of the .p8 file from
+#                                App Store Connect (the actual private key
+#                                text, including the BEGIN/END lines).
+#   SPARKLE_ED_PRIVATE_KEY     — base64-encoded Sparkle EdDSA private key
+#                                (output of `generate_keys -x -`).
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Manual fire-from-the-UI path, useful for verifying the workflow
+  # without cutting an actual release. With `dry_run: true` the workflow
+  # builds + signs + notarizes but does NOT publish a GitHub Release
+  # or push the appcast.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip GitHub Release + appcast publish (build + sign + notarize only)"
+        required: false
+        default: "false"
+
+# Avoid two release runs racing each other if a tag and a manual dispatch
+# fire simultaneously.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create releases, push to gh-pages
+  pages: write      # if the user wires up GH Pages publish later
+
+jobs:
+  release:
+    name: Build, sign, notarize, publish
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # Used in several steps; declaring once here keeps them in sync.
+      APP_NAME: Pacer
+      BUNDLE_ID: com.ericandrechek.pacer
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # Need full history so `git describe` against the tag works
+          # for embedding the version into the build (and so we can
+          # push to gh-pages at the end without re-fetching).
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        # Strip the leading `v` from the tag (`v1.2.3` → `1.2.3`). For
+        # workflow_dispatch fires without a tag, fall back to `0.0.0-dev`
+        # so the build still has a sane MARKETING_VERSION.
+        run: |
+          set -e
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="0.0.0-dev"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved version: ${version}"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install build tools
+        run: |
+          brew install xcodegen create-dmg
+
+      - name: Import Developer ID Application cert
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        # Standard GitHub-Actions-on-macOS keychain dance:
+        #   1. Decode the base64 .p12 to a temp file.
+        #   2. Create an ephemeral keychain just for this job.
+        #   3. Import the .p12 with -T /usr/bin/codesign so codesign
+        #      can read the private key without an interactive prompt.
+        #   4. Add it to the user's search list and set as default.
+        # The ephemeral keychain is destroyed in the cleanup step at
+        # the end of the job so the cert never persists on the runner.
+        run: |
+          set -euo pipefail
+          CERT_PATH="${RUNNER_TEMP}/cert.p12"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain-db"
+
+          echo "${MACOS_CERTIFICATE}" | base64 --decode > "${CERT_PATH}"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          security import "${CERT_PATH}" \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" \
+            -A -t cert -f pkcs12 \
+            -k "${KEYCHAIN_PATH}"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}"
+          security default-keychain -s "${KEYCHAIN_PATH}"
+
+          # Confirm a Developer ID Application identity is now visible
+          # to codesign — fail fast if the secret wasn't loaded.
+          security find-identity -v -p codesigning "${KEYCHAIN_PATH}" \
+            | grep "Developer ID Application"
+
+      - name: Stamp version into project.yml
+        # Override the in-repo MARKETING_VERSION so the built bundle
+        # carries the tag's version (without committing it back).
+        run: |
+          set -e
+          version="${{ steps.version.outputs.version }}"
+          # Increment CFBundleVersion (CI build number) by a unix-time
+          # suffix so every release has a strictly-monotonic build value
+          # — Sparkle prefers CFBundleVersion for ordering, marketing
+          # version is informational.
+          build="$(date -u +%s)"
+          sed -i.bak -E \
+            -e "s/MARKETING_VERSION: \"[^\"]+\"/MARKETING_VERSION: \"${version}\"/g" \
+            -e "s/CURRENT_PROJECT_VERSION: \"[^\"]+\"/CURRENT_PROJECT_VERSION: \"${build}\"/g" \
+            project.yml
+          rm -f project.yml.bak
+          grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app (Release, unsigned)
+        # We build unsigned and sign manually below — same pattern as
+        # bin/dev-install.sh. xcodebuild's auto-signing wants a
+        # provisioning profile registered for the App Groups capability
+        # and we don't want to manage profiles in CI.
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Pacer.xcodeproj \
+            -scheme Pacer \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build \
+            | (xcbeautify --renderer github-actions || cat)
+
+      - name: Sign the bundle
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # Reuses the same inside-out signing order as bin/dev-install.sh:
+        # frameworks (Sparkle XPC services + helper + framework) first,
+        # then resource bundles, then the widget extension, finally the
+        # outer app bundle so its seal covers everything inside.
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build -name "Pacer.app" -path "*/Build/Products/Release/*" | head -1)"
+          if [ -z "${APP_PATH}" ] || [ ! -d "${APP_PATH}" ]; then
+            echo "ERROR: could not locate built Pacer.app under build/"
+            find build -name "Pacer.app" -type d
+            exit 1
+          fi
+          echo "App at: ${APP_PATH}"
+
+          IDENTITY="Developer ID Application: Eric Andrechek (${APPLE_TEAM_ID})"
+          APP_ENT="App/Pacer.entitlements"
+          WIDGET_ENT="Widgets/PacerWidgets.entitlements"
+
+          sign() {
+            local ent="$1" target="$2"
+            local args=(--force --options runtime --timestamp --sign "${IDENTITY}")
+            [ -n "${ent}" ] && args+=(--entitlements "${ent}")
+            codesign "${args[@]}" "${target}"
+          }
+
+          # Sparkle internals (deepest-first).
+          SPARKLE="${APP_PATH}/Contents/Frameworks/Sparkle.framework"
+          if [ -d "${SPARKLE}" ]; then
+            while IFS= read -r xpc; do
+              xpc_name="$(basename "${xpc}" .xpc)"
+              [ -e "${xpc}/Contents/MacOS/${xpc_name}" ] && \
+                sign "" "${xpc}/Contents/MacOS/${xpc_name}"
+              sign "" "${xpc}"
+            done < <(find "${SPARKLE}" -name "*.xpc" -type d)
+            for helper in \
+              "${SPARKLE}/Versions/Current/Autoupdate" \
+              "${SPARKLE}/Versions/Current/Updater.app"; do
+              [ -e "${helper}" ] && sign "" "${helper}"
+            done
+            sign "" "${SPARKLE}"
+          fi
+
+          # Any other dylibs Xcode emitted (PacerCore products, etc).
+          while IFS= read -r dylib; do
+            [ -e "${dylib}" ] && sign "" "${dylib}"
+          done < <(find "${APP_PATH}" -name "*.dylib" -type f)
+
+          # Resource bundles.
+          for bundle in \
+            "${APP_PATH}/Contents/Resources/PacerCore_PacerCore.bundle" \
+            "${APP_PATH}/Contents/PlugIns/PacerWidgets.appex/Contents/Resources/PacerCore_PacerCore.bundle"; do
+            [ -e "${bundle}" ] && sign "" "${bundle}"
+          done
+
+          # Widget extension.
+          sign "${WIDGET_ENT}" "${APP_PATH}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
+          sign "${WIDGET_ENT}" "${APP_PATH}/Contents/PlugIns/PacerWidgets.appex"
+
+          # Outer app bundle.
+          sign "${APP_ENT}" "${APP_PATH}"
+
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          echo "APP_PATH=${APP_PATH}" >> "${GITHUB_ENV}"
+
+      - name: Notarize and staple
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+        # Notarize via App Store Connect API key (the only flow that
+        # works in CI — interactive Apple-ID auth obviously can't).
+        # `--wait` blocks until Apple's notary service returns Accepted/
+        # Invalid so we fail fast on rejection.
+        run: |
+          set -euo pipefail
+          KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
+          echo "${NOTARY_KEY_P8}" > "${KEY_PATH}"
+
+          ZIP_PATH="${RUNNER_TEMP}/Pacer.zip"
+          ditto -c -k --keepParent "${APP_PATH}" "${ZIP_PATH}"
+
+          xcrun notarytool submit "${ZIP_PATH}" \
+            --key "${KEY_PATH}" \
+            --key-id "${NOTARY_KEY_ID}" \
+            --issuer "${NOTARY_ISSUER_ID}" \
+            --wait \
+            --output-format json \
+            | tee "${RUNNER_TEMP}/notary.json"
+
+          status="$(jq -r .status "${RUNNER_TEMP}/notary.json")"
+          if [ "${status}" != "Accepted" ]; then
+            submission_id="$(jq -r .id "${RUNNER_TEMP}/notary.json")"
+            echo "::error::Notarization failed with status=${status}"
+            xcrun notarytool log "${submission_id}" \
+              --key "${KEY_PATH}" \
+              --key-id "${NOTARY_KEY_ID}" \
+              --issuer "${NOTARY_ISSUER_ID}" \
+              || true
+            exit 1
+          fi
+
+          xcrun stapler staple "${APP_PATH}"
+          xcrun stapler validate "${APP_PATH}"
+
+      - name: Build DMG
+        # `create-dmg` is the gold-standard CLI for building a signed
+        # macOS DMG with a styled background + drag-to-Applications
+        # affordance. It signs the DMG itself if we pass --codesign,
+        # though we re-sign manually below so the entitlements file
+        # is consistent with what Sparkle's installer expects.
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          DMG_PATH="${RUNNER_TEMP}/Pacer-${version}.dmg"
+
+          create-dmg \
+            --volname "Pacer ${version}" \
+            --window-pos 200 120 \
+            --window-size 600 380 \
+            --icon-size 100 \
+            --icon "Pacer.app" 175 190 \
+            --hide-extension "Pacer.app" \
+            --app-drop-link 425 190 \
+            --no-internet-enable \
+            "${DMG_PATH}" \
+            "${APP_PATH}" \
+            || true   # create-dmg returns non-zero on certain warnings; we re-check below
+
+          if [ ! -f "${DMG_PATH}" ]; then
+            echo "::error::DMG was not produced"
+            exit 1
+          fi
+          echo "DMG_PATH=${DMG_PATH}" >> "${GITHUB_ENV}"
+          echo "DMG_NAME=Pacer-${version}.dmg" >> "${GITHUB_ENV}"
+
+      - name: Sign + notarize DMG
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+        # The DMG itself also needs Developer ID signing + notarization
+        # so users don't get a Gatekeeper "downloaded from internet"
+        # prompt on first mount. (The app inside is already notarized;
+        # the DMG container is separate.)
+        run: |
+          set -euo pipefail
+          IDENTITY="Developer ID Application: Eric Andrechek (${APPLE_TEAM_ID})"
+          codesign --force --sign "${IDENTITY}" --timestamp "${DMG_PATH}"
+
+          KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
+          xcrun notarytool submit "${DMG_PATH}" \
+            --key "${KEY_PATH}" \
+            --key-id "${NOTARY_KEY_ID}" \
+            --issuer "${NOTARY_ISSUER_ID}" \
+            --wait
+
+          xcrun stapler staple "${DMG_PATH}"
+          xcrun stapler validate "${DMG_PATH}"
+
+      - name: Sign Sparkle update
+        id: sparkle
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        # Sparkle's `sign_update` ships inside the Sparkle SPM checkout
+        # under `bin/`. After xcodegen + xcodebuild, the resolved package
+        # lives under build/SourcePackages/checkouts/Sparkle.
+        run: |
+          set -euo pipefail
+          SIGN_UPDATE="$(find build/SourcePackages/checkouts/Sparkle/bin -name sign_update | head -1)"
+          if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
+            echo "::error::Could not locate Sparkle's sign_update tool"
+            find build -name sign_update 2>/dev/null | head -5
+            exit 1
+          fi
+          echo "Using ${SIGN_UPDATE}"
+
+          KEY_FILE="${RUNNER_TEMP}/sparkle.key"
+          echo "${SPARKLE_ED_PRIVATE_KEY}" > "${KEY_FILE}"
+
+          # `sign_update -f <keyfile> <dmg>` emits an `sparkle:edSignature`
+          # attribute string suitable for direct inclusion in the appcast.
+          SIGNATURE="$("${SIGN_UPDATE}" -f "${KEY_FILE}" "${DMG_PATH}")"
+          echo "signature=${SIGNATURE}" >> "${GITHUB_OUTPUT}"
+
+          SIZE="$(stat -f%z "${DMG_PATH}")"
+          echo "size=${SIZE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tag="v${version}"
+
+          # Create-or-update the release. `--generate-notes` populates
+          # the body from commits since the previous tag.
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${DMG_PATH}" --clobber
+          else
+            gh release create "${tag}" "${DMG_PATH}" \
+              --title "Pacer ${version}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Update appcast on gh-pages
+        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Maintain a single appcast.xml at the root of the gh-pages
+        # branch, served from https://ericandrechek.github.io/Pacer/appcast.xml
+        # (the SUFeedURL declared in Info.plist).
+        #
+        # The first run on a repo that has no gh-pages branch yet
+        # bootstraps an empty appcast.xml; subsequent runs append.
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          signature='${{ steps.sparkle.outputs.signature }}'   # e.g. sparkle:edSignature="..." length="N"
+          size='${{ steps.sparkle.outputs.size }}'
+          pubdate="$(LC_TIME=en_US.UTF-8 date -u +"%a, %d %b %Y %H:%M:%S +0000")"
+          dmg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${DMG_NAME}"
+
+          # Build the <item> entry for this release. Sparkle is tolerant
+          # of HTML-encoded vs raw attributes; we use the raw form that
+          # `sign_update` already produced.
+          ITEM_FILE="${RUNNER_TEMP}/item.xml"
+          cat > "${ITEM_FILE}" <<EOF
+              <item>
+                  <title>Version ${version}</title>
+                  <pubDate>${pubdate}</pubDate>
+                  <sparkle:version>${version}</sparkle:version>
+                  <sparkle:shortVersionString>${version}</sparkle:shortVersionString>
+                  <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+                  <enclosure
+                      url="${dmg_url}"
+                      length="${size}"
+                      type="application/octet-stream"
+                      ${signature} />
+              </item>
+          EOF
+
+          # Check out gh-pages (create if absent).
+          worktree="${RUNNER_TEMP}/gh-pages"
+          if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" >/dev/null 2>&1; then
+            git worktree add -B gh-pages "${worktree}" origin/gh-pages
+          else
+            git worktree add --orphan -B gh-pages "${worktree}"
+            (cd "${worktree}" && rm -rf .* * 2>/dev/null || true)
+          fi
+
+          appcast="${worktree}/appcast.xml"
+          if [ ! -f "${appcast}" ]; then
+            cat > "${appcast}" <<'HEADER'
+          <?xml version="1.0" standalone="yes"?>
+          <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+              <channel>
+                  <title>Pacer</title>
+                  <link>https://ericandrechek.github.io/Pacer/appcast.xml</link>
+                  <description>Pacer auto-update feed</description>
+                  <language>en</language>
+              </channel>
+          </rss>
+          HEADER
+          fi
+
+          # Insert the new item right before the closing </channel>.
+          # sed -i'' is GNU-vs-BSD safe with a temp suffix.
+          python3 - "${appcast}" "${ITEM_FILE}" <<'PY'
+          import sys, pathlib
+          appcast = pathlib.Path(sys.argv[1])
+          item = pathlib.Path(sys.argv[2]).read_text()
+          xml = appcast.read_text()
+          if "</channel>" not in xml:
+              raise SystemExit(f"appcast missing </channel>: {appcast}")
+          xml = xml.replace("</channel>", item + "        </channel>", 1)
+          appcast.write_text(xml)
+          PY
+
+          (
+            cd "${worktree}"
+            git add appcast.xml
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "appcast: ${version}"
+            git push origin gh-pages
+          )
+
+      - name: Clean up ephemeral keychain
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/build.keychain-db" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary-key.p8" "${RUNNER_TEMP}/sparkle.key"

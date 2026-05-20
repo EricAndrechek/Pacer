@@ -100,6 +100,37 @@ while IFS= read -r dylib; do
     [ -e "${dylib}" ] && sign "" "${dylib}"
 done < <(find "${BUILD_OUTPUT}" -name "*.dylib" -type f)
 
+# Sparkle.framework ships with embedded XPC services + helper
+# executables (Autoupdate, Updater.app, Downloader.xpc, Installer.xpc).
+# All of them have to be signed by the same Team ID as the host app
+# or Sparkle's update flow will refuse to launch them. Sign deepest-
+# first so each enclosing seal covers the inner signatures. The Sparkle
+# README is explicit about this ordering; --deep is *not* the right
+# answer (it overwrites existing internal signatures, and Apple's docs
+# now flag it as deprecated).
+SPARKLE_FW="${BUILD_OUTPUT}/Contents/Frameworks/Sparkle.framework"
+if [ -d "${SPARKLE_FW}" ]; then
+    # XPC services (Downloader, Installer): bundle binary then bundle.
+    while IFS= read -r xpc; do
+        xpc_name="$(basename "${xpc}" .xpc)"
+        [ -e "${xpc}/Contents/MacOS/${xpc_name}" ] && \
+            sign "" "${xpc}/Contents/MacOS/${xpc_name}"
+        sign "" "${xpc}"
+    done < <(find "${SPARKLE_FW}" -name "*.xpc" -type d)
+
+    # The Autoupdate helper executable + the Updater.app helper bundle
+    # inside the framework's Versions/B/.
+    for helper in \
+        "${SPARKLE_FW}/Versions/Current/Autoupdate" \
+        "${SPARKLE_FW}/Versions/Current/Updater.app"; do
+        [ -e "${helper}" ] && sign "" "${helper}"
+    done
+
+    # Finally the framework itself. Sign by Versions/Current path so
+    # the version-resolved symlink chain stays valid.
+    sign "" "${SPARKLE_FW}"
+fi
+
 # PacerCore resource bundles ride along inside the app and the widget
 # extension; sign them so the parent seals don't break later.
 for bundle in \

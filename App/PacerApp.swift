@@ -10,6 +10,13 @@ struct PacerApp: App {
     /// just project the container into their own environments.
     @NSApplicationDelegateAdaptor(PacerAppDelegate.self) private var appDelegate
 
+    /// Sparkle 2.x updater. `init()` starts the on-launch check + 24h
+    /// recurrence using the SUFeedURL declared in Info.plist. Owned
+    /// here so its lifetime matches the app's, and so the "Check for
+    /// Updates…" menu item can bind to its KVO-observable
+    /// `canCheckForUpdates` state.
+    @StateObject private var updater = PacerUpdater()
+
     init() {
         // Force overlay-style scrollers process-wide. NSScroller reads
         // `AppleShowScrollBars` via CFPreferences, which gives the
@@ -105,6 +112,11 @@ struct PacerApp: App {
                 Button("About Pacer") {
                     showAboutPanel()
                 }
+                // Sparkle's standard "Check for Updates…" item. Lives
+                // under the application menu, above "Settings…", which
+                // is where every Mac app puts it. The view auto-disables
+                // while a check is already in flight.
+                CheckForUpdatesView(updater: updater.updater)
             }
             // ⌘1..⌘4 jump between sidebar destinations. Live in
             // `.commands` so they're part of the menu-bar responder
