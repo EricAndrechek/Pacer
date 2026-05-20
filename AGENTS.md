@@ -22,10 +22,6 @@ See `docs/design.md` for the full v1 design.
   metric Pacer surfaces should match `ccusage`'s number for the same
   range, modulo the cache 5m/1h split (we track separately, ccusage
   doesn't).
-- Reference implementation in Go: `<reference Go implementation>/`.
-  ~2,900 LOC covering OAuth/Keychain, JSONL parsing, SQLite schema,
-  pace charts, and pricing primitives. The Swift port mirrors this
-  closely.
 - **`AGENTS.md` → "Performance — invariants and patterns"** (below) —
   read before adding ANY `@Query`, `FetchDescriptor`, computed view
   property, widget provider, or new rollup table. Codifies hard-won
@@ -199,17 +195,21 @@ shared SwiftData container directly — no IPC.
   (see README for the full invocation).
 - Local dev runs through Xcode with the user's own team selected.
 
-## Team IDs
+## Team IDs and signing
 
-Two certs in keychain (`security find-identity -v -p codesigning`):
-- `<REDACTED_DEV_TEAM_ID>` — Apple Development cert for local dev signing
-- `YZXWMJ5VBY` — Developer ID Application cert for distribution
+Pacer ships from `YZXWMJ5VBY` (Eric Andrechek's Apple Developer team). The
+Developer ID Application cert under that team signs every release build;
+the same Team ID prefixes the App Group identifier
+(`YZXWMJ5VBY.com.ericandrechek.pacer`) so the macOS Sequoia App
+Management prompt stays quiet (see `docs/research/tcc-app-management.md`).
 
-`project.yml` currently sets `DEVELOPMENT_TEAM: YZXWMJ5VBY`. If a Debug
-build trips on missing provisioning profiles, the user should open the
-project in Xcode and let it auto-resolve, or manually flip the team in
-the Signing & Capabilities tab. Distribution (M8 Sparkle release) will
-use `YZXWMJ5VBY` explicitly with the Developer ID cert.
+If you're building Pacer from source under a different Apple Developer
+account, you'll need to replace `YZXWMJ5VBY` in `project.yml`,
+`App/Pacer.entitlements`, `Widgets/PacerWidgets.entitlements`, and
+`bin/dev-install.sh`'s `SIGN_IDENTITY` with your own Team ID, and
+re-create the App Group + Developer ID Application cert in App Store
+Connect. `xcodebuild` resolves provisioning through Xcode's
+`-allowProvisioningUpdates` flag, which the install scripts pass.
 
 ## Build, test, and verification commands
 
@@ -297,14 +297,13 @@ automatic for users coming from the prior daemon-based architecture.
 
 ### Why we do not use the Xcode project's signing flags from CLI directly
 
-The user's project.yml has `DEVELOPMENT_TEAM: YZXWMJ5VBY` (Developer ID
-team for distribution) but the Apple Development cert that's actually
-present in the keychain is under a different cert team
-(`<REDACTED_DEV_TEAM_ID>`). `xcodebuild` resolves this through Xcode's
-`-allowProvisioningUpdates` flag, which the install scripts pass.
-Don't try to work around signing with `CODE_SIGN_IDENTITY=""` for the
-install flow — that produces an unsigned bundle that macOS refuses to
-launch and that can't access the App Group container.
+`project.yml` sets `DEVELOPMENT_TEAM: YZXWMJ5VBY` (the Developer ID team
+that ships releases) but a developer's local Apple Development cert may
+live under a different cert team. `xcodebuild` resolves this through
+Xcode's `-allowProvisioningUpdates` flag, which the install scripts
+pass. Don't try to work around signing with `CODE_SIGN_IDENTITY=""` for
+the install flow — that produces an unsigned bundle that macOS refuses
+to launch and that can't access the App Group container.
 
 ### Real-run bugs the test suite cannot catch
 
