@@ -15,8 +15,7 @@ import PacerCore
 ///     adjacent segments. Each segment is colored by the `PaceBand`
 ///     classification at the segment's *earlier* endpoint, so a curve
 ///     that started under-pace and ramped over-pace renders multi-
-///     colored along its length — mirrors the reference-impl reference's
-///     intent.
+///     colored along its length.
 ///   - Tail point at the most-recent sample, colored by the latest
 ///     segment's band.
 ///

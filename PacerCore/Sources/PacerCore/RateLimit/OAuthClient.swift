@@ -60,14 +60,13 @@ public enum OAuthClientError: Error, Sendable {
 public struct OAuthClient: Sendable {
 
     /// Anthropic's undocumented usage endpoint. Stable for ~a year;
-    /// every community tool (claude-hud, ccstatusline, the reference-impl
-    /// reference plugin) uses this exact URL.
+    /// every community tool (claude-hud, ccstatusline, etc.) uses this
+    /// exact URL.
     public static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
-    /// Beta-channel header Claude Code sends with its own requests. The
-    /// reference-impl reference verified this version returns 200 against
-    /// live accounts; older values may also work but we send what we
-    /// know is current.
+    /// Beta-channel header Claude Code sends with its own requests.
+    /// This version returns 200 against live accounts; older values may
+    /// also work but we send what we know is current.
     public static let betaHeader = "oauth-2025-04-20"
 
     /// We identify polling traffic honestly so Anthropic's logs can

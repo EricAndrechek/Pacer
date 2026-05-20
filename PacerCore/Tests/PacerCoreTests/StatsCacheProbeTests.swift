@@ -58,8 +58,7 @@ private func writeFixture(_ json: String) throws -> URL {
     #expect(result.version == 99)
     // Critical: we still surface what we can, but mark recognized=false
     // so the debug view warns instead of pretending we know what the
-    // values mean. Mirrors the reference-impl Go ref's "unsupported
-    // stats-cache version N" log path.
+    // values mean.
     #expect(result.versionRecognized == false)
 }
 

@@ -73,8 +73,7 @@ public enum KeychainOAuthError: Error, Sendable, Equatable {
 ///
 /// `/usr/bin/security` is an Apple-signed binary that's already in both
 /// layers (it's the canonical `apple-tool:` partition member), so it
-/// reads without prompting. The reference-impl reference plugin reached
-/// the same conclusion. This costs one ~10ms subprocess every 5
+/// reads without prompting. This costs one ~10ms subprocess every 5
 /// minutes — negligible — and works without asking the user to do
 /// anything special.
 ///
@@ -93,9 +92,8 @@ public struct KeychainOAuth: Sendable {
 
     /// Service name Claude Code writes its credential under, verified
     /// from `security find-generic-password -s "Claude Code-credentials"`
-    /// on the user's machine. This string is also hardcoded in the
-    /// reference-impl Go reference and in every community statusline tool;
-    /// Anthropic has not changed it in ~a year.
+    /// on the user's machine. This string is also hardcoded in every
+    /// community statusline tool; Anthropic has not changed it in ~a year.
     public static let serviceName = "Claude Code-credentials"
 
     /// The injection point. Returns the raw JSON blob bytes on success,

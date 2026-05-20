@@ -8,21 +8,19 @@ import SwiftData
 /// **This probe must NEVER feed user-facing aggregates.** Stats-cache
 /// is lazy-written by Claude Code (lags by hours, sometimes a full
 /// day) and has fewer categories than the JSONL data (no 5m/1h cache
-/// split, no per-message timing). The reference-impl Go reference treats
-/// it as an authoritative-on-modtime mirror; Pacer deliberately does
-/// NOT — JSONL is the source of truth, this is sanity-check only.
+/// split, no per-message timing). Pacer deliberately does NOT treat it
+/// as an authoritative-on-modtime mirror — JSONL is the source of
+/// truth, this is sanity-check only.
 ///
-/// We follow the reference-impl Go reference's version gate: only
-/// `version == 3` is recognized. A different version means Claude Code
+/// Version gate: only `version == 3` is recognized. A different version means Claude Code
 /// changed the format and our key list might be stale; we still write
 /// the version field so the debug view can surface "your stats-cache
 /// is on a newer/older format than we know how to parse" but skip the
 /// other fields.
 public struct StatsCacheProbe: Sendable {
 
-    /// Schema version we know how to parse. Mirror of
-    /// `supportedStatsCacheVersion` in the reference-impl Go ref
-    /// (`statscache.go:18`).
+    /// Schema version we know how to parse. Bump when Claude Code's
+    /// `~/.claude/stats-cache.json` `version` field changes.
     public static let supportedVersion = 3
 
     public enum ProbeError: Error, Sendable {

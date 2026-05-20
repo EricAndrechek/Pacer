@@ -73,7 +73,7 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
         let rows = [
             ("Pacer",       342.10),
             ("public-blog", 156.40),
-            ("example-proj",      88.75),
+            ("dotfiles",     88.75),
             ("openexp",      42.30),
             ("scratch",      18.05),
         ].map { TopProjectsEntry.Row(displayName: $0.0, costUSD: $0.1) }

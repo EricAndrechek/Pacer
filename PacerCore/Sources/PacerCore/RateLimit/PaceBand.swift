@@ -7,8 +7,7 @@ import Foundation
 /// only). Where `UsageBand` answers "how full is the bucket", `PaceBand`
 /// answers "given how much of the window has elapsed, are you on track."
 ///
-/// Mirrors the policy used in the reference-impl plugin (see
-/// `reference-impl/plugins/claudecode/render.go:paceColor`):
+/// Four-band policy:
 ///
 ///   - **green**:   used% < pace% − tolerance        → behind pace, plenty of headroom
 ///   - **white**:   |used% − pace%| ≤ tolerance       → on track

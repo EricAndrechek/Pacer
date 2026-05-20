@@ -4,11 +4,9 @@ import Foundation
 /// in the dashboard, the MenuBarExtra rows, and the widget gauges so
 /// the visual grammar is consistent across surfaces.
 ///
-/// Currently keys off absolute usage only. The reference-impl reference
-/// has a richer `PaceColor(usagePct, pacePct)` that compares actual
-/// usage to where linear pace would have you. We'll add a `paceBand`
-/// helper alongside this one when the pace-chart card lands (v1.1
-/// scope per design.md).
+/// Keys off absolute usage only. A pace-aware variant
+/// (`PaceColor(usagePct, pacePct)`) compares actual usage to where
+/// linear pace would have you — see `PaceBand` for that policy.
 public enum UsageBand: Sendable, Equatable {
     /// 0–50%. Plenty of headroom.
     case green

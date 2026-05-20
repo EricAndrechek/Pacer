@@ -116,9 +116,9 @@ stdout. Else emit Pacer's own minimal status text.
 - 5-minute cadence (server-side aggregation cadence — faster polling
   returns stale data).
 - Honors `Retry-After`, exponential backoff to 1 hour on 429.
-- Reads OAuth token via `SecItemCopyMatching` against Keychain service
-  `Claude Code-credentials`. First-run prompts user once for ACL grant
-  (matches `/usr/bin/security` shellout behavior in reference-impl plugin).
+- Reads OAuth token via `/usr/bin/security` shellout against Keychain
+  service `Claude Code-credentials`. The `security` binary is already
+  trusted in both partition layers, so reads don't prompt.
 - Required for: passive dashboards / widgets showing fresh rate-limit
   data hours after the last session.
 
@@ -313,8 +313,9 @@ Methods (v1):
 Schema versioning: `"schema_version": 1` on every message. Additive-only
 within v1. Breaking changes bump to `2` with a deprecation period.
 
-This unblocks the reference-impl plugin reading from Pacer instead of
-duplicating its own JSONL scanning.
+This unblocks third-party clients (community statusline plugins,
+Stream Deck integrations, etc.) reading from Pacer instead of
+duplicating their own JSONL scanning.
 
 ## Cost calculation
 
@@ -349,11 +350,9 @@ correctness ports.
 
 ## Visualizations (Swift Charts)
 
-Mirrors reference-impl's button concepts and expands.
-
 **Active state (top of dashboard)**
 - 5h gauge + pace chart (curve so far, dashed pace line, 4-band color
-  policy from reference-impl's `colors.PaceColor`)
+  policy — see `PaceBand`)
 - 7d gauge + pace chart
 - Burn rate: tokens/min, $/hr, projected end-of-window cost
 
@@ -386,7 +385,7 @@ Mirrors reference-impl's button concepts and expands.
 - 5h thresholds: 75% / 90% / 100% (defaults on)
 - 7d thresholds: 75% / 90% / 100% (defaults on)
 - Daily cost threshold (default off)
-- "Ahead of pace by 15pp" — matches reference-impl's red-band signal
+- "Ahead of pace by 15pp" — red-band signal (see `PaceBand`)
 - "Statusline integration overwritten" — when watcher detects
   displacement
 
