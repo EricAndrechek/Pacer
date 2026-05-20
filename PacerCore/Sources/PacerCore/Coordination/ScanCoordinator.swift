@@ -416,6 +416,24 @@ public final class ScanCoordinator {
     public func runForever() async throws {
         resolvedRoots = try resolver.resolve()
         let stream = await watcher.triggers()
+        // One-shot stale-cursor prune: walk the JSONLFileCursor table
+        // and drop rows whose paths no longer exist on disk. On the
+        // live machine the table had drifted to 1072 cursors vs ~900
+        // real JSONL files — 170+ stale rows that the cache (kept
+        // hot per-cycle) was paying memory + iteration cost on. Disk
+        // failures (e.g. transient network home dir) won't drop
+        // active cursors because Claude Code's `~/.claude` is a local
+        // path; the next genuine FSEvent for a path we deleted will
+        // simply re-create the cursor at offset 0 (correct: we'd be
+        // seeing a new file).
+        do {
+            let pruned = try pruneStaleCursors()
+            if pruned > 0 {
+                log("startup: pruned \(pruned) stale JSONLFileCursor row(s)")
+            }
+        } catch {
+            log("startup: stale-cursor prune failed: \(error)")
+        }
         // Initial scan first, BEFORE we install the watcher. That way
         // the first FSEvent doesn't race the historical scan and we
         // can't double-process the same files.
@@ -1059,6 +1077,37 @@ public final class ScanCoordinator {
             // mirror in lockstep with the disk write.
             cursorsCache?[pathLocal] = state
         }
+    }
+
+    /// Walk every `JSONLFileCursor` row, delete the ones whose path no
+    /// longer exists on disk. Called once on startup from
+    /// `runForever`. Returns the count deleted so the log line can
+    /// report it. ~1 ms per stat × ~1000 cursors = ~300 ms one-shot
+    /// startup cost; cleanup is permanent until new stale paths
+    /// accumulate. Mirrors deletions into the in-memory cache if it's
+    /// populated (it won't be on the very first startup call, but the
+    /// guard is cheap and protects against future call-order
+    /// reshuffling).
+    private func pruneStaleCursors() throws -> Int {
+        let descriptor = FetchDescriptor<JSONLFileCursor>()
+        let rows = try context.fetch(descriptor)
+        let fm = FileManager.default
+        var deletedPaths: [String] = []
+        for row in rows where !fm.fileExists(atPath: row.path) {
+            deletedPaths.append(row.path)
+            context.delete(row)
+        }
+        if cursorsCache != nil {
+            for path in deletedPaths {
+                cursorsCache?[path] = nil
+            }
+        }
+        // Commit the prune so the table stays small even if the
+        // startup scan errors out before its own save.
+        if context.hasChanges {
+            try context.save()
+        }
+        return deletedPaths.count
     }
 
     private func deleteAllCursors() throws {
