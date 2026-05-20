@@ -33,13 +33,6 @@ struct MenuBarLabel: View {
     @Query(MenuBarLabel.recentTokenSampleDescriptor)
     private var recentSamples: [TokenSample]
 
-    /// Most-recent session (by lastSeenAt). Drives the small leading-
-    /// edge dot that shows when Claude Code is actively generating —
-    /// the "is something happening right now" signal that the user
-    /// can spot in the menu bar without opening the popover.
-    @Query(MenuBarLabel.recentSessionDescriptor)
-    private var recentSessions: [SessionInfo]
-
     init() {
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
@@ -58,14 +51,6 @@ struct MenuBarLabel: View {
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 1
-        return d
-    }()
-
-    private static let recentSessionDescriptor: FetchDescriptor<SessionInfo> = {
-        var d = FetchDescriptor<SessionInfo>(
-            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
@@ -200,13 +185,6 @@ struct MenuBarLabel: View {
         recentSamples.first.map { pacerShortModel($0.model) }
     }
 
-    /// `.active` when the most-recent session row was touched within the
-    /// last five minutes (Claude is currently generating). Drives the
-    /// small leading-edge dot.
-    private var sessionActivity: LiveSessionActivity? {
-        recentSessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
-    }
-
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
     /// it's the only window chip on screen, the prefix is redundant;
     /// when 7-day is also visible, the prefix removes ambiguity.
@@ -220,9 +198,6 @@ struct MenuBarLabel: View {
     /// hover for the "everything else."
     private var tooltip: String {
         var parts: [String] = []
-        if sessionActivity == .active {
-            parts.append("Claude active")
-        }
         if let f = fiveHour {
             parts.append("5h: \(Int(f.usedPercentage.rounded()))%")
         }
@@ -249,14 +224,6 @@ struct MenuBarLabel: View {
         // subview's). Spacing between chips comes from `HStack`'s
         // own `spacing:`.
         HStack(spacing: 6) {
-            // Live-session dot is leading-most so it reads as a
-            // status indicator before any chip content. Only renders
-            // when activity == .active so the menu bar stays calm
-            // in the common case where nothing is running. Reduce-
-            // motion suppresses the pulse but the dot still shows.
-            if sessionActivity == .active {
-                ActivityDot(reduceMotion: reduceMotion)
-            }
             ForEach(chips) { chip in
                 chipView(chip)
             }
@@ -384,49 +351,6 @@ private extension UsageBand {
         case .orange: return 2
         case .red:    return 3
         }
-    }
-}
-
-/// Small green dot for the menu bar that means "Claude Code is
-/// actively generating." Renders only when the most-recent
-/// `SessionInfo.lastSeenAt` is within the `LiveSessionActivity.active`
-/// threshold. A subtle 1-second pulse helps the dot read as live
-/// state rather than a static decoration — suppressed under Reduce
-/// Motion.
-///
-/// **No continuous animation.** Earlier revisions ran a
-/// `.repeatForever(autoreverses: true)` opacity+scale pulse to signal
-/// liveness. The cost was catastrophic: `sample(1)` against the live
-/// process showed `[NSStatusItem _updateReplicantsUnlessMenuIsTracking]`
-/// → `cacheDisplayInRect` consuming ~40 % of MainActor whenever a
-/// session was active. Each animation frame triggered a SwiftUI body
-/// re-eval, which dirtied the NSHostingView, which woke the
-/// NSStatusItem replicant-update timer, which re-rasterized the
-/// entire status item to a bitmap — at 60 Hz. The dot's mere
-/// presence (only rendered when `sessionActivity == .active`) is
-/// already an unambiguous live signal; the pulse was a "would be
-/// nicer" decoration paid for in continuous core-pegged CPU.
-///
-/// `reduceMotion` is retained as an input even though it no longer
-/// gates anything — keeping the parameter shape stable so the call
-/// site doesn't have to change for a future re-introduction of
-/// motion (e.g., a CALayer-driven one that bypasses SwiftUI's
-/// per-frame body re-eval).
-private struct ActivityDot: View {
-    let reduceMotion: Bool
-
-    var body: some View {
-        // 7pt fits comfortably alongside chip text (~13pt) without
-        // dominating the menu bar. The slight outline catches it
-        // against a near-green wallpaper.
-        Circle()
-            .fill(LiveSessionActivity.active.color)
-            .frame(width: 7, height: 7)
-            .overlay(
-                Circle()
-                    .stroke(Color.black.opacity(0.18), lineWidth: 0.5)
-            )
-            .accessibilityHidden(true)
     }
 }
 
