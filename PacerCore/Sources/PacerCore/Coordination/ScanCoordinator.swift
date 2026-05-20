@@ -245,6 +245,27 @@ public final class ScanCoordinator {
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
 
+    /// Last time we ran the auto-aliaser pass. Under heavy Claude
+    /// Code activity the per-cycle SwiftData fetches inside
+    /// `ProjectGitRootAutoAliaser.run` started landing in 1500-2000ms
+    /// territory because MainActor was contended by view refreshes
+    /// (autoA's own fetches queue behind the @Query refresh storm
+    /// each save triggers). Auto-aliasing isn't time-critical — a
+    /// newly-seen project picks up its alias within a minute either
+    /// way — so we throttle to a periodic pass instead of every cycle.
+    /// First scan after launch always runs (cache empty).
+    private var lastAutoAliasAt: Date?
+    /// Hash of the candidate-path set last fed to the auto-aliaser.
+    /// If a cycle's candidate set differs from this, we run
+    /// auto-aliaser immediately regardless of `lastAutoAliasAt` —
+    /// otherwise a fresh project path could wait up to the throttle
+    /// interval before getting an alias entry. FNV-1a, stable, sub-µs.
+    private var lastAutoAliasCandidateHash: String?
+    /// Minimum gap between auto-aliaser runs when the candidate set
+    /// is unchanged. 60 s matches the routine-log throttle and the
+    /// backstop scan interval.
+    private static let autoAliasInterval: TimeInterval = 60
+
     public init(
         container: ModelContainer,
         configuration: Configuration = Configuration(),
@@ -554,10 +575,26 @@ public final class ScanCoordinator {
             }
         }
 
+        // Throttle the auto-aliaser unless the candidate set changed
+        // since we last ran it — see `lastAutoAliasAt` for the why.
+        // The hash is over distinct project paths; new projects bypass
+        // the timer gate (we want their alias detection to be fresh,
+        // not 60 s stale), while unchanged sets fall through.
         let candidatePaths = try fetchDistinctProjectPaths()
-        let autoAliasResult = try await autoAliaser.run(candidatePaths: candidatePaths)
-        if autoAliasResult.aliasesAdded > 0 {
-            log("auto-alias: probed \(autoAliasResult.pathsProbed) path(s), added \(autoAliasResult.aliasesAdded) alias(es)")
+        let candidateHash = Self.fnv1aHex(candidatePaths.sorted().joined(separator: "\u{001F}"))
+        let now = Date()
+        let candidatesChanged = lastAutoAliasCandidateHash != candidateHash
+        let throttleExpired: Bool = {
+            guard let last = lastAutoAliasAt else { return true }
+            return now.timeIntervalSince(last) >= Self.autoAliasInterval
+        }()
+        if candidatesChanged || throttleExpired {
+            let autoAliasResult = try await autoAliaser.run(candidatePaths: candidatePaths)
+            if autoAliasResult.aliasesAdded > 0 {
+                log("auto-alias: probed \(autoAliasResult.pathsProbed) path(s), added \(autoAliasResult.aliasesAdded) alias(es)")
+            }
+            lastAutoAliasAt = now
+            lastAutoAliasCandidateHash = candidateHash
         }
         phase.autoAliasMs = tickMs()
 
