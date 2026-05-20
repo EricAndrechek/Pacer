@@ -139,6 +139,75 @@ public final class ScanCoordinator {
         public let sessionRecomputeStats: SessionInfoRecomputer.Stats
         public let probeResult: StatsCacheProbe.ProbeResult?
         public let durationSeconds: Double
+        public let phaseTimings: PhaseTimings
+    }
+
+    /// Per-phase wall-clock breakdown of one scan cycle. Captured by
+    /// `runScanCycle`; logged inline so a `scan: ...` line in the log
+    /// shows exactly which sub-step ate the cycle's budget.
+    ///
+    /// All values are milliseconds (Double for sub-ms precision in
+    /// tests/CI; the log line rounds to Int). Phases are recorded in
+    /// the order they execute inside `runScanCycle` — keep the
+    /// `formatReport` ordering aligned so the log line reads top-to-
+    /// bottom through the cycle.
+    public struct PhaseTimings: Sendable {
+        /// Auto-aliaser pass: probe distinct project paths for nearby
+        /// `.git`, write aliases. Includes optional sibling-merge
+        /// reconciliation that fires on a `pathCanonicalizationVersion`
+        /// bump. Cheap in steady state (most paths already probed).
+        public var autoAliasMs: Double = 0
+        /// Alias + meta + cursor setup: `loadAliases`, the four
+        /// `fetchMeta(...)` reads (scanVersion, costRecomputeVersion,
+        /// pathCanonicalizationVersion, aliasesFingerprint),
+        /// `loadCursors`/`deleteAllCursors`, persister construction +
+        /// `clearDirtyPairs`, and the four `consumeMissing*` recovery
+        /// drains. Cheap on a warm DB; first scan after a schema bump
+        /// can be 100s of ms because `markEverySampleDirty` walks
+        /// every TokenSample.
+        public var metaPrepMs: Double = 0
+        /// In-place path canonicalization migration: only non-zero when
+        /// the code-level `pathCanonicalizationVersion` or the user's
+        /// alias-table fingerprint changed. Walks every TokenSample so
+        /// can be significant on a large store.
+        public var migrationMs: Double = 0
+        /// JSONL file walk: stat every known cursor file, open + read
+        /// from cursor offset on changed files, parse each new line,
+        /// emit to the InsertSink. On steady-state writes this is the
+        /// `887-file stat sweep + 1-line parse` cost.
+        public var scanMs: Double = 0
+        /// `SamplePersister.flush` — currently O(1) (just resets the
+        /// pending-insert counter). Kept separate so a future change
+        /// that adds work here is visible.
+        public var flushMs: Double = 0
+        /// `saveCursors`: update or insert one `JSONLFileCursor` row
+        /// per file changed this cycle. No save here — the terminal
+        /// `context.save()` commits them.
+        public var saveCursorsMs: Double = 0
+        /// `AggregateRecomputer.recompute` — daily (date, model) rollup.
+        /// Per-pair fetch + upsert on the main context for ≤64 pairs,
+        /// background `@ModelActor` worker above that threshold.
+        public var dailyRecomputeMs: Double = 0
+        /// `HourlyAggregateRecomputer.recompute` — (date, hour, model)
+        /// rollup. Same dispatch shape as `dailyRecomputeMs`.
+        public var hourlyRecomputeMs: Double = 0
+        /// `ProjectAggregateRecomputer.recompute` — (projectPath, date)
+        /// rollup. Same dispatch shape as `dailyRecomputeMs`.
+        public var projectRecomputeMs: Double = 0
+        /// `SessionInfoRecomputer.recompute` — per-session rollup. Same
+        /// dispatch shape as `dailyRecomputeMs`.
+        public var sessionRecomputeMs: Double = 0
+        /// `StatsCacheProbe.probeAndStore`: reads `~/.claude/stats-cache.json`
+        /// and stashes the result. Cheap; nil-probe path is zero.
+        public var probeMs: Double = 0
+        /// Terminal commit: the five `writeMeta(...)` updates (only
+        /// when `cycleDidWork || isFullScan`) plus the one
+        /// `context.save()`. The save is the @Query-fanout
+        /// trigger — every visible card refetches when this commits.
+        public var saveMs: Double = 0
+        /// `postScanCycleSummary`: NotificationCenter post for widgets
+        /// + other out-of-process consumers. Sub-ms.
+        public var notifMs: Double = 0
     }
 
     private let container: ModelContainer
@@ -434,6 +503,17 @@ public final class ScanCoordinator {
         scanInFlight = true
         defer { scanInFlight = false }
         let started = Date()
+        var phase = PhaseTimings()
+        // Mutable so the closure can advance it after each phase.
+        // `Date()` is the same clock the cycle's `durationSeconds` uses,
+        // so the phase sum and the total agree within rounding.
+        var lastTick = started
+        func tickMs() -> Double {
+            let now = Date()
+            let delta = now.timeIntervalSince(lastTick) * 1000
+            lastTick = now
+            return delta
+        }
 
         // Auto-aliasing pass: walk up from each known project path
         // looking for the nearest `.git`, and write the resulting
@@ -472,6 +552,7 @@ public final class ScanCoordinator {
         if autoAliasResult.aliasesAdded > 0 {
             log("auto-alias: probed \(autoAliasResult.pathsProbed) path(s), added \(autoAliasResult.aliasesAdded) alias(es)")
         }
+        phase.autoAliasMs = tickMs()
 
         // Load user-defined project-path aliases once per cycle. Cheap
         // (small table, ~tens of rows max), and folding the load into
@@ -579,6 +660,13 @@ public final class ScanCoordinator {
             storedPathVersion != Self.currentPathCanonicalizationVersion
             || storedAliasFingerprint != aliasesFingerprint
         )
+        // metaPrep covers loadAliases + 4 fetchMeta reads + cursor
+        // load + persister setup + recovery drains + the cost-rebuild
+        // markEverySampleDirty walk. The migration timing below
+        // separates the (usually-zero) canonicalization pass so the
+        // metaPrep number is a steady-state floor we can target.
+        phase.metaPrepMs = tickMs()
+
         if needsPathMigration {
             let changed = try activePersister.canonicalizeProjectPaths(aliases: aliases)
             if changed > 0 {
@@ -594,6 +682,7 @@ public final class ScanCoordinator {
                 try activePersister.markSessionsDirtyForAliasChange()
             }
         }
+        phase.migrationMs = tickMs()
         let beforeStats = activePersister.stats
 
         // The scanner's emit closure is @Sendable but we need to hop
@@ -608,8 +697,11 @@ public final class ScanCoordinator {
             emit: { entry in await sink.consume(entry) }
         )
         try sink.throwIfError()
+        phase.scanMs = tickMs()
         try activePersister.flush()
+        phase.flushMs = tickMs()
         try saveCursors(result.updatedCursors)
+        phase.saveCursorsMs = tickMs()
 
         let cycleStats = SamplePersister.Stats(
             inserted: activePersister.stats.inserted - beforeStats.inserted,
@@ -619,6 +711,7 @@ public final class ScanCoordinator {
         let recomputer = AggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
         let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
+        phase.dailyRecomputeMs = tickMs()
 
         // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
         // chart) and LiveActivityCard (last-hour burn rate). Order
@@ -633,6 +726,7 @@ public final class ScanCoordinator {
         )
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
             buckets: activePersister.dirtyHourBuckets)
+        phase.hourlyRecomputeMs = tickMs()
 
         // Both recomputers below previously ignored cost mode entirely
         // — they summed `sample.sourceCostUSD ?? 0`, which silently
@@ -646,6 +740,7 @@ public final class ScanCoordinator {
             mode: configuration.costMode
         )
         let projectRecomputeStats = try await projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
+        phase.projectRecomputeMs = tickMs()
 
         let sessionRecomputer = SessionInfoRecomputer(
             container: container,
@@ -653,6 +748,7 @@ public final class ScanCoordinator {
             mode: configuration.costMode
         )
         let sessionRecomputeStats = try await sessionRecomputer.recompute(sessionIds: activePersister.dirtySessionIds)
+        phase.sessionRecomputeMs = tickMs()
 
         var probeResult: StatsCacheProbe.ProbeResult?
         if let probe {
@@ -665,6 +761,7 @@ public final class ScanCoordinator {
                 log("stats-cache probe failed: \(error)")
             }
         }
+        phase.probeMs = tickMs()
 
         // Bookkeeping. Always write incremental cursor (even on full
         // scan, so the next run is incremental). scanVersion gates
@@ -725,6 +822,11 @@ public final class ScanCoordinator {
         if context.hasChanges {
             try context.save()
         }
+        // saveMs covers the (up to five) `writeMeta` upserts plus the
+        // terminal `context.save()`. The save is what fans @Query
+        // refreshes out to every visible view — when this number is
+        // big AND `cycleDidWork == true`, the UI is paying for it.
+        phase.saveMs = tickMs()
 
         // Tell out-of-process consumers (WidgetKit, mainly — it doesn't
         // observe SwiftData @Query) that user-visible data shifted.
@@ -738,6 +840,7 @@ public final class ScanCoordinator {
                 projectAttributionChanged: needsPathMigration
             ))
         }
+        phase.notifMs = tickMs()
 
         return ScanReport(
             wasFullScan: isFullScan,
@@ -748,7 +851,8 @@ public final class ScanCoordinator {
             projectRecomputeStats: projectRecomputeStats,
             sessionRecomputeStats: sessionRecomputeStats,
             probeResult: probeResult,
-            durationSeconds: Date().timeIntervalSince(started)
+            durationSeconds: Date().timeIntervalSince(started),
+            phaseTimings: phase
         )
     }
 
@@ -907,9 +1011,31 @@ public final class ScanCoordinator {
     /// Compact one-line summary for the daemon log. Caller adds the
     /// "scan: " or "startup: " prefix; we don't include the kind here
     /// twice (duplication was a cosmetic bug in earlier versions).
+    ///
+    /// Format:
+    ///   `<kind> files=N skipped=N parsed=N inserted=N dups=N
+    ///    aggs=N hourAggs=N projAggs=N sess=N ms=N
+    ///    [autoA=N prep=N mig=N scan=N flush=N curs=N
+    ///     dailyR=N hourR=N projR=N sessR=N probe=N save=N notif=N]`
+    ///
+    /// The bracketed phase tail is what makes "the 1500ms cycle"
+    /// debuggable post-hoc — without it the log only tells you the
+    /// total. Phases are in execution order so reading left-to-right
+    /// follows the cycle.
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        return "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        let p = r.phaseTimings
+        let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
+        return "\(base) \(phases)"
+    }
+
+    /// Round to int milliseconds for the log line — every phase emits
+    /// hundreds of values per minute on an active machine, sub-ms
+    /// precision adds noise without signal. Tests can still read the
+    /// raw `Double` off `PhaseTimings`.
+    private static func fmtMs(_ ms: Double) -> String {
+        String(Int(ms.rounded()))
     }
 }
 

@@ -33,7 +33,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data
+        logs logs-tail status open clean-data perf-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
 # surprising.
@@ -121,6 +121,9 @@ open:  ## Open Pacer.app from /Applications.
 		echo "ERROR: $(INSTALLED_APP) not installed. Run 'make install' first."; exit 1; \
 	fi
 	@open "$(INSTALLED_APP)"
+
+perf-snapshot:  ## Capture CPU sample + top + log + sqlite stats for the running Pacer.app. No GUI interaction. Output: ~/Library/Logs/Pacer/perf-snapshots/<ts>/summary.txt
+	@$(REPO_ROOT)/bin/dev-perf-snapshot.sh
 
 # ------------------------------------------------------------------
 # Destructive utilities (no shortcut alias; user must spell it out)
