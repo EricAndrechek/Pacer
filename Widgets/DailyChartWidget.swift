@@ -170,7 +170,7 @@ struct DailyChartWidgetView: View {
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 AxisValueLabel {
                     if let v = value.as(Double.self) {
-                        Text(compactDollar(v))
+                        Text(pacerCost(v))
                             .font(.system(size: 8, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -204,11 +204,6 @@ struct DailyChartWidgetView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func compactDollar(_ usd: Double) -> String {
-        if usd >= 100 { return String(format: "$%.0f", usd) }
-        if usd >= 10  { return String(format: "$%.0f", usd) }
-        return String(format: "$%.1f", usd)
-    }
 }
 
 struct DailyChartWidget: Widget {

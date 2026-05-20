@@ -95,11 +95,11 @@ struct TodayTimelineCard: View {
                     Text(hourLabel(h, style: .regular))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(pacerTokens(row.tokens))
+                    Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                     if row.cost > 0 {
-                        Text(pacerCost(row.cost))
+                        Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
@@ -141,7 +141,7 @@ struct TodayTimelineCard: View {
             .cornerRadius(2)
             .annotation(position: .top, alignment: .center, spacing: 2) {
                 if h.hour == cached.peakHour && h.tokens > 0 {
-                    Text(pacerTokens(h.tokens))
+                    Text(pacerTokens(h.tokens)).help(pacerTokensExact(h.tokens))
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                 }

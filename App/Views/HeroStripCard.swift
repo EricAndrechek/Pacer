@@ -212,12 +212,11 @@ struct HeroStripCard: View {
     private var costTile: some View {
         HeroTile(label: "Today", onTap: onTodayTap) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(pacerCost(cached.todayCost))
+                Text(pacerCost(cached.todayCost)).help(pacerCostExact(cached.todayCost))
                     .font(.system(size: 32, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .help(pacerCostExact(cached.todayCost))
                 HStack(spacing: 6) {
                     if let ratio = cached.weekDeltaRatio {
                         trendChip(ratio: ratio)

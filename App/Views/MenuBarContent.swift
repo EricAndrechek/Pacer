@@ -414,8 +414,8 @@ struct MenuStatusContent: View {
             // close enough that the eye doesn't catch it as "off."
             Divider()
                 .padding(.vertical, 4)
-            todayValueRow(label: "Today", value: pacerCost(todayCost))
-            todayValueRow(label: "Tokens", value: pacerTokens(todayTokens))
+            todayValueRow(label: "Today", value: pacerCost(todayCost), tooltip: pacerCostExact(todayCost))
+            todayValueRow(label: "Tokens", value: pacerTokens(todayTokens), tooltip: "\(pacerTokensExact(todayTokens)) tokens")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
@@ -469,7 +469,7 @@ struct MenuStatusContent: View {
     }
 
     @ViewBuilder
-    private func todayValueRow(label: String, value: String) -> some View {
+    private func todayValueRow(label: String, value: String, tooltip: String? = nil) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.system(size: 12))
@@ -480,6 +480,7 @@ struct MenuStatusContent: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.primary)
+                .help(tooltip ?? value)
         }
     }
 }

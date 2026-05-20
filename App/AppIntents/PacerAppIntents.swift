@@ -6,6 +6,7 @@
 @preconcurrency import AppIntents
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// Pacer's Shortcuts.app integration. Four intents covering the most
 /// common automation use cases:
@@ -83,7 +84,7 @@ struct GetTodayCostIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Double> {
         let cost = try fetchTodayCost()
-        let dialog = IntentDialog(stringLiteral: "Today's Claude Code cost is \(formatUSD(cost)).")
+        let dialog = IntentDialog(stringLiteral: "Today's Claude Code cost is \(pacerCostExact(cost)).")
         return .result(value: cost, dialog: dialog)
     }
 }
@@ -139,13 +140,6 @@ private func fetchTodayCost() throws -> Double {
     )
     let rows = try context.fetch(descriptor)
     return rows.reduce(0) { $0 + $1.totalCostUSD }
-}
-
-private func formatUSD(_ amount: Double) -> String {
-    let f = NumberFormatter()
-    f.numberStyle = .currency
-    f.currencyCode = "USD"
-    return f.string(from: NSNumber(value: amount)) ?? String(format: "$%.2f", amount)
 }
 
 // MARK: - AppShortcutsProvider

@@ -222,7 +222,7 @@ public final class NotificationCoordinator {
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
         content.title = "Pacer daily summary"
-        let costStr = String(format: "$%.2f", currentCost)
+        let costStr = pacerCostExact(currentCost)
         if let topModel, modelCount > 0 {
             let modelLabel = topModel
                 .split(separator: "/").last.map(String.init) ?? topModel

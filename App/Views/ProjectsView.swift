@@ -902,12 +902,11 @@ private struct ProjectsContent: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            Text(pacerTokens(row.totalTokens))
+            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 100, alignment: .trailing)
-                .help(pacerTokensExact(row.totalTokens))
             Text("\(row.sessionCount)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -917,11 +916,10 @@ private struct ProjectsContent: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .trailing)
-            Text(pacerCost(row.cost))
+            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 84, alignment: .trailing)
-                .help(pacerCostExact(row.cost))
         }
     }
 

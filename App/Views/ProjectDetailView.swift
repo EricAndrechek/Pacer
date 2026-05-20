@@ -648,7 +648,7 @@ struct ProjectDetailView: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
-                Text(pacerTokens(row.totalTokens))
+                Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
@@ -665,7 +665,7 @@ struct ProjectDetailView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 70, alignment: .trailing)
-            Text(pacerCost(row.cost))
+            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 84, alignment: .trailing)
@@ -688,7 +688,7 @@ struct ProjectDetailView: View {
                     Text(row.date)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost))
+                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                 }
@@ -715,7 +715,7 @@ struct ProjectDetailView: View {
                     AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                     AxisValueLabel {
                         if let v = value.as(Double.self) {
-                            Text(pacerCost(v))
+                            Text(pacerCost(v)).help(pacerCostExact(v))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
                         }
@@ -794,7 +794,7 @@ struct ProjectDetailView: View {
                     Text(pacerShortModel(m.model))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(pacerTokens(m.tokens))
+                    Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                     Text("(\(pct)%)")
@@ -825,7 +825,7 @@ struct ProjectDetailView: View {
                             Text(pacerShortModel(m.model))
                                 .font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 8)
-                            Text(pacerTokens(m.tokens))
+                            Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
@@ -965,6 +965,7 @@ private struct BudgetEditor: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .help("\(pacerCostExact(current)) of \(pacerCostExact(limit))")
                 Text(pct)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(tint)

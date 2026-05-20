@@ -345,7 +345,7 @@ private struct ModelsContent: View {
                     Text(r.displayName)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(pacerTokens(r.totalTokens))
+                    Text(pacerTokens(r.totalTokens)).help(pacerTokensExact(r.totalTokens))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                     Text("(\(pct)%)")
@@ -377,7 +377,7 @@ private struct ModelsContent: View {
                                 .font(.system(size: 13, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Text(pacerTokens(row.totalTokens))
+                            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
@@ -424,6 +424,7 @@ private struct ModelsContent: View {
                     Text("\(pacerTokens(total)) tokens")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
+                        .help("\(pacerTokensExact(total)) tokens")
                 }
             }
         }) {
@@ -449,7 +450,7 @@ private struct ModelsContent: View {
                         AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                         AxisValueLabel {
                             if let v = value.as(Double.self) {
-                                Text(pacerTokens(Int64(v)))
+                                Text(pacerTokens(Int64(v))).help(pacerTokensExact(Int64(v)))
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
                             }
@@ -479,7 +480,7 @@ private struct ModelsContent: View {
                             HStack(spacing: 5) {
                                 Text(s.model)
                                     .font(.system(size: 11, weight: .medium))
-                                Text(pacerTokens(s.tokens))
+                                Text(pacerTokens(s.tokens)).help(pacerTokensExact(s.tokens))
                                     .font(.system(size: 11, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
@@ -592,12 +593,11 @@ private struct ModelsContent: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            Text(pacerTokens(row.totalTokens))
+            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 100, alignment: .trailing)
-                .help(pacerTokensExact(row.totalTokens))
             Text("\(row.activeDays)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -607,11 +607,10 @@ private struct ModelsContent: View {
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 100, alignment: .trailing)
-            Text(pacerCost(row.cost))
+            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 84, alignment: .trailing)
-                .help(pacerCostExact(row.cost))
         }
     }
 }

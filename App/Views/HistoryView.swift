@@ -274,10 +274,9 @@ private struct MonthlyChartCard: View {
                     Text(longMonth(row.month))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost))
+                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .help(pacerCostExact(row.cost))
                 }
             } else if !monthly.isEmpty {
                 Text("total \(pacerCost(total))")
@@ -310,7 +309,7 @@ private struct MonthlyChartCard: View {
                 .cornerRadius(2)
                 .annotation(position: .top, alignment: .center, spacing: 2) {
                     if m.cost > 0 && m.month != selectedMonth {
-                        Text(pacerCost(m.cost))
+                        Text(pacerCost(m.cost)).help(pacerCostExact(m.cost))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
@@ -336,7 +335,7 @@ private struct MonthlyChartCard: View {
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 AxisValueLabel {
                     if let d = value.as(Double.self) {
-                        Text(pacerCost(d))
+                        Text(pacerCost(d)).help(pacerCostExact(d))
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
@@ -619,17 +618,15 @@ private struct TopDaysContent: View {
                     }
                     .frame(height: 6)
                 }
-                Text(pacerTokens(row.tokens))
+                Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .frame(width: 80, alignment: .trailing)
-                    .help(pacerTokensExact(row.tokens))
-                Text(pacerCost(row.cost))
+                Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .frame(width: 80, alignment: .trailing)
-                    .help(pacerCostExact(row.cost))
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)

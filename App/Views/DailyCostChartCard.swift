@@ -88,10 +88,9 @@ struct DailyCostChartCard: View {
                     Text(row.date)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    Text(pacerCost(row.cost))
+                    Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                        .help(pacerCostExact(row.cost))
                 }
             } else if d.totalCost > 0 {
                 Text("total \(pacerCost(d.totalCost))")
@@ -124,7 +123,7 @@ struct DailyCostChartCard: View {
                 .cornerRadius(2)
                 .annotation(position: .top, alignment: .center, spacing: 2) {
                     if annotateDates.contains(d.date) {
-                        Text(pacerCost(d.cost))
+                        Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
@@ -142,7 +141,7 @@ struct DailyCostChartCard: View {
                 AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
                 AxisValueLabel {
                     if let dollars = value.as(Double.self) {
-                        Text(pacerCost(dollars))
+                        Text(pacerCost(dollars)).help(pacerCostExact(dollars))
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }

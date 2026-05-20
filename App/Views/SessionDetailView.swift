@@ -181,7 +181,7 @@ struct SessionDetailView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer(minLength: 8)
-            Text(pacerTokens(count))
+            Text(pacerTokens(count)).help(pacerTokensExact(count))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(count > 0 ? .primary : .tertiary)
