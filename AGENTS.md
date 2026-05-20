@@ -95,7 +95,7 @@ App/
                                   "Show Database in Finder" / "Open Logs Folder" so users
                                   have somewhere to look when something goes wrong.
   ContentView.swift             — NavigationSplitView shell (Dashboard / History / Projects /
-                                  Models / Settings), ⌘1..5 keyboard shortcuts. Selection
+                                  Models / Settings), ⌘1..⌘4 keyboard shortcuts. Selection
                                   persisted via @SceneStorage. .navigationTitle +
                                   .navigationSubtitle expose current rate-limit % to the
                                   window title bar / Dock. .toolbar hosts a freshness

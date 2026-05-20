@@ -5,9 +5,9 @@ import PacerUI
 
 /// Top-level shell. Sidebar-driven NavigationSplitView with five
 /// destinations: Dashboard / History / Projects / Models / Settings.
-/// ⌘1..5 jumps between them; ⌘, jumps to Settings (the standard macOS
-/// shortcut, which `PacerApp` translates into a `.pacerOpenSettings`
-/// notification we observe here).
+/// ⌘1..⌘4 jumps between the activity destinations; ⌘, jumps to
+/// Settings (the standard macOS shortcut, which `PacerApp` translates
+/// into a `.pacerOpenSettings` notification we observe here).
 ///
 /// Why a sidebar instead of the macOS-native TabView the previous
 /// version used: pro Mac apps the user reaches for daily — Linear,
@@ -24,7 +24,7 @@ struct ContentView: View {
     /// always reset to Dashboard on relaunch — annoying for users who
     /// live in History or Projects.
     enum Destination: String, Hashable, Identifiable, CaseIterable {
-        case dashboard, history, projects, models, roi, settings
+        case dashboard, history, projects, models, settings
         var id: String { rawValue }
 
         var title: String {
@@ -33,7 +33,6 @@ struct ContentView: View {
             case .history:   return "History"
             case .projects:  return "Projects"
             case .models:    return "Models"
-            case .roi:       return "ROI"
             case .settings:  return "Settings"
             }
         }
@@ -49,9 +48,6 @@ struct ContentView: View {
             case .history:   return "calendar"
             case .projects:  return selected ? "folder.fill"    : "folder"
             case .models:    return selected ? "cpu.fill"       : "cpu"
-            case .roi:       return selected
-                                 ? "chart.line.uptrend.xyaxis.circle.fill"
-                                 : "chart.line.uptrend.xyaxis"
             case .settings:  return selected ? "gearshape.fill" : "gearshape"
             }
         }
@@ -118,7 +114,7 @@ struct ContentView: View {
         // that the hero strip's three tiles don't squeeze. User can
         // still resize larger; this is just the floor.
         .frame(minWidth: 880, minHeight: 620)
-        // ⌘1..⌘5 are wired through PacerApp's CommandGroup so they live
+        // ⌘1..⌘4 are wired through PacerApp's CommandGroup so they live
         // in the menu-bar responder chain — more reliable than hidden
         // Buttons inside .background, which were missing keystrokes.
         // The notification carries the destination as its `object`.
@@ -171,7 +167,6 @@ struct ContentView: View {
                         SidebarItem(destination: .history, selection: selection)
                         SidebarItem(destination: .projects, selection: selection)
                         SidebarItem(destination: .models, selection: selection)
-                        SidebarItem(destination: .roi, selection: selection)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -231,7 +226,7 @@ struct ContentView: View {
     /// usage views into Settings every time you reach the bottom of
     /// "Activity."
     private func moveSelection(by delta: Int) {
-        let order: [Destination] = [.dashboard, .history, .projects, .models, .roi, .settings]
+        let order: [Destination] = [.dashboard, .history, .projects, .models, .settings]
         let current = selection.wrappedValue
         guard let idx = order.firstIndex(of: current) else {
             selection.wrappedValue = .dashboard
@@ -268,7 +263,6 @@ struct ContentView: View {
         case .history:   HistoryView()
         case .projects:  ProjectsView()
         case .models:    ModelsView()
-        case .roi:       ROIView()
         case .settings:  SettingsView()
         }
     }
@@ -483,7 +477,7 @@ extension Notification.Name {
     /// a separate Settings scene.
     static let pacerOpenSettings = Notification.Name("PacerOpenSettings")
 
-    /// Fired by the ⌘1..⌘5 menu commands in `PacerApp`. The notification's
+    /// Fired by the ⌘1..⌘4 menu commands in `PacerApp`. The notification's
     /// `object` is a `ContentView.Destination`. Posting from the menu-bar
     /// command group keeps the shortcuts in the responder chain (a hidden
     /// Button inside .background turned out to miss keystrokes) while

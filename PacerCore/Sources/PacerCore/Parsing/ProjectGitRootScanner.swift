@@ -103,10 +103,6 @@ public enum ProjectGitRootScanner {
     ///   root for samples taken inside it, so we don't follow the
     ///   pointer)
     ///
-    /// Public so ROI view can reuse the same lookup — it has the
-    /// same set of project paths and the same "skip if no git
-    /// ancestor" semantics, so duplicating the walk in the view
-    /// would invite drift.
     public static func findGitRoot(from path: String, home: String) async -> String? {
         let fm = FileManager.default
         var isDir: ObjCBool = false

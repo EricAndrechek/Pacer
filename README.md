@@ -22,7 +22,8 @@ Distributed via Developer ID + notarization with Sparkle auto-updates.
   server-supplied numbers). Selectable in Settings → Data.
 - **Multiple surfaces.**
     - Main app with five tabs: Dashboard, History, Projects, Models,
-      Settings. ⌘1..5 to switch (⌘5 = Settings; ⌘, also jumps there).
+      Settings. ⌘1..⌘4 jumps between the activity tabs; ⌘, opens
+      Settings.
     - `MenuBarExtra` status item with configurable display
       (icon-only / percent-only / both / hidden) and icon style
       (gauge needle / ring fill / dot).

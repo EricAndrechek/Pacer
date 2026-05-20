@@ -106,7 +106,7 @@ struct PacerApp: App {
                     showAboutPanel()
                 }
             }
-            // ⌘1..⌘5 jump between sidebar destinations. Live in
+            // ⌘1..⌘4 jump between sidebar destinations. Live in
             // `.commands` so they're part of the menu-bar responder
             // chain and reliably fire even when sidebar items don't
             // have keyboard focus. Each posts a notification that
@@ -141,13 +141,6 @@ struct PacerApp: App {
                     )
                 }
                 .keyboardShortcut("4", modifiers: .command)
-                Button("ROI") {
-                    NotificationCenter.default.post(
-                        name: .pacerSelectDestination,
-                        object: ContentView.Destination.roi
-                    )
-                }
-                .keyboardShortcut("5", modifiers: .command)
                 // Settings intentionally has no numbered shortcut here —
                 // ⌘, (replaced via CommandGroup .appSettings above)
                 // remains the single source of truth, and the sidebar's
