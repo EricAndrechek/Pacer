@@ -176,6 +176,13 @@ public final class ScanCoordinator {
         /// emit to the InsertSink. On steady-state writes this is the
         /// `887-file stat sweep + 1-line parse` cost.
         public var scanMs: Double = 0
+        /// `await watcher.consumeChangedPaths()` — drain the FSEvents
+        /// path hints buffered on the watcher actor since the last
+        /// cycle. Separated from `scanMs` because the cost is an actor
+        /// hop, not file I/O — if this number is high while `scanMs`
+        /// stays small, the watcher actor is contended (typically by
+        /// FSEvents bursts during heavy Claude Code writes).
+        public var consumeChangedPathsMs: Double = 0
         /// `SamplePersister.flush` — currently O(1) (just resets the
         /// pending-insert counter). Kept separate so a future change
         /// that adds work here is visible.
@@ -690,13 +697,46 @@ public final class ScanCoordinator {
         // wraps this hop and surfaces the first error so we don't
         // silently swallow disk-full / migration-failed conditions.
         let sink = InsertSink(persister: activePersister)
+        // Drain the watcher's per-cycle changed-path set BEFORE we
+        // start scanning. FSEvents writes paths in here as they
+        // arrive; on a cycle driven by a debounced FSEvent burst the
+        // set contains exactly the JSONLs that changed, and the
+        // scanner stats just those (single-digit ms) instead of
+        // walking all 800+ cursored files (~300ms floor). Empty set
+        // means a backstop tick, the first cycle after startup, or
+        // a manual trigger — scanner falls back to the full walk so
+        // we never miss a file FSEvents didn't tell us about.
+        //
+        // On a full re-scan (parser version bump → `isFullScan`) we
+        // ignore the hint and force a full walk: cursor wipes only
+        // help if we actually visit every file, and a hint from one
+        // recent write would otherwise leave the other 700+ files
+        // unscanned until their next individual FSEvent.
+        let hintedPaths: Set<String>?
+        if isFullScan {
+            _ = watcher.consumeChangedPaths()  // drain anyway
+            hintedPaths = nil
+        } else {
+            let paths = watcher.consumeChangedPaths()
+            hintedPaths = paths.isEmpty ? nil : paths
+        }
+        let consumeMs = tickMs()
         let result = try await scanner.scan(
             roots: resolvedRoots,
             cursors: cursors,
             aliases: aliases,
-            emit: { entry in await sink.consume(entry) }
+            hintedPaths: hintedPaths,
+            emit: { entry in sink.consume(entry) }
         )
-        try sink.throwIfError()
+        // Bulk-insert everything the scanner collected. One MainActor
+        // pass over the entries; see `InsertSink` doc for the rationale.
+        try sink.flush()
+        // scanMs is the inner work (scanner actor + file I/O + emit
+        // hops). consumeMs is the watcher-actor hop to drain hinted
+        // paths. The two are reported separately in PhaseTimings but
+        // tickMs() advances `lastTick` either way, so the sum is the
+        // total wall-clock budget of the JSONL pipeline this cycle.
+        phase.consumeChangedPathsMs = consumeMs
         phase.scanMs = tickMs()
         try activePersister.flush()
         phase.flushMs = tickMs()
@@ -1049,7 +1089,7 @@ public final class ScanCoordinator {
         let dailyPairs = r.recomputeStats.pairsRecomputed
         let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) ms=\(Int(r.durationSeconds * 1000))"
         let p = r.phaseTimings
-        let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
+        let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) consume=\(Self.fmtMs(p.consumeChangedPathsMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
         return "\(base) \(phases)"
     }
 
@@ -1062,29 +1102,55 @@ public final class ScanCoordinator {
     }
 }
 
-/// Bridges scanner emit (`@Sendable async`) into MainActor-isolated
-/// SwiftData inserts. Captures the first error so the caller can
-/// re-throw after the scan completes — silent-swallow would hide disk
-/// failures and bad-state migrations.
-@MainActor
-private final class InsertSink {
+/// Bridges scanner emit (off-actor, sync) into MainActor-isolated
+/// SwiftData inserts. The scanner runs on its own actor and used to
+/// `await sink.consume(entry)` per parsed line — which under MainActor
+/// pressure was ~100 ms of suspend/resume PER ENTRY. We now collect
+/// all parsed entries into a Sendable array (lock-protected) during
+/// the scan, then `flush()` them all on MainActor in one shot. That
+/// turns N MainActor hops into 1, regardless of cycle entry count.
+///
+/// `@unchecked Sendable` because the lock is what makes this safe to
+/// cross queues; Swift can't see through the lock to verify.
+private final class InsertSink: @unchecked Sendable {
     private let persister: SamplePersister
+    private let lock = NSLock()
+    /// Entries collected by `consume` during scan, drained by `flush`.
+    /// `nonisolated(unsafe)` because the lock is the synchronization
+    /// primitive — nothing else may touch this field.
+    private var collected: [ParsedUsageEntry] = []
     private var firstError: Error?
 
     init(persister: SamplePersister) {
         self.persister = persister
     }
 
+    /// Called by the scanner actor on each parsed line. Sync — no
+    /// MainActor hop. Just appends to the collected list.
     func consume(_ entry: ParsedUsageEntry) {
-        if firstError != nil { return }
-        do {
-            _ = try persister.insert(entry)
-        } catch {
-            firstError = error
-        }
+        lock.lock()
+        collected.append(entry)
+        lock.unlock()
     }
 
-    func throwIfError() throws {
+    /// MainActor pass that inserts every collected entry into the
+    /// persister and surfaces the first error. Called by ScanCoordinator
+    /// once after `scanner.scan` returns. One MainActor pass instead of
+    /// one-hop-per-entry is the entire point of this design.
+    @MainActor
+    func flush() throws {
+        lock.lock()
+        let toInsert = collected
+        collected.removeAll(keepingCapacity: true)
+        lock.unlock()
+        for entry in toInsert {
+            do {
+                _ = try persister.insert(entry)
+            } catch {
+                firstError = error
+                break
+            }
+        }
         if let firstError { throw firstError }
     }
 }

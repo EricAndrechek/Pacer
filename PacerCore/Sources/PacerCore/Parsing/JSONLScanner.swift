@@ -67,13 +67,67 @@ public actor JSONLScanner {
     /// parse time. The default `[:]` keeps the worktree-stripping
     /// canonicalization but applies no user remaps — fine for tests
     /// and for any caller that hasn't loaded aliases yet.
+    ///
+    /// `hintedPaths`, when non-nil and non-empty, restricts the
+    /// candidate set to **only** those paths instead of walking the
+    /// roots' `FileManager.enumerator`. ScanCoordinator hands this in
+    /// after consuming the JSONLWatcher's FSEvents-reported paths,
+    /// which is what makes the steady-state scan O(#changed-files)
+    /// instead of O(#JSONL-files-known). When `nil` or empty (manual
+    /// triggers, backstop ticks, the first-scan-after-startup before
+    /// any FSEvent has fired), falls back to the full walk so we never
+    /// miss a file FSEvents didn't tell us about.
+    /// Async-emit overload kept for tests that aggregate via an actor
+    /// (`DateCollector`, `CostCollector`, etc. in CCusageGroundTruthTests).
+    /// Delegates to the sync-emit primary form using a per-entry
+    /// `await` shim. Slower than the sync form by exactly one actor
+    /// hop per emit — fine for tests and ground-truth tooling, but
+    /// **do not use from the production ScanCoordinator path**: see
+    /// `InsertSink` for the buffer-then-flush pattern that avoids
+    /// the per-entry MainActor hop entirely.
     public func scan(
         roots: [ClaudePathResolver.ResolvedRoot],
         cursors: [String: CursorState] = [:],
         aliases: [String: String] = [:],
+        hintedPaths: Set<String>? = nil,
         emit: @Sendable (ParsedUsageEntry) async -> Void
     ) async throws -> ScanResult {
-        let candidates = collectCandidates(roots: roots, cursors: cursors)
+        // Buffer entries synchronously into a Sendable box, then
+        // drain in one async pass after scan completes — preserves
+        // test ordering without re-introducing per-entry suspensions
+        // inside the scanner. The box is necessary because the
+        // sync-emit closure crosses a `@Sendable` boundary and Swift
+        // can't see through a captured `var` for concurrency
+        // analysis.
+        final class Box: @unchecked Sendable {
+            var entries: [ParsedUsageEntry] = []
+        }
+        let box = Box()
+        let result = try await scan(
+            roots: roots,
+            cursors: cursors,
+            aliases: aliases,
+            hintedPaths: hintedPaths,
+            emit: { entry in box.entries.append(entry) }
+        )
+        for entry in box.entries { await emit(entry) }
+        return result
+    }
+
+    public func scan(
+        roots: [ClaudePathResolver.ResolvedRoot],
+        cursors: [String: CursorState] = [:],
+        aliases: [String: String] = [:],
+        hintedPaths: Set<String>? = nil,
+        emit: @Sendable (ParsedUsageEntry) -> Void
+    ) async throws -> ScanResult {
+        let candidates: [Candidate]
+        if let hintedPaths, !hintedPaths.isEmpty {
+            candidates = collectHintedCandidates(
+                hintedPaths: hintedPaths, cursors: cursors)
+        } else {
+            candidates = collectCandidates(roots: roots, cursors: cursors)
+        }
         // Sort by mtime ascending. Older files first means cross-file
         // dedup is deterministic: when two files share a dedupKey
         // (resumed sessions replay turns into a new file), the older
@@ -112,7 +166,7 @@ public actor JSONLScanner {
             filesScanned += 1
             do {
                 var bytesConsumed: Int64 = 0
-                try await readNewLines(
+                try readNewLines(
                     from: c.url,
                     startingAt: startOffset
                 ) { lineData in
@@ -125,7 +179,7 @@ public actor JSONLScanner {
                         }
                     }
                     entriesAccepted += 1
-                    await emit(entry)
+                    emit(entry)
                 } byteCounter: { delta in
                     bytesConsumed += delta
                 }
@@ -159,6 +213,46 @@ public actor JSONLScanner {
     }
 
     // MARK: - Internal
+
+    /// Build candidates from a pre-known set of paths (FSEvents hints).
+    /// Skips the recursive directory enumeration entirely — just stats
+    /// each hinted path and rejects ones that don't exist (a file may
+    /// be deleted between FSEvent and scan) or aren't regular `.jsonl`
+    /// files. Per-file stat is the same `URL.resourceValues` call the
+    /// walk variant uses, so cursor semantics stay identical.
+    nonisolated private func collectHintedCandidates(
+        hintedPaths: Set<String>,
+        cursors: [String: CursorState]
+    ) -> [Candidate] {
+        var out: [Candidate] = []
+        out.reserveCapacity(hintedPaths.count)
+        let resourceKeys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .contentModificationDateKey,
+            .fileSizeKey,
+        ]
+        for raw in hintedPaths {
+            // Only consider `.jsonl` — JSONLWatcher should have
+            // pre-filtered, but defense-in-depth in case a caller
+            // hands us something else.
+            guard raw.hasSuffix(".jsonl") else { continue }
+            let url = URL(fileURLWithPath: raw).standardizedFileURL
+            guard let values = try? url.resourceValues(forKeys: resourceKeys),
+                  values.isRegularFile == true,
+                  let mtime = values.contentModificationDate,
+                  let size = values.fileSize
+            else { continue }
+            let path = url.path
+            out.append(Candidate(
+                url: url,
+                path: path,
+                size: Int64(size),
+                mtime: mtime,
+                cursor: cursors[path]
+            ))
+        }
+        return out
+    }
 
     nonisolated private func collectCandidates(
         roots: [ClaudePathResolver.ResolvedRoot],
@@ -222,9 +316,9 @@ public actor JSONLScanner {
     private func readNewLines(
         from url: URL,
         startingAt offset: Int64,
-        lineHandler: (Data) async -> Void,
+        lineHandler: (Data) -> Void,
         byteCounter: (Int64) -> Void
-    ) async throws {
+    ) throws {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         if offset > 0 {
@@ -236,7 +330,7 @@ public actor JSONLScanner {
             for byte in chunk {
                 if byte == 0x0A {
                     if !pending.isEmpty {
-                        await lineHandler(Data(pending))
+                        lineHandler(Data(pending))
                     }
                     byteCounter(Int64(pending.count + 1))
                     pending.removeAll(keepingCapacity: true)

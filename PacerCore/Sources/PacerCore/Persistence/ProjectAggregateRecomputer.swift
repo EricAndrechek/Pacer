@@ -59,12 +59,17 @@ public final class ProjectAggregateRecomputer {
     ) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
-        // Pricing must be loaded before we walk samples — without it
-        // every TokenSample whose `sourceCostUSD` is nil contributes
-        // $0 to the project rollup, which is exactly the bug the
-        // Projects view was hitting before this fix.
-        try? await pricingTable.ensureLoaded()
-        let snapshot = await pricingTable.snapshot()
+        // Sync pricing snapshot via `SampleCostCache.current()` for the
+        // per-pair path (covers both the legacy full recompute and the
+        // new fast path). Swapping out the awaited `pricingTable`
+        // lookup here removes ~150 ms of MainActor-contended actor
+        // hop from every cycle — see same comment in
+        // `AggregateRecomputer.recompute`. The bulk path below still
+        // awaits because the bulk worker runs off-MainActor and the
+        // cost is amortized across thousands of pairs.
+        let snapshot: PricingTable.Snapshot = (mode == .display)
+            ? PricingTable.Snapshot(pricingByModel: [:])
+            : SampleCostCache.current()
         if pairs.count >= Self.bulkRecomputeThreshold {
             // See AggregateRecomputer — commit any pending main-context
             // inserts so the background worker's separate context can

@@ -76,13 +76,13 @@ public final class HourlyAggregateRecomputer {
         }
 
         var stats = Stats(bucketsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
-        let pricingSnapshot: PricingTable.Snapshot
-        if mode == .display {
-            pricingSnapshot = PricingTable.Snapshot(pricingByModel: [:])
-        } else {
-            try? await pricingTable.ensureLoaded()
-            pricingSnapshot = await pricingTable.snapshot()
-        }
+        // Pricing snapshot via `SampleCostCache.current()` (sync,
+        // nonisolated) — see the same comment in
+        // `AggregateRecomputer.recompute` for why we don't `await`
+        // `PricingTable.shared` here.
+        let pricingSnapshot: PricingTable.Snapshot = (mode == .display)
+            ? PricingTable.Snapshot(pricingByModel: [:])
+            : SampleCostCache.current()
         for bucket in buckets {
             stats.bucketsRecomputed += 1
             let pendingForBucket = pending[bucket] ?? []

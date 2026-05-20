@@ -47,11 +47,13 @@ public final class SessionInfoRecomputer {
     public func recompute(sessionIds: Set<String>) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
-        // Same fix as ProjectAggregateRecomputer: pricing must be loaded
-        // before walking samples or every sample without a stored
-        // costUSD silently contributes $0 to the session rollup.
-        try? await pricingTable.ensureLoaded()
-        let snapshot = await pricingTable.snapshot()
+        // Sync pricing snapshot via `SampleCostCache.current()` for the
+        // per-session path — matches the same change in
+        // `AggregateRecomputer.recompute`. The bulk path below still
+        // awaits because it runs off-MainActor (no contention).
+        let snapshot: PricingTable.Snapshot = (mode == .display)
+            ? PricingTable.Snapshot(pricingByModel: [:])
+            : SampleCostCache.current()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
             try context.save()
             let worker = SessionInfoBulkWorker(modelContainer: container)

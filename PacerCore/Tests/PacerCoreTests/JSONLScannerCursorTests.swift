@@ -64,11 +64,31 @@ private func line(messageId: String, requestId: String, timestamp: String = "202
     return String(data: try! JSONSerialization.data(withJSONObject: dict), encoding: .utf8)!
 }
 
-private actor Collector {
-    private(set) var entries: [ParsedUsageEntry] = []
-    func add(_ e: ParsedUsageEntry) { entries.append(e) }
-    func count() -> Int { entries.count }
-    func dedupKeys() -> [String?] { entries.map(\.dedupKey) }
+/// Sendable, lock-protected collector matching the new sync-emit
+/// signature on `JSONLScanner.scan`. Tests no longer need `await
+/// collector.add(entry)` per emit; the production code path
+/// (`InsertSink`) uses the same lock-and-collect shape to avoid the
+/// per-entry MainActor hop that used to dominate scan-cycle time.
+private final class Collector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _entries: [ParsedUsageEntry] = []
+    func add(_ e: ParsedUsageEntry) {
+        lock.lock()
+        _entries.append(e)
+        lock.unlock()
+    }
+    var entries: [ParsedUsageEntry] {
+        lock.lock(); defer { lock.unlock() }
+        return _entries
+    }
+    func count() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return _entries.count
+    }
+    func dedupKeys() -> [String?] {
+        lock.lock(); defer { lock.unlock() }
+        return _entries.map(\.dedupKey)
+    }
 }
 
 @Test func firstScanEstablishesCursors() async throws {
@@ -80,7 +100,7 @@ private actor Collector {
     let scanner = JSONLScanner()
     let collector = Collector()
     let result = try await scanner.scan(roots: try resolved(root: root)) { entry in
-        await collector.add(entry)
+        collector.add(entry)
     }
 
     #expect(result.progress.filesScanned == 1)
@@ -106,13 +126,13 @@ private actor Collector {
     // Second scan with the cursors → file unchanged → skipped, nothing emitted.
     let collector = Collector()
     let second = try await scanner.scan(roots: try resolved(root: root), cursors: cursors) { entry in
-        await collector.add(entry)
+        collector.add(entry)
     }
 
     #expect(second.progress.filesScanned == 0)
     #expect(second.progress.filesSkipped == 1)
     #expect(second.progress.entriesAccepted == 0)
-    #expect(await collector.count() == 0)
+    #expect(collector.count() == 0)
     // Skipped files don't appear in updatedCursors — caller keeps the prior cursor.
     #expect(second.updatedCursors[url.standardizedFileURL.path] == nil)
 }
@@ -141,7 +161,7 @@ private actor Collector {
 
     let collector = Collector()
     let second = try await scanner.scan(roots: try resolved(root: root), cursors: cursors) { entry in
-        await collector.add(entry)
+        collector.add(entry)
     }
     cursors = cursors.merging(second.updatedCursors) { _, new in new }
 
@@ -149,7 +169,7 @@ private actor Collector {
     #expect(second.progress.filesSkipped == 0)
     // Critical assertion: only the appended line is parsed, not all 3.
     #expect(second.progress.entriesAccepted == 1)
-    #expect(await collector.dedupKeys() == ["m3:r3"])
+    #expect(collector.dedupKeys() == ["m3:r3"])
 }
 
 @Test func partialTrailingLineIsDeferred() async throws {
@@ -212,7 +232,7 @@ private actor Collector {
 
     let collector = Collector()
     let second = try await scanner.scan(roots: try resolved(root: root), cursors: cursors) { entry in
-        await collector.add(entry)
+        collector.add(entry)
     }
     cursors = cursors.merging(second.updatedCursors) { _, new in new }
 
@@ -220,7 +240,7 @@ private actor Collector {
     // re-read from start, emit the single line.
     #expect(second.progress.filesScanned == 1)
     #expect(second.progress.entriesAccepted == 1)
-    #expect(await collector.dedupKeys() == ["m99:r99"])
+    #expect(collector.dedupKeys() == ["m99:r99"])
     let cursor2 = cursors[url.standardizedFileURL.path]!
     #expect(cursor2.byteOffset < cursor1.byteOffset)
 }
@@ -244,12 +264,12 @@ private actor Collector {
 
     let collector = Collector()
     let second = try await scanner.scan(roots: try resolved(root: root), cursors: cursors) { entry in
-        await collector.add(entry)
+        collector.add(entry)
     }
     cursors = cursors.merging(second.updatedCursors) { _, new in new }
 
     // url1 unchanged → skipped. url2 fresh → read from offset 0.
     #expect(second.progress.filesScanned == 1)
     #expect(second.progress.filesSkipped == 1)
-    #expect(await collector.dedupKeys() == ["b1:rb1"])
+    #expect(collector.dedupKeys() == ["b1:rb1"])
 }

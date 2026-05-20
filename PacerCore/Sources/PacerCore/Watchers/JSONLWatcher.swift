@@ -33,6 +33,26 @@ public actor JSONLWatcher {
     /// Outermost FS event arrival not yet flushed. The coalesce task
     /// reads this when it wakes up to decide whether to emit.
     private var pendingFSEventArrivedAt: Date?
+    /// `.jsonl` paths observed via FSEvents since the last
+    /// `consumeChangedPaths()`. Accumulated in the FS callback and
+    /// drained by `ScanCoordinator` immediately before each scan,
+    /// then passed to `JSONLScanner.scan` as a hint so the scanner
+    /// can stat just those paths instead of walking the whole
+    /// `~/.claude/projects/` tree.
+    ///
+    /// **Stored off-actor under `pathsLock`** rather than on the actor
+    /// directly — `consumeChangedPaths()` is on a hot path called once
+    /// per scan from MainActor, and going through an actor hop was
+    /// adding 100+ ms of suspend/resume latency when MainActor was
+    /// contended by SwiftUI rendering. The lock protects a Set<String>
+    /// shared between the FS-callback dispatch queue (writes) and
+    /// MainActor (reads via consumeChangedPaths). Both critical
+    /// sections are microseconds, so contention is negligible.
+    private let pathsLock = NSLock()
+    /// `nonisolated(unsafe)` because we manage thread-safety via
+    /// `pathsLock`, not actor isolation. Reads and writes must take
+    /// the lock; nothing else may touch this field.
+    nonisolated(unsafe) private var changedPaths: Set<String> = []
     /// Resolved root paths the live FSEventStream was started against.
     /// Cached so `updateLiveCadence` can restart the stream with a new
     /// latency without re-resolving roots.
@@ -79,10 +99,15 @@ public actor JSONLWatcher {
             fsEvents?.stop()
             fsEvents = nil
             // Restart with the same handler shape used in startLive
-            // — we hop back into the actor to coalesce, same as before.
-            let watcher = FSEventStreamWrapper(handler: { [weak self] _ in
+            // — we hop back into the actor to coalesce + record paths,
+            // same as before. The path-recording side feeds
+            // `JSONLScanner`'s hinted-paths fast path; without it the
+            // restart variant would silently lose hints whenever the
+            // user opens/closes the main window (which triggers a
+            // latency change).
+            let watcher = FSEventStreamWrapper(handler: { [weak self] paths in
                 guard let self else { return }
-                Task { await self.coalesceTrigger() }
+                Task { await self.recordChangedPathsAndCoalesce(paths) }
             })
             if watcher.start(paths: liveRootPaths, latencySeconds: latencySeconds) {
                 fsEvents = watcher
@@ -148,9 +173,9 @@ public actor JSONLWatcher {
         // FSEvents: arms `coalesceTrigger()` on every batch of
         // file-system events. The handler hops back into the actor
         // because the FS callback fires on its own dispatch queue.
-        let watcher = FSEventStreamWrapper(handler: { [weak self] _ in
+        let watcher = FSEventStreamWrapper(handler: { [weak self] paths in
             guard let self else { return }
-            Task { await self.coalesceTrigger() }
+            Task { await self.recordChangedPathsAndCoalesce(paths) }
         })
         let started = watcher.start(paths: pathStrings, latencySeconds: latency)
         if started {
@@ -197,6 +222,47 @@ public actor JSONLWatcher {
             if Task.isCancelled { return }
             await self?.flushPending()
         }
+    }
+
+    /// Same as `coalesceTrigger` but first records the FS-reported
+    /// paths (filtered to `.jsonl`) into `changedPaths`. The scanner
+    /// uses this set as a hint so it can stat just the affected files
+    /// instead of walking the whole projects tree — the difference
+    /// between a ~300ms scan floor and a single-digit-ms one on a
+    /// machine with ~900 cursored JSONL files.
+    private func recordChangedPathsAndCoalesce(_ paths: [String]) {
+        // FSEvents reports any path under the watched root —
+        // directories, renames, attribute changes, non-jsonl
+        // files. Filter to `.jsonl` here so the hint set never
+        // contains paths the scanner would just ignore. The
+        // scanner's own existence/stat checks handle further
+        // races (file deleted between event and scan).
+        pathsLock.lock()
+        for path in paths where path.hasSuffix(".jsonl") {
+            changedPaths.insert(path)
+        }
+        pathsLock.unlock()
+        coalesceTrigger()
+    }
+
+    /// Drain and return `.jsonl` paths observed since the last call.
+    /// Called by `ScanCoordinator` at the top of each cycle before it
+    /// hands the set to `JSONLScanner.scan(hintedPaths:)`. An empty
+    /// return signals "scan everything" (backstop tick, manual
+    /// trigger, or no FS events between this and the prior scan).
+    ///
+    /// `nonisolated` so MainActor doesn't pay an actor-hop suspend on
+    /// every scan cycle. Thread-safety comes from `pathsLock`. This
+    /// shaved ~100-150 ms off scan-cycle latency on machines under UI
+    /// pressure — the previous actor-isolated form was waiting for
+    /// the watcher actor to be free, which serialized behind FSEvents
+    /// callbacks during active Claude Code writes.
+    public nonisolated func consumeChangedPaths() -> Set<String> {
+        pathsLock.lock()
+        let out = changedPaths
+        changedPaths.removeAll(keepingCapacity: true)
+        pathsLock.unlock()
+        return out
     }
 
     private func flushPending() {

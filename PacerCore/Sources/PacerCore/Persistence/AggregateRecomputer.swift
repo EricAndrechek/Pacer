@@ -103,17 +103,20 @@ public final class AggregateRecomputer {
         }
 
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
-        // Load pricing snapshot once for the per-pair path. The
-        // snapshot is cheap (dict copy) and lets per-sample cost
-        // computation stay sync inside the fast-path loop. Skipped
-        // entirely in `.display` mode where pricing isn't consulted.
-        let pricingSnapshot: PricingTable.Snapshot
-        if mode == .display {
-            pricingSnapshot = PricingTable.Snapshot(pricingByModel: [:])
-        } else {
-            try? await pricingTable.ensureLoaded()
-            pricingSnapshot = await pricingTable.snapshot()
-        }
+        // Pricing snapshot for the per-sample fast-path cost
+        // computation. We read from `SampleCostCache` (process-wide,
+        // warmed at app launch, nonisolated) rather than awaiting
+        // `PricingTable.shared` per cycle — the actor hop was
+        // adding ~150 ms per recomputer phase under MainActor
+        // contention (every scan cycle was paying it). The cache is
+        // updated atomically when the user toggles cost mode or when
+        // a pricing refresh completes; recomputer fast-path callers
+        // are tolerant of a one-cycle stale snapshot.
+        //
+        // `.display` mode never consults pricing — skip the read.
+        let pricingSnapshot: PricingTable.Snapshot = (mode == .display)
+            ? PricingTable.Snapshot(pricingByModel: [:])
+            : SampleCostCache.current()
         for pair in pairs {
             stats.pairsRecomputed += 1
             let pendingForPair = pending[pair] ?? []
