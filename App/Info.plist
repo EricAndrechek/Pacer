@@ -31,7 +31,7 @@
 	<key>SUFeedURL</key>
 	<string>https://ericandrechek.github.io/Pacer/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>PLACEHOLDER_SPARKLE_PUBLIC_KEY_REPLACE_BEFORE_RELEASE</string>
+	<string>iCjiSrk4yhkum2eWbamefoJ9vxQh2oDhGIQwo+pEHLY=</string>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>

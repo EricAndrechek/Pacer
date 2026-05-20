@@ -484,13 +484,27 @@ private func makeEntry(
     #expect(abs(agg.totalCostUSD - 0.05) < 1e-9)
 }
 
+/// Sendable snapshot of the bits of `DailyAggregate` this test compares.
+/// SwiftData @Model classes are not Sendable (Swift 6 strict
+/// concurrency); copying out the value-typed fields inside the
+/// MainActor closure lets us return the snapshot across the async
+/// boundary without bridging the persistent model itself.
+private struct AggregateSnapshot: Sendable {
+    let inputTokens: Int64
+    let outputTokens: Int64
+    let cacheReadTokens: Int64
+    let cacheCreation5mTokens: Int64
+    let cacheCreation1hTokens: Int64
+    let totalCostUSD: Double
+}
+
 @MainActor
 @Test func aggregateRecomputerFastPathProducesSameResultAsFullPath() async throws {
     // Property: the fast path and the full-recompute path agree on
     // the resulting `DailyAggregate` for the same input. Run both
     // against equivalent contexts and compare token totals.
     let dayInstant = Date(timeIntervalSince1970: 1_756_800_000)
-    let runScenario = { @MainActor (forceFullPath: Bool) async throws -> DailyAggregate in
+    let runScenario = { @MainActor (forceFullPath: Bool) async throws -> AggregateSnapshot in
         let container = try makeInMemoryContainer()
         let context = ModelContext(container)
         let persister = try SamplePersister(context: context)
@@ -520,7 +534,15 @@ private func makeEntry(
         _ = try await recomputer.recompute(
             pairs: persister.dirtyPairs, pending: pending, polluted: polluted
         )
-        return try context.fetch(FetchDescriptor<DailyAggregate>()).first!
+        let agg = try context.fetch(FetchDescriptor<DailyAggregate>()).first!
+        return AggregateSnapshot(
+            inputTokens: agg.inputTokens,
+            outputTokens: agg.outputTokens,
+            cacheReadTokens: agg.cacheReadTokens,
+            cacheCreation5mTokens: agg.cacheCreation5mTokens,
+            cacheCreation1hTokens: agg.cacheCreation1hTokens,
+            totalCostUSD: agg.totalCostUSD
+        )
     }
 
     let fastPath = try await runScenario(false)
@@ -676,7 +698,10 @@ private func makeEntry(
     #expect(a.topModel == "claude-opus-4-7")
 
     let b = sessions.first { $0.sessionId == "sess-B" }!
-    #expect(b.totalTokens == 3)
+    // `totalTokens` is input + output only — cache_read is excluded
+    // since it's effectively free and would dwarf the meaningful signal.
+    // sess-B has input=1, output=1, cacheRead=1, so totalTokens=2.
+    #expect(b.totalTokens == 2)
     #expect(b.topModel == "claude-opus-4-7")
 }
 
