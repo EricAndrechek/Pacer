@@ -1,6 +1,12 @@
 import Foundation
 import SwiftData
-import UserNotifications
+// `@preconcurrency` downgrades UserNotifications' (pre-Swift-6)
+// non-Sendable result types like UNNotificationSettings to warnings.
+// Without it, `await center.notificationSettings()` fails strict
+// concurrency on Swift 6.0 (macos-15 runner) even though we only
+// read a Sendable enum off the result. macOS 15 SDK hasn't fully
+// audited the framework yet.
+@preconcurrency import UserNotifications
 import PacerCore
 import PacerUI
 
