@@ -124,8 +124,21 @@ echo "    signed."
 #     stapler then attaches to the bundle. Without notarization the
 #     "would like to access data from other apps" prompt fires on
 #     every launch even with Developer ID signing.
+#
+# `PACER_DEV_SKIP_NOTARIZE=1` skips this whole step. Use only for
+# rapid local-only perf iteration — the resulting bundle works on
+# this machine for the running user (Developer ID + Gatekeeper grant
+# is enough) but will trip TCC's "App Management" prompt on every
+# launch and won't open on other machines. The NEXT non-skip install
+# re-notarizes and clears the prompt.
 NOTARY_PROFILE="pacer-notarization"
 NOTARY_ZIP="$(mktemp -d)/Pacer.zip"
+
+if [ "${PACER_DEV_SKIP_NOTARIZE:-0}" = "1" ]; then
+    echo
+    echo "==> Skipping notarization (PACER_DEV_SKIP_NOTARIZE=1)"
+    echo "    note: TCC App-Management prompt may fire on launch"
+else
 
 echo
 echo "==> Notarizing with Apple (profile: ${NOTARY_PROFILE})"
@@ -138,6 +151,9 @@ if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 
     echo "      --key-id <KEY_ID> --issuer <ISSUER_UUID>"
     echo "Get the .p8 + Key ID + Issuer ID from App Store Connect →"
     echo "Users and Access → Integrations → Team Keys."
+    echo
+    echo "For rapid local-only iteration without notarization:"
+    echo "  PACER_DEV_SKIP_NOTARIZE=1 make install"
     exit 1
 fi
 
@@ -163,6 +179,7 @@ fi
 
 xcrun stapler staple "${BUILD_OUTPUT}" 2>&1 | tail -3
 xcrun stapler validate "${BUILD_OUTPUT}" 2>&1 | tail -1
+fi  # PACER_DEV_SKIP_NOTARIZE
 
 # 3a. Quit Pacer.app if running, capturing whether it was so we can
 #     re-open at the end.

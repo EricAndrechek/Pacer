@@ -237,12 +237,29 @@ public actor JSONLWatcher {
         // contains paths the scanner would just ignore. The
         // scanner's own existence/stat checks handle further
         // races (file deleted between event and scan).
+        //
+        // **Suppress the coalesce trigger when no `.jsonl` paths
+        // were in this batch** — FSEvents fires on many path types
+        // (xattrs, lock files, sibling-directory mtime touches) that
+        // can't possibly add usage data, and waking the scan loop
+        // for them was producing the cascading-MainActor-pressure
+        // we measured under heavy Claude Code activity: every
+        // unnecessary scan triggered a context.save, which fanned a
+        // @Query refresh storm out to every visible view, which kept
+        // MainActor pegged enough that the NEXT scan's phase timings
+        // (autoA, prep, scan) inflated 10-50x. Filtering at the
+        // trigger source breaks the loop. Backstop ticks still
+        // catch anything FSEvents missed.
+        var foundJsonl = false
         pathsLock.lock()
         for path in paths where path.hasSuffix(".jsonl") {
             changedPaths.insert(path)
+            foundJsonl = true
         }
         pathsLock.unlock()
-        coalesceTrigger()
+        if foundJsonl {
+            coalesceTrigger()
+        }
     }
 
     /// Drain and return `.jsonl` paths observed since the last call.
