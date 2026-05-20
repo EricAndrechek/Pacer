@@ -53,6 +53,24 @@ public actor JSONLWatcher {
     /// `pathsLock`, not actor isolation. Reads and writes must take
     /// the lock; nothing else may touch this field.
     nonisolated(unsafe) private var changedPaths: Set<String> = []
+    /// Timestamp of the most recent FSEvents callback that contained
+    /// at least one `.jsonl` path. Used by the backstop loop to skip
+    /// the periodic full-walk emit when FSEvents has been actively
+    /// firing — the hinted scans the events trigger already cover
+    /// every changed file, so the backstop's full walk is redundant
+    /// (and ~800-1100 ms on a populated `~/.claude/projects/`).
+    private var lastJsonlFSEventAt: Date?
+    /// How many consecutive backstop emits we've skipped because
+    /// FSEvents was active. After `maxBackstopsSkipped` skips in a
+    /// row we force-fire one anyway as a safety net — FSEvents can
+    /// drop events under load and we don't want a single missed
+    /// event to leave a file's cursor stale indefinitely.
+    private var consecutiveBackstopsSkipped: Int = 0
+    /// Force a full-walk backstop after this many consecutive skips.
+    /// At 60 s base interval that's ~10 minutes worst-case latency
+    /// for catching events FSEvents missed. Anything beyond that
+    /// risks user-visible "where's my data" lag.
+    private static let maxBackstopsSkipped: Int = 9
     /// Resolved root paths the live FSEventStream was started against.
     /// Cached so `updateLiveCadence` can restart the stream with a new
     /// latency without re-resolving roots.
@@ -187,12 +205,19 @@ public actor JSONLWatcher {
         // Backstop loop reads the live interval at the top of each
         // iteration so `updateLiveCadence` picks up before the next
         // sleep. Initial value comes from the seeded `mode`.
+        // The post-sleep `shouldSkipBackstop()` check lets the loop
+        // skip its emit when FSEvents has been actively firing
+        // (those events already drove hinted scans; an extra full
+        // walk is wasted ~800-1100 ms). Forced fire after
+        // `maxBackstopsSkipped` consecutive skips bounds worst-case
+        // missed-event latency.
         liveBackstopSeconds = backstopInterval
         backstopTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let interval = await self?.currentBackstopSeconds() else { return }
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 if Task.isCancelled { return }
+                if await self?.shouldSkipBackstop() == true { continue }
                 await self?.emitDirect()
             }
         }
@@ -258,8 +283,42 @@ public actor JSONLWatcher {
         }
         pathsLock.unlock()
         if foundJsonl {
+            // Stamp here, not inside coalesceTrigger, because we
+            // want the timestamp to reflect FSEvents' actual rate,
+            // not the coalesce window. The backstop loop reads this
+            // to decide whether the periodic full walk is necessary.
+            lastJsonlFSEventAt = Date()
             coalesceTrigger()
         }
+    }
+
+    /// Whether the next backstop tick should skip its emit. Returns
+    /// `true` when an FSEvents callback containing `.jsonl` paths
+    /// fired within the last `backstopInterval` AND we haven't
+    /// skipped too many in a row. The skip cap is a safety net for
+    /// the edge case where FSEvents drops events under load: we
+    /// force a full walk every `maxBackstopsSkipped + 1` ticks
+    /// regardless, so worst-case latency for a missed event is
+    /// bounded (~10 min at the default 60 s interval).
+    private func shouldSkipBackstop() -> Bool {
+        guard let lastFS = lastJsonlFSEventAt else {
+            // Never seen an FSEvent — couldn't have been firing
+            // recently. Don't skip; let the full walk catch anything
+            // initial.
+            consecutiveBackstopsSkipped = 0
+            return false
+        }
+        let sinceLastFS = Date().timeIntervalSince(lastFS)
+        // Be permissive about "recently": within the backstop
+        // interval itself. If FSEvents fired more than `interval`
+        // ago, we genuinely need the safety walk.
+        if sinceLastFS < liveBackstopSeconds
+            && consecutiveBackstopsSkipped < Self.maxBackstopsSkipped {
+            consecutiveBackstopsSkipped += 1
+            return true
+        }
+        consecutiveBackstopsSkipped = 0
+        return false
     }
 
     /// Drain and return `.jsonl` paths observed since the last call.
