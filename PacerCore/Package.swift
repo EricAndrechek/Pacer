@@ -27,7 +27,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PacerCoreTests",
-            dependencies: ["PacerCore"]
+            dependencies: ["PacerCore", "PacerUI"]
         ),
     ]
 )
