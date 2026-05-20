@@ -34,6 +34,9 @@ public final class HourlyAggregateRecomputer {
         public var bucketsRecomputed: Int
         public var aggregatesUpserted: Int
         public var aggregatesDeleted: Int
+        /// Mirror of `AggregateRecomputer.Stats.fastPathApplied` — see
+        /// that doc for the diagnostic intent.
+        public var fastPathApplied: Int = 0
     }
 
     /// Same threshold as the sister recomputers — keeps incremental
@@ -42,8 +45,17 @@ public final class HourlyAggregateRecomputer {
     /// buckets on bootstrap or cost-recompute bumps) to the bulk path.
     private static let bulkRecomputeThreshold = 64
 
+    /// Recompute dirty hour buckets and upsert their `HourlyAggregate`
+    /// rows. `pending` and `polluted` opt into the incremental fast
+    /// path — see `AggregateRecomputer.recompute` for the design
+    /// rationale; this method mirrors it exactly. Empty defaults
+    /// preserve the legacy "always full-recompute" behavior.
     @discardableResult
-    public func recompute(buckets: Set<DateHourModelTriple>) async throws -> Stats {
+    public func recompute(
+        buckets: Set<DateHourModelTriple>,
+        pending: [DateHourModelTriple: [TokenSample]] = [:],
+        polluted: Set<DateHourModelTriple> = []
+    ) async throws -> Stats {
         if buckets.isEmpty {
             return Stats(bucketsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         }
@@ -64,17 +76,77 @@ public final class HourlyAggregateRecomputer {
         }
 
         var stats = Stats(bucketsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
-        if mode == .calculate {
+        let pricingSnapshot: PricingTable.Snapshot
+        if mode == .display {
+            pricingSnapshot = PricingTable.Snapshot(pricingByModel: [:])
+        } else {
             try? await pricingTable.ensureLoaded()
+            pricingSnapshot = await pricingTable.snapshot()
         }
         for bucket in buckets {
             stats.bucketsRecomputed += 1
+            let pendingForBucket = pending[bucket] ?? []
+            let isPolluted = polluted.contains(bucket)
+            if !isPolluted, !pendingForBucket.isEmpty,
+               try fastPathApply(bucket: bucket, pending: pendingForBucket,
+                                 snapshot: pricingSnapshot, stats: &stats) {
+                continue
+            }
             try await recomputeOne(bucket: bucket, stats: &stats)
         }
         // No save here — `ScanCoordinator.runScanCycle` does one
         // terminal save per cycle that commits this recomputer's
         // changes alongside the others'.
         return stats
+    }
+
+    /// Incremental fast path. Mirrors
+    /// `AggregateRecomputer.fastPathApply` — returns `true` when the
+    /// existing aggregate row was updated in place, `false` when no
+    /// row exists yet and the caller should fall through to the full
+    /// recompute. Per-sample cost (no sum-then-price) preserves the
+    /// 200k-tier-per-call semantics; `sampleCount` adds the pending
+    /// count because the existing row already counted prior samples.
+    private func fastPathApply(
+        bucket: DateHourModelTriple,
+        pending: [TokenSample],
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws -> Bool {
+        let aggKey = HourlyAggregate.makeKey(
+            date: bucket.date, hour: bucket.hour, model: bucket.model)
+        let existing = try context.fetch(
+            FetchDescriptor<HourlyAggregate>(
+                predicate: #Predicate<HourlyAggregate> { $0.dateHourModelKey == aggKey }
+            )
+        ).first
+        guard let existing else { return false }
+
+        for sample in pending {
+            existing.inputTokens += sample.inputTokens
+            existing.outputTokens += sample.outputTokens
+            existing.cacheReadTokens += sample.cacheReadTokens
+            existing.cacheCreation5mTokens += sample.cacheCreation5mTokens
+            existing.cacheCreation1hTokens += sample.cacheCreation1hTokens
+            let breakdown = TokenBreakdown(
+                inputTokens: sample.inputTokens,
+                outputTokens: sample.outputTokens,
+                cacheReadTokens: sample.cacheReadTokens,
+                cacheCreation5mTokens: sample.cacheCreation5mTokens,
+                cacheCreation1hTokens: sample.cacheCreation1hTokens
+            )
+            existing.totalCostUSD += CostCalculator.cost(
+                storedCostUSD: sample.sourceCostUSD,
+                model: sample.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
+        }
+        existing.sampleCount += pending.count
+        stats.aggregatesUpserted += 1
+        stats.fastPathApplied += 1
+        return true
     }
 
     private func recomputeOne(bucket: DateHourModelTriple, stats: inout Stats) async throws {

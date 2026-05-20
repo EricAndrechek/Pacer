@@ -710,7 +710,17 @@ public final class ScanCoordinator {
 
         let recomputer = AggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
-        let recomputeStats = try await recomputer.recompute(pairs: activePersister.dirtyPairs)
+        // Pass the persister's cycle-local pending-sample dicts so the
+        // recomputer can take the incremental fast path on un-polluted
+        // pairs whose `DailyAggregate` row already exists. Brand-new
+        // pairs (no existing row) AND polluted pairs (recovery /
+        // markEverySampleDirty / canonicalize) fall through to the
+        // full recompute path — same code as before this change.
+        let recomputeStats = try await recomputer.recompute(
+            pairs: activePersister.dirtyPairs,
+            pending: activePersister.pendingPairSamples,
+            polluted: activePersister.pollutedDailyPairs
+        )
         phase.dailyRecomputeMs = tickMs()
 
         // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
@@ -725,7 +735,10 @@ public final class ScanCoordinator {
             mode: configuration.costMode
         )
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
-            buckets: activePersister.dirtyHourBuckets)
+            buckets: activePersister.dirtyHourBuckets,
+            pending: activePersister.pendingHourSamples,
+            polluted: activePersister.pollutedHourBuckets
+        )
         phase.hourlyRecomputeMs = tickMs()
 
         // Both recomputers below previously ignored cost mode entirely
@@ -739,7 +752,11 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
-        let projectRecomputeStats = try await projectRecomputer.recompute(pairs: activePersister.dirtyProjectDates)
+        let projectRecomputeStats = try await projectRecomputer.recompute(
+            pairs: activePersister.dirtyProjectDates,
+            pending: activePersister.pendingProjectSamples,
+            polluted: activePersister.pollutedProjectPairs
+        )
         phase.projectRecomputeMs = tickMs()
 
         let sessionRecomputer = SessionInfoRecomputer(
@@ -1024,7 +1041,13 @@ public final class ScanCoordinator {
     /// follows the cycle.
     private func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) ms=\(Int(r.durationSeconds * 1000))"
+        // `fast=N/M` shows fast-path-applied / pairs-recomputed for the
+        // daily rollup. The same ratio holds approximately for hourly
+        // (most active hour buckets have the same dirtying pattern as
+        // their parent (date, model) pair) so one column is enough.
+        let dailyFast = r.recomputeStats.fastPathApplied
+        let dailyPairs = r.recomputeStats.pairsRecomputed
+        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) ms=\(Int(r.durationSeconds * 1000))"
         let p = r.phaseTimings
         let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
         return "\(base) \(phases)"

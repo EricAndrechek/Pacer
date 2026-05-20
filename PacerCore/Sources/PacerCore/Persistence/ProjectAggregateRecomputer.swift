@@ -34,6 +34,9 @@ public final class ProjectAggregateRecomputer {
         public var pairsRecomputed: Int
         public var aggregatesUpserted: Int
         public var aggregatesDeleted: Int
+        /// Mirror of `AggregateRecomputer.Stats.fastPathApplied`. See
+        /// that doc for the diagnostic intent.
+        public var fastPathApplied: Int = 0
     }
 
     /// Above this many dirty pairs we hand off to a background
@@ -44,8 +47,16 @@ public final class ProjectAggregateRecomputer {
     /// cheap and visibility of in-flight inserts is free.
     private static let bulkRecomputeThreshold = 64
 
+    /// Recompute dirty `(projectPath, date)` pairs. `pending` and
+    /// `polluted` opt into the incremental fast path — see
+    /// `AggregateRecomputer.recompute` for the design. Empty defaults
+    /// preserve legacy behavior.
     @discardableResult
-    public func recompute(pairs: Set<ProjectDatePair>) async throws -> Stats {
+    public func recompute(
+        pairs: Set<ProjectDatePair>,
+        pending: [ProjectDatePair: [TokenSample]] = [:],
+        polluted: Set<ProjectDatePair> = []
+    ) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
         // Pricing must be loaded before we walk samples — without it
@@ -65,10 +76,102 @@ public final class ProjectAggregateRecomputer {
         }
         for pair in pairs {
             stats.pairsRecomputed += 1
+            let pendingForPair = pending[pair] ?? []
+            let isPolluted = polluted.contains(pair)
+            if !isPolluted, !pendingForPair.isEmpty,
+               try fastPathApply(pair: pair, pending: pendingForPair,
+                                 snapshot: snapshot, stats: &stats) {
+                continue
+            }
             try recomputeOne(pair: pair, snapshot: snapshot, stats: &stats)
         }
         // No save here — see comment in `AggregateRecomputer.recompute`.
         return stats
+    }
+
+    /// Incremental fast path for the project rollup. Unlike the
+    /// daily/hourly rollups, this one carries denormalized session +
+    /// per-model JSON columns, so the fast path has to decode them,
+    /// union the pending samples' contributions in memory, and
+    /// re-encode. Even with the round-trip, the savings vs fetching
+    /// every TokenSample for the pair (~100ms on a populated bucket)
+    /// are large — single-ms typical case once decoded.
+    private func fastPathApply(
+        pair: ProjectDatePair,
+        pending: [TokenSample],
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws -> Bool {
+        let key = ProjectDailyAggregate.makeKey(
+            projectPath: pair.projectPath, date: pair.date)
+        let existing = try context.fetch(
+            FetchDescriptor<ProjectDailyAggregate>(
+                predicate: #Predicate<ProjectDailyAggregate> { $0.projectDateKey == key }
+            )
+        ).first
+        guard let existing else { return false }
+
+        // Decode existing JSON aggregates. Defaults to empty when the
+        // stored Data is empty/corrupt — the bucket then behaves as if
+        // it had no prior contributors, which is what the legacy
+        // recompute path would produce on first insert anyway.
+        let decoder = JSONDecoder()
+        var sessions: Set<String> = []
+        if !existing.sessionIdsJSON.isEmpty,
+           let decoded = try? decoder.decode([String].self, from: existing.sessionIdsJSON) {
+            sessions = Set(decoded)
+        }
+        var modelTokens: [String: Int64] = [:]
+        if !existing.modelTokensJSON.isEmpty,
+           let decoded = try? decoder.decode([String: Int64].self, from: existing.modelTokensJSON) {
+            modelTokens = decoded
+        }
+        var modelCost: [String: Double] = [:]
+        if !existing.modelCostJSON.isEmpty,
+           let decoded = try? decoder.decode([String: Double].self, from: existing.modelCostJSON) {
+            modelCost = decoded
+        }
+
+        for s in pending {
+            existing.inputTokens += s.inputTokens
+            existing.outputTokens += s.outputTokens
+            existing.cacheReadTokens += s.cacheReadTokens
+            existing.cacheCreation5mTokens += s.cacheCreation5mTokens
+            existing.cacheCreation1hTokens += s.cacheCreation1hTokens
+            let breakdown = TokenBreakdown(
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                cacheReadTokens: s.cacheReadTokens,
+                cacheCreation5mTokens: s.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.cacheCreation1hTokens
+            )
+            let cost = CostCalculator.cost(
+                storedCostUSD: s.sourceCostUSD,
+                model: s.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
+            existing.totalCostUSD += cost
+            if let sid = s.sessionId, !sid.isEmpty {
+                sessions.insert(sid)
+            }
+            modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens
+            modelCost[s.model, default: 0] += cost
+            if s.sampledAt > existing.lastActive {
+                existing.lastActive = s.sampledAt
+            }
+        }
+
+        let encoder = JSONEncoder()
+        existing.sessionIdsJSON = (try? encoder.encode(Array(sessions))) ?? Data()
+        existing.modelTokensJSON = (try? encoder.encode(modelTokens)) ?? Data()
+        existing.modelCostJSON = (try? encoder.encode(modelCost)) ?? Data()
+        existing.sessionCount = sessions.count
+        existing.modelCount = modelTokens.count
+        stats.aggregatesUpserted += 1
+        stats.fastPathApplied += 1
+        return true
     }
 
     private func recomputeOne(

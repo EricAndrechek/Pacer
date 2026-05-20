@@ -82,6 +82,48 @@ public final class SamplePersister {
     /// session-less entries (older Claude Code lines) don't get a
     /// SessionInfo row.
     public private(set) var dirtySessionIds: Set<String>
+
+    /// Samples inserted this cycle, bucketed by `(date, model)`. Drives
+    /// `AggregateRecomputer`'s incremental fast path: when the bucket
+    /// already has a `DailyAggregate` row on disk AND the only thing
+    /// that dirtied the pair this cycle is one of these inserts, the
+    /// recomputer can sum the small `pendingPairSamples[pair]` list
+    /// and add it to the existing aggregate — instead of fetching
+    /// every TokenSample for `(date, model)` (typically 500+ on an
+    /// active bucket, the source of the 400ms-per-pair scan tick we
+    /// measured before this change). Cleared in `clearDirtyPairs()`.
+    /// Capped at `fastPathPendingCap` per pair; past the cap the pair
+    /// is `polluted` and the recomputer falls back to full recompute
+    /// (the bulk path's amortized one-fetch model is faster than a
+    /// thousand-sample in-memory walk).
+    public private(set) var pendingPairSamples: [DateModelPair: [TokenSample]]
+    /// `(date, hour, model)` equivalent of `pendingPairSamples`. Same
+    /// fast-path semantics on `HourlyAggregateRecomputer`.
+    public private(set) var pendingHourSamples: [DateHourModelTriple: [TokenSample]]
+    /// `(projectPath, date)` equivalent. Drives the project rollup's
+    /// fast path. The project rollup carries extra columns (session
+    /// ids, model breakdown, JSON aggregates), so its fast path
+    /// merges in a slightly heavier per-sample loop than daily/hourly
+    /// — still O(pending.count) instead of O(all samples for pair).
+    public private(set) var pendingProjectSamples: [ProjectDatePair: [TokenSample]]
+    /// `(date, model)` pairs whose pending list overflowed the per-pair
+    /// cap, OR that were marked dirty by something other than an
+    /// `insert(_:)` call (recovery drain, `markEverySampleDirty`, alias
+    /// migration). For these the partial delta can't be trusted as
+    /// representative of "samples since last aggregate write," so the
+    /// recomputer must full-recompute. Cleared in `clearDirtyPairs()`.
+    public private(set) var pollutedDailyPairs: Set<DateModelPair>
+    /// `(date, hour, model)` equivalent of `pollutedDailyPairs`.
+    public private(set) var pollutedHourBuckets: Set<DateHourModelTriple>
+    /// `(projectPath, date)` equivalent of `pollutedDailyPairs`.
+    public private(set) var pollutedProjectPairs: Set<ProjectDatePair>
+    /// Cap on per-bucket pending list length. Past this, fast-path
+    /// gain (skipping the full fetch) is outweighed by the cost of
+    /// iterating the pending list in memory — and on a full
+    /// historical scan we accumulate thousands of samples per pair
+    /// before the cycle's recomputer runs, where the bulk-worker
+    /// path's "one fetch grouped in memory" model already wins.
+    private static let fastPathPendingCap = 32
     /// (date, model) pairs that have TokenSamples in the DB but no
     /// matching DailyAggregate at persister-init time. These are
     /// integrity gaps that the dirty-pair tracking will not catch: a
@@ -131,6 +173,12 @@ public final class SamplePersister {
         self.dirtyProjectDates = []
         self.dirtyHourBuckets = []
         self.dirtySessionIds = []
+        self.pendingPairSamples = [:]
+        self.pendingHourSamples = [:]
+        self.pendingProjectSamples = [:]
+        self.pollutedDailyPairs = []
+        self.pollutedHourBuckets = []
+        self.pollutedProjectPairs = []
         self.missingAggregatePairs = []
         self.missingProjectAggregatePairs = []
         self.missingHourBuckets = []
@@ -154,9 +202,11 @@ public final class SamplePersister {
         }
         let sample = TokenSample(from: entry)
         context.insert(sample)
-        dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-        dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
         // Hour bucket uses the same user-local calendar that
         // `TokenSample.date` was formatted under, so a sample at
         // 23:30 local lands in (today, 23) — and the next half-hour's
@@ -164,10 +214,46 @@ public final class SamplePersister {
         // land correctly under (tomorrow, 0). `Calendar.current` is
         // safe to call here; we're on MainActor.
         let hour = Self.localHour(of: sample.sampledAt)
-        dirtyHourBuckets.insert(DateHourModelTriple(
-            date: sample.date, hour: hour, model: sample.model))
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: hour, model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
         if let sid = sample.sessionId, !sid.isEmpty {
             dirtySessionIds.insert(sid)
+        }
+        // Track the sample for the recomputers' fast path. We append
+        // until the pair crosses the per-bucket cap, then mark the
+        // pair polluted and drop the pending list so future inserts
+        // for the same pair don't keep growing it. Polluted pairs fall
+        // through to the existing full-recompute path on flush.
+        if !pollutedDailyPairs.contains(pair) {
+            var list = pendingPairSamples[pair, default: []]
+            list.append(sample)
+            if list.count > Self.fastPathPendingCap {
+                pollutedDailyPairs.insert(pair)
+                pendingPairSamples[pair] = nil
+            } else {
+                pendingPairSamples[pair] = list
+            }
+        }
+        if !pollutedHourBuckets.contains(hourBucket) {
+            var list = pendingHourSamples[hourBucket, default: []]
+            list.append(sample)
+            if list.count > Self.fastPathPendingCap {
+                pollutedHourBuckets.insert(hourBucket)
+                pendingHourSamples[hourBucket] = nil
+            } else {
+                pendingHourSamples[hourBucket] = list
+            }
+        }
+        if !pollutedProjectPairs.contains(projectPair) {
+            var list = pendingProjectSamples[projectPair, default: []]
+            list.append(sample)
+            if list.count > Self.fastPathPendingCap {
+                pollutedProjectPairs.insert(projectPair)
+                pendingProjectSamples[projectPair] = nil
+            } else {
+                pendingProjectSamples[projectPair] = list
+            }
         }
         pendingInsertCount += 1
         stats.inserted += 1
@@ -197,11 +283,23 @@ public final class SamplePersister {
     /// touch `seenDedupKeys` — those persist across the persister's
     /// lifetime so subsequent inserts in the same session stay
     /// idempotent.
+    ///
+    /// Also clears the per-cycle pending-sample dictionaries + their
+    /// polluted-pair shadow sets. The recomputers read these during
+    /// the cycle's tail to decide between the incremental fast path
+    /// and a full recompute; once the cycle's terminal save lands,
+    /// they've served their purpose and a new cycle starts fresh.
     public func clearDirtyPairs() {
         dirtyPairs.removeAll()
         dirtyProjectDates.removeAll()
         dirtyHourBuckets.removeAll()
         dirtySessionIds.removeAll()
+        pendingPairSamples.removeAll()
+        pendingHourSamples.removeAll()
+        pendingProjectSamples.removeAll()
+        pollutedDailyPairs.removeAll()
+        pollutedHourBuckets.removeAll()
+        pollutedProjectPairs.removeAll()
     }
 
     /// Drain and return the (date, model) pairs that have TokenSamples
@@ -250,21 +348,35 @@ public final class SamplePersister {
     /// Merge external pairs into the dirty set. Only used to fold
     /// `missingAggregatePairs` into `dirtyPairs` from ScanCoordinator;
     /// in normal operation pairs are added by `insert(_:)`.
+    ///
+    /// Pollutes each pair so the recomputer's incremental fast path
+    /// won't apply — these pairs need a full re-aggregation because
+    /// either there's no `DailyAggregate` row yet (recovery drain) or
+    /// the existing row's cost numbers were computed under buggy logic
+    /// (`markEverySampleDirty` after a cost-version bump). The pending
+    /// sample list from a co-occurring `insert(_:)` is partial in both
+    /// cases and would land the wrong total if added blindly.
     public func addDirtyPairs(_ pairs: Set<DateModelPair>) {
         dirtyPairs.formUnion(pairs)
+        pollutedDailyPairs.formUnion(pairs)
     }
 
     /// Merge external project-date pairs into the dirty set. Symmetric
-    /// to `addDirtyPairs(_:)` for the project rollup path.
+    /// to `addDirtyPairs(_:)` for the project rollup path. Pollutes
+    /// each pair so the project recomputer's fast path won't apply —
+    /// same reasoning as `addDirtyPairs(_:)`.
     public func addDirtyProjectDates(_ pairs: Set<ProjectDatePair>) {
         dirtyProjectDates.formUnion(pairs)
+        pollutedProjectPairs.formUnion(pairs)
     }
 
     /// Merge external hour-bucket triples into the dirty set. Symmetric
     /// to `addDirtyPairs(_:)` for the hourly rollup path. Used to fold
     /// `missingHourBuckets` into `dirtyHourBuckets` from ScanCoordinator.
+    /// Pollutes each triple — same reasoning as `addDirtyPairs(_:)`.
     public func addDirtyHourBuckets(_ triples: Set<DateHourModelTriple>) {
         dirtyHourBuckets.formUnion(triples)
+        pollutedHourBuckets.formUnion(triples)
     }
 
     /// Merge external session ids into the dirty set. Symmetric to
@@ -291,12 +403,23 @@ public final class SamplePersister {
         descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt]
         let samples = try context.fetch(descriptor)
         for sample in samples {
-            dirtyPairs.insert(DateModelPair(date: sample.date, model: sample.model))
+            let pair = DateModelPair(date: sample.date, model: sample.model)
+            dirtyPairs.insert(pair)
+            // Pollute so any concurrent insert(_:) in the same cycle
+            // doesn't trip the recomputer's fast path. The whole reason
+            // this method runs is that the existing aggregate rows
+            // have wrong cost — incrementally ADDING to them would
+            // compound the error. Full recompute is mandatory.
+            pollutedDailyPairs.insert(pair)
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            dirtyProjectDates.insert(ProjectDatePair(projectPath: path, date: sample.date))
+            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+            dirtyProjectDates.insert(projectPair)
+            pollutedProjectPairs.insert(projectPair)
             let hour = Self.localHour(of: sample.sampledAt)
-            dirtyHourBuckets.insert(DateHourModelTriple(
-                date: sample.date, hour: hour, model: sample.model))
+            let hourBucket = DateHourModelTriple(
+                date: sample.date, hour: hour, model: sample.model)
+            dirtyHourBuckets.insert(hourBucket)
+            pollutedHourBuckets.insert(hourBucket)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
             }
@@ -341,11 +464,16 @@ public final class SamplePersister {
             sample.projectPath = canonical
             // Both ends of the change need recompute: the old bucket
             // emptied (so the recomputer deletes it) and the new
-            // bucket gets the migrated samples.
-            dirtyProjectDates.insert(ProjectDatePair(
-                projectPath: pre, date: sample.date))
-            dirtyProjectDates.insert(ProjectDatePair(
-                projectPath: canonical, date: sample.date))
+            // bucket gets the migrated samples. Both also pollute the
+            // project pair — the underlying TokenSample rows shifted
+            // buckets, so the existing aggregate's totals no longer
+            // reflect what's actually in the new bucket.
+            let prePair = ProjectDatePair(projectPath: pre, date: sample.date)
+            let canonicalPair = ProjectDatePair(projectPath: canonical, date: sample.date)
+            dirtyProjectDates.insert(prePair)
+            dirtyProjectDates.insert(canonicalPair)
+            pollutedProjectPairs.insert(prePair)
+            pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
             }
@@ -399,10 +527,15 @@ public final class SamplePersister {
             let canonical = ProjectPathCanonicalizer.canonicalize(pre, aliases: aliases)
             guard canonical != pre else { continue }
             sample.projectPath = canonical
-            dirtyProjectDates.insert(ProjectDatePair(
-                projectPath: pre, date: sample.date))
-            dirtyProjectDates.insert(ProjectDatePair(
-                projectPath: canonical, date: sample.date))
+            // Same pollution semantics as the full-walk variant —
+            // samples are shifting buckets so neither end's existing
+            // aggregate represents the post-migration state.
+            let prePair = ProjectDatePair(projectPath: pre, date: sample.date)
+            let canonicalPair = ProjectDatePair(projectPath: canonical, date: sample.date)
+            dirtyProjectDates.insert(prePair)
+            dirtyProjectDates.insert(canonicalPair)
+            pollutedProjectPairs.insert(prePair)
+            pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
             }

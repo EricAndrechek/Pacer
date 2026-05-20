@@ -42,6 +42,14 @@ public final class AggregateRecomputer {
         public var pairsRecomputed: Int
         public var aggregatesUpserted: Int
         public var aggregatesDeleted: Int
+        /// How many pairs took the incremental fast path this call. The
+        /// remainder of `pairsRecomputed` went through the legacy
+        /// "fetch all samples for the pair + sum" path. Lets the
+        /// caller log whether the fast path is engaging — large
+        /// `pairsRecomputed - fastPathApplied` gaps mean pollution
+        /// (recovery / cost-version bumps / migrations) is forcing the
+        /// slow path.
+        public var fastPathApplied: Int = 0
     }
 
     /// Above this many dirty pairs we hand off to a background
@@ -56,8 +64,23 @@ public final class AggregateRecomputer {
     /// rows. A bucket with zero remaining samples (shouldn't happen
     /// during a scan, but possible if an external delete intervened)
     /// has its `DailyAggregate` row removed.
+    ///
+    /// `pending` and `polluted` opt the per-pair path into the
+    /// incremental fast path: for any pair where `pending[pair]` is
+    /// non-empty AND the pair is NOT polluted AND a `DailyAggregate`
+    /// row already exists for the pair, the recomputer adds just
+    /// those new samples' tokens + per-sample cost to the existing
+    /// aggregate — skipping the giant per-pair fetch (the source of
+    /// the ~400ms-per-pair scan tick we measured before this change).
+    /// Empty defaults preserve the legacy "always full-recompute"
+    /// behavior for callers that don't have pending-sample tracking
+    /// (tests, the rare manual call).
     @discardableResult
-    public func recompute(pairs: Set<DateModelPair>) async throws -> Stats {
+    public func recompute(
+        pairs: Set<DateModelPair>,
+        pending: [DateModelPair: [TokenSample]] = [:],
+        polluted: Set<DateModelPair> = []
+    ) async throws -> Stats {
         if pairs.isEmpty {
             return Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         }
@@ -80,11 +103,26 @@ public final class AggregateRecomputer {
         }
 
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
-        if mode == .calculate {
+        // Load pricing snapshot once for the per-pair path. The
+        // snapshot is cheap (dict copy) and lets per-sample cost
+        // computation stay sync inside the fast-path loop. Skipped
+        // entirely in `.display` mode where pricing isn't consulted.
+        let pricingSnapshot: PricingTable.Snapshot
+        if mode == .display {
+            pricingSnapshot = PricingTable.Snapshot(pricingByModel: [:])
+        } else {
             try? await pricingTable.ensureLoaded()
+            pricingSnapshot = await pricingTable.snapshot()
         }
         for pair in pairs {
             stats.pairsRecomputed += 1
+            let pendingForPair = pending[pair] ?? []
+            let isPolluted = polluted.contains(pair)
+            if !isPolluted, !pendingForPair.isEmpty,
+               try fastPathApply(pair: pair, pending: pendingForPair,
+                                 snapshot: pricingSnapshot, stats: &stats) {
+                continue
+            }
             try await recomputeOne(pair: pair, stats: &stats)
         }
         // No save here — `ScanCoordinator.runScanCycle` does one
@@ -92,6 +130,58 @@ public final class AggregateRecomputer {
         // changes alongside the project recomputer's, the session
         // recomputer's, the cursor updates, and the meta writes.
         return stats
+    }
+
+    /// Incremental fast path: if a `DailyAggregate` row already exists
+    /// for the pair, add the new samples' tokens + per-sample cost to
+    /// it in place. Returns `true` when applied, `false` when the row
+    /// didn't exist (brand-new bucket) or another reason makes the
+    /// fast path inappropriate — caller falls through to `recomputeOne`.
+    ///
+    /// Cost is computed per-sample (NOT sum-tokens-then-price): the
+    /// 200k-tier boundary on Anthropic's pricing applies per API call,
+    /// not per day, so summing first would mis-attribute the
+    /// boundary. ccusage applies the same per-entry semantics
+    /// (`data-loader.ts:638-678`). This matches what the full
+    /// recompute path does in `recomputeOne` below.
+    private func fastPathApply(
+        pair: DateModelPair,
+        pending: [TokenSample],
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws -> Bool {
+        let aggKey = DailyAggregate.makeKey(date: pair.date, model: pair.model)
+        let existing = try context.fetch(
+            FetchDescriptor<DailyAggregate>(
+                predicate: #Predicate<DailyAggregate> { $0.dateModelKey == aggKey }
+            )
+        ).first
+        guard let existing else { return false }
+
+        for sample in pending {
+            existing.inputTokens += sample.inputTokens
+            existing.outputTokens += sample.outputTokens
+            existing.cacheReadTokens += sample.cacheReadTokens
+            existing.cacheCreation5mTokens += sample.cacheCreation5mTokens
+            existing.cacheCreation1hTokens += sample.cacheCreation1hTokens
+            let breakdown = TokenBreakdown(
+                inputTokens: sample.inputTokens,
+                outputTokens: sample.outputTokens,
+                cacheReadTokens: sample.cacheReadTokens,
+                cacheCreation5mTokens: sample.cacheCreation5mTokens,
+                cacheCreation1hTokens: sample.cacheCreation1hTokens
+            )
+            existing.totalCostUSD += CostCalculator.cost(
+                storedCostUSD: sample.sourceCostUSD,
+                model: sample.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
+        }
+        stats.aggregatesUpserted += 1
+        stats.fastPathApplied += 1
+        return true
     }
 
     private func recomputeOne(pair: DateModelPair, stats: inout Stats) async throws {

@@ -395,6 +395,144 @@ private func makeEntry(
     #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 0)
 }
 
+// MARK: - AggregateRecomputer incremental fast path
+
+@MainActor
+@Test func aggregateRecomputerFastPathAddsDeltaToExistingRow() async throws {
+    // Verifies the incremental fast path is engaged AND produces a
+    // numerically identical result to the legacy full-recompute path
+    // for a co-occurring "existing aggregate + new inserts" cycle.
+    // Regressions that silently disable the fast path (e.g. all pairs
+    // polluted) would show up as `fastPathApplied == 0` here.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+
+    // Cycle 1: insert 1 sample, recompute (full path). Aggregate is born.
+    _ = try persister.insert(makeEntry(
+        timestamp: day, input: 100, output: 10, cacheRead: 1, storedCost: 0.50, dedup: "a:1"))
+    try persister.flush()
+    _ = try await recomputer.recompute(
+        pairs: persister.dirtyPairs,
+        pending: persister.pendingPairSamples,
+        polluted: persister.pollutedDailyPairs
+    )
+    persister.clearDirtyPairs()
+
+    // Cycle 2: insert 1 more sample to the same pair, recompute. Fast
+    // path should engage because the aggregate already exists and the
+    // pair isn't polluted.
+    _ = try persister.insert(makeEntry(
+        timestamp: day, input: 25, output: 5, cacheRead: 1, storedCost: 0.20, dedup: "b:1"))
+    try persister.flush()
+    let stats = try await recomputer.recompute(
+        pairs: persister.dirtyPairs,
+        pending: persister.pendingPairSamples,
+        polluted: persister.pollutedDailyPairs
+    )
+
+    #expect(stats.fastPathApplied == 1)
+    #expect(stats.pairsRecomputed == 1)
+    let agg = try context.fetch(FetchDescriptor<DailyAggregate>()).first!
+    #expect(agg.inputTokens == 125)
+    #expect(agg.outputTokens == 15)
+    #expect(abs(agg.totalCostUSD - 0.70) < 1e-9)
+}
+
+@MainActor
+@Test func aggregateRecomputerFastPathRespectsPollutedPair() async throws {
+    // When ScanCoordinator folds a recovery pair into the dirty set
+    // (via `addDirtyPairs`), the pair is polluted and must NOT take
+    // the fast path even when pending samples exist for it — the
+    // existing aggregate's totals may be stale.
+    let container = try makeInMemoryContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+    let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
+
+    let day = Date(timeIntervalSince1970: 1_756_800_000)
+
+    // Seed an existing aggregate that DOESN'T match any underlying
+    // sample (simulating a stale row that needs full recompute).
+    let pair = DateModelPair(date: TokenSample.formatDate(day), model: "claude-opus-4-7")
+    context.insert(DailyAggregate(
+        date: pair.date, model: pair.model,
+        inputTokens: 999, outputTokens: 999, totalCostUSD: 99.0
+    ))
+    try context.save()
+
+    // New insert plus mark the pair polluted (recovery path semantics).
+    _ = try persister.insert(makeEntry(
+        timestamp: day, input: 5, output: 5, storedCost: 0.05, dedup: "x:1"))
+    persister.addDirtyPairs([pair])
+    try persister.flush()
+
+    let stats = try await recomputer.recompute(
+        pairs: persister.dirtyPairs,
+        pending: persister.pendingPairSamples,
+        polluted: persister.pollutedDailyPairs
+    )
+    #expect(stats.fastPathApplied == 0)
+    let agg = try context.fetch(FetchDescriptor<DailyAggregate>()).first!
+    // Full recompute reset the bogus 999/99.0 numbers to the actual
+    // sample totals — 5 input, 5 output, $0.05.
+    #expect(agg.inputTokens == 5)
+    #expect(agg.outputTokens == 5)
+    #expect(abs(agg.totalCostUSD - 0.05) < 1e-9)
+}
+
+@MainActor
+@Test func aggregateRecomputerFastPathProducesSameResultAsFullPath() async throws {
+    // Property: the fast path and the full-recompute path agree on
+    // the resulting `DailyAggregate` for the same input. Run both
+    // against equivalent contexts and compare token totals.
+    let dayInstant = Date(timeIntervalSince1970: 1_756_800_000)
+    let runScenario = { @MainActor (forceFullPath: Bool) async throws -> DailyAggregate in
+        let container = try makeInMemoryContainer()
+        let context = ModelContext(container)
+        let persister = try SamplePersister(context: context)
+        let recomputer = AggregateRecomputer(container: container, context: context, mode: .display)
+
+        // Cycle 1.
+        _ = try persister.insert(makeEntry(
+            timestamp: dayInstant, input: 7, output: 3, cacheRead: 1,
+            cache5m: 2, cache1h: 4, storedCost: 0.11, dedup: "a:1"))
+        try persister.flush()
+        _ = try await recomputer.recompute(
+            pairs: persister.dirtyPairs,
+            pending: persister.pendingPairSamples,
+            polluted: persister.pollutedDailyPairs
+        )
+        persister.clearDirtyPairs()
+
+        // Cycle 2.
+        _ = try persister.insert(makeEntry(
+            timestamp: dayInstant, input: 13, output: 9, cacheRead: 2,
+            cache5m: 0, cache1h: 8, storedCost: 0.23, dedup: "b:1"))
+        try persister.flush()
+        // forceFullPath simulates a polluted pair so the fast path
+        // is bypassed even though deltas exist.
+        let pending = forceFullPath ? [:] : persister.pendingPairSamples
+        let polluted: Set<DateModelPair> = forceFullPath ? persister.dirtyPairs : []
+        _ = try await recomputer.recompute(
+            pairs: persister.dirtyPairs, pending: pending, polluted: polluted
+        )
+        return try context.fetch(FetchDescriptor<DailyAggregate>()).first!
+    }
+
+    let fastPath = try await runScenario(false)
+    let fullPath = try await runScenario(true)
+    #expect(fastPath.inputTokens == fullPath.inputTokens)
+    #expect(fastPath.outputTokens == fullPath.outputTokens)
+    #expect(fastPath.cacheReadTokens == fullPath.cacheReadTokens)
+    #expect(fastPath.cacheCreation5mTokens == fullPath.cacheCreation5mTokens)
+    #expect(fastPath.cacheCreation1hTokens == fullPath.cacheCreation1hTokens)
+    #expect(abs(fastPath.totalCostUSD - fullPath.totalCostUSD) < 1e-9)
+}
+
 // MARK: - ProjectAggregateRecomputer
 
 @MainActor
