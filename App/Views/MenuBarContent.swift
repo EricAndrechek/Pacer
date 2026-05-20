@@ -393,12 +393,30 @@ private extension UsageBand {
 /// threshold. A subtle 1-second pulse helps the dot read as live
 /// state rather than a static decoration — suppressed under Reduce
 /// Motion.
+///
+/// **No continuous animation.** Earlier revisions ran a
+/// `.repeatForever(autoreverses: true)` opacity+scale pulse to signal
+/// liveness. The cost was catastrophic: `sample(1)` against the live
+/// process showed `[NSStatusItem _updateReplicantsUnlessMenuIsTracking]`
+/// → `cacheDisplayInRect` consuming ~40 % of MainActor whenever a
+/// session was active. Each animation frame triggered a SwiftUI body
+/// re-eval, which dirtied the NSHostingView, which woke the
+/// NSStatusItem replicant-update timer, which re-rasterized the
+/// entire status item to a bitmap — at 60 Hz. The dot's mere
+/// presence (only rendered when `sessionActivity == .active`) is
+/// already an unambiguous live signal; the pulse was a "would be
+/// nicer" decoration paid for in continuous core-pegged CPU.
+///
+/// `reduceMotion` is retained as an input even though it no longer
+/// gates anything — keeping the parameter shape stable so the call
+/// site doesn't have to change for a future re-introduction of
+/// motion (e.g., a CALayer-driven one that bypasses SwiftUI's
+/// per-frame body re-eval).
 private struct ActivityDot: View {
     let reduceMotion: Bool
-    @State private var pulsing = false
 
     var body: some View {
-        // 8pt fits comfortably alongside chip text (~13pt) without
+        // 7pt fits comfortably alongside chip text (~13pt) without
         // dominating the menu bar. The slight outline catches it
         // against a near-green wallpaper.
         Circle()
@@ -408,18 +426,6 @@ private struct ActivityDot: View {
                 Circle()
                     .stroke(Color.black.opacity(0.18), lineWidth: 0.5)
             )
-            .opacity(pulsing ? 0.55 : 1.0)
-            .scaleEffect(pulsing ? 0.85 : 1.0)
-            .animation(
-                reduceMotion
-                    ? .default
-                    : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
-                value: pulsing
-            )
-            .onAppear {
-                guard !reduceMotion else { return }
-                pulsing = true
-            }
             .accessibilityHidden(true)
     }
 }
