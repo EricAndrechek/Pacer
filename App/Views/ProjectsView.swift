@@ -907,6 +907,7 @@ private struct ProjectsContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 100, alignment: .trailing)
+                .help(pacerTokensExact(row.totalTokens))
             Text("\(row.sessionCount)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -920,6 +921,7 @@ private struct ProjectsContent: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 84, alignment: .trailing)
+                .help(pacerCostExact(row.cost))
         }
     }
 

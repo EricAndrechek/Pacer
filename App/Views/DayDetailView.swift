@@ -259,11 +259,26 @@ struct DayDetailView: View {
                     alignment: .leading,
                     spacing: 12
                 ) {
-                    MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
-                    MetricTile(value: pacerTokens(t.input), label: "input")
-                    MetricTile(value: pacerTokens(t.output), label: "output")
-                    MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
-                    MetricTile(value: pacerTokens(t.cacheCreation), label: "cache write")
+                    MetricTile(
+                        value: pacerCost(t.cost), label: "cost", size: .hero,
+                        tooltip: pacerCostExact(t.cost)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.input), label: "input",
+                        tooltip: pacerTokensExact(t.input)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.output), label: "output",
+                        tooltip: pacerTokensExact(t.output)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.cacheRead), label: "cache read",
+                        tooltip: pacerTokensExact(t.cacheRead)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.cacheCreation), label: "cache write",
+                        tooltip: pacerTokensExact(t.cacheCreation)
+                    )
                 }
                 if t.cacheRead > 0 {
                     cacheRatioRow
@@ -389,6 +404,7 @@ struct DayDetailView: View {
                     Text(pacerCost(agg.totalCostUSD))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
+                        .help(pacerCostExact(agg.totalCostUSD))
                     Text("(\(pct)%)")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
@@ -453,10 +469,12 @@ struct DayDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
+                                .help(pacerTokensExact(agg.inputTokens + agg.outputTokens))
                             Text(pacerCost(agg.totalCostUSD))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
+                                .help(pacerCostExact(agg.totalCostUSD))
                             if total > 0 {
                                 Text("\(Int(agg.totalCostUSD / total * 100))%")
                                     .font(.system(size: 11))
@@ -523,10 +541,12 @@ struct DayDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                                 .frame(width: 90, alignment: .trailing)
+                                .help(pacerTokensExact(row.tokens))
                             Text(pacerCost(row.cost))
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
+                                .help(pacerCostExact(row.cost))
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(.tertiary)
@@ -544,7 +564,10 @@ struct DayDetailView: View {
                             Divider()
                         }
                         Button("Copy path") { pacerCopyToPasteboard(row.path) }
-                        Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
+                        // Copy the exact dollars-and-cents; the visible
+                        // label is compact but the clipboard should be
+                        // precise so a paste into a spreadsheet works.
+                        Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
                     }
                 }
             }

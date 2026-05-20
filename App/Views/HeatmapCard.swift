@@ -382,6 +382,7 @@ struct HeatmapCard: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.primary)
+                .help(formatTotalExact(total, kind: metric))
             Text("\(metric.label.lowercased()) across \(activeDays) day\(activeDays == 1 ? "" : "s") in the last year")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -395,6 +396,17 @@ struct HeatmapCard: View {
         switch kind {
         case .cost:     return pacerCost(value)
         case .tokens:   return pacerTokens(Int64(value))
+        case .sessions: return "\(Int(value))"
+        }
+    }
+
+    /// Tooltip companion to `formatTotal` — full precision, used in
+    /// `.help()` and accessibility values so hover/screen-reader users
+    /// see the exact figure even when the visible label is compact.
+    private func formatTotalExact(_ value: Double, kind: ProjectMetric) -> String {
+        switch kind {
+        case .cost:     return pacerCostExact(value)
+        case .tokens:   return "\(pacerTokensExact(Int64(value))) tokens"
         case .sessions: return "\(Int(value))"
         }
     }
@@ -611,15 +623,17 @@ struct HeatmapCard: View {
 
     /// VoiceOver-friendly label for an active cell — speaks the date and
     /// the cell's value in the current metric ("Thu, May 7, 2026: $12.40").
+    /// Uses the exact formatter pair so the screen reader speaks the
+    /// precise number instead of the compact "$12.4k" form.
     private func cellAccessibilityLabel(_ cell: Cell) -> String {
         let date = Self.tooltipDateFmt.string(from: cell.date)
         let v = cell.value(for: metric)
         let valueText: String
         switch metric {
         case .cost:
-            valueText = pacerCost(v)
+            valueText = pacerCostExact(v)
         case .tokens:
-            valueText = "\(pacerTokens(Int64(v))) tokens"
+            valueText = "\(pacerTokensExact(Int64(v))) tokens"
         case .sessions:
             let n = Int(v)
             valueText = "\(n) \(n == 1 ? "session" : "sessions")"

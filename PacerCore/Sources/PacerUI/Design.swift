@@ -113,6 +113,11 @@ public struct MetricTile: View {
     public var ornament: AnyView?
     /// Hero (32pt) for landing strips, regular (24pt) for in-card use.
     public var size: Size = .regular
+    /// Optional hover tooltip — `.help(tooltip)` on the whole tile.
+    /// Use this to surface the exact value when `value` is shown in
+    /// its compact form ("$10.8k") so a hover reveals "$10,770.42".
+    /// `pacerCost` + `pacerCostExact` are the canonical pair.
+    public var tooltip: String?
 
     public enum Size {
         case hero, regular, compact
@@ -141,13 +146,15 @@ public struct MetricTile: View {
         label: String,
         hint: String? = nil,
         size: Size = .regular,
-        ornament: AnyView? = nil
+        ornament: AnyView? = nil,
+        tooltip: String? = nil
     ) {
         self.value = value
         self.label = label
         self.hint = hint
         self.size = size
         self.ornament = ornament
+        self.tooltip = tooltip
     }
 
     public var body: some View {
@@ -178,6 +185,24 @@ public struct MetricTile: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+        }
+        // `.help()` no-ops when its argument is nil-equivalent, but we
+        // skip it entirely on `tooltip == nil` so a tile without an
+        // exact form doesn't surface an empty tooltip on hover.
+        .modifier(OptionalHelp(text: tooltip))
+    }
+}
+
+/// Apply `.help(text)` only when `text` is non-nil. SwiftUI's
+/// `.help(_:)` always installs a tooltip; passing the empty string
+/// shows an empty bubble on hover, which reads as broken.
+private struct OptionalHelp: ViewModifier {
+    let text: String?
+    func body(content: Content) -> some View {
+        if let text, !text.isEmpty {
+            content.help(text)
+        } else {
+            content
         }
     }
 }

@@ -197,20 +197,24 @@ struct LiveActivityCard: View {
             MetricTile(
                 value: pacerCost(stats.costLastHour),
                 label: "last hour cost",
-                hint: "\(stats.sampleCount) sample\(stats.sampleCount == 1 ? "" : "s")"
+                hint: "\(stats.sampleCount) sample\(stats.sampleCount == 1 ? "" : "s")",
+                tooltip: pacerCostExact(stats.costLastHour)
             )
             MetricTile(
                 value: pacerTokens(stats.tokensLastHour),
-                label: "last hour tokens"
+                label: "last hour tokens",
+                tooltip: pacerTokensExact(stats.tokensLastHour)
             )
             MetricTile(
                 value: pacerCost(todayCostSoFar),
-                label: "today so far"
+                label: "today so far",
+                tooltip: pacerCostExact(todayCostSoFar)
             )
             MetricTile(
                 value: pacerCost(projectedEndOfDay(stats: stats)),
                 label: "projected EOD",
-                hint: "if rate holds"
+                hint: "if rate holds",
+                tooltip: pacerCostExact(projectedEndOfDay(stats: stats))
             )
         }
     }

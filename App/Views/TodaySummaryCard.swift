@@ -57,9 +57,21 @@ struct TodayDetailsCard: View {
             alignment: .leading,
             spacing: 12
         ) {
-            MetricTile(value: pacerTokens(totals.inputTokens), label: "input")
-            MetricTile(value: pacerTokens(totals.outputTokens), label: "output")
-            MetricTile(value: pacerTokens(totals.cacheReadTokens), label: "cache read")
+            MetricTile(
+                value: pacerTokens(totals.inputTokens),
+                label: "input",
+                tooltip: pacerTokensExact(totals.inputTokens)
+            )
+            MetricTile(
+                value: pacerTokens(totals.outputTokens),
+                label: "output",
+                tooltip: pacerTokensExact(totals.outputTokens)
+            )
+            MetricTile(
+                value: pacerTokens(totals.cacheReadTokens),
+                label: "cache read",
+                tooltip: pacerTokensExact(totals.cacheReadTokens)
+            )
             MetricTile(value: "\(totals.distinctModels)", label: "models")
         }
     }
@@ -110,6 +122,7 @@ struct TodayDetailsCard: View {
                         .monospacedDigit()
                         .foregroundStyle(.green)
                         .frame(minWidth: 88, alignment: .trailing)
+                        .help("Saved \(pacerCostExact(savings)) by reusing cached prompts")
                 }
             }
             HStack(spacing: 4) {

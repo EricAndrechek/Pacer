@@ -573,10 +573,22 @@ struct ProjectDetailView: View {
                 alignment: .leading,
                 spacing: 12
             ) {
-                MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
-                MetricTile(value: pacerTokens(t.input), label: "input")
-                MetricTile(value: pacerTokens(t.output), label: "output")
-                MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
+                MetricTile(
+                    value: pacerCost(t.cost), label: "cost", size: .hero,
+                    tooltip: pacerCostExact(t.cost)
+                )
+                MetricTile(
+                    value: pacerTokens(t.input), label: "input",
+                    tooltip: pacerTokensExact(t.input)
+                )
+                MetricTile(
+                    value: pacerTokens(t.output), label: "output",
+                    tooltip: pacerTokensExact(t.output)
+                )
+                MetricTile(
+                    value: pacerTokens(t.cacheRead), label: "cache read",
+                    tooltip: pacerTokensExact(t.cacheRead)
+                )
                 MetricTile(value: "\(aggregates.count)", label: "active days")
             }
         }

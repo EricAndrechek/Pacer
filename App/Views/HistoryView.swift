@@ -185,10 +185,27 @@ private struct LifetimeSummaryContent: View {
                     alignment: .leading,
                     spacing: 12
                 ) {
-                    MetricTile(value: pacerCost(t.cost), label: "cost", size: .hero)
-                    MetricTile(value: pacerTokens(t.input), label: "input")
-                    MetricTile(value: pacerTokens(t.output), label: "output")
-                    MetricTile(value: pacerTokens(t.cacheRead), label: "cache read")
+                    MetricTile(
+                        value: pacerCost(t.cost),
+                        label: "cost",
+                        size: .hero,
+                        tooltip: pacerCostExact(t.cost)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.input),
+                        label: "input",
+                        tooltip: pacerTokensExact(t.input)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.output),
+                        label: "output",
+                        tooltip: pacerTokensExact(t.output)
+                    )
+                    MetricTile(
+                        value: pacerTokens(t.cacheRead),
+                        label: "cache read",
+                        tooltip: pacerTokensExact(t.cacheRead)
+                    )
                     MetricTile(value: "\(t.distinctDays)", label: "active days")
                     MetricTile(value: "\(t.distinctModels)", label: "models")
                 }
@@ -260,11 +277,13 @@ private struct MonthlyChartCard: View {
                     Text(pacerCost(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
+                        .help(pacerCostExact(row.cost))
                 }
             } else if !monthly.isEmpty {
                 Text("total \(pacerCost(total))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .help(pacerCostExact(total))
             }
         }) {
             if monthly.isEmpty {
@@ -297,7 +316,7 @@ private struct MonthlyChartCard: View {
                     }
                 }
                 .accessibilityLabel("\(longMonth(m.month))")
-                .accessibilityValue(pacerCost(m.cost))
+                .accessibilityValue(pacerCostExact(m.cost))
             }
             // Selection callout moved to the card header so the chart
             // doesn't reflow on hover. Just keep a thin dashed rule
@@ -605,10 +624,12 @@ private struct TopDaysContent: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
                     .frame(width: 80, alignment: .trailing)
+                    .help(pacerTokensExact(row.tokens))
                 Text(pacerCost(row.cost))
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .frame(width: 80, alignment: .trailing)
+                    .help(pacerCostExact(row.cost))
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
@@ -619,7 +640,9 @@ private struct TopDaysContent: View {
             Button("Open day") { onDayTap(row.date) }
             Divider()
             Button("Copy date") { pacerCopyToPasteboard(row.date) }
-            Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
+            // Copy the exact dollars-and-cents — the row shows
+            // "$10.8k" but a copy-to-paste should be the precise value.
+            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
         }
     }
 

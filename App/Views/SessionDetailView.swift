@@ -123,8 +123,14 @@ struct SessionDetailView: View {
                 alignment: .leading,
                 spacing: 12
             ) {
-                MetricTile(value: pacerCost(session.cumulativeCostUSD), label: "cost", size: .hero)
-                MetricTile(value: pacerTokens(session.totalTokens), label: "tokens")
+                MetricTile(
+                    value: pacerCost(session.cumulativeCostUSD), label: "cost", size: .hero,
+                    tooltip: pacerCostExact(session.cumulativeCostUSD)
+                )
+                MetricTile(
+                    value: pacerTokens(session.totalTokens), label: "tokens",
+                    tooltip: pacerTokensExact(session.totalTokens)
+                )
                 MetricTile(value: pacerShortModel(session.topModel), label: "top model", size: .compact)
                 MetricTile(value: Self.durationLabel(for: session), label: "duration", size: .compact)
             }

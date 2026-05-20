@@ -91,11 +91,13 @@ struct DailyCostChartCard: View {
                     Text(pacerCost(row.cost))
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
+                        .help(pacerCostExact(row.cost))
                 }
             } else if d.totalCost > 0 {
                 Text("total \(pacerCost(d.totalCost))")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .help(pacerCostExact(d.totalCost))
             }
         }) {
             if d.dailyTotals.isEmpty {

@@ -86,17 +86,20 @@ struct MonthlyForecastCard: View {
             MetricTile(
                 value: pacerCost(p.monthSoFar),
                 label: "month so far",
-                hint: monthLabel(p)
+                hint: monthLabel(p),
+                tooltip: pacerCostExact(p.monthSoFar)
             )
             MetricTile(
                 value: pacerCost(p.averageDailyCost),
                 label: "avg per active day",
-                hint: "\(p.daysWithData) day\(p.daysWithData == 1 ? "" : "s") with usage"
+                hint: "\(p.daysWithData) day\(p.daysWithData == 1 ? "" : "s") with usage",
+                tooltip: pacerCostExact(p.averageDailyCost)
             )
             MetricTile(
                 value: pacerCost(p.projectedMonthTotal),
                 label: "projected month",
-                hint: trajectoryHint(p)
+                hint: trajectoryHint(p),
+                tooltip: pacerCostExact(p.projectedMonthTotal)
             )
             MetricTile(
                 value: "\(max(0, p.daysInMonth - p.dayOfMonth))",

@@ -217,6 +217,7 @@ struct HeroStripCard: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                    .help(pacerCostExact(cached.todayCost))
                 HStack(spacing: 6) {
                     if let ratio = cached.weekDeltaRatio {
                         trendChip(ratio: ratio)
@@ -232,11 +233,13 @@ struct HeroStripCard: View {
                             size: .compact
                         )
                         .fixedSize()
+                        .help("Over the included quota by \(pacerCostExact(extra))")
                     }
                     Text("\(pacerTokens(cached.todayTokens)) tokens")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help("\(pacerTokensExact(cached.todayTokens)) tokens")
                 }
                 if dailyBudgetEnabled, dailyBudgetUSD > 0 {
                     budgetBar
@@ -264,6 +267,7 @@ struct HeroStripCard: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .help("\(pacerCostExact(cached.todayCost)) of \(pacerCostExact(dailyBudgetUSD)) daily budget")
                 Spacer(minLength: 0)
                 Text(pctText)
                     .font(.system(size: 10, weight: .semibold, design: .rounded))

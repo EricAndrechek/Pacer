@@ -516,9 +516,11 @@ private struct ModelsContent: View {
                             Button("Copy model name") { pacerCopyToPasteboard(row.model) }
                             Button("Copy display name") { pacerCopyToPasteboard(row.displayName) }
                             Divider()
-                            Button("Copy cost") { pacerCopyToPasteboard(pacerCost(row.cost)) }
+                            // Copy precise dollars so a paste into a
+                            // spreadsheet keeps full cents.
+                            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
                             Button("Copy token total") {
-                                pacerCopyToPasteboard(pacerTokens(row.totalTokens))
+                                pacerCopyToPasteboard(pacerTokensExact(row.totalTokens))
                             }
                         }
                 }
@@ -595,6 +597,7 @@ private struct ModelsContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 100, alignment: .trailing)
+                .help(pacerTokensExact(row.totalTokens))
             Text("\(row.activeDays)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -608,6 +611,7 @@ private struct ModelsContent: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .frame(width: 84, alignment: .trailing)
+                .help(pacerCostExact(row.cost))
         }
     }
 }

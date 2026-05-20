@@ -146,7 +146,8 @@ struct WeeklyComparisonCard: View {
             MetricTile(
                 value: pacerCost(thisWeek.cost),
                 label: "cost",
-                hint: deltaHint(this: thisWeek.cost, last: lastWeek.cost, formatter: pacerCost)
+                hint: deltaHint(this: thisWeek.cost, last: lastWeek.cost, formatter: pacerCost),
+                tooltip: pacerCostExact(thisWeek.cost)
             )
             MetricTile(
                 value: pacerTokens(thisWeek.totalTokens),
@@ -155,7 +156,8 @@ struct WeeklyComparisonCard: View {
                     this: Double(thisWeek.totalTokens),
                     last: Double(lastWeek.totalTokens),
                     formatter: { pacerTokens(Int64($0)) }
-                )
+                ),
+                tooltip: pacerTokensExact(thisWeek.totalTokens)
             )
             MetricTile(
                 value: "\(thisWeek.distinctDates.count)",
@@ -168,7 +170,8 @@ struct WeeklyComparisonCard: View {
                 MetricTile(
                     value: pacerCost(cpmt),
                     label: "per 1M tokens",
-                    hint: cacheHitHint(thisWeek)
+                    hint: cacheHitHint(thisWeek),
+                    tooltip: pacerCostExact(cpmt)
                 )
             } else {
                 MetricTile(
