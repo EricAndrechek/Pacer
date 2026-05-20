@@ -10,17 +10,48 @@ import PacerUI
 ///
 /// Order: lifetime hero → 26-week heatmap → monthly bar chart → top
 /// expensive days table.
+///
+/// A single time-range picker in the page header scopes the
+/// range-aware cards (LifetimeSummary, TopDays). HeatmapCard and
+/// MonthlyChartCard ignore it — they're convention-driven windows
+/// (52 weeks / 12 months) where the fixed scope IS the card's
+/// purpose. The single picker replaces the two independent pickers
+/// the cards each carried previously, which let the two card scopes
+/// drift apart (top "Last 90 days", bottom "Lifetime") in ways that
+/// felt like one picker was controlling the other.
 struct HistoryView: View {
     @State private var modalRoot: PacerModalDestination?
 
+    @AppStorage("pacer.history.range", store: PacerSettings.store)
+    private var rangeRaw: String = TimeRange.all.rawValue
+
+    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
+    private var rangeBinding: Binding<TimeRange> {
+        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
+    }
+
     var body: some View {
-        PageScaffold("History", subtitle: "Lifetime view of your usage.") {
-            LifetimeSummaryCard()
+        PageScaffold(
+            "History",
+            subtitle: "Lifetime view of your usage.",
+            trailing: {
+                Picker("Time range", selection: rangeBinding) {
+                    ForEach(TimeRange.allCases) { r in
+                        Text(r.shortLabel).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .controlSize(.small)
+                .labelsHidden()
+            }
+        ) {
+            LifetimeSummaryCard(range: range)
             HeatmapCard { dayKey in
                 modalRoot = .day(date: dayKey)
             }
             MonthlyChartCard()
-            TopDaysCard { dayKey in
+            TopDaysCard(range: range) { dayKey in
                 modalRoot = .day(date: dayKey)
             }
         }
@@ -30,44 +61,34 @@ struct HistoryView: View {
 
 // MARK: - Range-scoped summary
 
-/// Headline tile-grid summary that's range-scopable. Replaces the
-/// pre-redesign "Lifetime"-only card. The range picker lets the user
-/// see "Last 7 days", "Last 30 days", "Last 1 year", or "All time"
-/// without leaving the History tab — answering the user's "I want to
-/// see totals per year/month/etc" feedback. Range persists across
-/// launches via App Group `UserDefaults`.
+/// Headline tile-grid summary that re-scopes by the page-level range.
+/// Replaces the pre-redesign "Lifetime"-only card. Range comes from
+/// `HistoryView`'s single `@AppStorage` so changing it affects this
+/// card and `TopDaysCard` together.
 ///
-/// Card vs Content split is the `.id(range)` trick: the outer Card owns
-/// the range picker and the @AppStorage that drives it; the inner
-/// Content takes `range` as an init argument and scopes its @Query
-/// accordingly. `.id(range)` on the content forces SwiftData to
-/// re-create the @Query each time the user picks a different range —
-/// which is the only way to push the range predicate into the fetch
-/// layer instead of filtering 700+ rows in memory on every scan tick.
+/// Card vs Content split is the `.id(range)` trick: the outer Card
+/// just owns the range parameter; the inner Content takes `range` as
+/// an init argument and scopes its @Query accordingly. `.id(range)`
+/// on the content forces SwiftData to re-create the @Query each time
+/// the range changes — which is the only way to push the range
+/// predicate into the fetch layer instead of filtering 700+ rows in
+/// memory on every scan tick.
 private struct LifetimeSummaryCard: View {
-    @AppStorage("pacer.history.summaryRange", store: PacerSettings.store)
-    private var rangeRaw: String = TimeRange.all.rawValue
-
-    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
-    private var rangeBinding: Binding<TimeRange> {
-        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
-    }
+    let range: TimeRange
 
     var body: some View {
-        LifetimeSummaryContent(range: range, rangeBinding: rangeBinding)
+        LifetimeSummaryContent(range: range)
             .id(range)
     }
 }
 
 private struct LifetimeSummaryContent: View {
     let range: TimeRange
-    let rangeBinding: Binding<TimeRange>
 
     @Query private var aggregates: [DailyAggregate]
 
-    init(range: TimeRange, rangeBinding: Binding<TimeRange>) {
+    init(range: TimeRange) {
         self.range = range
-        self.rangeBinding = rangeBinding
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
             _aggregates = Query(
@@ -137,21 +158,10 @@ private struct LifetimeSummaryContent: View {
     var body: some View {
         let t = totals
         PacerCard(cardTitle, trailing: {
-            HStack(spacing: 10) {
-                if range == .all, let first = t.firstDate {
-                    Text("since \(first)")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-                Picker("Time range", selection: rangeBinding) {
-                    ForEach(TimeRange.allCases) { r in
-                        Text(r.shortLabel).tag(r)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-                .controlSize(.small)
-                .labelsHidden()
+            if range == .all, let first = t.firstDate {
+                Text("since \(first)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
         }) {
             if t.distinctDays == 0 {
@@ -359,6 +369,7 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 }
 
 private struct TopDaysCard: View {
+    let range: TimeRange
     let onDayTap: (String) -> Void
 
     @AppStorage("pacer.history.topDaysSort", store: PacerSettings.store)
@@ -366,30 +377,22 @@ private struct TopDaysCard: View {
     @AppStorage("pacer.history.topDaysSortDescending", store: PacerSettings.store)
     private var descending: Bool = true
 
-    @AppStorage("pacer.history.topDaysRange", store: PacerSettings.store)
-    private var rangeRaw: String = TimeRange.all.rawValue
-
-    private var range: TimeRange { TimeRange(rawValue: rangeRaw) ?? .all }
     private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
-    private var rangeBinding: Binding<TimeRange> {
-        Binding(get: { range }, set: { rangeRaw = $0.rawValue })
-    }
     private var sortBinding: Binding<TopDaysSort> {
         Binding(get: { sort }, set: { sortRaw = $0.rawValue })
     }
 
     var body: some View {
         // Card+Content split with `.id(range)` so the @Query gets
-        // re-created with a range-scoped predicate when the user
-        // changes the time window — same pattern as LifetimeSummaryCard.
-        // Sort changes happen inside the content view and reuse the
-        // same fetched slice without re-fetching.
+        // re-created with a range-scoped predicate when the page-level
+        // range changes — same pattern as LifetimeSummaryCard. Sort
+        // changes happen inside the content view and reuse the same
+        // fetched slice without re-fetching.
         TopDaysContent(
             range: range,
             sort: sort,
             descending: descending,
             onDayTap: onDayTap,
-            rangeBinding: rangeBinding,
             sortBinding: sortBinding,
             descendingBinding: $descending
         )
@@ -402,7 +405,6 @@ private struct TopDaysContent: View {
     let sort: TopDaysSort
     let descending: Bool
     let onDayTap: (String) -> Void
-    let rangeBinding: Binding<TimeRange>
     let sortBinding: Binding<TopDaysSort>
     let descendingBinding: Binding<Bool>
 
@@ -413,7 +415,6 @@ private struct TopDaysContent: View {
         sort: TopDaysSort,
         descending: Bool,
         onDayTap: @escaping (String) -> Void,
-        rangeBinding: Binding<TimeRange>,
         sortBinding: Binding<TopDaysSort>,
         descendingBinding: Binding<Bool>
     ) {
@@ -421,7 +422,6 @@ private struct TopDaysContent: View {
         self.sort = sort
         self.descending = descending
         self.onDayTap = onDayTap
-        self.rangeBinding = rangeBinding
         self.sortBinding = sortBinding
         self.descendingBinding = descendingBinding
         if let since = range.since {
@@ -491,21 +491,10 @@ private struct TopDaysContent: View {
             }
         }()
         PacerCard(title, trailing: {
-            HStack(spacing: 10) {
-                if !all.isEmpty {
-                    Text("showing \(visible.count) of \(all.count)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Picker("Time range", selection: rangeBinding) {
-                    ForEach(TimeRange.allCases) { r in
-                        Text(r.shortLabel).tag(r)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-                .controlSize(.small)
-                .labelsHidden()
+            if !all.isEmpty {
+                Text("showing \(visible.count) of \(all.count)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
         }) {
             if all.isEmpty {
