@@ -44,7 +44,7 @@ struct TodayCostProvider: TimelineProvider {
             let rows = try context.fetch(descriptor)
             let cost = rows.reduce(0) { $0 + $1.totalCostUSD }
             let tokens = rows.reduce(Int64(0)) {
-                $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+                $0 + $1.inputTokens + $1.outputTokens
             }
             return TodayCostEntry(
                 date: Date(),

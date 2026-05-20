@@ -192,7 +192,7 @@ struct MenuBarLabel: View {
 
     private var todayTokens: Int64 {
         todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+            $0 + $1.inputTokens + $1.outputTokens
         }
     }
 
@@ -465,7 +465,7 @@ struct MenuStatusContent: View {
 
     private var todayTokens: Int64 {
         todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+            $0 + $1.inputTokens + $1.outputTokens
         }
     }
 

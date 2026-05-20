@@ -35,11 +35,11 @@ struct PerModelTodayCard: View {
 
     private func refreshCache() {
         let totalTokens = aggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+            $0 + $1.inputTokens + $1.outputTokens
         }
         cached = aggregates
             .map { agg in
-                let tokens = agg.inputTokens + agg.outputTokens + agg.cacheReadTokens
+                let tokens = agg.inputTokens + agg.outputTokens
                 let share = totalTokens > 0 ? Double(tokens) / Double(totalTokens) : 0
                 return ModelRow(
                     model: agg.model,
@@ -72,7 +72,7 @@ struct PerModelTodayCard: View {
         built.reserveCapacity(rows.count)
         var totalTokens: Int64 = 0
         for r in rows {
-            let t = Int64(r.inputTokens + r.outputTokens + r.cacheReadTokens)
+            let t = Int64(r.inputTokens + r.outputTokens)
             running += Double(t)
             totalTokens += t
             built.append((r, running))
@@ -96,7 +96,7 @@ struct PerModelTodayCard: View {
             // `reduce` on every hover tick.
             if let r = hoveredRow {
                 let total = hoverTotalTokens
-                let myTotal = r.inputTokens + r.outputTokens + r.cacheReadTokens
+                let myTotal = r.inputTokens + r.outputTokens
                 let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
                 HStack(spacing: 8) {
                     Text(pacerShortModel(r.model))
@@ -133,7 +133,7 @@ struct PerModelTodayCard: View {
     private var donut: some View {
         Chart(rows) { row in
             SectorMark(
-                angle: .value("Tokens", Double(row.inputTokens + row.outputTokens + row.cacheReadTokens)),
+                angle: .value("Tokens", Double(row.inputTokens + row.outputTokens)),
                 innerRadius: .ratio(0.62),
                 angularInset: 1.5
             )
@@ -157,7 +157,7 @@ struct PerModelTodayCard: View {
         let total = hoverTotalTokens
         guard total > 0 else { return "no data yet" }
         return rows.prefix(5).map { row in
-            let tokens = row.inputTokens + row.outputTokens + row.cacheReadTokens
+            let tokens = row.inputTokens + row.outputTokens
             let pct = Int(Double(tokens) / Double(total) * 100)
             return "\(pacerShortModel(row.model)) \(pct) percent"
         }.joined(separator: ", ")

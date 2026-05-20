@@ -179,7 +179,7 @@ public final class ProjectAggregateRecomputer {
             if let sid = s.sessionId, !sid.isEmpty {
                 sessions.insert(sid)
             }
-            modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens + s.cacheReadTokens
+            modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens
             modelCost[s.model, default: 0] += cost
             if s.sampledAt > lastActive { lastActive = s.sampledAt }
         }

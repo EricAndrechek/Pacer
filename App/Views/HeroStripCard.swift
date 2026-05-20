@@ -131,7 +131,7 @@ struct HeroStripCard: View {
         var next = Cached()
         next.todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
         next.todayTokens = todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+            $0 + $1.inputTokens + $1.outputTokens
         }
         if let (ratio, activeDays) = computeWeekDelta() {
             next.weekDeltaRatio = ratio

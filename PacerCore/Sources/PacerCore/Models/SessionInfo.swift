@@ -66,6 +66,6 @@ public final class SessionInfo {
 
 extension SessionInfo {
     public var totalTokens: Int64 {
-        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
+        cumulativeInputTokens + cumulativeOutputTokens
     }
 }

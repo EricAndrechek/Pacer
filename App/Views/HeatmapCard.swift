@@ -163,7 +163,7 @@ struct HeatmapCard: View {
         for row in aggregates {
             var a = byDate[row.date] ?? Acc()
             a.cost += row.totalCostUSD
-            a.tokens += row.inputTokens + row.outputTokens + row.cacheReadTokens
+            a.tokens += row.inputTokens + row.outputTokens
             byDate[row.date] = a
         }
 

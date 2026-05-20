@@ -153,7 +153,7 @@ public final class SessionInfoRecomputer {
                 mode: mode,
                 snapshot: snapshot
             )
-            let t = s.inputTokens + s.outputTokens + s.cacheReadTokens
+            let t = s.inputTokens + s.outputTokens
             modelTokens[s.model, default: 0] += t
             if firstModel == nil { firstModel = s.model }
         }

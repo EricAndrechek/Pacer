@@ -293,7 +293,7 @@ struct NotificationsHost: View {
         let today = TokenSample.formatDate(Date())
         let todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
         let todayTokens = todayAggregates.reduce(0) {
-            $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens
+            $0 + $1.inputTokens + $1.outputTokens
         }
         let weekCost = weekAggregates.reduce(0) { $0 + $1.totalCostUSD }
 

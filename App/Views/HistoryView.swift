@@ -488,7 +488,7 @@ private struct TopDaysContent: View {
         for row in aggregates {
             var v = byDate[row.date] ?? (0, 0)
             v.cost += row.totalCostUSD
-            v.tokens += row.inputTokens + row.outputTokens + row.cacheReadTokens
+            v.tokens += row.inputTokens + row.outputTokens
             byDate[row.date] = v
         }
         let rows = byDate.map { DayRow(date: $0.key, cost: $0.value.cost, tokens: $0.value.tokens) }

@@ -241,7 +241,7 @@ private struct ModelsContent: View {
                 date: $0.date,
                 model: $0.model,
                 displayName: pacerShortModel($0.model),
-                tokens: $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
+                tokens: $0.inputTokens + $0.outputTokens
             )
         }
         // Bucket dailyMix by date once so the trend-chart hover

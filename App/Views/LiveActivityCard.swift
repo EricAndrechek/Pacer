@@ -114,7 +114,7 @@ struct LiveActivityCard: View {
     private var stats: LiveStats {
         var s = LiveStats()
         for row in recentHourlyRows {
-            s.tokensLastHour += row.inputTokens + row.outputTokens + row.cacheReadTokens
+            s.tokensLastHour += row.inputTokens + row.outputTokens
             s.costLastHour += row.totalCostUSD
             s.sampleCount += row.sampleCount
         }

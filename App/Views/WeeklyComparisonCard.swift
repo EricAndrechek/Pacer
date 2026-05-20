@@ -50,7 +50,7 @@ struct WeeklyComparisonCard: View {
         var cacheReadTokens: Int64 = 0
         var distinctDates: Set<String> = []
 
-        var totalTokens: Int64 { inputTokens + outputTokens + cacheReadTokens }
+        var totalTokens: Int64 { inputTokens + outputTokens }
         var activeDays: Int { distinctDates.filter { _ in true }.count }
         /// cacheRead / (cacheRead + nonCacheInput). Same definition the
         /// TodayDetailsCard uses; the per-message Claude API price for

@@ -194,7 +194,7 @@ struct ProjectDetailView: View {
             days.append(DayPoint(
                 date: r.date,
                 cost: r.totalCostUSD,
-                tokens: r.inputTokens + r.outputTokens + r.cacheReadTokens
+                tokens: r.inputTokens + r.outputTokens
             ))
             if let tokens = try? decoder.decode([String: Int64].self, from: r.modelTokensJSON) {
                 for (model, tok) in tokens {
@@ -276,7 +276,7 @@ struct ProjectDetailView: View {
             // bucket under the canonical's "root" row.
             let key = s.originalProjectPath ?? projectPath
             var a = byPath[key] ?? Acc()
-            a.tokens += s.inputTokens + s.outputTokens + s.cacheReadTokens
+            a.tokens += s.inputTokens + s.outputTokens
             a.cost += s.effectiveCostUSD(mode: mode)
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             byPath[key] = a

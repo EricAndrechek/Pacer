@@ -64,7 +64,7 @@ struct TodayTimelineCard: View {
         var total: Int64 = 0
         for row in hourlyRows {
             var v = byHour[row.hour] ?? (0, 0)
-            let t = row.inputTokens + row.outputTokens + row.cacheReadTokens
+            let t = row.inputTokens + row.outputTokens
             v.tokens += t
             v.cost += row.totalCostUSD
             byHour[row.hour] = v

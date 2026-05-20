@@ -116,7 +116,7 @@ struct DayDetailView: View {
                 path: agg.projectPath,
                 displayName: pacerShortPath(agg.projectPath),
                 cost: agg.totalCostUSD,
-                tokens: agg.inputTokens + agg.outputTokens + agg.cacheReadTokens
+                tokens: agg.inputTokens + agg.outputTokens
             )
         }.sorted { lhs, rhs in
             // Stable sort: by cost desc, with displayName as a
@@ -160,7 +160,7 @@ struct DayDetailView: View {
             primary = { $0.model < $1.model }
         case .tokens:
             let totalTokens: (DailyAggregate) -> Int64 = {
-                $0.inputTokens + $0.outputTokens + $0.cacheReadTokens
+                $0.inputTokens + $0.outputTokens
             }
             primary = { totalTokens($0) < totalTokens($1) }
         case .cost:
@@ -448,7 +448,7 @@ struct DayDetailView: View {
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)
-                            Text(pacerTokens(agg.inputTokens + agg.outputTokens + agg.cacheReadTokens))
+                            Text(pacerTokens(agg.inputTokens + agg.outputTokens))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()

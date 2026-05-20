@@ -64,7 +64,7 @@ struct DailyCostChartCard: View {
             return DailyTotal(
                 date: date,
                 cost: rows.reduce(0) { $0 + $1.totalCostUSD },
-                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens + $1.cacheReadTokens }
+                tokens: rows.reduce(0) { $0 + $1.inputTokens + $1.outputTokens }
             )
         }
         let topThree = Set(totals.sorted { $0.cost > $1.cost }.prefix(3).map(\.date))
