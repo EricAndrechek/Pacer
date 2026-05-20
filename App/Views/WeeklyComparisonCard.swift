@@ -48,16 +48,19 @@ struct WeeklyComparisonCard: View {
         var inputTokens: Int64 = 0
         var outputTokens: Int64 = 0
         var cacheReadTokens: Int64 = 0
+        var cacheCreation5mTokens: Int64 = 0
+        var cacheCreation1hTokens: Int64 = 0
         var distinctDates: Set<String> = []
 
         var totalTokens: Int64 { inputTokens + outputTokens }
         var activeDays: Int { distinctDates.filter { _ in true }.count }
-        /// cacheRead / (cacheRead + nonCacheInput). Same definition the
-        /// TodayDetailsCard uses; the per-message Claude API price for
-        /// cached reads is ~10% of fresh input, so this is the dominant
-        /// efficiency lever.
+        /// Standard cache hit rate: reads / (reads + writes). Matches
+        /// the formula used in TodayDetailsCard. Cache writes (5m + 1h
+        /// creation) cost 1.25–2× input; reads cost ~10% — so the
+        /// hit-rate framing is the right efficiency lens.
         var cacheHitRatio: Double {
-            let denom = Double(cacheReadTokens + inputTokens)
+            let written = cacheCreation5mTokens + cacheCreation1hTokens
+            let denom = Double(cacheReadTokens + written)
             guard denom > 0 else { return 0 }
             return Double(cacheReadTokens) / denom
         }
@@ -101,6 +104,8 @@ struct WeeklyComparisonCard: View {
                 t.inputTokens += row.inputTokens
                 t.outputTokens += row.outputTokens
                 t.cacheReadTokens += row.cacheReadTokens
+                t.cacheCreation5mTokens += row.cacheCreation5mTokens
+                t.cacheCreation1hTokens += row.cacheCreation1hTokens
                 t.distinctDates.insert(row.date)
             }
             switch bucket {
