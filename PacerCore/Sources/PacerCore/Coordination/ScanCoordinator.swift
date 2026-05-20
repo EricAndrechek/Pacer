@@ -490,8 +490,19 @@ public final class ScanCoordinator {
     /// cycle can amortize. The user-visible cost is ≤2 s lag on
     /// dashboard updates, which is well within "live usage tracker"
     /// expectations.
+    ///
+    /// Backstop widened from 60 s to 300 s after p50 cycle-latency
+    /// analysis showed ~70 % of cycles during a 30-min idle window
+    /// were `files=0 skipped=928 scan~1000 ms` — 928-file full walks
+    /// for zero new data. The shouldSkipBackstop gate handles active
+    /// FSEvents periods (skips when an `.jsonl` event fired within
+    /// the backstop window), but quiet stretches >backstop expire
+    /// the gate and fire the safety walk. Modern macOS FSEvents is
+    /// reliable enough that 5-min safety-net cadence is sufficient;
+    /// in the rare case FSEvents drops an event, the user sees the
+    /// data appear within 5 min of the drop.
     private static let visibleLatency: CFTimeInterval = 2.0
-    private static let visibleBackstop: TimeInterval = 60
+    private static let visibleBackstop: TimeInterval = 300
 
     /// Same knobs when there's no visible main window. Latency widens
     /// so burst writes during an active Claude Code session don't wake
