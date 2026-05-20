@@ -139,19 +139,35 @@ appcast skeleton; you don't need to bootstrap it manually.
 
 ### 5. Set the GitHub Actions secrets
 
-Under **Settings → Secrets and variables → Actions → New repository
-secret**, add each of the seven secrets the workflow expects:
+The repo was pre-populated with the three secrets that don't depend on
+your local cert/Apple-account state:
 
-| Secret name | Value |
-| --- | --- |
-| `MACOS_CERTIFICATE` | base64 of the `.p12` from step 1 |
-| `MACOS_CERTIFICATE_PASSWORD` | the password used to export the `.p12` |
-| `KEYCHAIN_PASSWORD` | any strong random string (one-time, only used to lock the ephemeral CI keychain) |
-| `APPLE_TEAM_ID` | `YZXWMJ5VBY` |
-| `NOTARY_KEY_ID` | from step 2 |
-| `NOTARY_ISSUER_ID` | from step 2 |
-| `NOTARY_KEY_P8` | the full contents of the `.p8` file from step 2 |
-| `SPARKLE_ED_PRIVATE_KEY` | the contents of `sparkle-private.key` from step 3 |
+| Secret name | Pre-set? | Value source |
+| --- | --- | --- |
+| `APPLE_TEAM_ID` | ✓ already set | `YZXWMJ5VBY` |
+| `KEYCHAIN_PASSWORD` | ✓ already set | auto-generated random string (only used to unlock the ephemeral CI keychain) |
+| `SPARKLE_ED_PRIVATE_KEY` | ✓ already set | exported from your Keychain via `generate_keys -x` |
+| `MACOS_CERTIFICATE` | needs you | base64 of the `.p12` from step 1 |
+| `MACOS_CERTIFICATE_PASSWORD` | needs you | the password used to export the `.p12` |
+| `NOTARY_KEY_ID` | needs you | from step 2 |
+| `NOTARY_ISSUER_ID` | needs you | from step 2 |
+| `NOTARY_KEY_P8` | needs you | the full contents of the `.p8` file from step 2 |
+
+The fastest way to set the five remaining secrets is the
+[`bin/setup-release-secrets.sh`](../bin/setup-release-secrets.sh)
+helper:
+
+```sh
+bin/setup-release-secrets.sh
+```
+
+It walks you through the .p12 path + password and the App Store Connect
+.p8 + Key ID + Issuer ID and uses `gh secret set` to upload each, so
+the values never go through the GitHub web UI's text input and never
+hit your shell history (the password prompt uses `read -s`).
+
+If you prefer the web UI, **Settings → Secrets and variables → Actions
+→ New repository secret** is the manual equivalent for each one.
 
 ### 6. Smoke-test with workflow_dispatch
 
