@@ -35,6 +35,9 @@ public final class SessionInfoRecomputer {
         public var sessionsRecomputed: Int
         public var sessionsUpserted: Int
         public var sessionsDeleted: Int
+        /// Mirror of `AggregateRecomputer.Stats.fastPathApplied` — see
+        /// that doc for the diagnostic intent.
+        public var fastPathApplied: Int = 0
     }
 
     /// Above this many dirty session ids we hand off to a background
@@ -43,8 +46,20 @@ public final class SessionInfoRecomputer {
     /// produce a handful and stay on the main context.
     private static let bulkRecomputeThreshold = 64
 
+    /// Recompute dirty sessions. `pending` and `polluted` opt the
+    /// per-session path into the incremental fast path — see
+    /// `AggregateRecomputer.recompute` for the design. SessionInfo's
+    /// fast path has one extra constraint vs daily/hourly/project:
+    /// `topModel` depends on per-model token totals, which aren't
+    /// stored on the row, so it falls through whenever any pending
+    /// sample's model differs from the existing row's `topModel`.
+    /// Empty defaults preserve legacy "always full-recompute".
     @discardableResult
-    public func recompute(sessionIds: Set<String>) async throws -> Stats {
+    public func recompute(
+        sessionIds: Set<String>,
+        pending: [String: [TokenSample]] = [:],
+        polluted: Set<String> = []
+    ) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
         // Sync pricing snapshot via `SampleCostCache.current()` for the
@@ -62,9 +77,90 @@ public final class SessionInfoRecomputer {
         }
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
+            let pendingForSid = pending[sid] ?? []
+            let isPolluted = polluted.contains(sid)
+            if !isPolluted, !pendingForSid.isEmpty,
+               try fastPathApply(sessionId: sid, pending: pendingForSid,
+                                 snapshot: snapshot, stats: &stats) {
+                continue
+            }
             try recomputeOne(sessionId: sid, snapshot: snapshot, stats: &stats)
         }
         return stats
+    }
+
+    /// Incremental fast path for SessionInfo. Returns `true` only when
+    /// the existing `SessionInfo` row exists AND every pending sample
+    /// has the same model as `existing.topModel` — otherwise the
+    /// per-model token ranking could shift and we can't recompute
+    /// `topModel` from deltas alone (the row doesn't store per-model
+    /// totals). On `false`, caller falls through to the full
+    /// `recomputeOne` path that re-fetches every sample for the
+    /// session.
+    private func fastPathApply(
+        sessionId: String,
+        pending: [TokenSample],
+        snapshot: PricingTable.Snapshot,
+        stats: inout Stats
+    ) throws -> Bool {
+        let sid = sessionId
+        let existing = try context.fetch(
+            FetchDescriptor<SessionInfo>(
+                predicate: #Predicate<SessionInfo> { $0.sessionId == sid }
+            )
+        ).first
+        guard let existing else { return false }
+        // Empty `topModel` would normally mean the row was never
+        // populated; defer to full recompute to build it correctly.
+        let topModel = existing.topModel
+        guard !topModel.isEmpty else { return false }
+        // If any pending sample uses a different model, fall through —
+        // we can't tell whether the new model overtakes topModel
+        // without the per-model totals the full path computes.
+        for s in pending {
+            if s.model != topModel { return false }
+        }
+
+        for s in pending {
+            existing.cumulativeInputTokens += s.inputTokens
+            existing.cumulativeOutputTokens += s.outputTokens
+            existing.cumulativeCacheReadTokens += s.cacheReadTokens
+            existing.cumulativeCacheCreation5mTokens += s.cacheCreation5mTokens
+            existing.cumulativeCacheCreation1hTokens += s.cacheCreation1hTokens
+            let breakdown = TokenBreakdown(
+                inputTokens: s.inputTokens,
+                outputTokens: s.outputTokens,
+                cacheReadTokens: s.cacheReadTokens,
+                cacheCreation5mTokens: s.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.cacheCreation1hTokens
+            )
+            existing.cumulativeCostUSD += CostCalculator.cost(
+                storedCostUSD: s.sourceCostUSD,
+                model: s.model,
+                breakdown: breakdown,
+                mode: mode,
+                snapshot: snapshot
+            )
+            if s.sampledAt < existing.firstSeenAt {
+                existing.firstSeenAt = s.sampledAt
+            }
+            if s.sampledAt > existing.lastSeenAt {
+                existing.lastSeenAt = s.sampledAt
+                // Most-recent sample wins for path + cc version, same
+                // as `applySamples`. Only overwrite when the new
+                // sample actually carries the field — same fallback
+                // rule the full path uses.
+                if let path = s.projectPath {
+                    existing.projectPath = path
+                }
+                if let ccVersion = s.ccVersion {
+                    existing.ccVersion = ccVersion
+                }
+            }
+        }
+        stats.sessionsUpserted += 1
+        stats.fastPathApplied += 1
+        return true
     }
 
     private func recomputeOne(

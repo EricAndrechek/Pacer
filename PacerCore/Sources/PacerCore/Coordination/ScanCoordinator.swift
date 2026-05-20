@@ -841,7 +841,11 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
-        let sessionRecomputeStats = try await sessionRecomputer.recompute(sessionIds: activePersister.dirtySessionIds)
+        let sessionRecomputeStats = try await sessionRecomputer.recompute(
+            sessionIds: activePersister.dirtySessionIds,
+            pending: activePersister.pendingSessionSamples,
+            polluted: activePersister.pollutedSessionIds
+        )
         phase.sessionRecomputeMs = tickMs()
 
         var probeResult: StatsCacheProbe.ProbeResult?

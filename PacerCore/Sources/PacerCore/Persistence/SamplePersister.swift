@@ -106,6 +106,14 @@ public final class SamplePersister {
     /// merges in a slightly heavier per-sample loop than daily/hourly
     /// — still O(pending.count) instead of O(all samples for pair).
     public private(set) var pendingProjectSamples: [ProjectDatePair: [TokenSample]]
+    /// `sessionId` equivalent. Drives the SessionInfo rollup's fast
+    /// path. SessionInfo's `topModel` field is the tricky bit: it's
+    /// the per-model token leader, which can shift if a new sample
+    /// arrives under a different model. The recomputer's fast path
+    /// only applies when every pending sample's model equals the
+    /// existing row's `topModel` — otherwise it falls through to a
+    /// full recompute (full re-fetch of the session's samples).
+    public private(set) var pendingSessionSamples: [String: [TokenSample]]
     /// `(date, model)` pairs whose pending list overflowed the per-pair
     /// cap, OR that were marked dirty by something other than an
     /// `insert(_:)` call (recovery drain, `markEverySampleDirty`, alias
@@ -117,6 +125,13 @@ public final class SamplePersister {
     public private(set) var pollutedHourBuckets: Set<DateHourModelTriple>
     /// `(projectPath, date)` equivalent of `pollutedDailyPairs`.
     public private(set) var pollutedProjectPairs: Set<ProjectDatePair>
+    /// `sessionId` equivalent of `pollutedDailyPairs`. Populated when
+    /// a session is dirtied by something other than a same-model
+    /// `insert(_:)` — recovery drain, `markEverySampleDirty`, alias
+    /// canonicalize, or an insert whose model differs from the
+    /// existing row's `topModel`. Session-recomputer fast path checks
+    /// this set first.
+    public private(set) var pollutedSessionIds: Set<String>
     /// Cap on per-bucket pending list length. Past this, fast-path
     /// gain (skipping the full fetch) is outweighed by the cost of
     /// iterating the pending list in memory — and on a full
@@ -176,9 +191,11 @@ public final class SamplePersister {
         self.pendingPairSamples = [:]
         self.pendingHourSamples = [:]
         self.pendingProjectSamples = [:]
+        self.pendingSessionSamples = [:]
         self.pollutedDailyPairs = []
         self.pollutedHourBuckets = []
         self.pollutedProjectPairs = []
+        self.pollutedSessionIds = []
         self.missingAggregatePairs = []
         self.missingProjectAggregatePairs = []
         self.missingHourBuckets = []
@@ -255,6 +272,17 @@ public final class SamplePersister {
                 pendingProjectSamples[projectPair] = list
             }
         }
+        if let sid = sample.sessionId, !sid.isEmpty,
+           !pollutedSessionIds.contains(sid) {
+            var list = pendingSessionSamples[sid, default: []]
+            list.append(sample)
+            if list.count > Self.fastPathPendingCap {
+                pollutedSessionIds.insert(sid)
+                pendingSessionSamples[sid] = nil
+            } else {
+                pendingSessionSamples[sid] = list
+            }
+        }
         pendingInsertCount += 1
         stats.inserted += 1
         if pendingInsertCount >= saveBatchSize {
@@ -297,9 +325,11 @@ public final class SamplePersister {
         pendingPairSamples.removeAll()
         pendingHourSamples.removeAll()
         pendingProjectSamples.removeAll()
+        pendingSessionSamples.removeAll()
         pollutedDailyPairs.removeAll()
         pollutedHourBuckets.removeAll()
         pollutedProjectPairs.removeAll()
+        pollutedSessionIds.removeAll()
     }
 
     /// Drain and return the (date, model) pairs that have TokenSamples
@@ -380,9 +410,13 @@ public final class SamplePersister {
     }
 
     /// Merge external session ids into the dirty set. Symmetric to
-    /// `addDirtyPairs(_:)` for the SessionInfo rollup path.
+    /// `addDirtyPairs(_:)` for the SessionInfo rollup path. Pollutes
+    /// each session id so the recomputer's fast path won't apply —
+    /// the existing `SessionInfo` row's `topModel` / cumulative
+    /// columns can't be trusted under recovery semantics.
     public func addDirtySessionIds(_ ids: Set<String>) {
         dirtySessionIds.formUnion(ids)
+        pollutedSessionIds.formUnion(ids)
     }
 
     /// Mark every sample-driven aggregate as needing recompute.
@@ -422,6 +456,7 @@ public final class SamplePersister {
             pollutedHourBuckets.insert(hourBucket)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
+                pollutedSessionIds.insert(sid)
             }
         }
     }
@@ -476,6 +511,7 @@ public final class SamplePersister {
             pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
+                pollutedSessionIds.insert(sid)
             }
             changedCount += 1
         }
@@ -538,6 +574,7 @@ public final class SamplePersister {
             pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
+                pollutedSessionIds.insert(sid)
             }
             changedCount += 1
         }
@@ -559,6 +596,9 @@ public final class SamplePersister {
         for sample in samples {
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
+                // Alias change can shift `SessionInfo.projectPath` —
+                // pollute so the recomputer takes the full path.
+                pollutedSessionIds.insert(sid)
             }
         }
     }
