@@ -205,6 +205,12 @@ struct HeroStripCard: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // OAuth poller writes RateLimitSample without bumping scanMeta
+        // (only the JSONL scanner does that), so without this the hero
+        // tiles stay stale across successful OAuth polls. Watching the
+        // newest sample's sampledAt fires the refresh exactly when a
+        // new poll lands.
+        .onChange(of: rateLimits.first?.sampledAt) { _, _ in refreshCache() }
     }
 
     // MARK: - Cost tile
@@ -312,38 +318,43 @@ struct HeroStripCard: View {
     ) -> some View {
         HeroTile(label: label) {
             if let s = sample, let resets = s.resetsAt {
-                let pacePct = PaceMath.paceFraction(
-                    now: Date(), resetsAt: resets, windowDuration: duration
-                ) * 100
-                let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
-                // Chip moved to its own row below the % line so it
-                // can't ever wrap mid-word ("behi nd") when the tile
-                // gets narrow. Layout: hero %, status row, optional
-                // burn-rate forecast row.
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text("\(Int(s.usedPercentage.rounded()))%")
-                            .font(.system(size: 32, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(color(for: band))
-                            .lineLimit(1)
-                        Text("/")
-                            .font(.system(size: 18))
-                            .foregroundStyle(.tertiary)
-                        Text("\(Int(pacePct.rounded()))%")
-                            .font(.system(size: 18, weight: .medium, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
+                if cycle.isAwaiting {
+                    // Sample's cycle already ended; no fresh sample yet.
+                    // Show "awaiting" rather than rendering stale used/pace %.
+                    awaitingTile
+                } else {
+                    let pacePct = cycle.paceFraction * 100
+                    let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                    // Chip moved to its own row below the % line so it
+                    // can't ever wrap mid-word ("behi nd") when the tile
+                    // gets narrow. Layout: hero %, status row, optional
+                    // burn-rate forecast row.
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text("\(Int(s.usedPercentage.rounded()))%")
+                                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(color(for: band))
+                                .lineLimit(1)
+                            Text("/")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.tertiary)
+                            Text("\(Int(pacePct.rounded()))%")
+                                .font(.system(size: 18, weight: .medium, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        HStack(spacing: 8) {
+                            paceChip(band: band)
+                            Text("resets \(pacerRelative(resets))")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        burnRow(burn)
                     }
-                    HStack(spacing: 8) {
-                        paceChip(band: band)
-                        Text("resets \(pacerRelative(resets))")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    burnRow(burn)
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -355,6 +366,25 @@ struct HeroStripCard: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+    }
+
+    /// Layout matches the active-cycle tile's vertical footprint so the
+    /// HStack's equal-height layout doesn't reflow when a sibling tile
+    /// is showing active data.
+    private var awaitingTile: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("—")
+                .font(.system(size: 32, weight: .semibold, design: .rounded))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Text("awaiting first sample of new cycle")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Text(" ")  // matches burnRow's empty-placeholder height
+                .font(.system(size: 11))
+                .opacity(0)
         }
     }
 

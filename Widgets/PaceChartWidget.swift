@@ -34,13 +34,17 @@ struct PaceChartEntry: TimelineEntry {
         let chart: PaceChartView.Data
         let resetsAt: Date
 
-        var paceEndPct: Double {
-            PaceMath.paceFraction(
-                now: Date(),
-                resetsAt: resetsAt,
-                windowDuration: chart.durationSeconds
-            ) * 100
+        /// Active-vs-awaiting bracket. When awaiting, the widget should
+        /// render its empty-state treatment instead of the chart + %s
+        /// (see #4 — prior-cycle numbers aren't meaningful once the
+        /// cycle has ended).
+        var cycle: DisplayCycle {
+            DisplayCycle.resolve(resetsAt: resetsAt, duration: chart.durationSeconds)
         }
+
+        var isAwaiting: Bool { cycle.isAwaiting }
+
+        var paceEndPct: Double { cycle.paceFraction * 100 }
 
         var band: PaceBand {
             PaceBand(usedPct: chart.usedPct, paceEndPct: paceEndPct)
@@ -199,16 +203,17 @@ struct PaceChartWidgetView: View {
     @ViewBuilder
     private var small: some View {
         let target = smallTarget()
+        let awaiting = target.state?.isAwaiting == true
         VStack(alignment: .leading, spacing: 4) {
             WidgetTitleBar(
                 title: target.title,
-                dotColor: target.state?.band.color
+                dotColor: awaiting ? .secondary : target.state?.band.color
             ) {
-                if let s = target.state {
+                if let s = target.state, !s.isAwaiting {
                     paceFraction(used: s.chart.usedPct, pace: s.paceEndPct, compact: true)
                 }
             }
-            if let s = target.state {
+            if let s = target.state, !s.isAwaiting {
                 // Caption sits between the title bar and the chart so it
                 // gets the full column width (~134pt) instead of fighting
                 // for space below the chart's `maxHeight: .infinity`.
@@ -225,6 +230,8 @@ struct PaceChartWidgetView: View {
                     .lineLimit(2)
                 PaceChartView(data: s.chart, style: .compact)
                     .frame(maxHeight: .infinity)
+            } else if awaiting {
+                WidgetEmptyState(message: "Cycle reset. Awaiting fresh sample.")
             } else {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             }
@@ -294,17 +301,18 @@ struct PaceChartWidgetView: View {
         state: PaceChartEntry.WindowState?,
         style: PaceChartView.Style
     ) -> some View {
+        let awaiting = state?.isAwaiting == true
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 4) {
                 Circle()
-                    .fill(state?.band.color ?? .secondary)
+                    .fill(awaiting ? Color.secondary : (state?.band.color ?? .secondary))
                     .frame(width: 6, height: 6)
                 Text(label)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            if let state {
+            if let state, !state.isAwaiting {
                 paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: true)
                 // Caption goes above the chart so it has the column's
                 // full width (~148pt at medium) instead of being squeezed
@@ -321,6 +329,12 @@ struct PaceChartWidgetView: View {
                     .lineLimit(2)
                 PaceChartView(data: state.chart, style: style)
                     .frame(maxHeight: .infinity)
+            } else if awaiting {
+                Text("cycle reset · awaiting sample")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             } else {
                 Text("collecting…")
                     .font(.caption2)
@@ -333,20 +347,21 @@ struct PaceChartWidgetView: View {
 
     @ViewBuilder
     private func largeRow(label: String, state: PaceChartEntry.WindowState?) -> some View {
+        let awaiting = state?.isAwaiting == true
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(state?.band.color ?? .secondary)
+                    .fill(awaiting ? Color.secondary : (state?.band.color ?? .secondary))
                     .frame(width: 7, height: 7)
                 Text(label)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                 Spacer()
-                if let state {
+                if let state, !state.isAwaiting {
                     paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: false)
                 }
             }
-            if let state {
+            if let state, !state.isAwaiting {
                 // Large widget gets the dashboard treatment — axes and
                 // full label typography. With `.detailed` the chart
                 // looks identical to the app card.
@@ -359,6 +374,12 @@ struct PaceChartWidgetView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            } else if awaiting {
+                Text("Cycle reset · awaiting first sample")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             } else {
                 Text("collecting…")
                     .font(.caption2)

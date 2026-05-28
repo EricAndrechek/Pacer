@@ -3,25 +3,32 @@ import Security
 
 /// One decoded copy of the OAuth credential blob Claude Code stores in
 /// the user's login Keychain under service name `Claude Code-credentials`.
-/// We only ever read this — Claude Code itself rotates and re-writes it.
-///
-/// The raw blob has additional fields (`refreshToken`, `scopes`, …) that
-/// we deliberately don't surface; Pacer needs only the access token to
-/// hit `/api/oauth/usage`. Keeping the surface small means a future
-/// schema change in irrelevant fields can't break us.
+/// Claude Code itself writes the entry on interactive login; Pacer
+/// reads it on every poll and (optionally, on the user's request) does
+/// its own refresh via `OAuthClient.refresh` — see #6.
 public struct OAuthCredential: Sendable, Equatable {
     public let accessToken: String
     /// Server-side expiry. The endpoint will return 401 if we send an
     /// expired token, so we treat this as advisory — useful for skipping
     /// guaranteed-401 calls but trust the server for borderline cases.
     public let expiresAt: Date?
+    /// Used by `OAuthClient.refresh` to exchange for a new access
+    /// token. Optional because some legacy blob shapes omitted it; if
+    /// it's nil, refresh isn't possible and the user has to re-login.
+    public let refreshToken: String?
     /// Surfaced for diagnostics (`pro`, `max5x`, `max20x`, etc.). No
     /// behavior keys off it.
     public let subscriptionType: String?
 
-    public init(accessToken: String, expiresAt: Date?, subscriptionType: String?) {
+    public init(
+        accessToken: String,
+        expiresAt: Date?,
+        refreshToken: String? = nil,
+        subscriptionType: String?
+    ) {
         self.accessToken = accessToken
         self.expiresAt = expiresAt
+        self.refreshToken = refreshToken
         self.subscriptionType = subscriptionType
     }
 }
@@ -112,10 +119,23 @@ public struct KeychainOAuth: Sendable {
     /// find-generic-password -w` and returns the printed JSON blob.
     /// See the type doc for why we use the CLI instead of SecItem.
     ///
-    /// We deliberately do NOT pin `-a <username>` — Claude Code stores
-    /// the entry under the current user but the service name is unique
-    /// on a normal install, and skipping `-a` keeps us robust to
-    /// account-name edge cases (renamed accounts, multi-user setups).
+    /// ## Why we try `-a NSUserName()` first, then fall back to no-acct
+    ///
+    /// Claude Code 2.x writes a *new* `Claude Code-credentials` item with
+    /// `acct` set to the macOS username (`NSUserName()`). Older installs
+    /// (or `claude setup-token` paths) leave a separate item with the
+    /// same service name and `acct = ""` — and on a machine that
+    /// upgraded, both items coexist.
+    ///
+    /// `security find-generic-password -s X -w` (no `-a`) silently picks
+    /// whichever item the keychain returns first — empirically the
+    /// legacy `acct=""` one, which Claude Code 2.x no longer refreshes.
+    /// The result is a token that expires ~8 hours after the *original*
+    /// login and never updates again — exactly the stall behind #6.
+    ///
+    /// Strategy: try `-a NSUserName()` first; on errSecItemNotFound
+    /// (status 44), fall back to no-acct so older Claude Code installs
+    /// that never wrote the per-user item still work.
     ///
     /// Exit-status mapping comes from the `security(1)` man page and
     /// confirmation from `SecBase.h`:
@@ -125,13 +145,31 @@ public struct KeychainOAuth: Sendable {
     ///   - 51 → `errSecInteractionNotAllowed` (-25308, masked) — non-UI context
     /// Anything else is surfaced raw via `.unexpectedStatus`.
     public static let defaultRawReader: RawReader = {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
+        let userScopedResult = runSecurityCLI(args: [
             "find-generic-password",
             "-s", KeychainOAuth.serviceName,
+            "-a", NSUserName(),
             "-w",
-        ]
+        ])
+        if case .failure(.notFound) = userScopedResult {
+            // Fall back to the legacy no-acct read for older Claude
+            // Code installs that never wrote the per-user item.
+            return runSecurityCLI(args: [
+                "find-generic-password",
+                "-s", KeychainOAuth.serviceName,
+                "-w",
+            ])
+        }
+        return userScopedResult
+    }
+
+    /// One-shot subprocess invocation with the 5-second timeout the
+    /// production keychain workflow needs. Extracted so the per-user
+    /// and legacy reads share identical error-handling.
+    private static func runSecurityCLI(args: [String]) -> Result<Data, KeychainOAuthError> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = args
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
@@ -248,13 +286,79 @@ public struct KeychainOAuth: Sendable {
             }
         }
 
+        let refreshToken = (oauth["refreshToken"] as? String).flatMap {
+            $0.isEmpty ? nil : $0
+        }
         let subscriptionType = oauth["subscriptionType"] as? String
 
         return .success(OAuthCredential(
             accessToken: accessToken,
             expiresAt: expiresAt,
+            refreshToken: refreshToken,
             subscriptionType: subscriptionType
         ))
+    }
+
+    /// Update the on-disk credential after a successful OAuth refresh.
+    /// Reads the current blob, mutates the access token / refresh token
+    /// / expiry, and writes the modified blob back via
+    /// `security add-generic-password -U`. Other fields (scopes,
+    /// subscriptionType, anything Claude Code adds we don't model)
+    /// round-trip unchanged so we can't accidentally strip a field
+    /// Claude Code relies on later.
+    ///
+    /// Writes are scoped to `acct=NSUserName()`, mirroring the read
+    /// path. If the existing entry was a legacy `acct=""` item, we
+    /// still write the per-user item — the next read picks it up
+    /// thanks to the `-a $USER` first / fallback strategy.
+    public func update(
+        accessToken: String,
+        refreshToken: String,
+        expiresAt: Date
+    ) -> Result<Void, KeychainOAuthError> {
+        // 1. Pull the current blob so we preserve any fields we don't model.
+        let raw: Data
+        switch rawReader() {
+        case .success(let data):
+            raw = data
+        case .failure(let err):
+            return .failure(err)
+        }
+        let trimmed = raw.trimmedASCIIWhitespace()
+        guard var top = (try? JSONSerialization.jsonObject(with: trimmed)) as? [String: Any],
+              var oauth = top["claudeAiOauth"] as? [String: Any]
+        else {
+            return .failure(.malformedJSON(underlying: "couldn't decode existing blob for round-trip"))
+        }
+
+        // 2. Mutate just the three fields the refresh response gives us.
+        // expiresAt is stored as Unix milliseconds — matches Claude Code's
+        // own format (verified live).
+        oauth["accessToken"] = accessToken
+        oauth["refreshToken"] = refreshToken
+        oauth["expiresAt"] = Int64(expiresAt.timeIntervalSince1970 * 1000)
+        top["claudeAiOauth"] = oauth
+
+        let updatedJSON: Data
+        do {
+            updatedJSON = try JSONSerialization.data(withJSONObject: top)
+        } catch {
+            return .failure(.malformedJSON(underlying: "re-serialize: \(error.localizedDescription)"))
+        }
+
+        // 3. Write back. `-U` updates an existing item or creates a new
+        // one. We scope by `-a NSUserName()` so we match Claude Code 2.x's
+        // per-user item rather than touching the legacy `acct=""` item.
+        guard let jsonString = String(data: updatedJSON, encoding: .utf8) else {
+            return .failure(.malformedJSON(underlying: "non-UTF8 serialized blob"))
+        }
+        return Self.runSecurityCLI(args: [
+            "add-generic-password",
+            "-U",                       // update if exists
+            "-s", Self.serviceName,
+            "-a", NSUserName(),
+            "-w", jsonString,
+        ]).map { _ in () }
     }
 }
 

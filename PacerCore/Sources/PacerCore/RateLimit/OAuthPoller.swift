@@ -216,11 +216,64 @@ public actor OAuthPoller {
         let now = clock.now()
         lastPollAt = now
 
+        let previousOutcome = lastOutcome
         let outcome = await categorize(result)
         lastOutcome = outcome
         let delay = nextDelaySeconds(for: outcome, result: result)
         nextPollAt = now.addingTimeInterval(delay)
+
+        // Telemetry for #3: log on outcome-category transitions. A
+        // steady-state failure (.tokenExpired for 16 hours) produces a
+        // single log line, not one per poll; recovery logs once too.
+        if !Self.sameCategory(previousOutcome, outcome) {
+            Log.write("OAuthPoller", Self.summarize(outcome: outcome, delay: delay))
+        }
         return outcome
+    }
+
+    /// Two outcomes are "the same category" when their enum case is the
+    /// same, ignoring associated values — so a stream of `.http(503)`
+    /// then `.http(504)` is treated as one ongoing transport problem.
+    private static func sameCategory(_ a: PollOutcome?, _ b: PollOutcome?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case (nil, _), (_, nil): return false
+        case (.some(let x), .some(let y)):
+            let nameX = Mirror(reflecting: x).children.first?.label ?? "\(x)"
+            let nameY = Mirror(reflecting: y).children.first?.label ?? "\(y)"
+            return nameX == nameY
+        }
+    }
+
+    private static func summarize(outcome: PollOutcome, delay: TimeInterval) -> String {
+        let next = "next=\(Int(delay.rounded()))s"
+        switch outcome {
+        case .success(let fh, let sd):
+            let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"
+            let s = sd.map { String(format: "%.1f%%", $0) } ?? "nil"
+            return "ok 5h=\(f) 7d=\(s); \(next)"
+        case .credentialsNotFound:
+            return "credentials missing — sign into Claude Code; \(next)"
+        case .keychainAccessDenied:
+            return "keychain access denied — approve in foreground app; \(next)"
+        case .keychainMalformed:
+            return "keychain blob malformed; \(next)"
+        case .keychainStatus(let status):
+            return "keychain OSStatus=\(status); \(next)"
+        case .tokenExpired:
+            return "access token expired — Claude Code must refresh it; \(next)"
+        case .unauthorized:
+            return "unauthorized (401); \(next)"
+        case .rateLimited(let retryAfter):
+            let ra = retryAfter.map { "\(Int($0))s" } ?? "nil"
+            return "rate-limited (429) retryAfter=\(ra); \(next)"
+        case .http(let status):
+            return "http \(status); \(next)"
+        case .transport:
+            return "transport error (network); \(next)"
+        case .responseSchemaMismatch:
+            return "response schema mismatch; \(next)"
+        }
     }
 
     private func categorize(_ result: Result<RateLimitSnapshot, OAuthClientError>) async -> PollOutcome {
