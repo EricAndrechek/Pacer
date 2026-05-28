@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Pacer.app"
 INSTALL_DIR="/Applications"
 INSTALLED_APP="${INSTALL_DIR}/${APP_NAME}"
-BUILD_OUTPUT="${REPO_ROOT}/Build/Products/Debug/${APP_NAME}"
+BUILD_OUTPUT="${REPO_ROOT}/Build/Build/Products/Debug/${APP_NAME}"
 
 # Legacy daemon labels — retired in favor of in-process collection,
 # but old installs may still have these registered. We bootout and
@@ -59,6 +59,7 @@ xcodebuild \
     -scheme Pacer \
     -configuration Debug \
     -destination 'platform=macOS' \
+    -derivedDataPath "${REPO_ROOT}/Build" \
     build \
     | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 

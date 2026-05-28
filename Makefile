@@ -23,7 +23,7 @@ SHELL := /bin/bash
 
 # Paths used throughout. Quoted in recipes when expanded.
 REPO_ROOT      := $(shell pwd)
-BUILD_OUTPUT   := $(REPO_ROOT)/Build/Products/Debug/Pacer.app
+BUILD_OUTPUT   := $(REPO_ROOT)/Build/Build/Products/Debug/Pacer.app
 INSTALLED_APP  := /Applications/Pacer.app
 LOG_DIR        := $(HOME)/Library/Logs/Pacer
 LOG_ERR        := $(LOG_DIR)/Pacer.err.log
@@ -54,6 +54,7 @@ verify:  ## Verification build (no signing, no install) — fastest sanity check
 	@xcodegen generate
 	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
+		-derivedDataPath "$(REPO_ROOT)/Build" \
 		CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
@@ -63,10 +64,11 @@ build: verify  ## Alias for `verify`.
 test:  ## Run the PacerCore unit + ground-truth tests.
 	@cd PacerCore && swift test 2>&1 | tail -3
 
-app:  ## Signed Debug build of Pacer.app (output: Build/Products/Debug/Pacer.app).
+app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate
 	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
+		-derivedDataPath "$(REPO_ROOT)/Build" \
 		-allowProvisioningUpdates \
 		build | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
