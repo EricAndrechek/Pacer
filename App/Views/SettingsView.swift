@@ -36,6 +36,10 @@ struct SettingsView: View {
                     DailySummaryCard()
                     NotificationTestCard()
                 }
+                SettingsSection("Authentication") {
+                    OAuthRefreshCard()
+                    OAuthTokenOverrideCard()
+                }
                 SettingsSection("Data") {
                     CostCalculationCard()
                     ProjectAliasesCard()
@@ -905,6 +909,344 @@ private struct CostCalculationCard: View {
         }, footer: {
             Text("**Auto** matches `bun x ccusage`. **Calculate** is what you want when older Claude Code lines lack `costUSD`. **Display** only shows server-supplied numbers and ignores tokens that didn't come with one.")
         })
+    }
+}
+
+// MARK: - Authentication
+
+/// On-demand refresh of Pacer's view of the OAuth credential. POSTs
+/// the keychain's `refreshToken` to Anthropic's OAuth endpoint, then
+/// writes the rotated credential back to the keychain. Workaround
+/// for Claude Code 2.x refreshing only in memory — see #6 and the
+/// `OAuthClient.refresh` doc comment for the race-with-Claude-Code
+/// caveat. Refresh is user-triggered (not background) so the race
+/// window is bounded to button clicks.
+private struct OAuthRefreshCard: View {
+    @State private var inProgress: Bool = false
+    @State private var lastResult: RefreshOutcome?
+
+    private enum RefreshOutcome: Equatable {
+        case success(expiresAt: Date)
+        case failure(message: String)
+    }
+
+    var body: some View {
+        PacerCard("Refresh OAuth keychain entry", content: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    statusLabel
+                    Spacer(minLength: 8)
+                    Button("Refresh now") { runRefresh() }
+                        .controlSize(.small)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(inProgress)
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Forces a fresh access token using the refresh token already in the keychain, then writes the rotated credential back. Pacer's next poll will use the new token; no re-login needed.")
+                Text("Caveat: Anthropic rotates the refresh token on every call, which invalidates the in-memory copy your other Claude Code sessions hold. Those sessions will need `claude logout && claude login` the next time they would have auto-refreshed (~8 hours after their last refresh).")
+                    .padding(.top, 2)
+            }
+        })
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if inProgress {
+            ProgressView().controlSize(.small)
+            Text("Refreshing…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let result = lastResult {
+            switch result {
+            case .success(let expiresAt):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.system(size: 12))
+                Text("Refreshed — expires \(pacerRelative(expiresAt))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            case .failure(let msg):
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                    .font(.system(size: 12))
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
+        } else {
+            Image(systemName: "arrow.clockwise")
+                .foregroundStyle(.tertiary)
+                .font(.system(size: 12))
+            Text("Click Refresh now to rotate Pacer's OAuth token via the keychain.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+        }
+    }
+
+    private func runRefresh() {
+        inProgress = true
+        lastResult = nil
+        Task { @MainActor in
+            let client = OAuthClient(tokenOverride: { nil })
+            let result = await client.refresh()
+            inProgress = false
+            lastResult = Self.classify(result)
+        }
+    }
+
+    private static func classify(
+        _ result: Result<OAuthCredential, OAuthRefreshError>
+    ) -> RefreshOutcome {
+        switch result {
+        case .success(let credential):
+            return .success(expiresAt: credential.expiresAt ?? Date().addingTimeInterval(8 * 3600))
+        case .failure(.noRefreshToken):
+            return .failure(message: "No refresh token in the keychain. Run `claude logout && claude login` to seed one.")
+        case .failure(.keychainRead(.notFound)):
+            return .failure(message: "No `Claude Code-credentials` entry found. Sign into Claude Code first.")
+        case .failure(.keychainRead(.accessDenied)):
+            return .failure(message: "Keychain access denied. Approve the prompt in the foreground app and retry.")
+        case .failure(.keychainRead),
+             .failure(.keychainWrite):
+            return .failure(message: "Couldn't read or write the keychain. Check ~/Library/Logs/Pacer/Pacer.err.log.")
+        case .failure(.http(let status, _)) where status == 400 || status == 401:
+            return .failure(message: "Refresh token rejected (\(status)). Likely rotated by another client — run `claude logout && claude login` to re-seed.")
+        case .failure(.http(let status, _)):
+            return .failure(message: "Anthropic returned HTTP \(status) from the refresh endpoint.")
+        case .failure(.transport):
+            return .failure(message: "Network error talking to the refresh endpoint.")
+        case .failure(.responseSchemaMismatch):
+            return .failure(message: "Refresh response didn't match the expected shape. Anthropic may have changed the API.")
+        }
+    }
+}
+
+/// Manual OAuth access-token override. When non-empty, the OAuth poller
+/// uses this token instead of the one in the `Claude Code-credentials`
+/// keychain entry — workaround for Claude Code 2.x not persisting
+/// refreshed tokens back to the keychain (see #6).
+///
+/// UX shape: draft state local to the card, committed to `@AppStorage`
+/// only on Save. Test runs a one-off `OAuthClient.fetchUsage()` with the
+/// *draft* (not the saved value), so the user can validate before
+/// committing — same one-call shape the poller itself uses, no
+/// special-case server hit.
+private struct OAuthTokenOverrideCard: View {
+    @AppStorage(PacerSettings.Key.oauthTokenOverride, store: PacerSettings.store)
+    private var savedOverride: String = ""
+
+    @State private var draft: String = ""
+    @State private var testResult: TestResult?
+    @State private var testInProgress: Bool = false
+
+    /// Result of running the Test button against the draft token. Kept
+    /// alongside the UI rather than persisted — once the user types
+    /// anything, the prior verdict is no longer authoritative.
+    private enum TestResult: Equatable {
+        case success(fiveHourPct: Double?, sevenDayPct: Double?)
+        case failure(message: String)
+    }
+
+    private var trimmedDraft: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    private var draftIsEmpty: Bool { trimmedDraft.isEmpty }
+    private var isDirty: Bool { draft != savedOverride }
+
+    var body: some View {
+        PacerCard("OAuth token override", content: {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("Paste OAuth access token", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .lineLimit(2...4)
+                    .onChange(of: draft) { _, _ in
+                        // Editing invalidates the prior test verdict.
+                        testResult = nil
+                    }
+
+                HStack(spacing: 8) {
+                    statusLabel
+                    Spacer(minLength: 8)
+                    Button(draftIsEmpty ? "Test keychain" : "Test") { runTest() }
+                        .controlSize(.small)
+                        .disabled(testInProgress)
+                        .help(draftIsEmpty
+                            ? "Tests the OAuth token Pacer currently reads from the Claude Code keychain."
+                            : "Tests the token in the field above (not yet saved).")
+                    Button("Save") {
+                        savedOverride = draft
+                        // Saving a different value invalidates the prior test;
+                        // the saved value is now what the poller will use.
+                        testResult = nil
+                    }
+                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!isDirty || testInProgress)
+                    Button("Clear") {
+                        draft = ""
+                        savedOverride = ""
+                        testResult = nil
+                    }
+                    .controlSize(.small)
+                    .disabled(draftIsEmpty && savedOverride.isEmpty || testInProgress)
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Claude Code 2.x doesn't persist refreshed access tokens back to its keychain entry, so the copy Pacer reads goes stale after ~8 hours and the rate-limit panel freezes. As a workaround, paste a fresh access token here — Pacer will use it instead.")
+                Text("To fetch a fresh token after re-signing into Claude Code, run in Terminal:")
+                    .padding(.top, 2)
+                Text("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                Text("Access tokens last ~8 hours; re-paste when Pacer's chip turns yellow again.")
+                    .padding(.top, 2)
+            }
+        })
+        .onAppear { draft = savedOverride }
+    }
+
+    /// Single source of truth for the status icon + caption sitting to
+    /// the left of the action buttons. Test result takes precedence
+    /// (the user just asked for it) over saved/dirty state.
+    @ViewBuilder
+    private var statusLabel: some View {
+        if testInProgress {
+            ProgressView()
+                .controlSize(.small)
+            Text("Testing…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let result = testResult {
+            switch result {
+            case .success(let fh, let sd):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.system(size: 12))
+                Text("Valid · \(formatSuccess(fiveHour: fh, sevenDay: sd))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            case .failure(let msg):
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+                    .font(.system(size: 12))
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+            }
+        } else if isDirty {
+            Image(systemName: "pencil")
+                .foregroundStyle(.orange)
+                .font(.system(size: 12))
+            Text("Unsaved changes")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if !savedOverride.isEmpty {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.system(size: 12))
+            Text("Saved · Pacer is using this token")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        } else {
+            Image(systemName: "key")
+                .foregroundStyle(.tertiary)
+                .font(.system(size: 12))
+            Text("Empty · Pacer reads from keychain")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+    }
+
+    private func formatSuccess(fiveHour: Double?, sevenDay: Double?) -> String {
+        let f = fiveHour.map { "5h=\(Int($0.rounded()))%" } ?? "5h=—"
+        let s = sevenDay.map { "7d=\(Int($0.rounded()))%" } ?? "7d=—"
+        return "\(f), \(s)"
+    }
+
+    /// Run one OAuth request, mirroring whichever path the poller
+    /// itself would take right now:
+    ///   - draft non-empty: test the *draft*, with a broken keychain
+    ///     underneath so the result reflects the typed token alone.
+    ///   - draft empty: test the live keychain read, exactly as the
+    ///     production poller would do it. Useful for confirming a
+    ///     fresh `claude login` produced a working token before
+    ///     trusting Pacer's next poll.
+    private func runTest() {
+        let token = trimmedDraft
+        testInProgress = true
+        testResult = nil
+        Task { @MainActor in
+            let client: OAuthClient
+            if token.isEmpty {
+                // Production path: real keychain, no override.
+                client = OAuthClient(tokenOverride: { nil })
+            } else {
+                // Draft path: deliberately broken keychain so the
+                // result reflects the typed token alone.
+                let brokenKeychain = KeychainOAuth(rawReader: { .failure(.notFound) })
+                client = OAuthClient(
+                    keychain: brokenKeychain,
+                    tokenOverride: { token }
+                )
+            }
+            let result = await client.fetchUsage()
+            testInProgress = false
+            testResult = Self.classify(result)
+        }
+    }
+
+    /// Translate the typed OAuthClient outcome into a user-facing
+    /// result. We don't surface raw HTTP bodies — they're noisy and
+    /// usually point at the same actionable advice ("get a fresh token").
+    private static func classify(
+        _ result: Result<RateLimitSnapshot, OAuthClientError>
+    ) -> TestResult {
+        switch result {
+        case .success(let snapshot):
+            return .success(
+                fiveHourPct: snapshot.fiveHour?.usedPercentage,
+                sevenDayPct: snapshot.sevenDay?.usedPercentage
+            )
+        case .failure(.unauthorized):
+            return .failure(message: "Anthropic rejected this token (401). It may be expired or revoked — fetch a fresh one.")
+        case .failure(.rateLimited):
+            return .failure(message: "Rate-limited by Anthropic (429). Wait a moment and try again.")
+        case .failure(.transport):
+            return .failure(message: "Network error. Check your connection and retry.")
+        case .failure(.http(403, _)):
+            // 403 ≠ 401: Anthropic accepted the token as valid auth
+            // but won't honor it for /api/oauth/usage. Almost always
+            // means the token lacks the `user:sessions:claude_code`
+            // scope — i.e. it came from `claude setup-token` or a
+            // web-console API key rather than the interactive
+            // `claude login` flow.
+            return .failure(message: "Token rejected for this endpoint (403). Use a token from `claude logout && claude login`, not `claude setup-token` or a console API key.")
+        case .failure(.http(let status, _)):
+            return .failure(message: "Anthropic returned HTTP \(status).")
+        case .failure(.responseSchemaMismatch):
+            return .failure(message: "Anthropic's response didn't match Pacer's expected shape. Likely a server-side change.")
+        case .failure(.credentialsNotFound),
+             .failure(.keychainAccessDenied),
+             .failure(.keychainMalformed),
+             .failure(.keychainStatus),
+             .failure(.tokenExpired):
+            // The override path shouldn't reach any of these. Surface a
+            // generic message rather than crashing — keeps the UI honest
+            // if the client's failure modes ever expand.
+            return .failure(message: "Pacer hit an unexpected internal error while testing.")
+        }
     }
 }
 

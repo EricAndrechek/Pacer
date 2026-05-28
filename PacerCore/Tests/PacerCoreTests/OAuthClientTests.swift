@@ -234,6 +234,47 @@ import Testing
 
     // MARK: - Local expiry gate
 
+    @Test func tokenOverrideBypassesKeychainAndExpiry() async {
+        // Keychain is broken AND the keychain blob's expiresAt is in
+        // the past — neither matters when an override is present. The
+        // request must go out carrying the override token verbatim.
+        let pastExpiry = Date(timeIntervalSince1970: 1_700_000_000)
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let brokenKeychain = KeychainOAuth(rawReader: { .failure(.accessDenied) })
+        let overrideToken = "sk-ant-oat01-OVERRIDE"
+        let observedAuth = Box<String?>(nil)
+        let c = OAuthClient(
+            keychain: brokenKeychain,
+            transport: { req in
+                observedAuth.value = req.value(forHTTPHeaderField: "Authorization")
+                return self.http(200, body: #"{"five_hour":{"utilization":1,"resets_at":""}}"#)
+            },
+            now: { now },
+            tokenOverride: { overrideToken }
+        )
+        _ = await c.fetchUsage()
+        #expect(observedAuth.value == "Bearer \(overrideToken)")
+        // Sanity: also check that a keychain blob with `pastExpiry`
+        // wouldn't have routed here if the override path were skipped.
+        // (Kept for documentation; the brokenKeychain alone proves it.)
+        _ = pastExpiry
+    }
+
+    @Test func emptyOverrideFallsThroughToKeychain() async {
+        // Whitespace-trimmed empty override = no override → keychain is
+        // authoritative. Verifies the closure can return nil/empty and
+        // the keychain path takes over.
+        let c = OAuthClient(
+            keychain: goodKeychain(),
+            transport: { _ in self.http(200, body: #"{"five_hour":{"utilization":7,"resets_at":""}}"#) },
+            tokenOverride: { nil }
+        )
+        guard case .success = await c.fetchUsage() else {
+            Issue.record("expected success on keychain fallback")
+            return
+        }
+    }
+
     @Test func skipsExpiredToken() async {
         // expiresAt in the past — we short-circuit before hitting the
         // network.
