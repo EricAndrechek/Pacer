@@ -120,8 +120,12 @@ private struct PaceChartColumn: View {
             .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
             .sorted { $0.sampledAt < $1.sampledAt }
             .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
-        if points.last?.time != now {
-            points.append(.init(time: now, value: latest.usedPercentage))
+        // Clamp the synthesized tail to the cycle: once `now > resets`
+        // (cycle ended, no fresh sample yet), a tail at `now` falls
+        // outside `chartXScale`'s domain.
+        let tailTime = min(now, resets)
+        if points.last?.time != tailTime {
+            points.append(.init(time: tailTime, value: latest.usedPercentage))
         }
         return PaceChartView.Data(
             cycleStart: cycleStart,
