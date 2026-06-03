@@ -58,7 +58,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Need full history so `git describe` against the tag works
           # for embedding the version into the build (and so we can
