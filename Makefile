@@ -23,7 +23,9 @@ SHELL := /bin/bash
 
 # Paths used throughout. Quoted in recipes when expanded.
 REPO_ROOT      := $(shell pwd)
-BUILD_OUTPUT   := $(REPO_ROOT)/Build/Build/Products/Debug/Pacer.app
+# Informational only — dev-install.sh resolves the real path post-build
+# (Xcode's <derivedDataPath>/[Build/]Products nesting is version-dependent).
+BUILD_OUTPUT   := $(REPO_ROOT)/Build/Products/Debug/Pacer.app
 INSTALLED_APP  := /Applications/Pacer.app
 LOG_DIR        := $(HOME)/Library/Logs/Pacer
 LOG_ERR        := $(LOG_DIR)/Pacer.err.log

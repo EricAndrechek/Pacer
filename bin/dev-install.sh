@@ -19,7 +19,10 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="Pacer.app"
 INSTALL_DIR="/Applications"
 INSTALLED_APP="${INSTALL_DIR}/${APP_NAME}"
-BUILD_OUTPUT="${REPO_ROOT}/Build/Build/Products/Debug/${APP_NAME}"
+# Resolved after the build — the product dir under -derivedDataPath
+# varies by Xcode version (newer emits <ddp>/Products/Debug, CI/older
+# emits <ddp>/Build/Products/Debug). See the resolver below.
+BUILD_OUTPUT=""
 
 # Legacy daemon labels — retired in favor of in-process collection,
 # but old installs may still have these registered. We bootout and
@@ -63,10 +66,17 @@ xcodebuild \
     build \
     | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
-if [ ! -d "${BUILD_OUTPUT}" ]; then
-    echo "ERROR: build did not produce ${BUILD_OUTPUT}"
+# Locate the built bundle by its stable suffix. Both Xcode product-dir
+# layouts end in Products/Debug/Pacer.app, so resolving by suffix is
+# version-proof — a hardcoded path breaks whenever the maintainer's and
+# CI's toolchains disagree on the <derivedDataPath>/[Build/]Products nesting.
+BUILD_OUTPUT="$(find "${REPO_ROOT}/Build" -type d -name "${APP_NAME}" -path "*/Products/Debug/*" | head -1)"
+if [ -z "${BUILD_OUTPUT}" ] || [ ! -d "${BUILD_OUTPUT}" ]; then
+    echo "ERROR: build did not produce ${APP_NAME} under ${REPO_ROOT}/Build"
+    find "${REPO_ROOT}/Build" -name "${APP_NAME}" -type d 2>/dev/null | head -5
     exit 1
 fi
+echo "    built: ${BUILD_OUTPUT}"
 
 # 2b. Manually sign every binary inside the .app with Developer ID
 #     Application. This is what the eventual Sparkle release will use,
