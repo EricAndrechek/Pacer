@@ -36,6 +36,15 @@ Icon
 sparkle-private-key
 *.priv
 
+# Local release secrets — NEVER commit. The keys/ folder holds the
+# Developer ID .p12, the App Store Connect .p8, and a .env with the
+# cert password + notary IDs. The *.p12/*.p8/.env globs are belt-and-
+# suspenders in case a key file ever lands outside keys/.
+keys/
+*.p12
+*.p8
+.env
+
 # Local build artifacts
 *.app
 *.dmg
