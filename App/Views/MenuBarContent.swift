@@ -204,8 +204,15 @@ struct MenuBarLabel: View {
         if let s = sevenDay {
             parts.append("7d: \(Int(s.usedPercentage.rounded()))%")
         }
+        // Tooltip's reset hint reads from the 5-hour sample. When that
+        // sample's cycle has already ended (Pacer hasn't ingested a fresh
+        // one — see #3/#4), don't show "resets X ago" — that confuses
+        // "ago" as a past event when it's actually "Pacer is behind."
         if let resets = fiveHour?.resetsAt {
-            parts.append("resets \(pacerRelative(resets))")
+            let cycle = DisplayCycle.resolve(resetsAt: resets, duration: 5 * 3600)
+            parts.append(cycle.isAwaiting
+                ? "5h cycle reset, awaiting fresh sample"
+                : "resets \(pacerRelative(resets))")
         }
         if parts.isEmpty {
             return "Pacer — collecting…"
@@ -432,33 +439,56 @@ struct MenuStatusContent: View {
                 .frame(width: 48, alignment: .leading)
 
             if let s = sample, let resets = s.resetsAt {
-                let pacePct = PaceMath.paceFraction(
-                    now: Date(), resetsAt: resets, windowDuration: duration
-                ) * 100
-                let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
+                if cycle.isAwaiting {
+                    // Stale cycle (Pacer hasn't polled a fresh one yet).
+                    // Show a muted "awaiting" line — no pace math from
+                    // prior-cycle numbers.
+                    CircularGauge(
+                        percentage: s.usedPercentage,
+                        lineWidth: 3,
+                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
+                    )
+                    .frame(width: 22, height: 22)
+                    .opacity(0.4)
 
-                CircularGauge(
-                    percentage: s.usedPercentage,
-                    lineWidth: 3,
-                    labelFont: .system(size: 8, weight: .bold, design: .rounded)
-                )
-                .frame(width: 22, height: 22)
+                    Text("—")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 32, alignment: .trailing)
 
-                Text("\(Int(s.usedPercentage.rounded()))%")
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .frame(width: 32, alignment: .trailing)
+                    Text("awaiting new cycle")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
 
-                Text("pace \(Int(pacePct.rounded()))%")
-                    .font(.system(size: 11, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(band.color)
+                    Spacer(minLength: 0)
+                } else {
+                    let pacePct = cycle.paceFraction * 100
+                    let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
 
-                Spacer(minLength: 4)
+                    CircularGauge(
+                        percentage: s.usedPercentage,
+                        lineWidth: 3,
+                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
+                    )
+                    .frame(width: 22, height: 22)
 
-                Text("resets \(pacerRelative(resets, style: .short))")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    Text("\(Int(s.usedPercentage.rounded()))%")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .frame(width: 32, alignment: .trailing)
+
+                    Text("pace \(Int(pacePct.rounded()))%")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(band.color)
+
+                    Spacer(minLength: 4)
+
+                    Text("resets \(pacerRelative(resets, style: .short))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             } else {
                 Text("collecting…")
                     .font(.system(size: 11))

@@ -70,9 +70,25 @@ struct PaceChartCard: View {
     @ViewBuilder
     private func trailingChip(latest: RateLimitSample?) -> some View {
         if let latest {
-            Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+            // OAuth samples ought to arrive every 5 min. If the newest one
+            // is much older than that — the poller is stalled (commonly an
+            // expired Claude Code token) and the chart numbers are stale.
+            // statusline samples are irregular by nature; skip the warning
+            // for that source. See #3.
+            let elapsed = Date().timeIntervalSince(latest.sampledAt)
+            let isStaleOAuth = latest.source == RateLimitSource.oauth && elapsed > 15 * 60
+            HStack(spacing: 4) {
+                if isStaleOAuth {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                }
+                Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
+                    .font(.system(size: 11))
+            }
+            .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
+            .help(isStaleOAuth
+                ? "Pacer hasn't received fresh data in \(pacerRelative(latest.sampledAt)). The OAuth token may have expired — try launching or quitting/reopening Claude Code to refresh it. See ~/Library/Logs/Pacer/Pacer.err.log for the poller's last outcome."
+                : "")
         }
     }
 
@@ -109,6 +125,14 @@ private struct PaceChartColumn: View {
 
     private var latest: RateLimitSample? { windowSamples.first }
 
+    /// Display-cycle for this column. nil only when there's no sample
+    /// or the sample has no `resetsAt`. Otherwise resolves the
+    /// active-or-awaiting bracket for everything in the column body.
+    private var cycle: DisplayCycle? {
+        guard let latest, let resets = latest.resetsAt else { return nil }
+        return DisplayCycle.resolve(resetsAt: resets, duration: duration)
+    }
+
     /// Build the `PaceChartView.Data` snapshot — same shape the widget
     /// will pass in. Synthesizes a "now" tail point so the line tracks
     /// to current time even if the most-recent sample is older.
@@ -120,8 +144,12 @@ private struct PaceChartColumn: View {
             .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
             .sorted { $0.sampledAt < $1.sampledAt }
             .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
-        if points.last?.time != now {
-            points.append(.init(time: now, value: latest.usedPercentage))
+        // Clamp the synthesized tail to the cycle: once `now > resets`
+        // (cycle ended, no fresh sample yet), a tail at `now` falls
+        // outside `chartXScale`'s domain.
+        let tailTime = min(now, resets)
+        if points.last?.time != tailTime {
+            points.append(.init(time: tailTime, value: latest.usedPercentage))
         }
         return PaceChartView.Data(
             cycleStart: cycleStart,
@@ -136,24 +164,49 @@ private struct PaceChartColumn: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             heroLine
-            if let chartData {
-                PaceChartView(data: chartData, style: .detailed)
-                    .frame(height: 96)
-            } else {
-                Text("collecting…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .frame(height: 96)
-            }
+            chartSlot
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Renders the chart for an active cycle or a textual placeholder
+    /// when awaiting. Same vertical footprint either way so the parent
+    /// HStack's equal-height layout stays stable.
+    @ViewBuilder
+    private var chartSlot: some View {
+        if cycle?.isAwaiting == true {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Awaiting first sample of new cycle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("Pacer will plot the new cycle once a fresh sample arrives.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: 96, alignment: .topLeading)
+        } else if let chartData {
+            PaceChartView(data: chartData, style: .detailed)
+                .frame(height: 96)
+        } else {
+            Text("collecting…")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .frame(height: 96)
+        }
     }
 
     private var header: some View {
         HStack {
             Eyebrow(text: title)
             Spacer()
-            if let resets = latest?.resetsAt {
+            if let cycle, cycle.isAwaiting {
+                Text("cycle reset · awaiting")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else if let resets = latest?.resetsAt {
                 Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -167,13 +220,8 @@ private struct PaceChartColumn: View {
 
     @ViewBuilder
     private var heroLine: some View {
-        if let latest, let resets = latest.resetsAt {
-            let paceFraction = PaceMath.paceFraction(
-                now: Date(),
-                resetsAt: resets,
-                windowDuration: duration
-            )
-            let paceEndPct = paceFraction * 100
+        if let latest, let cycle, !cycle.isAwaiting {
+            let paceEndPct = cycle.paceFraction * 100
             let band = PaceBand(usedPct: latest.usedPercentage, paceEndPct: paceEndPct)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text("\(Int(latest.usedPercentage.rounded()))%")

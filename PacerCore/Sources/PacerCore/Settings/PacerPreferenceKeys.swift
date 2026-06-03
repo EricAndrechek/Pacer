@@ -54,6 +54,13 @@ public enum PacerPreferenceKeys {
     /// Sort field used by the Projects view. Persists across launches
     /// so reopening the app doesn't snap back to "by cost descending".
     public static let projectsSort           = "pacer.view.projectsSort"
+    /// Manual OAuth access-token override. When non-empty, the OAuth
+    /// poller uses this token instead of reading the access token out
+    /// of the `Claude Code-credentials` keychain entry. Workaround for
+    /// Claude Code 2.x not persisting refreshed tokens back to the
+    /// keychain (see #6). Stored as a plain string; lives in the App
+    /// Group UserDefaults suite alongside the rest of Pacer's prefs.
+    public static let oauthTokenOverride     = "pacer.oauth.tokenOverride"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls
@@ -80,5 +87,14 @@ public enum PacerPreferences {
         case "display":   return .display
         default:          return .auto
         }
+    }
+
+    /// Trimmed OAuth token override. Returns nil for an absent or
+    /// whitespace-only value so callers can `if let` straight through
+    /// to the "use keychain" path. See #6 for why this exists.
+    public static func oauthTokenOverride(from store: UserDefaults = store) -> String? {
+        let raw = store.string(forKey: PacerPreferenceKeys.oauthTokenOverride) ?? ""
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

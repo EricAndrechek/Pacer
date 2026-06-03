@@ -75,6 +75,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuContentController: NSViewController?
     private var menuBarHostingView: SizingHostingView?
     private var menuBarPrefObserver: NSObjectProtocol?
+    // Tracked at class scope so the observer block doesn't capture a
+    // local `var` — Swift 6.3 strict-concurrency rejects the local-var
+    // form because the @Sendable observer closure makes the capture
+    // task-isolated, conflicting with the inner @MainActor Task that
+    // mutates it. As an instance property on this @MainActor class it
+    // is main-actor isolated, matching the inner Task.
+    private var menuBarLastChipsEmpty: Bool = false
 
     override init() {
         // Redirect stderr to a log file before anything else so the
@@ -437,7 +444,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // Only rebuild when the "is the item present at all" answer
         // changes (empty chip list ↔ at least one chip). Every other
         // chip-list change is handled by the SwiftUI label re-render.
-        var lastIsEmpty = currentChipsAreEmpty()
+        menuBarLastChipsEmpty = currentChipsAreEmpty()
         menuBarPrefObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
             object: PacerSettings.store,
@@ -446,8 +453,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 guard let self else { return }
                 let nowEmpty = self.currentChipsAreEmpty()
-                if nowEmpty != lastIsEmpty {
-                    lastIsEmpty = nowEmpty
+                if nowEmpty != self.menuBarLastChipsEmpty {
+                    self.menuBarLastChipsEmpty = nowEmpty
                     self.rebuildMenuBarForCurrentChips()
                 }
             }

@@ -38,3 +38,26 @@ private func makeIsolatedDefaults() -> UserDefaults {
     defaults.set("nonsense", forKey: PacerPreferenceKeys.costMode)
     #expect(PacerPreferences.costMode(from: defaults) == .auto)
 }
+
+@Test func oauthTokenOverrideAbsentReturnsNil() {
+    let defaults = makeIsolatedDefaults()
+    #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
+}
+
+@Test func oauthTokenOverrideEmptyStringReturnsNil() {
+    let defaults = makeIsolatedDefaults()
+    defaults.set("", forKey: PacerPreferenceKeys.oauthTokenOverride)
+    #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
+}
+
+@Test func oauthTokenOverrideWhitespaceOnlyReturnsNil() {
+    let defaults = makeIsolatedDefaults()
+    defaults.set("   \n  ", forKey: PacerPreferenceKeys.oauthTokenOverride)
+    #expect(PacerPreferences.oauthTokenOverride(from: defaults) == nil)
+}
+
+@Test func oauthTokenOverrideTrimsWhitespace() {
+    let defaults = makeIsolatedDefaults()
+    defaults.set("  sk-ant-oat01-abc\n", forKey: PacerPreferenceKeys.oauthTokenOverride)
+    #expect(PacerPreferences.oauthTokenOverride(from: defaults) == "sk-ant-oat01-abc")
+}

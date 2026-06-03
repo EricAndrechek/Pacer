@@ -131,6 +131,7 @@ public enum PacerSettings {
         public static let costMode               = PacerPreferenceKeys.costMode
         public static let timeRange              = PacerPreferenceKeys.timeRange
         public static let projectsSort           = PacerPreferenceKeys.projectsSort
+        public static let oauthTokenOverride     = PacerPreferenceKeys.oauthTokenOverride
     }
 
     // MARK: - Defaults
@@ -156,6 +157,7 @@ public enum PacerSettings {
         Key.costMode:              "auto",
         Key.timeRange:             "90d",
         Key.projectsSort:          "cost",
+        Key.oauthTokenOverride:    "",
     ]
 
     /// Register the defaults dict on first launch — `@AppStorage`'s
