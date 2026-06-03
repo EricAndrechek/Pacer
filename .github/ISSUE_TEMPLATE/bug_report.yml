@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in Pacer is broken, wrong, or misbehaving.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! A screenshot and the version/OS info below make bugs much faster to fix.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you see, and what did you expect instead?
+      placeholder: When I click the menu-bar icon and choose "Open Pacer", the activity pill in the toolbar is clipped…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Click the menu-bar gauge
+        2. Click "Open Pacer"
+        3. Look at the top-right of the window
+    validations:
+      required: false
+  - type: input
+    id: pacer-version
+    attributes:
+      label: Pacer version
+      description: Pacer → About, or the version on the DMG you installed.
+      placeholder: "0.1.1"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.5 (Sequoia), Apple Silicon"
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot / logs
+      description: Drag in a screenshot if it's visual. For crashes/stalls, `make logs-tail` output (or Console.app) helps.
+    validations:
+      required: false
