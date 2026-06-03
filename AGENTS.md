@@ -79,6 +79,34 @@ These are subtle, easy to miss, and break user-visible numbers:
   Anthropic OAuth fallback) — leave a comment so the next reader doesn't
   "fix" it back.
 
+## Reviewing pull requests
+
+- **Always pull a PR into an isolated worktree with `wt`** — never check
+  it out over your working tree. Use the [`wt`](https://worktrunk.dev)
+  CLI:
+
+  ```sh
+  wt switch pr:7          # fetches PR #7, creates ./.worktrees/<branch>, cds in
+  ```
+
+  Worktrees keep the PR's build artifacts, generated `Pacer.xcodeproj`,
+  and any local fix-ups from polluting `main`, and let the installed
+  `/Applications` app come from exactly one branch at a time.
+
+- **Verify before merging — build *and* run it.** `make test` +
+  `make verify` is the floor; `make install` and watch `make logs` is the
+  bar. Two classes of bug only show up when you actually run the branch:
+  - **Build-path drift.** Xcode's product dir under `-derivedDataPath`
+    is version-dependent (`<ddp>/Products/Debug` vs
+    `<ddp>/Build/Products/Debug`). Resolve the bundle by its
+    `*/Products/Debug/Pacer.app` suffix, never a hardcoded nesting — a
+    path that works on the contributor's toolchain can break on yours.
+  - **Keychain v1/v2 compat.** Confirm the OAuth poller logs
+    `[OAuthPoller] ok …` after install — that proves the live keychain
+    read still works. The reader tries `-a NSUserName()` (Claude Code
+    2.x per-user item) first and falls back to no-acct only on
+    `errSecItemNotFound`, so v1 (`acct=""`) installs keep working.
+
 ## App target — what's where
 
 The SwiftUI app is organized like this (under `App/`):
