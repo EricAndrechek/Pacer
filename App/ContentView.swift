@@ -463,6 +463,12 @@ private struct ToolbarFreshness: View {
         .background(
             Capsule().fill(Color.primary.opacity(0.06))
         )
+        // Without this the NSToolbar host compresses the pill below its
+        // ideal height when the window mounts from the menu-bar "Open
+        // Pacer" path, clipping the Capsule's top edge (issue #1). Pin
+        // both axes to the intrinsic size so the toolbar centers the
+        // pill at full height instead of squashing it.
+        .fixedSize()
         .help(tooltip)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Activity status: \(label)")
