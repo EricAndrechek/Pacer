@@ -129,16 +129,20 @@ jobs:
             | grep "Developer ID Application"
 
       - name: Stamp version into project.yml
+        id: stamp
         # Override the in-repo MARKETING_VERSION so the built bundle
         # carries the tag's version (without committing it back).
         run: |
           set -e
           version="${{ steps.version.outputs.version }}"
-          # Increment CFBundleVersion (CI build number) by a unix-time
-          # suffix so every release has a strictly-monotonic build value
-          # — Sparkle prefers CFBundleVersion for ordering, marketing
-          # version is informational.
+          # CFBundleVersion (CI build number) is a unix timestamp so every
+          # release has a strictly-monotonic build value. Sparkle orders
+          # updates by CFBundleVersion (its sparkle:version), NOT by the
+          # marketing string — so this `build` value must also become the
+          # appcast's <sparkle:version> (see the appcast step). Exposed as a
+          # step output so that step can read it.
           build="$(date -u +%s)"
+          echo "build=${build}" >> "${GITHUB_OUTPUT}"
           sed -i.bak -E \
             -e "s/MARKETING_VERSION: \"[^\"]+\"/MARKETING_VERSION: \"${version}\"/g" \
             -e "s/CURRENT_PROJECT_VERSION: \"[^\"]+\"/CURRENT_PROJECT_VERSION: \"${build}\"/g" \
@@ -404,7 +408,8 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.version }}"
-          signature='${{ steps.sparkle.outputs.signature }}'   # e.g. sparkle:edSignature="..." length="N"
+          build="${{ steps.stamp.outputs.build }}"             # CFBundleVersion of this build (unix ts)
+          signature='${{ steps.sparkle.outputs.signature }}'   # e.g. sparkle:edSignature="..."
           size='${{ steps.sparkle.outputs.size }}'
           pubdate="$(LC_TIME=en_US.UTF-8 date -u +"%a, %d %b %Y %H:%M:%S +0000")"
           dmg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${DMG_NAME}"
@@ -417,7 +422,7 @@ jobs:
               <item>
                   <title>Version ${version}</title>
                   <pubDate>${pubdate}</pubDate>
-                  <sparkle:version>${version}</sparkle:version>
+                  <sparkle:version>${build}</sparkle:version>
                   <sparkle:shortVersionString>${version}</sparkle:shortVersionString>
                   <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
                   <enclosure
