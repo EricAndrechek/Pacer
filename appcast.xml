@@ -17,5 +17,17 @@
             type="application/octet-stream"
             sparkle:edSignature="csnFBLKBGGUscZu+gMhe7r6DZWXpadMvcp9slnOg77uNzERQ5K8tAjqkxjCJ7Dm9IHYaxjDXbU0GCmzoTd1aCg==" />
     </item>
+            <item>
+        <title>Version 0.1.1</title>
+        <pubDate>Wed, 03 Jun 2026 16:19:41 +0000</pubDate>
+        <sparkle:version>1780503333</sparkle:version>
+        <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.1.1/Pacer-0.1.1.dmg"
+            length="5217586"
+            type="application/octet-stream"
+            sparkle:edSignature="UgMrDN9CR0pSKXQzAasXe+j8fqRCJJfdN/pd5BNJtxlZmJBxAqOgyh30bcSE3lip1tkmlS9xko7WEyBo595UCg==" />
+    </item>
         </channel>
 </rss>
