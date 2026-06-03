@@ -359,9 +359,13 @@ jobs:
           KEY_FILE="${RUNNER_TEMP}/sparkle.key"
           echo "${SPARKLE_ED_PRIVATE_KEY}" > "${KEY_FILE}"
 
-          # `sign_update -f <keyfile> <dmg>` emits an `sparkle:edSignature`
-          # attribute string suitable for direct inclusion in the appcast.
-          SIGNATURE="$("${SIGN_UPDATE}" -f "${KEY_FILE}" "${DMG_PATH}")"
+          # `sign_update -f <keyfile> <dmg>` emits both an
+          # `sparkle:edSignature="..."` AND a `length="..."` attribute. The
+          # appcast <enclosure> template already sets length="${size}" from
+          # stat, so keep only the edSignature here — otherwise the rendered
+          # enclosure has `length` twice, which is malformed XML ("Attribute
+          # length redefined") and Sparkle rejects the whole feed.
+          SIGNATURE="$("${SIGN_UPDATE}" -f "${KEY_FILE}" "${DMG_PATH}" | sed -E 's/[[:space:]]*length="[0-9]+"//')"
           echo "signature=${SIGNATURE}" >> "${GITHUB_OUTPUT}"
 
           SIZE="$(stat -f%z "${DMG_PATH}")"
