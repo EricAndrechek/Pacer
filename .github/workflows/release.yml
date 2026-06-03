@@ -340,7 +340,12 @@ jobs:
         # lives under build/SourcePackages/checkouts/Sparkle.
         run: |
           set -euo pipefail
-          SIGN_UPDATE="$(find build/SourcePackages/checkouts/Sparkle/bin -name sign_update | head -1)"
+          # Sparkle ships TWO `sign_update`s: the modern EdDSA tool at
+          # bin/sign_update and a legacy DSA shell script at
+          # bin/old_dsa_scripts/sign_update. A bare `find ... | head -1`
+          # can pick the DSA one (it does on the GitHub runner), which
+          # rejects the `-f <keyfile>` EdDSA args and exits 1. Exclude it.
+          SIGN_UPDATE="$(find build/SourcePackages/checkouts/Sparkle/bin -name sign_update -not -path '*old_dsa_scripts*' | head -1)"
           if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
             echo "::error::Could not locate Sparkle's sign_update tool"
             find build -name sign_update 2>/dev/null | head -5
