@@ -1,0 +1,21 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Pacer</title>
+        <link>https://ericandrechek.github.io/Pacer/appcast.xml</link>
+        <description>Pacer auto-update feed</description>
+        <language>en</language>
+        <item>
+        <title>Version 0.1.0</title>
+        <pubDate>Wed, 03 Jun 2026 15:37:09 +0000</pubDate>
+        <sparkle:version>0.1.0</sparkle:version>
+        <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.1.0/Pacer-0.1.0.dmg"
+            length="5217534"
+            type="application/octet-stream"
+            sparkle:edSignature="csnFBLKBGGUscZu+gMhe7r6DZWXpadMvcp9slnOg77uNzERQ5K8tAjqkxjCJ7Dm9IHYaxjDXbU0GCmzoTd1aCg==" length="5217534" />
+    </item>
+        </channel>
+</rss>
