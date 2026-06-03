@@ -429,8 +429,12 @@ jobs:
           if gh api "repos/${GITHUB_REPOSITORY}/branches/gh-pages" >/dev/null 2>&1; then
             git worktree add -B gh-pages "${worktree}" origin/gh-pages
           else
+            # --orphan checks out an unborn branch, so the working tree is
+            # already empty (only the .git link file). Do NOT `rm -rf .* *`
+            # here: the .* glob matches .git and destroys the worktree link,
+            # which made every later git command fail with "not a git
+            # repository" (the v0.1.0 appcast bootstrap hit exactly this).
             git worktree add --orphan -B gh-pages "${worktree}"
-            (cd "${worktree}" && rm -rf .* * 2>/dev/null || true)
           fi
 
           appcast="${worktree}/appcast.xml"
