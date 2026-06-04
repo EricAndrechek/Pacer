@@ -33,7 +33,6 @@
         <title>Version 0.1.2</title>
         <description><![CDATA[
 <h2>What's Changed</h2>
-<h3>What's Changed</h3>
 <ul>
 <li>docs: issue templates + CONTRIBUTING by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4581703554" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/14" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/14/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/14">EricAndrechek/Pacer#14</a></li>
 <li>fix(ui): refresh "today" views automatically at the local day rollover by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4588227226" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/15" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/15/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/15">EricAndrechek/Pacer#15</a></li>
@@ -46,7 +45,8 @@
 <li>chore(release): prep 0.1.2 — version bump + release notes in update dialog by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589150061" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/22" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/22/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/22">EricAndrechek/Pacer#22</a></li>
 <li>docs: rewrite README for non-technical users by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4589161839" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/23" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/23/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/23">EricAndrechek/Pacer#23</a></li>
 </ul>
-<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.1.1...v0.1.2">EricAndrechek/Pacer@<tt>v0.1.1...v0.1.2</tt></a></p>]]></description>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.1.1...v0.1.2">EricAndrechek/Pacer@<tt>v0.1.1...v0.1.2</tt></a></p>
+]]></description>
         <pubDate>Thu, 04 Jun 2026 13:47:44 +0000</pubDate>
         <sparkle:version>1780580617</sparkle:version>
         <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
