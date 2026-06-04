@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import SwiftData
+import WidgetKit
 import PacerCore
 import PacerUI
 
@@ -64,83 +65,119 @@ enum ScreenshotMode {
         // directly, so other windows are irrelevant to the output.
         for window in NSApp.windows { window.orderOut(nil) }
 
-        // Each scene in both appearances. The opaque background applied
-        // in `render` is what makes dark mode work: a SwiftUI ScrollView's
-        // own background is clear, so the dark-mode (white) page-title text
-        // would otherwise flatten onto the transparent backing and survive
-        // only as its grey anti-alias fringe — the "ghost" header.
-        for scheme in [ColorScheme.light, .dark] {
-            let suffix = scheme == .dark ? "-dark" : ""
-            await render(
-                "dashboard\(suffix)",
-                size: CGSize(width: 1280, height: 880),
-                scheme: scheme, container: container
-            ) {
-                ContentView()
-            }
-            await render(
-                "history\(suffix)",
-                size: CGSize(width: 1180, height: 860),
-                scheme: scheme, container: container
-            ) {
-                HistoryView()
-            }
-            await render(
-                "menubar\(suffix)",
-                size: CGSize(width: 360, height: 340),
-                scheme: scheme, container: container
-            ) {
-                MenuPopoverPreview()
-            }
-        }
+        // A richer menu-bar readout for the status-bar shot than the
+        // default (icon + 5-hour %).
+        PacerSettings.store.set(
+            "icon,five_hour_pct,seven_day_pct,today_cost",
+            forKey: PacerSettings.Key.menuBarChips
+        )
+
+        // Window scenes — framed like a real macOS window screenshot:
+        // rounded corners + a soft drop shadow on a transparent margin.
+        await capture("dashboard", width: 1280, height: 880, scheme: .light,
+                      card: true, container: container) { ContentView() }
+        await capture("dashboard-dark", width: 1280, height: 880, scheme: .dark,
+                      card: true, container: container) { ContentView() }
+        await capture("history", width: 1180, height: 860, scheme: .light,
+                      card: true, container: container) { HistoryView() }
+
+        // Menu-bar popover — tightly cropped to its intrinsic size.
+        await capture("menubar", width: 280, height: nil, scheme: .light,
+                      card: true, cornerRadius: 12, container: container) { MenuStatusContent() }
+        await capture("menubar-dark", width: 280, height: nil, scheme: .dark,
+                      card: true, cornerRadius: 12, container: container) { MenuStatusContent() }
+
+        // The menu-bar item itself (the status-bar readout chips), and the
+        // home-screen widget family — both self-decorated, captured on a
+        // transparent canvas so they drop into the README cleanly.
+        await capture("statusbar", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { StatusBarPreview() }
+        await capture("widgets", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { WidgetGallery() }
 
         log("screenshots complete")
     }
 
     /// Host `content` in an off-screen window, let the SwiftUI lifecycle
-    /// run, then snapshot it to a PNG.
-    private static func render(
+    /// run, then snapshot it to a PNG with transparency preserved.
+    ///
+    /// `card: true` frames the content like a macOS window screenshot —
+    /// an opaque window-colored backing (which is also what keeps
+    /// dark-mode white text from ghosting against a transparent backing),
+    /// rounded corners, a hairline border, and a drop shadow on a
+    /// transparent margin. `card: false` renders the content as-is on a
+    /// transparent canvas (for views that decorate themselves, like the
+    /// widget gallery and the status-bar readout).
+    ///
+    /// `nil` for `width`/`height` means "size to the content's intrinsic
+    /// dimension" (measured via `fittingSize`).
+    private static func capture(
         _ name: String,
-        size: CGSize,
+        width: CGFloat?,
+        height: CGFloat?,
         scheme: ColorScheme,
+        card: Bool,
+        cornerRadius: CGFloat = 14,
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
-        let root = AnyView(
-            content()
-                // Opaque window-colored backing behind everything so
-                // dark-mode white text doesn't flatten onto a transparent
-                // (→ white) background and ghost. Matches the real app
-                // window background, so it also improves card separation
-                // in light mode.
-                .background(Color(nsColor: .windowBackgroundColor))
-                .frame(width: size.width, height: size.height)
-                .preferredColorScheme(scheme)
-                .modelContainer(container)
-        )
+        let margin: CGFloat = card ? 56 : 28
+        let sized = content()
+            .modelContainer(container)
+            .frame(width: width, height: height)
+
+        let decorated: AnyView
+        if card {
+            decorated = AnyView(
+                sized
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.28), radius: 24, x: 0, y: 12)
+            )
+        } else {
+            decorated = AnyView(sized)
+        }
+        let root = AnyView(decorated.padding(margin).preferredColorScheme(scheme))
 
         let hosting = NSHostingView(rootView: root)
-        hosting.frame = NSRect(origin: .zero, size: size)
+        // Lay out at a generous temp frame so `fittingSize` resolves any
+        // intrinsic dimension, then settle on the final size.
+        let tempW = width.map { $0 + 2 * margin } ?? 4000
+        let tempH = height.map { $0 + 2 * margin } ?? 4000
+        hosting.frame = NSRect(x: 0, y: 0, width: tempW, height: tempH)
+        hosting.layoutSubtreeIfNeeded()
+        let fit = hosting.fittingSize
+        let finalSize = CGSize(
+            width: width.map { $0 + 2 * margin } ?? ceil(fit.width),
+            height: height.map { $0 + 2 * margin } ?? ceil(fit.height)
+        )
+        await snapshot(hosting, size: finalSize, name: name, scheme: scheme)
+    }
 
-        // Borderless, far off-screen, never key/active — no focus steal,
-        // nothing visible, but `orderFrontRegardless` realizes the view
-        // tree so onAppear/@Query/Charts actually run.
+    /// Realize `hosting` in an off-screen, never-activated, non-opaque
+    /// window (so transparency is preserved), let the SwiftUI lifecycle
+    /// run, then write a PNG.
+    private static func snapshot(
+        _ hosting: NSHostingView<AnyView>, size: CGSize, name: String, scheme: ColorScheme
+    ) async {
+        hosting.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(
             contentRect: NSRect(x: -60_000, y: -60_000, width: size.width, height: size.height),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
+            styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
         window.contentView = hosting
         window.orderFrontRegardless()
 
         // Spin the run loop so SwiftUI mounts, @Query fetches land, the
-        // @State scan-tick caches refresh, and Charts lay out. Generous
-        // settle so appear/content transitions (e.g. the page-title text
-        // animating in) finish before we snapshot — a mid-transition
-        // capture double-draws the header text.
+        // @State scan-tick caches refresh, and Charts lay out.
         await settle(seconds: 2.6)
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
@@ -158,9 +195,8 @@ enum ScreenshotMode {
             window.orderOut(nil)
             return
         }
-        let url = outputDirectory.appendingPathComponent("\(name).png")
         do {
-            try png.write(to: url)
+            try png.write(to: outputDirectory.appendingPathComponent("\(name).png"))
             log("✓ \(name).png (\(rep.pixelsWide)×\(rep.pixelsHigh))")
         } catch {
             log("⚠️ write failed for \(name): \(error)")
@@ -389,23 +425,127 @@ extension ScreenshotMode {
     }
 }
 
-/// Dropdown-styled wrapper around the real menu-bar content so the
-/// `menubar.png` reads like the popover users actually see, rather than
-/// a bare floating column.
-private struct MenuPopoverPreview: View {
+/// The menu-bar item's readout (`MenuBarLabel`) on a dark bar that
+/// stands in for the macOS menu bar, so `statusbar.png` shows what the
+/// chips look like up top.
+private struct StatusBarPreview: View {
     var body: some View {
-        DayKeyedContent {
-            MenuStatusContent()
+        MenuBarLabel()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.black.opacity(0.82))
+                    .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
+            )
+    }
+}
+
+/// A single composite image of the home-screen widget family — the real
+/// widget views, fed fake `TimelineEntry` values, each framed at its
+/// native size with the rounded corners + shadow widgets get on the
+/// desktop. One image keeps the README compact while still showing the
+/// range of widget options.
+private struct WidgetGallery: View {
+    private let small = CGSize(width: 158, height: 158)
+    private let medium = CGSize(width: 348, height: 158)
+
+    var body: some View {
+        VStack(spacing: 22) {
+            HStack(alignment: .top, spacing: 22) {
+                tile(small) { TodayCostWidgetView(entry: ScreenshotEntries.todayCost) }
+                tile(medium) { PaceGaugesWidgetView(entry: ScreenshotEntries.paceGauges) }
+            }
+            HStack(alignment: .top, spacing: 22) {
+                tile(medium) { LiveSessionWidgetView(entry: ScreenshotEntries.liveSession) }
+                tile(medium) { DailyChartWidgetView(entry: ScreenshotEntries.dailyChart) }
+            }
+            HStack(alignment: .top, spacing: 22) {
+                tile(medium) { TopProjectsWidgetView(entry: ScreenshotEntries.topProjects) }
+            }
         }
-        .frame(width: 300)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+        .padding(28)
+    }
+
+    @ViewBuilder
+    private func tile(
+        _ size: CGSize,
+        @ViewBuilder _ content: () -> some View
+    ) -> some View {
+        content()
+            .frame(width: size.width, height: size.height)
+            // `.containerBackground(for: .widget)` is a no-op outside a
+            // real widget, so paint the card fill ourselves.
+            .background(PacerDesign.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
+    }
+}
+
+/// Deterministic fake `TimelineEntry` values for the widget gallery.
+private enum ScreenshotEntries {
+    private static let now = Date()
+    static let opus = "claude-opus-4-6"
+
+    static var todayCost: TodayCostEntry {
+        TodayCostEntry(date: now, costUSD: 23.40, tokens: 1_900_000, modelCount: 3, isFresh: true)
+    }
+
+    static var paceGauges: PaceGaugesEntry {
+        PaceGaugesEntry(
+            date: now,
+            fiveHour: .init(usedPct: 42, resetsAt: now.addingTimeInterval(2 * 3600)),
+            sevenDay: .init(usedPct: 61, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            window: .both
         )
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    static var liveSession: LiveSessionEntry {
+        LiveSessionEntry(
+            date: now,
+            session: .init(
+                projectDisplayName: "atlas-api",
+                totalTokens: 486_000,
+                costUSD: 6.20,
+                topModel: opus,
+                firstSeenAt: now.addingTimeInterval(-2 * 3600),
+                lastSeenAt: now.addingTimeInterval(-30)
+            )
+        )
+    }
+
+    static var dailyChart: DailyChartEntry {
+        let days = (0..<14).map { i -> DailyChartEntry.DayCost in
+            let day = Calendar.current.date(byAdding: .day, value: -(13 - i), to: now) ?? now
+            let cost = 14.0 + Double((i * 7) % 23) + (i.isMultiple(of: 3) ? 6.0 : 0)
+            return DailyChartEntry.DayCost(date: TokenSample.formatDate(day), cost: cost)
+        }
+        let total = days.reduce(0) { $0 + $1.cost }
+        return DailyChartEntry(
+            date: now, days: days,
+            totalCostUSD: total,
+            avgCostUSD: total / Double(days.count),
+            todayCostUSD: days.last?.cost ?? 0,
+            isFresh: true, range: .days14
+        )
+    }
+
+    static var topProjects: TopProjectsEntry {
+        let rows = [
+            TopProjectsEntry.Row(displayName: "atlas-api", costUSD: 142.80),
+            TopProjectsEntry.Row(displayName: "web-dashboard", costUSD: 96.40),
+            TopProjectsEntry.Row(displayName: "ml-pipeline", costUSD: 71.10),
+            TopProjectsEntry.Row(displayName: "infra-terraform", costUSD: 38.25),
+        ]
+        return TopProjectsEntry(
+            date: now, range: .days7,
+            totalCostUSD: rows.reduce(0) { $0 + $1.costUSD },
+            projectCount: rows.count,
+            rows: rows, focus: nil
+        )
     }
 }

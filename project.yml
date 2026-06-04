@@ -74,6 +74,17 @@ targets:
       - path: App
         excludes:
           - "Info.plist"   # hand-managed below — see the `info:` block
+      # The widget *views* are also compiled into the app (not just the
+      # PacerWidgets extension) so the headless screenshot generator
+      # (`App/Background/ScreenshotMode.swift`) can render them with fake
+      # entries for the README gallery. Exclude the extension's `@main`
+      # bundle + its plist/entitlements — only the view/entry/support
+      # types are wanted here.
+      - path: Widgets
+        excludes:
+          - "Info.plist"
+          - "PacerWidgets.entitlements"
+          - "PacerWidgetsBundle.swift"
     # Hand-managed Info.plist (vs GENERATE_INFOPLIST_FILE) so we can
     # carry Sparkle's keys (SUFeedURL, SUPublicEDKey, SUEnableAutomaticChecks).
     # Xcode's auto-generation only knows about the INFOPLIST_KEY_* aliases
