@@ -13,15 +13,26 @@ make screenshots
 
 | File | Scene | Notes |
 | --- | --- | --- |
-| `dashboard.png` / `dashboard-dark.png` | Main dashboard (`ContentView`) | macOS window chrome; light + dark |
+| `dashboard.png` / `dashboard-dark.png` | Main dashboard (`ContentView`) | macOS window chrome (traffic-light titlebar); light + dark |
 | `history.png` | History view (`HistoryView`) | lifetime totals, six-month heatmap, monthly spend |
-| `menubar.png` / `menubar-dark.png` | Click-down popover (`MenuStatusContent`) | tightly cropped; light + dark |
-| `statusbar.png` | Menu-bar readout (`MenuBarLabel`) | the status-item chips on a menu-bar-style pill |
+| `menubar.png` / `menubar-dark.png` | Menu-bar experience (`MenuBarExperience`) | the menu-bar readout chips + the click-down popover beneath, in one image; light + dark |
 | `widgets.png` | Widget gallery | one composite of the real widget views (Today, pace gauges, live session, daily cost, top projects) |
 
 All are rendered at 2× (Retina) with transparent margins, rounded corners, and a
 soft drop shadow so they drop into the README — and a future App Store / press
 kit — cleanly.
+
+**Light/dark in the README.** The dashboard and menu-bar images ship in both
+appearances, and the README uses `<picture>` with a
+`(prefers-color-scheme: dark)` source so GitHub serves the matching one based on
+the viewer's theme — no JS, just the standard element:
+
+```html
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
+  <img src="docs/screenshots/dashboard.png" alt="…">
+</picture>
+```
 
 ## How it works
 
@@ -38,8 +49,13 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
    **never reads or mutates the user's real `~/.claude` data or `pacer.sqlite`**,
    and is safe to run alongside a live Pacer.
 2. **Seed.** `ScreenshotMode.seed(into:)` fills the container with deterministic
-   "healthy heavy user" data — six months of daily rollups, today's hourly
-   breakdown, sessions, recent tokens, and rate-limit trails (see below).
+   data — six months of daily rollups, today's hourly breakdown, sessions, recent
+   tokens, and rate-limit trails (see below). The *shapes* are calibrated from
+   real heavy-user trends (Opus-dominant model mix, weekday-peaked spend with
+   weekend dips and the odd spike day, cache reads ≈ 200–300× input+output with
+   output ≫ non-cached input, and the rate-limit curves below). Absolute
+   magnitudes are kept to a believable-heavy range for a public README rather
+   than mirroring any one person's exact spend.
 3. **Capture.** `ScreenshotMode.captureAll(...)` hosts each **real** view in an
    off-screen, never-activated window so the full SwiftUI lifecycle runs
    (`@Query` fetches land, `@State` caches refresh, Charts lay out — a one-shot
