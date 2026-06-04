@@ -31,6 +31,13 @@ keeps all of your data on your own Mac.
        alt="Pacer history — lifetime totals, a six-month GitHub-style activity heatmap, and monthly spend">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/dashboard-dark.png" width="840"
+       alt="Pacer dashboard in dark mode">
+  <br>
+  <sub><em>Light and dark, throughout.</em></sub>
+</p>
+
 > **Heads up — early days.** Pacer is pre-1.0 and under active development. It
 > works and it's useful today, but expect the occasional rough edge, and your
 > saved history may need to be rebuilt between 0.x versions.
@@ -99,6 +106,31 @@ Pacer is the always-on, zoomed-out companion to that:
 
 Think of `/usage` as the speedometer inside one car, and Pacer as the dashboard
 that remembers every trip.
+
+### vs. Claude God and other menu-bar trackers
+
+Pacer isn't the only menu-bar usage app — [Claude God](https://claudegod.app),
+[ccseva](https://github.com/Iamshankhadeep/ccseva), and several others cover
+similar ground, and a few are genuinely good. [Claude God](https://claudegod.app)
+is the closest in spirit: a native macOS menu-bar app with quota gauges,
+per-model cost analytics, a session timeline, and a colour-coded icon. If you're
+weighing them against Pacer, here's where Pacer leans:
+
+- **Pacing, not just percentages.** Pacer's signature is the *pace* view: your
+  5-hour and weekly windows plotted against an ideal-burn reference line,
+  colour-banded behind / on track / ahead / nearly maxed, with a burn-rate
+  projection of *when* you'd hit the wall. It's built to answer "am I going to
+  run out before the reset?", not just "what % am I at right now?"
+- **Quiet and local-first by design.** No Dock icon, notifications off by
+  default, nothing leaves your Mac, and a written-down [privacy](#privacy)
+  contract for exactly what it reads and the only two hosts it talks to.
+- **Signed, notarized, and self-updating** via [Sparkle](https://sparkle-project.org)
+  — install the DMG once and it keeps itself current.
+
+Where the others go further: Claude God, for instance, adds things Pacer doesn't
+— ROI analysis correlating spend with git commits, and a Claude Code plugin
+marketplace. If those are what you want, it's worth a look. These tools coexist
+happily; pick the one that thinks about your usage the way you do.
 
 ### vs. `ccusage`
 
