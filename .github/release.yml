@@ -2,23 +2,16 @@
 # (`gh release create --generate-notes`, used by .github/workflows/release.yml).
 # These notes are also mirrored into Sparkle's update dialog via the
 # appcast <description>, so keep them clean and readable.
+#
+# No `categories:` block on purpose: PRs here aren't labeled, so every
+# category would be a label-keyed bucket and everything would fall to a
+# catch-all — which GitHub renders as a redundant "### <catch-all>" header
+# under its own fixed "## What's Changed" wrapper (a doubled heading). The
+# default, config-less behavior — a single "## What's Changed" with a flat
+# list of PRs — is the cleanest given good conventional-commit PR titles.
+# We keep this file only to drop bot noise from the notes.
 changelog:
   exclude:
     authors:
       - dependabot
       - github-actions
-  categories:
-    # Label-based grouping. PRs aren't always labeled; anything without a
-    # matching label falls through to the catch-all below, so notes stay
-    # complete either way. Labelled PRs get grouped — apply these labels
-    # to make a release read at a glance.
-    - title: 🚀 Features
-      labels: [enhancement, feature]
-    - title: 🐛 Fixes
-      labels: [bug, fix]
-    - title: 🧹 Maintenance, Docs & Tests
-      labels: [chore, documentation, docs, test]
-    # Catch-all. Titled "What's Changed" so an unlabeled release reads
-    # exactly like GitHub's default while staying future-proofed.
-    - title: What's Changed
-      labels: ["*"]
