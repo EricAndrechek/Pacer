@@ -85,13 +85,39 @@ public enum PacerStore {
         return new
     }
 
+    /// Every `@Model` type the app registers. Single-sourced so the
+    /// on-disk container (`makeModelContainer`) and the in-memory one
+    /// (`makeInMemoryContainer`, used by the screenshot/demo mode)
+    /// can't drift apart — a `@Query` against a model missing from the
+    /// container's schema is a hard crash, so both builders must list
+    /// the exact same set.
+    ///
+    /// All targets (Pacer app, PacerWidgets) open the same on-disk
+    /// container, so this list must include every @Model type we want
+    /// to read or write anywhere.
+    ///
+    /// Heartbeat lingers from M1 as our App Group sanity check; it
+    /// gets removed when the M6 dashboard takes over verification.
+    public static let allModelTypes: [any PersistentModel.Type] = [
+        Heartbeat.self,
+        TokenSample.self,
+        DailyAggregate.self,
+        HourlyAggregate.self,
+        ProjectDailyAggregate.self,
+        RateLimitSample.self,
+        ExtraUsageSample.self,
+        SessionInfo.self,
+        ClaudeCodeMeta.self,
+        JSONLFileCursor.self,
+        ProjectPathAlias.self,
+        ProjectPathProbe.self,
+        ProjectBudget.self,
+        AlertRule.self,
+    ]
+
     public static func makeModelContainer() throws -> ModelContainer {
         let url = try storeURL()
         let configuration = ModelConfiguration(url: url)
-        // All targets (Pacer app, PacerDaemon, PacerWidgets) open the
-        // same on-disk container, so the schema list here must include
-        // every @Model type we want to read or write anywhere.
-        //
         // **Schema evolution:** Pacer relies on SwiftData's implicit
         // lightweight migration — safe for added optional fields and
         // added @Model types. Anything heavier (added NON-optional
@@ -102,24 +128,22 @@ public enum PacerStore {
         // `showFatalContainerError` alert in `PacerAppDelegate` is the
         // user-facing safety net, but the right fix is to add the
         // migration plan before shipping the schema change.
-        //
-        // Heartbeat lingers from M1 as our App Group sanity check; it
-        // gets removed when the M6 dashboard takes over verification.
         return try ModelContainer(
-            for: Heartbeat.self,
-            TokenSample.self,
-            DailyAggregate.self,
-            HourlyAggregate.self,
-            ProjectDailyAggregate.self,
-            RateLimitSample.self,
-            ExtraUsageSample.self,
-            SessionInfo.self,
-            ClaudeCodeMeta.self,
-            JSONLFileCursor.self,
-            ProjectPathAlias.self,
-            ProjectPathProbe.self,
-            ProjectBudget.self,
-            AlertRule.self,
+            for: Schema(allModelTypes),
+            configurations: configuration
+        )
+    }
+
+    /// In-memory container carrying the full schema. Never touches the
+    /// on-disk App Group store, so it's safe to spin up alongside a
+    /// running Pacer and seed with synthetic data — used by the
+    /// screenshot/demo mode (`PACER_SCREENSHOT_MODE`) to render the real
+    /// views against fake data without reading or mutating the user's
+    /// actual usage history.
+    public static func makeInMemoryContainer() throws -> ModelContainer {
+        let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+        return try ModelContainer(
+            for: Schema(allModelTypes),
             configurations: configuration
         )
     }

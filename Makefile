@@ -35,7 +35,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data perf-snapshot
+        logs logs-tail status open clean-data perf-snapshot screenshots
 
 # Default target — show help so a bare `make` doesn't do something
 # surprising.
@@ -65,6 +65,13 @@ build: verify  ## Alias for `verify`.
 
 test:  ## Run the PacerCore unit + ground-truth tests.
 	@cd PacerCore && swift test 2>&1 | tail -3
+
+screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. Headless, synthetic data, no focus steal — safe to run alongside a live Pacer. Re-run after any meaningful UI change.
+	@mkdir -p "$(REPO_ROOT)/docs/screenshots"
+	@bin="$(REPO_ROOT)/Build/Products/Debug/Pacer.app/Contents/MacOS/Pacer"; \
+	if [ ! -x "$$bin" ]; then echo "ERROR: build missing at $$bin (did 'make verify' succeed?)"; exit 1; fi; \
+	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin"; \
+	echo "Wrote PNGs to $(REPO_ROOT)/docs/screenshots/"
 
 app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate
