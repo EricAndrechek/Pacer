@@ -84,6 +84,23 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarLastChipsEmpty: Bool = false
 
     override init() {
+        // Screenshot/demo mode: never touch the user's real store, logs,
+        // or the single-instance gate (we may be running alongside a live
+        // Pacer). Use an in-memory container and let
+        // `applicationDidFinishLaunching` drive the capture run instead of
+        // the normal scan/menu-bar bring-up.
+        if ScreenshotMode.isActive {
+            PacerSettings.registerDefaults()
+            do {
+                container = try PacerStore.makeInMemoryContainer()
+            } catch {
+                Self.showFatalContainerError(error)
+            }
+            backgroundService = AppBackgroundService(container: container)
+            super.init()
+            return
+        }
+
         // Redirect stderr to a log file before anything else so the
         // ScanCoordinator/OAuthPoller log lines (via PacerCore.Log)
         // land somewhere readable. The retired daemon got its
@@ -237,6 +254,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Screenshot/demo mode: skip scan, menu bar, hotkey, and Dock
+        // policy. Seed synthetic data, capture the views off-screen, exit.
+        if ScreenshotMode.isActive {
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                await SampleCostCache.reload()
+                ScreenshotMode.seed(into: container)
+                await ScreenshotMode.captureAll(container: container)
+                exit(0)
+            }
+            return
+        }
+
         // Clear any "Pacer paused" banner left over from a previous
         // quit. We're alive again, the user is here — the "reopen
         // Pacer" prompt is moot. Also preempts a pending request that

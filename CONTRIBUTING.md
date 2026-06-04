@@ -22,11 +22,22 @@ Requirements: macOS 15+, Xcode 16+, and [`xcodegen`](https://github.com/yonsm/Xc
 you never edit `.xcodeproj` directly.
 
 ```sh
-make verify     # fast compile-only check (no signing, no install)
-make test       # PacerCore unit + ground-truth tests
-make install    # build + sign + notarize + install to /Applications, relaunch
-make help       # all targets
+make verify       # fast compile-only check (no signing, no install)
+make test         # PacerCore unit + ground-truth tests
+make install      # build + sign + notarize + install to /Applications, relaunch
+make screenshots  # regenerate the README screenshots (see below)
+make help         # all targets
 ```
+
+### Regenerating the README screenshots
+
+`make screenshots` rebuilds the app and runs it in a headless capture mode
+(`PACER_SCREENSHOT_MODE=1`, implemented in `App/Background/ScreenshotMode.swift`).
+It spins up an **in-memory** SwiftData store seeded with synthetic usage, renders
+the real views off-screen, and writes PNGs to `docs/screenshots/`. It never reads
+or touches your real `~/.claude` data or `pacer.sqlite`, steals no focus, and is
+safe to run while a real Pacer is open. **Re-run it after any meaningful UI
+change** so the README images don't drift from the app.
 
 Architecture, invariants, and the non-negotiable correctness/performance rules
 live in [`agents.md`](agents.md) — worth a skim before a non-trivial change.
