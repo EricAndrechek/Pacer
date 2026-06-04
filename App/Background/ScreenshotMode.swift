@@ -73,13 +73,14 @@ enum ScreenshotMode {
         )
 
         // Window scenes — framed like a real macOS window screenshot:
-        // rounded corners + a soft drop shadow on a transparent margin.
-        await capture("dashboard", width: 1280, height: 880, scheme: .light,
-                      card: true, container: container) { ContentView() }
-        await capture("dashboard-dark", width: 1280, height: 880, scheme: .dark,
-                      card: true, container: container) { ContentView() }
-        await capture("history", width: 1180, height: 860, scheme: .light,
-                      card: true, container: container) { HistoryView() }
+        // traffic-light titlebar, rounded corners, a soft drop shadow on
+        // a transparent margin.
+        await capture("dashboard", width: 1280, height: 860, scheme: .light,
+                      card: true, chrome: true, title: "Dashboard", container: container) { ContentView() }
+        await capture("dashboard-dark", width: 1280, height: 860, scheme: .dark,
+                      card: true, chrome: true, title: "Dashboard", container: container) { ContentView() }
+        await capture("history", width: 1180, height: 840, scheme: .light,
+                      card: true, chrome: true, title: "History", container: container) { HistoryView() }
 
         // Menu-bar popover — tightly cropped to its intrinsic size.
         await capture("menubar", width: 280, height: nil, scheme: .light,
@@ -118,18 +119,27 @@ enum ScreenshotMode {
         scheme: ColorScheme,
         card: Bool,
         cornerRadius: CGFloat = 14,
+        chrome: Bool = false,
+        title: String = "",
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
         let margin: CGFloat = card ? 56 : 28
-        let sized = content()
+        let inner = content()
             .modelContainer(container)
             .frame(width: width, height: height)
+
+        // Optional macOS window chrome — a titlebar with traffic-light
+        // buttons above the content, so window scenes read like a real
+        // app-window screenshot.
+        let framed: AnyView = chrome
+            ? AnyView(VStack(spacing: 0) { MacWindowChrome(title: title); inner })
+            : AnyView(inner)
 
         let decorated: AnyView
         if card {
             decorated = AnyView(
-                sized
+                framed
                     .background(Color(nsColor: .windowBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
@@ -139,22 +149,17 @@ enum ScreenshotMode {
                     .shadow(color: .black.opacity(0.28), radius: 24, x: 0, y: 12)
             )
         } else {
-            decorated = AnyView(sized)
+            decorated = framed
         }
         let root = AnyView(decorated.padding(margin).preferredColorScheme(scheme))
 
+        // Always size from the SwiftUI ideal size — accounts for the
+        // titlebar and any intrinsic (nil) dimension without per-scene math.
         let hosting = NSHostingView(rootView: root)
-        // Lay out at a generous temp frame so `fittingSize` resolves any
-        // intrinsic dimension, then settle on the final size.
-        let tempW = width.map { $0 + 2 * margin } ?? 4000
-        let tempH = height.map { $0 + 2 * margin } ?? 4000
-        hosting.frame = NSRect(x: 0, y: 0, width: tempW, height: tempH)
+        hosting.frame = NSRect(x: 0, y: 0, width: 5000, height: 5000)
         hosting.layoutSubtreeIfNeeded()
         let fit = hosting.fittingSize
-        let finalSize = CGSize(
-            width: width.map { $0 + 2 * margin } ?? ceil(fit.width),
-            height: height.map { $0 + 2 * margin } ?? ceil(fit.height)
-        )
+        let finalSize = CGSize(width: ceil(fit.width), height: ceil(fit.height))
         await snapshot(hosting, size: finalSize, name: name, scheme: scheme)
     }
 
@@ -299,28 +304,88 @@ extension ScreenshotMode {
         }
     }
 
-    /// Rate-limit trails for both windows. The latest 5h sits at 42%
-    /// (a touch behind pace) and the latest 7d at 61% (a touch ahead),
-    /// so the pace tiles show some color rather than a flat reading.
+    /// Rate-limit trails for both windows.
+    ///
+    /// The chart plots utilization across the whole cycle (cycleStart →
+    /// reset) against a straight 0→100% "ideal burn" reference line, so
+    /// the seed has to (a) span the full cycle starting at 0% at
+    /// `cycleStart`, and (b) tell a story worth showing. Utilization is
+    /// cumulative within a cycle, so it only ever climbs — "falling back
+    /// within pace" means going *flat* while the reference line keeps
+    /// rising. The keyframes below trace exactly that: a burst that
+    /// overshoots the pace line (ahead), a plateau that lets pace catch
+    /// up (back behind), then another climb — so the colour bands all
+    /// show up instead of a single straight diagonal.
+    ///
+    /// `now` lands partway through each cycle (≈60% of the 5-hour, ≈57%
+    /// of the 7-day), and the final keyframe is the value the hero
+    /// tiles / gauges / menu-bar readout display (42% and 61%).
     private static func seedRateLimits(_ ctx: ModelContext, now: Date) {
-        let sevenDayReset = now.addingTimeInterval(3 * 86_400)
-        for i in 0...16 {
-            let t = now.addingTimeInterval(-Double(16 - i) * 5.5 * 3_600)
-            let pct = 18.0 + Double(i) / 16.0 * 43.0
+        // 5-hour: calm open → burst overshoots pace → plateau drops it
+        // back behind → gentle final climb. Ends at 42% (pace ≈60% → a
+        // healthy "behind").
+        seedWindow(
+            ctx, window: "five_hour",
+            resetsAt: now.addingTimeInterval(2 * 3_600),
+            duration: 5 * 3_600, now: now,
+            interval: 5 * 60,
+            keyframes: [(0, 0), (0.08, 4), (0.18, 24), (0.27, 31),
+                        (0.37, 33), (0.48, 35), (0.55, 39), (0.60, 42)]
+        )
+        // 7-day: heavy first day pulls ahead → quiet midweek lets pace
+        // catch up → a recent burst pushes back ahead. Ends at 61%
+        // (pace ≈57% → a touch "ahead").
+        seedWindow(
+            ctx, window: "seven_day",
+            resetsAt: now.addingTimeInterval(3 * 86_400),
+            duration: 7 * 86_400, now: now,
+            interval: 90 * 60,
+            keyframes: [(0, 0), (0.10, 16), (0.22, 27), (0.33, 31),
+                        (0.45, 36), (0.52, 45), (0.55, 54), (0.57, 61)]
+        )
+    }
+
+    /// Emit `RateLimitSample`s every `interval` from the cycle start up
+    /// to `now`, following `keyframes` (cycle-fraction → utilization %)
+    /// with a little upward-only jitter so the polled line isn't a
+    /// perfectly straight interpolation. Clamped monotonic — usage never
+    /// dips inside a cycle.
+    private static func seedWindow(
+        _ ctx: ModelContext, window: String, resetsAt: Date, duration: TimeInterval,
+        now: Date, interval: TimeInterval, keyframes: [(Double, Double)]
+    ) {
+        let cycleStart = resetsAt.addingTimeInterval(-duration)
+        let nowFrac = now.timeIntervalSince(cycleStart) / duration
+        var t = cycleStart
+        var last = 0.0
+        var i = 0
+        while t <= now + 1 {
+            let frac = min(nowFrac, max(0, t.timeIntervalSince(cycleStart) / duration))
+            var pct = interpolateKeyframes(keyframes, at: frac)
+            if frac > 0, frac < nowFrac { pct += noise(i &* 17) * 0.8 }
+            pct = max(last, min(99, pct))
+            last = pct
             ctx.insert(RateLimitSample(
-                sampledAt: t, window: "seven_day", usedPercentage: pct,
-                resetsAt: sevenDayReset, source: "oauth"
+                sampledAt: t, window: window, usedPercentage: pct,
+                resetsAt: resetsAt, source: "oauth"
             ))
+            t = t.addingTimeInterval(interval)
+            i += 1
         }
-        let fiveHourReset = now.addingTimeInterval(2 * 3_600)
-        for i in 0...12 {
-            let t = now.addingTimeInterval(-Double(12 - i) * 14 * 60)
-            let pct = 6.0 + Double(i) / 12.0 * 36.0
-            ctx.insert(RateLimitSample(
-                sampledAt: t, window: "five_hour", usedPercentage: pct,
-                resetsAt: fiveHourReset, source: "oauth"
-            ))
+    }
+
+    /// Piecewise-linear lookup over `(x, y)` keyframes sorted by `x`.
+    private static func interpolateKeyframes(_ kf: [(Double, Double)], at x: Double) -> Double {
+        guard let first = kf.first, let lastKf = kf.last else { return 0 }
+        if x <= first.0 { return first.1 }
+        if x >= lastKf.0 { return lastKf.1 }
+        for j in 1..<kf.count where x <= kf[j].0 {
+            let (x0, y0) = kf[j - 1]
+            let (x1, y1) = kf[j]
+            let f = (x1 == x0) ? 0 : (x - x0) / (x1 - x0)
+            return y0 + (y1 - y0) * f
         }
+        return lastKf.1
     }
 
     /// A handful of sessions across recent projects; the first is "active"
@@ -422,6 +487,40 @@ extension ScreenshotMode {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.string(from: date)
+    }
+}
+
+/// A macOS window titlebar — traffic-light buttons at the left, a faint
+/// centered window title — prepended to window scenes so they read like a
+/// real app-window screenshot.
+private struct MacWindowChrome: View {
+    let title: String
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 8) {
+                dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
+                dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
+                dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
+                Spacer()
+            }
+            if !title.isEmpty {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity)
+        .frame(height: 40)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
+        }
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle().fill(color).frame(width: 12, height: 12)
     }
 }
 

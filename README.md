@@ -14,40 +14,43 @@ model, by day. It sits quietly in your menu bar, keeps itself up to date, and
 keeps all of your data on your own Mac.
 
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" width="820"
+  <img src="docs/screenshots/dashboard.png" width="760"
        alt="Pacer dashboard — today's cost, 5-hour and 7-day rate-limit pacing, live burn rate, and a projected end-of-day total">
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/statusbar.png" height="62"
-       alt="Pacer's menu-bar readout — gauge icon with 5-hour %, 7-day %, and today's cost">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/screenshots/menubar.png" width="300"
-       alt="Pacer menu-bar popover — 5-hour and 7-day pace gauges with reset times and today's cost">
-</p>
+<table align="center">
+  <tr>
+    <td align="center" valign="middle">
+      <img src="docs/screenshots/statusbar.png" width="240"
+           alt="Pacer's menu-bar readout — gauge icon with 5-hour %, 7-day %, and today's cost">
+      <br><sub><b>Menu-bar readout</b></sub>
+    </td>
+    <td align="center" valign="middle">
+      <img src="docs/screenshots/menubar.png" width="240"
+           alt="Pacer menu-bar popover — 5-hour and 7-day pace gauges with reset times and today's cost">
+      <br><sub><b>Click-down popover</b></sub>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
-  <img src="docs/screenshots/widgets.png" width="560"
+  <img src="docs/screenshots/widgets.png" width="600"
        alt="Pacer home-screen and Notification Center widgets — today's cost, rate-limit gauges, live session, daily cost chart, and top projects">
-  <br>
-  <sub><em>Menu-bar readout · click-down popover · home-screen widgets</em></sub>
+  <br><sub><b>Home-screen &amp; Notification Center widgets</b></sub>
 </p>
 
 <details>
-<summary align="center"><strong>More screenshots</strong> — six-month history & dark mode</summary>
+<summary><strong>More screenshots</strong> — six-month history &amp; dark mode</summary>
 <br>
 <p align="center">
-  <img src="docs/screenshots/history.png" width="820"
+  <img src="docs/screenshots/history.png" width="760"
        alt="Pacer history — lifetime totals, a six-month GitHub-style activity heatmap, and monthly spend">
+  <br><sub><b>History — lifetime totals, six-month heatmap, monthly spend</b></sub>
 </p>
 <p align="center">
-  <img src="docs/screenshots/dashboard-dark.png" width="700"
+  <img src="docs/screenshots/dashboard-dark.png" width="600"
        alt="Pacer dashboard in dark mode">
-  &nbsp;
-  <img src="docs/screenshots/menubar-dark.png" width="240"
-       alt="Pacer menu-bar popover in dark mode">
-  <br>
-  <sub><em>Light and dark, throughout.</em></sub>
+  <br><sub><b>Dark mode, throughout</b></sub>
 </p>
 </details>
 
@@ -179,10 +182,11 @@ The Xcode project is generated from `project.yml` — never edit the `.xcodeproj
 directly.
 
 ```sh
-make verify     # unsigned compile-only check (no Apple account needed)
-make test       # PacerCore unit + ground-truth tests
-make install    # signed + notarized build → /Applications/Pacer.app
-make help       # everything else
+make verify       # unsigned compile-only check (no Apple account needed)
+make test         # PacerCore unit + ground-truth tests
+make install      # signed + notarized build → /Applications/Pacer.app
+make screenshots  # regenerate the README screenshots (see docs/screenshots.md)
+make help         # everything else
 ```
 
 `make verify` and `make test` need no signing setup and are all that CI runs.
@@ -192,8 +196,8 @@ See [CONTRIBUTING → "Building and running it yourself"](CONTRIBUTING.md#buildi
 for the full story (and why an App Group ties signing to your Team ID).
 
 [`AGENTS.md`](AGENTS.md) is the deep architectural guide (performance invariants,
-the SwiftData schema, the recomputer pattern); [`docs/`](docs) covers the design
-and perf-tuning work.
+the SwiftData schema, the recomputer pattern); [`docs/`](docs) covers the design,
+perf-tuning, [screenshot generation](docs/screenshots.md), and release process.
 
 ### Releasing
 
