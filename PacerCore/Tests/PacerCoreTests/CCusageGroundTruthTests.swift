@@ -15,18 +15,30 @@ import Testing
 /// and isn't comparable. (See AGENTS.md "Non-negotiable correctness
 /// rules" §5.)
 ///
-/// **Skip semantics**: the test reads the user's real
-/// `~/.claude/projects/` and the captured ccusage snapshot. Both must
-/// be present locally; on a fresh checkout or a CI box without these
-/// fixtures, the test silently returns. Validates correctness on the
-/// developer's box without breaking elsewhere.
+/// **Opt-in.** These captured-snapshot tests are gated behind
+/// `PACER_RUN_CCUSAGE_SNAPSHOT_TEST=1` and skip otherwise. They compare a
+/// *live* scan of the developer's `~/.claude` against a *frozen* ccusage
+/// snapshot — which only holds while the snapshot matches what's on disk.
+/// In practice Claude Code prunes/rewrites old session files over time,
+/// so the live data drifts below the months-old snapshot and these fail
+/// even though Pacer is correct (Pacer's own DB keeps the original
+/// numbers; the snapshot and the on-disk files are what move). The
+/// earlier assumption in this file — "JSONL data for past dates is
+/// immutable on disk" — turned out false, which is why the gate exists.
 ///
-/// The captured snapshot is frozen in time. The user can keep using
-/// Claude Code (adding new dates beyond the snapshot range) without
-/// breaking this test — we only compare dates that appear in BOTH
-/// sources. JSONL data for dates already past is immutable on disk
-/// (sessions don't retroactively rewrite their own files), so per-day
-/// totals for snapshot-covered dates are stable.
+/// Run them deliberately, right after recapturing a fresh snapshot, when
+/// you want to verify parity with the reference tool:
+///
+///     bun x ccusage daily --json > docs/research/ccusage-outputs/daily.json
+///     PACER_RUN_CCUSAGE_SNAPSHOT_TEST=1 swift test
+///
+/// The always-on, deterministic correctness gate lives in
+/// `JSONLScannerFixtureTests` (synthetic fixture, hand-computed totals,
+/// no live data) — that's what protects the parser/dedup/cache-split
+/// rules in CI and on every box.
+private func capturedSnapshotTestsEnabled() -> Bool {
+    ProcessInfo.processInfo.environment["PACER_RUN_CCUSAGE_SNAPSHOT_TEST"] == "1"
+}
 
 private struct CcusageDay: Decodable {
     let date: String
@@ -66,6 +78,7 @@ private func locateCcusageSnapshot() -> URL? {
 }
 
 @Test func scannerTotalsMatchCapturedCcusageSnapshot() async throws {
+    guard capturedSnapshotTestsEnabled() else { return }
     guard let snapshotURL = locateCcusageSnapshot() else {
         // Captured outputs not present in this checkout — skip silently.
         // Comment from the test author: this means the dev didn't pull
@@ -329,6 +342,7 @@ private actor CostCollector {
 /// surface that case as a soft divergence (logged, not failed) and
 /// require exact match on days without 1h cache tokens.
 @Test func dailyCostsMatchCapturedCcusageSnapshot() async throws {
+    guard capturedSnapshotTestsEnabled() else { return }
     guard let snapshotURL = locateCcusageSnapshot() else { return }
     let snapshot = try JSONDecoder().decode(
         CcusageSnapshot.self,
@@ -406,6 +420,7 @@ private actor CostCollector {
 ///     tokens that day; logged-only divergence otherwise (see the
 ///     daily-cost test for the rationale).
 @Test func perModelTotalsMatchCapturedCcusageSnapshot() async throws {
+    guard capturedSnapshotTestsEnabled() else { return }
     guard let snapshotURL = locateCcusageSnapshot() else { return }
     let snapshot = try JSONDecoder().decode(
         CcusageSnapshot.self,
