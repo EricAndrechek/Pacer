@@ -1,20 +1,29 @@
 import SwiftUI
+import Sparkle
 import PacerUI
 
 /// Custom "About Pacer" window. Replaces `orderFrontStandardAboutPanel`
 /// — the system panel renders a bare icon + version + credits blob with
-/// no affordance to reach the project, file a bug, or star the repo,
-/// which for an open-source utility is the whole point of an About box.
+/// no affordance to reach the project, file a bug, sponsor it, or check
+/// for updates, which for an open-source utility is the whole point of
+/// an About box.
 ///
 /// Shown via a singleton `Window(id: "about")` scene in `PacerApp`, so
 /// the menu item reuses the one window instead of stacking panels. Uses
 /// the shared `PacerUI` design tokens so it reads as the same surface as
 /// the dashboard rather than a one-off.
 struct AboutView: View {
+    /// Sparkle updater, threaded through from `PacerApp` so the
+    /// "Check for Updates…" action drives the same updater the menu-bar
+    /// item uses (a single check-in-flight state across both entry
+    /// points).
+    let updater: SPUUpdater
+
     // Project links. Hard-coded rather than read from a plist: these are
     // the canonical home for the open-source project and don't vary per
     // build the way the version strings do.
     private static let repoURL = URL(string: "https://github.com/EricAndrechek/Pacer")!
+    private static let sponsorURL = URL(string: "https://github.com/sponsors/EricAndrechek")!
     private static let issuesURL = URL(string: "https://github.com/EricAndrechek/Pacer/issues")!
     private static let releasesURL = URL(string: "https://github.com/EricAndrechek/Pacer/releases")!
 
@@ -30,7 +39,7 @@ struct AboutView: View {
     }
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             // Logo. The asset already carries the purple→blue gradient
             // badge, so it needs no extra chrome beyond a soft shadow to
             // lift it off the window background.
@@ -47,6 +56,15 @@ struct AboutView: View {
                     .font(.callout)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+                // Reuses the menu item's Sparkle integration (KVO-driven
+                // disable while a check is in flight). `.link` style
+                // renders it as a quiet hyperlink right under the version
+                // — where macOS users look for it — rather than a heavy
+                // push button.
+                CheckForUpdatesView(updater: updater)
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .padding(.top, 1)
             }
 
             Text("Native macOS tracking for Claude Code usage.")
@@ -56,17 +74,18 @@ struct AboutView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 280)
 
-            // Project links. A star nudge first (the ask), then the two
-            // destinations a user actually reaches for from an About box.
-            HStack(spacing: 10) {
+            // Project links. Star + Donate (the support pair) lead, then
+            // the two destinations a user reaches for from an About box.
+            HStack(spacing: 8) {
                 AboutLinkButton(title: "Star", systemImage: "star.fill", url: Self.repoURL)
+                AboutLinkButton(title: "Donate", systemImage: "heart.fill", url: Self.sponsorURL)
                 AboutLinkButton(title: "Issues", systemImage: "ladybug.fill", url: Self.issuesURL)
                 AboutLinkButton(title: "Releases", systemImage: "shippingbox.fill", url: Self.releasesURL)
             }
             .padding(.top, 2)
 
             Divider()
-                .frame(width: 220)
+                .frame(width: 240)
                 .padding(.vertical, 2)
 
             VStack(spacing: 6) {
@@ -85,7 +104,7 @@ struct AboutView: View {
         // that the `.hiddenTitleBar` window style leaves overlaid on the
         // content's top-left corner.
         .padding(.top, 38)
-        .padding(.horizontal, 40)
+        .padding(.horizontal, 36)
         .padding(.bottom, 32)
         .frame(width: 400)
         .background(.background)
@@ -97,7 +116,7 @@ struct AboutView: View {
 /// A compact bordered link with an SF Symbol over its label. Wraps
 /// `Link` so it opens the destination in the user's browser and inherits
 /// the standard hover/press states, while a `VStack` icon-over-text
-/// layout keeps the three project links narrow enough to sit in one row.
+/// layout keeps the four project links narrow enough to sit in one row.
 private struct AboutLinkButton: View {
     let title: String
     let systemImage: String
@@ -111,7 +130,7 @@ private struct AboutLinkButton: View {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
             }
-            .frame(width: 76, height: 54)
+            .frame(width: 72, height: 54)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

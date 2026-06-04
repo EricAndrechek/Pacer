@@ -201,7 +201,7 @@ struct PacerApp: App {
         // fixed layout). Replaces the bare `orderFrontStandardAboutPanel`
         // — see AboutView for the rationale.
         Window("About Pacer", id: "about") {
-            AboutView()
+            AboutView(updater: updater.updater)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
