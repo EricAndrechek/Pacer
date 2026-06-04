@@ -13,6 +13,12 @@ import SwiftUI
 final class PacerUpdater: ObservableObject {
     let controller: SPUStandardUpdaterController
 
+    // User-driver delegate that supplies a custom version displayer (see
+    // PacerUserDriverDelegate). Retained here because `SPUStandardUserDriver`
+    // holds its delegate weakly. Applies to every build, not just Debug:
+    // it controls the version text in Sparkle's standard update dialogs.
+    private let uiDelegate = PacerUserDriverDelegate()
+
     #if DEBUG
     // Retained for the updater's lifetime — `SPUUpdater` holds its
     // delegate weakly, so without this strong reference the delegate
@@ -25,6 +31,12 @@ final class PacerUpdater: ObservableObject {
         // recurrence using the feed URL and interval declared in
         // Info.plist (SUFeedURL, SUScheduledCheckInterval). No extra
         // wiring needed here.
+        //
+        // `uiDelegate` is a stored property with an inline initializer, so
+        // it's set before `init` runs — but Swift still forbids reading
+        // `self.uiDelegate` until every stored property (incl. `controller`)
+        // is assigned. Capture it in a local to pass into the controller.
+        let userDriverDelegate = uiDelegate
         #if DEBUG
         // Local Debug builds: install a delegate that vetoes automatic
         // (launch + scheduled) update checks. See DevBuildUpdaterDelegate.
@@ -36,18 +48,64 @@ final class PacerUpdater: ObservableObject {
         self.controller = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: delegate,
-            userDriverDelegate: nil
+            userDriverDelegate: userDriverDelegate
         )
         #else
         self.controller = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
-            userDriverDelegate: nil
+            userDriverDelegate: userDriverDelegate
         )
         #endif
     }
 
     var updater: SPUUpdater { controller.updater }
+}
+
+/// Controls the version text Sparkle prints in its standard update
+/// dialogs ("…is now available—you have…", "…is currently the newest
+/// version available").
+///
+/// Sparkle's default `SUVersionDisplay` disambiguates two builds that
+/// share a `CFBundleShortVersionString` by appending the differing
+/// `CFBundleVersion` in parentheses — which, because Pacer's build
+/// number is a unix timestamp, surfaced as e.g. "Pacer 0.1.1
+/// (1780503333)". (It only appears when the marketing versions collide,
+/// i.e. a dev build checking against a same-version release; a normal
+/// 0.1.1 → 0.2.0 update never triggers it. But it's ugly when it shows.)
+///
+/// Returning the marketing version unchanged from
+/// `formatBundleDisplayVersion(…)` suppresses the appended build number;
+/// leaving the update-side formatter unimplemented makes Sparkle fall
+/// back to the appcast's plain `sparkle:shortVersionString` there too.
+/// This mirrors the About window, which also shows only the marketing
+/// version (with the build on hover).
+private final class PacerUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate, SUVersionDisplay {
+    func standardUserDriverRequestsVersionDisplayer() -> (any SUVersionDisplay)? {
+        self
+    }
+
+    // Required by SUVersionDisplay. Used for the "…is now available—you
+    // have…" alert. Return the update's marketing version and leave the
+    // bundle's display version (passed in) untouched — so neither side
+    // gets the build number appended.
+    func formatUpdateVersion(
+        fromUpdate update: SUAppcastItem,
+        andBundleDisplayVersion inOutBundleDisplayVersion: AutoreleasingUnsafeMutablePointer<NSString>,
+        withBundleVersion bundleVersion: String
+    ) -> String {
+        update.displayVersionString
+    }
+
+    // Optional. Used for the "…is currently the newest version available"
+    // (no-update) message. Return the marketing version unchanged.
+    func formatBundleDisplayVersion(
+        _ bundleDisplayVersion: String,
+        withBundleVersion bundleVersion: String,
+        matchingUpdate: SUAppcastItem?
+    ) -> String {
+        bundleDisplayVersion
+    }
 }
 
 #if DEBUG
