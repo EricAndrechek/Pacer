@@ -498,8 +498,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // so we can resize the NSStatusItem to fit.
         let host = SizingHostingView(
             rootView: AnyView(
-                MenuBarLabel()
-                    .modelContainer(container)
+                DayKeyedContent {
+                    MenuBarLabel()
+                        .modelContainer(self.container)
+                }
             )
         )
         host.translatesAutoresizingMaskIntoConstraints = false
@@ -576,8 +578,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // already current.
         let contentController = NSHostingController(
             rootView: AnyView(
-                MenuStatusContent()
-                    .modelContainer(container)
+                DayKeyedContent {
+                    MenuStatusContent()
+                        .modelContainer(self.container)
+                }
             )
         )
         // NSMenuItem.view doesn't auto-size — the menu reads the
