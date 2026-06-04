@@ -64,28 +64,27 @@ enum ScreenshotMode {
         // directly, so other windows are irrelevant to the output.
         for window in NSApp.windows { window.orderOut(nil) }
 
-        // App-shell scenes (sidebar + NavigationSplitView) are rendered
-        // light-only: SwiftUI draws the nav large-title inline in a
-        // light-gray that's invisible on the light background but ghosts
-        // over the page header on a dark background. The menu popover —
-        // which has no nav chrome — carries the dark-mode showcase.
-        await render(
-            "dashboard",
-            size: CGSize(width: 1280, height: 880),
-            scheme: .light, container: container
-        ) {
-            ContentView()
-        }
-        await render(
-            "history",
-            size: CGSize(width: 1180, height: 860),
-            scheme: .light, container: container
-        ) {
-            HistoryView()
-        }
-
+        // Each scene in both appearances. The opaque background applied
+        // in `render` is what makes dark mode work: a SwiftUI ScrollView's
+        // own background is clear, so the dark-mode (white) page-title text
+        // would otherwise flatten onto the transparent backing and survive
+        // only as its grey anti-alias fringe — the "ghost" header.
         for scheme in [ColorScheme.light, .dark] {
             let suffix = scheme == .dark ? "-dark" : ""
+            await render(
+                "dashboard\(suffix)",
+                size: CGSize(width: 1280, height: 880),
+                scheme: scheme, container: container
+            ) {
+                ContentView()
+            }
+            await render(
+                "history\(suffix)",
+                size: CGSize(width: 1180, height: 860),
+                scheme: scheme, container: container
+            ) {
+                HistoryView()
+            }
             await render(
                 "menubar\(suffix)",
                 size: CGSize(width: 360, height: 340),
@@ -109,6 +108,12 @@ enum ScreenshotMode {
     ) async {
         let root = AnyView(
             content()
+                // Opaque window-colored backing behind everything so
+                // dark-mode white text doesn't flatten onto a transparent
+                // (→ white) background and ghost. Matches the real app
+                // window background, so it also improves card separation
+                // in light mode.
+                .background(Color(nsColor: .windowBackgroundColor))
                 .frame(width: size.width, height: size.height)
                 .preferredColorScheme(scheme)
                 .modelContainer(container)

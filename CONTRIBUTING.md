@@ -34,10 +34,10 @@ make help         # all targets
 `make screenshots` rebuilds the app and runs it in a headless capture mode
 (`PACER_SCREENSHOT_MODE=1`, implemented in `App/Background/ScreenshotMode.swift`).
 It spins up an **in-memory** SwiftData store seeded with synthetic usage, renders
-the real views off-screen, and writes PNGs to `docs/screenshots/`. It never reads
-or touches your real `~/.claude` data or `pacer.sqlite`, steals no focus, and is
-safe to run while a real Pacer is open. **Re-run it after any meaningful UI
-change** so the README images don't drift from the app.
+the real views off-screen (light and dark), and writes PNGs to `docs/screenshots/`.
+It never reads or touches your real `~/.claude` data or `pacer.sqlite`, steals no
+focus, and is safe to run while a real Pacer is open. **Re-run it after any
+meaningful UI change** so the README images don't drift from the app.
 
 Architecture, invariants, and the non-negotiable correctness/performance rules
 live in [`agents.md`](agents.md) — worth a skim before a non-trivial change.
