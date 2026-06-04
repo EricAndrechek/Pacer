@@ -52,10 +52,14 @@ struct AboutView: View {
             VStack(spacing: 5) {
                 Text("Pacer")
                     .font(.system(size: 30, weight: .bold, design: .rounded))
-                Text("Version \(version) (\(build))")
+                // Only the marketing version is shown; the build number
+                // (a unix-timestamp, meaningful only to Sparkle's update
+                // ordering) is tucked into a hover tooltip so it's still
+                // available for bug reports without cluttering the line.
+                Text("Version \(version)")
                     .font(.callout)
-                    .monospacedDigit()
                     .foregroundStyle(.secondary)
+                    .help("Build \(build)")
                 // Reuses the menu item's Sparkle integration (KVO-driven
                 // disable while a check is in flight). `.link` style
                 // renders it as a quiet hyperlink right under the version

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import SwiftData
 
 public enum PacerStoreError: Error, Sendable {
@@ -6,11 +7,39 @@ public enum PacerStoreError: Error, Sendable {
 }
 
 public enum PacerStore {
-    /// TeamID-prefixed App Group identifier. The legacy `group.` prefix
+    /// The maintainer's canonical TeamID-prefixed App Group identifier.
+    /// Used as the fallback when the running binary's entitlement can't
+    /// be read (e.g. the unit-test runner) and as the value the
+    /// published build is signed with. The legacy `group.` prefix
     /// triggers the macOS Sequoia App Management prompt on every launch;
-    /// `<TeamID>.<bundleid>` does not. Must match the entitlements files.
-    /// See `docs/research/tcc-app-management.md`.
-    public static let appGroupIdentifier = "YZXWMJ5VBY.com.ericandrechek.pacer"
+    /// `<TeamID>.<bundleid>` does not. See `docs/research/tcc-app-management.md`.
+    static let defaultAppGroupIdentifier = "YZXWMJ5VBY.com.ericandrechek.pacer"
+
+    /// Live App Group identifier, derived once from the running binary's
+    /// `com.apple.security.application-groups` entitlement. Deriving it
+    /// (rather than hardcoding the Team ID) means a contributor who
+    /// builds under their *own* Apple Developer account — `dev-install.sh`
+    /// templates the entitlements with their Team ID — gets a matching
+    /// `<TheirTeamID>.com.ericandrechek.pacer` container with no source
+    /// edits. Falls back to `defaultAppGroupIdentifier` when no
+    /// entitlement is present. Must match the entitlements files.
+    /// See CONTRIBUTING "Building and running it yourself".
+    public static let appGroupIdentifier: String = resolveAppGroupIdentifier()
+
+    private static func resolveAppGroupIdentifier() -> String {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                task, "com.apple.security.application-groups" as CFString, nil
+              ),
+              let groups = value as? [String],
+              !groups.isEmpty
+        else {
+            return defaultAppGroupIdentifier
+        }
+        // Pick the Pacer group by suffix so an unrelated group added to
+        // the entitlements later wouldn't silently win the `first` slot.
+        return groups.first { $0.hasSuffix(".com.ericandrechek.pacer") } ?? groups[0]
+    }
     /// Pre-rename identifier. Only ever used by `bin/dev-install.sh` to
     /// copy SwiftData + UserDefaults from the legacy Group Container on
     /// upgrade. No first-release end-user has data here.

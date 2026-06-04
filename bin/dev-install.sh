@@ -43,6 +43,52 @@ echo "    repo:   ${REPO_ROOT}"
 echo "    target: ${INSTALLED_APP}"
 echo "    logs:   ${LOG_DIR}"
 
+# ---------------------------------------------------------------------------
+# Signing configuration. Override via env to build under your OWN Apple
+# Developer account — see CONTRIBUTING "Building and running it yourself".
+#
+#   PACER_SIGN_IDENTITY   codesign identity. Default: the maintainer's
+#                         Developer ID. Set to your own
+#                         "Developer ID Application: <Name> (<TEAMID>)".
+#   PACER_TEAM_ID         Team ID used to prefix the App Group in the
+#                         entitlements. Auto-derived from the "(TEAMID)"
+#                         suffix of PACER_SIGN_IDENTITY when unset.
+#   PACER_NOTARY_PROFILE  notarytool keychain profile. Default
+#                         "pacer-notarization". Notarization only silences
+#                         the TCC App-Management prompt / lets the build run
+#                         on other Macs — set PACER_DEV_SKIP_NOTARIZE=1 to
+#                         skip it for a local-only build.
+# ---------------------------------------------------------------------------
+DEFAULT_TEAM_ID="YZXWMJ5VBY"
+PACER_SIGN_IDENTITY="${PACER_SIGN_IDENTITY:-Developer ID Application: Eric Andrechek (${DEFAULT_TEAM_ID})}"
+PACER_NOTARY_PROFILE="${PACER_NOTARY_PROFILE:-pacer-notarization}"
+if [ -z "${PACER_TEAM_ID:-}" ]; then
+    # Parse the 10-char Team ID out of "...(TEAMID)"; fall back to default.
+    PACER_TEAM_ID="$(printf '%s' "${PACER_SIGN_IDENTITY}" | sed -nE 's/.*\(([A-Z0-9]{10})\)$/\1/p')"
+    PACER_TEAM_ID="${PACER_TEAM_ID:-${DEFAULT_TEAM_ID}}"
+fi
+echo "    signing: ${PACER_SIGN_IDENTITY}"
+echo "    team:    ${PACER_TEAM_ID}"
+
+# Fail early with an actionable message if the identity isn't in the
+# keychain — otherwise codesign fails deeper in the script with a terser one.
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "${PACER_SIGN_IDENTITY}"; then
+    echo
+    echo "ERROR: signing identity not found in your keychain:"
+    echo "    ${PACER_SIGN_IDENTITY}"
+    echo
+    echo "To build under your own Apple Developer account, run:"
+    echo "    PACER_SIGN_IDENTITY=\"Developer ID Application: <Your Name> (<TEAMID>)\" make install"
+    echo "  The Team ID in parentheses is auto-detected and used to prefix the"
+    echo "  App Group, so the app + widget share a container under your account."
+    echo
+    echo "List your available identities with:"
+    echo "    security find-identity -v -p codesigning"
+    echo
+    echo "See CONTRIBUTING.md -> \"Building and running it yourself\"."
+    exit 1
+fi
+
 # 1. Regenerate the Xcode project from project.yml so any source
 #    additions (new files in App/Views/, new PacerCore modules) get
 #    picked up. Skipped if no project.yml change since the last
@@ -100,9 +146,29 @@ echo "    built: ${BUILD_OUTPUT}"
 #     populated csreq and the grant persists across launches. Signing
 #     inside-out (deepest first) is required so each enclosing bundle's
 #     signature seals the inner ones.
-SIGN_IDENTITY="Developer ID Application: Eric Andrechek (YZXWMJ5VBY)"
+SIGN_IDENTITY="${PACER_SIGN_IDENTITY}"
 APP_ENTITLEMENTS="${REPO_ROOT}/App/Pacer.entitlements"
 WIDGETS_ENTITLEMENTS="${REPO_ROOT}/Widgets/PacerWidgets.entitlements"
+
+# When building under a non-default Team ID, the App Group string in the
+# entitlements must be re-prefixed to that team: macOS resolves the group
+# container only when the group's <TeamID> prefix matches the signing
+# cert's team. PacerStore derives the matching identifier from the signed
+# entitlement at runtime, so no source edits are needed — we just feed
+# codesign templated entitlements. Write them to temp copies so the
+# tracked .entitlements files stay clean.
+APP_ENTITLEMENTS_SIGN="${APP_ENTITLEMENTS}"
+WIDGETS_ENTITLEMENTS_SIGN="${WIDGETS_ENTITLEMENTS}"
+if [ "${PACER_TEAM_ID}" != "${DEFAULT_TEAM_ID}" ]; then
+    ENT_TMP="$(mktemp -d)"
+    APP_ENTITLEMENTS_SIGN="${ENT_TMP}/Pacer.entitlements"
+    WIDGETS_ENTITLEMENTS_SIGN="${ENT_TMP}/PacerWidgets.entitlements"
+    sed "s/${DEFAULT_TEAM_ID}\.com\.ericandrechek\.pacer/${PACER_TEAM_ID}.com.ericandrechek.pacer/g" \
+        "${APP_ENTITLEMENTS}" > "${APP_ENTITLEMENTS_SIGN}"
+    sed "s/${DEFAULT_TEAM_ID}\.com\.ericandrechek\.pacer/${PACER_TEAM_ID}.com.ericandrechek.pacer/g" \
+        "${WIDGETS_ENTITLEMENTS}" > "${WIDGETS_ENTITLEMENTS_SIGN}"
+    echo "==> Templated App Group prefix -> ${PACER_TEAM_ID}.com.ericandrechek.pacer"
+fi
 echo
 echo "==> Signing with ${SIGN_IDENTITY}"
 
@@ -166,11 +232,11 @@ for bundle in \
 done
 
 # Widget extension binary, then the .appex itself.
-sign "${WIDGETS_ENTITLEMENTS}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
-sign "${WIDGETS_ENTITLEMENTS}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex"
+sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
+sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex"
 
 # Outer app bundle last, so its signature covers everything inside.
-sign "${APP_ENTITLEMENTS}" "${BUILD_OUTPUT}"
+sign "${APP_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}"
 
 # Verify the whole bundle is consistent before installing.
 codesign --verify --deep --strict --verbose=2 "${BUILD_OUTPUT}" 2>&1 \
@@ -188,7 +254,7 @@ echo "    signed."
 # is enough) but will trip TCC's "App Management" prompt on every
 # launch and won't open on other machines. The NEXT non-skip install
 # re-notarizes and clears the prompt.
-NOTARY_PROFILE="pacer-notarization"
+NOTARY_PROFILE="${PACER_NOTARY_PROFILE}"
 NOTARY_ZIP="$(mktemp -d)/Pacer.zip"
 
 if [ "${PACER_DEV_SKIP_NOTARIZE:-0}" = "1" ]; then
