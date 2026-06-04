@@ -258,13 +258,42 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
+        // Key the active destination on the current local day. Reading
+        // `PacerToday.shared.key` here (tracked by `@Observable`) makes
+        // `detail` re-evaluate at the midnight rollover; the `.id` then
+        // rebuilds the destination — re-running every card's `init()`
+        // against a fresh `Date()` so date-pinned `@Query` predicates
+        // stop matching yesterday. This is the automatic equivalent of
+        // the manual "switch tabs and back" that users relied on.
+        let dayKey = PacerToday.shared.key
         switch selection.wrappedValue {
-        case .dashboard: DashboardView()
-        case .history:   HistoryView()
-        case .projects:  ProjectsView()
-        case .models:    ModelsView()
+        case .dashboard: DashboardView().id(dayKey)
+        case .history:   HistoryView().id(dayKey)
+        case .projects:  ProjectsView().id(dayKey)
+        case .models:    ModelsView().id(dayKey)
         case .settings:  SettingsView()
         }
+    }
+}
+
+// MARK: - Day-rollover keying
+
+/// Rebuilds `content` whenever the local day rolls over.
+///
+/// Date-pinned `@Query` predicates (`$0.date == <today captured in
+/// init>`) freeze at the day the host view was last initialized. For
+/// long-lived hosts that never get torn down — the menu-bar status
+/// item's retained `NSHostingController`s — that means today's rows
+/// stop matching after midnight and the chips look stale until the app
+/// restarts. Reading `PacerToday.shared.key` in `body` (tracked by
+/// `@Observable`) re-evaluates this view on rollover; the changed `.id`
+/// then rebuilds `content`, re-running its `init()` against a fresh
+/// `Date()`. The main window achieves the same effect via the `.id` on
+/// `ContentView.detail`.
+struct DayKeyedContent<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        content().id(PacerToday.shared.key)
     }
 }
 
