@@ -14,29 +14,42 @@ model, by day. It sits quietly in your menu bar, keeps itself up to date, and
 keeps all of your data on your own Mac.
 
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" width="840"
+  <img src="docs/screenshots/dashboard.png" width="820"
        alt="Pacer dashboard — today's cost, 5-hour and 7-day rate-limit pacing, live burn rate, and a projected end-of-day total">
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/statusbar.png" height="62"
+       alt="Pacer's menu-bar readout — gauge icon with 5-hour %, 7-day %, and today's cost">
+  &nbsp;&nbsp;&nbsp;
   <img src="docs/screenshots/menubar.png" width="300"
        alt="Pacer menu-bar popover — 5-hour and 7-day pace gauges with reset times and today's cost">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/menubar-dark.png" width="300"
-       alt="Pacer menu-bar popover in dark mode">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/history.png" width="840"
+  <img src="docs/screenshots/widgets.png" width="560"
+       alt="Pacer home-screen and Notification Center widgets — today's cost, rate-limit gauges, live session, daily cost chart, and top projects">
+  <br>
+  <sub><em>Menu-bar readout · click-down popover · home-screen widgets</em></sub>
+</p>
+
+<details>
+<summary align="center"><strong>More screenshots</strong> — six-month history & dark mode</summary>
+<br>
+<p align="center">
+  <img src="docs/screenshots/history.png" width="820"
        alt="Pacer history — lifetime totals, a six-month GitHub-style activity heatmap, and monthly spend">
 </p>
-
 <p align="center">
-  <img src="docs/screenshots/dashboard-dark.png" width="840"
+  <img src="docs/screenshots/dashboard-dark.png" width="700"
        alt="Pacer dashboard in dark mode">
+  &nbsp;
+  <img src="docs/screenshots/menubar-dark.png" width="240"
+       alt="Pacer menu-bar popover in dark mode">
   <br>
   <sub><em>Light and dark, throughout.</em></sub>
 </p>
+</details>
 
 > **Heads up — early days.** Pacer is pre-1.0 and under active development. It
 > works and it's useful today, but expect the occasional rough edge, and your
@@ -79,78 +92,48 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
 
 ## How Pacer compares
 
-Claude Code can already tell you about your usage, and so can the popular
-[`ccusage`](https://github.com/ryoppippi/ccusage) CLI. Here's where Pacer fits.
+You've got options for keeping an eye on Claude Code usage — Claude Code's own
+`/usage`, the popular [`ccusage`](https://github.com/ryoppippi/ccusage) CLI, and
+several menu-bar apps, the closest being [Claude God](https://claudegod.app) and
+[ccseva](https://github.com/Iamshankhadeep/ccseva). They're good tools; here's
+the honest lay of the land.
 
-### vs. Claude Code's built-in `/usage`
+| | **Pacer** | **[Claude God](https://claudegod.app)** | **[ccseva](https://github.com/Iamshankhadeep/ccseva)** | **[ccusage](https://github.com/ryoppippi/ccusage)** | **CC `/usage`** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Form factor | Menu-bar app | Menu-bar app | Menu-bar app | CLI | In-terminal |
+| Native macOS (not Electron) | ✓ | ✓ | – (Electron) | – | – |
+| Always-on, glanceable | ✓ | ✓ | ✓ | – | – |
+| Live limit % from Anthropic's API | ✓ | ✓ | ✦ | ✦ | ✓ |
+| Pace vs. ideal-burn line | ✓ | – | – | – | – |
+| End-of-day spend projection | ✓ | ✓ | ✓ | – | – |
+| Activity heatmap (6 months) | ✓ | – | – | – | – |
+| Per-project & per-model breakdown | ✓ | ✓ | ✓ | ✓ | – |
+| Home-screen / Notification Center widgets | ✓ | ✓ | – | – | – |
+| Threshold / budget notifications | ✓ | ✓ | ✓ | – | – |
+| CSV export | ✓ | ✓ | – | ✓ | – |
+| ROI: cost vs. git commits | – | ✓ | – | – | – |
+| Claude Code plugin marketplace | – | ✓ | – | – | – |
+| Free & open source | ✓ | ✓ | ✓ | ✓ | – |
 
-Recent Claude Code builds include a `/usage` view (also reachable via `/status`)
-that shows your current session cost and how you're tracking against your 5-hour
-and weekly limits. It's genuinely useful — but it's a *snapshot you ask for*:
-you type a command inside a session, read the numbers, and they're gone when you
-move on. It tells you about **right now, in this terminal**.
+<sub>✦ estimates the windows from your local JSONL logs rather than reading
+Anthropic's usage API. Best-effort as of June 2026 — these tools all move fast,
+so corrections are welcome via an issue or PR.</sub>
 
-Pacer is the always-on, zoomed-out companion to that:
+**The gist:**
 
-- **Always visible, never interrupts.** Your pacing lives in the menu bar. You
-  glance up — you don't stop what you're typing to run a command.
-- **History and trends, not just the moment.** Six months of daily activity, a
-  cost heatmap, weekly comparisons, and an end-of-day projection — none of which
-  the in-session view keeps once it scrolls away.
-- **Where the spend goes.** Break usage down by project and by model over time,
-  and drill into any single day. `/usage` doesn't itemize your history.
-- **One place for all sessions.** Pacer aggregates every project and every
-  terminal into one picture; `/usage` only sees the session you ran it in.
-- **Nudges, widgets, and export** round it out — threshold notifications, home-
-  screen widgets, and CSV export for your own spreadsheets.
-
-Think of `/usage` as the speedometer inside one car, and Pacer as the dashboard
-that remembers every trip.
-
-### vs. Claude God and other menu-bar trackers
-
-Pacer isn't the only menu-bar usage app — [Claude God](https://claudegod.app),
-[ccseva](https://github.com/Iamshankhadeep/ccseva), and several others cover
-similar ground, and a few are genuinely good. [Claude God](https://claudegod.app)
-is the closest in spirit: a native macOS menu-bar app with quota gauges,
-per-model cost analytics, a session timeline, and a colour-coded icon. If you're
-weighing them against Pacer, here's where Pacer leans:
-
-- **Pacing, not just percentages.** Pacer's signature is the *pace* view: your
-  5-hour and weekly windows plotted against an ideal-burn reference line,
-  colour-banded behind / on track / ahead / nearly maxed, with a burn-rate
-  projection of *when* you'd hit the wall. It's built to answer "am I going to
-  run out before the reset?", not just "what % am I at right now?"
-- **Quiet and local-first by design.** No Dock icon, notifications off by
-  default, nothing leaves your Mac, and a written-down [privacy](#privacy)
-  contract for exactly what it reads and the only two hosts it talks to.
-- **Signed, notarized, and self-updating** via [Sparkle](https://sparkle-project.org)
-  — install the DMG once and it keeps itself current.
-
-Where the others go further: Claude God, for instance, adds things Pacer doesn't
-— ROI analysis correlating spend with git commits, and a Claude Code plugin
-marketplace. If those are what you want, it's worth a look. These tools coexist
-happily; pick the one that thinks about your usage the way you do.
-
-### vs. `ccusage`
-
-[`ccusage`](https://github.com/ryoppippi/ccusage) is an excellent CLI that reads
-the same local JSONL files and prints daily / weekly / monthly / session reports.
-If you live in the terminal and want scriptable, pipeable numbers, it's great —
-and Pacer's test suite even cross-checks its own scanner against ccusage's output.
-
-Pacer covers different ground:
-
-- **A persistent GUI, not a command you re-run** — charts, a heatmap, and live
-  projections you keep an eye on, versus a table you print on demand.
-- **Real rate-limit pacing.** Pacer asks Anthropic's usage API for your actual
-  5-hour and weekly percentages (the same source Claude Code uses), rather than
-  estimating windows from local token logs alone.
-- **Always-on menu bar + widgets** so the numbers find you, instead of you
-  going to find them.
-
-If you want a CLI, use ccusage. If you want an at-a-glance app that sits in your
-menu bar and remembers everything, that's Pacer — and they happily coexist.
+- **vs. `/usage`** — Claude Code's built-in view is a *snapshot you ask for* in
+  one terminal; Pacer is the always-on, zoomed-out companion that remembers every
+  session. The speedometer in one car vs. the dashboard that logs every trip.
+- **vs. `ccusage`** — a great CLI for scriptable numbers (Pacer's tests even
+  cross-check their scanner against it); Pacer is the GUI you glance at instead of
+  a command you re-run, and it reads your *actual* limit % from Anthropic rather
+  than estimating from logs.
+- **vs. Claude God / ccseva** — the closest rivals, and genuinely nice. Pacer
+  leans into *pacing* (your windows against an ideal-burn line, "will I run out
+  before the reset?"), native + quiet-by-default, and signed/notarized
+  self-update; Claude God goes further on ROI/git correlation and a plugin
+  marketplace, and ccseva on its glassy UI. Pick the one that thinks about your
+  usage the way you do — they coexist happily.
 
 ## Privacy
 
