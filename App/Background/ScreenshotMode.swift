@@ -82,17 +82,15 @@ enum ScreenshotMode {
         await capture("history", width: 1180, height: 840, scheme: .light,
                       card: true, chrome: true, title: "History", container: container) { HistoryView() }
 
-        // Menu-bar popover — tightly cropped to its intrinsic size.
-        await capture("menubar", width: 280, height: nil, scheme: .light,
-                      card: true, cornerRadius: 12, container: container) { MenuStatusContent() }
-        await capture("menubar-dark", width: 280, height: nil, scheme: .dark,
-                      card: true, cornerRadius: 12, container: container) { MenuStatusContent() }
+        // The menu-bar experience as one cohesive image: a slice of the
+        // macOS menu bar with Pacer's readout, and the click-down popover
+        // hanging beneath it. Self-decorated on a transparent canvas.
+        await capture("menubar", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("menubar-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
 
-        // The menu-bar item itself (the status-bar readout chips), and the
-        // home-screen widget family — both self-decorated, captured on a
-        // transparent canvas so they drop into the README cleanly.
-        await capture("statusbar", width: nil, height: nil, scheme: .dark,
-                      card: false, container: container) { StatusBarPreview() }
+        // The home-screen widget family.
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
@@ -223,9 +221,14 @@ enum ScreenshotMode {
 // MARK: - Synthetic data
 
 extension ScreenshotMode {
-    private static let opus = "claude-opus-4-6"
+    // Model mix mirrors a real heavy Claude Code user: overwhelmingly
+    // Opus, a little Sonnet, a sliver of Haiku.
+    private static let opus = "claude-opus-4-7"
     private static let sonnet = "claude-sonnet-4-6"
     private static let haiku = "claude-haiku-4-5"
+    private static let opusShare = 0.88
+    private static let sonnetShare = 0.09
+    // haiku gets the remainder
 
     /// Fill an (in-memory) container with deterministic, healthy-looking
     /// usage so every dashboard / history / menu-bar card renders
@@ -256,49 +259,63 @@ extension ScreenshotMode {
         }
     }
 
-    /// Six months of per-model daily rollups with weekday/weekend
-    /// variation, a gentle recent-uptick ramp, and occasional gap days
-    /// so the heatmap and 30-day chart look organic.
+    /// Today's mid-day cost-so-far. Heavy-but-not-extreme, in the spirit
+    /// of a real power user (whose days run higher still).
+    private static let todayCost = 124.0
+
+    /// Six months of per-model daily rollups, shaped from real heavy-user
+    /// trends: weekday-driven with a Tue/Wed midweek peak and much quieter
+    /// weekends, high day-to-day variance, the odd big spike day, and
+    /// occasional gap days — so the heatmap and 30-day chart look lived-in.
     private static func seedDailyAggregates(
         _ ctx: ModelContext, startOfToday: Date, cal: Calendar
     ) {
         for d in 0..<182 {
             guard let day = cal.date(byAdding: .day, value: -d, to: startOfToday) else { continue }
-            // ~10% gap days (no usage), but today always has data.
-            if d != 0 && noise(d &* 7 &+ 5) < 0.10 { continue }
+            // ~12% gap days (no usage), but today always has data.
+            if d != 0 && noise(d &* 7 &+ 5) < 0.12 { continue }
 
             let ds = TokenSample.formatDate(day)
-            let weekday = cal.component(.weekday, from: day)
+            let weekday = cal.component(.weekday, from: day)   // 1=Sun … 7=Sat
             let isWeekend = (weekday == 1 || weekday == 7)
+            let isMidweek = (weekday == 3 || weekday == 4)     // Tue/Wed peak
             let r = noise(d)
-            let ramp = 0.7 + 0.5 * Double(182 - d) / 182.0
-            var dayCost = ((isWeekend ? 7.0 : 26.0) + r * (isWeekend ? 9.0 : 30.0)) * ramp
-            if d == 0 { dayCost = 23.4 }  // a believable mid-day total
+            let ramp = 0.85 + 0.3 * Double(182 - d) / 182.0    // slight recent uptick
 
-            let opusCost = dayCost * (0.46 + 0.12 * r)
-            let sonnetCost = dayCost * 0.34
-            let haikuCost = max(0.2, dayCost - opusCost - sonnetCost)
+            var dayCost = (isWeekend ? 30.0 : 110.0) * (0.55 + 0.9 * r) * ramp
+            if isMidweek { dayCost *= 1.25 }
+            // Occasional spike day (a long heads-down session).
+            if !isWeekend && noise(d &* 13 &+ 1) > 0.94 { dayCost *= 3.0 }
+            if d == 0 { dayCost = todayCost }
+
+            // Opus-dominant, with a little Sonnet and a sliver of Haiku.
+            let opusCost = dayCost * (opusShare + (r - 0.5) * 0.06)
+            let sonnetCost = dayCost * sonnetShare
+            let haikuCost = max(0.1, dayCost - opusCost - sonnetCost)
             insertDaily(ctx, date: ds, model: opus, cost: opusCost)
             insertDaily(ctx, date: ds, model: sonnet, cost: sonnetCost)
             insertDaily(ctx, date: ds, model: haiku, cost: haikuCost)
         }
     }
 
-    /// Today's hourly breakdown (workday-shaped) for the timeline card.
-    /// Only seed hours up to *now* — the Live Activity card sums the
-    /// current + previous hour buckets for its "last hour" rate and the
-    /// end-of-day projection, so seeding future hours would inflate both.
+    /// Today's hourly breakdown for the timeline card — active ~7am to
+    /// now, a broad midday plateau (noon–4pm peak) rather than a sharp
+    /// triangle, matching the real hourly distribution. Only seed hours
+    /// up to *now* — the Live Activity card sums the current + previous
+    /// hour buckets for its "last hour" rate and end-of-day projection,
+    /// so seeding future hours would inflate both.
     private static func seedTodayHourly(
         _ ctx: ModelContext, today: String, now: Date, cal: Calendar
     ) {
         let endHour = cal.component(.hour, from: now)
-        let startHour = endHour >= 8 ? 8 : max(0, endHour - 2)
+        let startHour = endHour >= 7 ? 7 : max(0, endHour - 2)
         guard startHour <= endHour else { return }
         for h in startHour...endHour {
-            // Triangular activity peaking around 1pm.
-            let intensity = max(0.15, 1.0 - abs(Double(h) - 13.0) / 6.0)
-            let opusCost = 1.6 * intensity * (0.8 + noise(h))
-            let sonnetCost = 0.9 * intensity * (0.8 + noise(h &+ 99))
+            // Broad midday plateau: flat-ish 11–16, tapering at the edges.
+            let dist = abs(Double(h) - 13.5)
+            let intensity = max(0.2, min(1.0, 1.15 - dist / 7.0))
+            let opusCost = 13.0 * intensity * (0.7 + 0.6 * noise(h))
+            let sonnetCost = 1.4 * intensity * (0.7 + noise(h &+ 99))
             insertHourly(ctx, date: today, hour: h, model: opus, cost: opusCost)
             insertHourly(ctx, date: today, hour: h, model: sonnet, cost: sonnetCost)
         }
@@ -321,57 +338,68 @@ extension ScreenshotMode {
     /// of the 7-day), and the final keyframe is the value the hero
     /// tiles / gauges / menu-bar readout display (42% and 61%).
     private static func seedRateLimits(_ ctx: ModelContext, now: Date) {
-        // 5-hour: calm open → burst overshoots pace → plateau drops it
-        // back behind → gentle final climb. Ends at 42% (pace ≈60% → a
-        // healthy "behind").
-        seedWindow(
-            ctx, window: "five_hour",
+        // 5-hour: a steady, near-linear climb with a recent uptick, ending
+        // ~32%. In real data the 5-hour window is rarely stressed (it
+        // climbs a few points per decile and seldom nears the cap), so
+        // here it stays comfortably behind the pace line — a healthy green
+        // "you're fine" reading. `now` sits ≈60% through the cycle.
+        let fiveHour = WindowSpec(
+            window: "five_hour",
             resetsAt: now.addingTimeInterval(2 * 3_600),
-            duration: 5 * 3_600, now: now,
-            interval: 5 * 60,
-            keyframes: [(0, 0), (0.08, 4), (0.18, 24), (0.27, 31),
-                        (0.37, 33), (0.48, 35), (0.55, 39), (0.60, 42)]
+            duration: 5 * 3_600,
+            keyframes: [(0, 0), (0.12, 6), (0.25, 12), (0.38, 17),
+                        (0.50, 22), (0.56, 26), (0.60, 32)]
         )
-        // 7-day: heavy first day pulls ahead → quiet midweek lets pace
-        // catch up → a recent burst pushes back ahead. Ends at 61%
-        // (pace ≈57% → a touch "ahead").
-        seedWindow(
-            ctx, window: "seven_day",
+        // 7-day: the window that actually tells a story. Front-loaded —
+        // a heavy first couple of days pull *ahead* of pace — then a
+        // quiet midweek lets the pace line catch up (it falls back within
+        // pace), then a recent push pulls ahead again, ending ~62% with
+        // `now` ≈57% through. Mirrors the real weekly pattern (early-week
+        // climb, midweek lull, late-week resurgence) and shows every pace
+        // band: ahead → on-pace → behind → ahead.
+        let sevenDay = WindowSpec(
+            window: "seven_day",
             resetsAt: now.addingTimeInterval(3 * 86_400),
-            duration: 7 * 86_400, now: now,
-            interval: 90 * 60,
-            keyframes: [(0, 0), (0.10, 16), (0.22, 27), (0.33, 31),
-                        (0.45, 36), (0.52, 45), (0.55, 54), (0.57, 61)]
+            duration: 7 * 86_400,
+            keyframes: [(0, 0), (0.08, 14), (0.18, 29), (0.26, 34),
+                        (0.36, 36), (0.46, 39), (0.52, 50), (0.55, 57), (0.57, 62)]
         )
-    }
 
-    /// Emit `RateLimitSample`s every `interval` from the cycle start up
-    /// to `now`, following `keyframes` (cycle-fraction → utilization %)
-    /// with a little upward-only jitter so the polled line isn't a
-    /// perfectly straight interpolation. Clamped monotonic — usage never
-    /// dips inside a cycle.
-    private static func seedWindow(
-        _ ctx: ModelContext, window: String, resetsAt: Date, duration: TimeInterval,
-        now: Date, interval: TimeInterval, keyframes: [(Double, Double)]
-    ) {
-        let cycleStart = resetsAt.addingTimeInterval(-duration)
-        let nowFrac = now.timeIntervalSince(cycleStart) / duration
-        var t = cycleStart
-        var last = 0.0
+        // Walk a single 5-minute grid (the real OAuth poll cadence, which
+        // returns BOTH windows at once) from the earliest cycle start to
+        // now, emitting each window's sample at the same timestamps. This
+        // matters: the menu-bar popover / hero tiles read the most-recent
+        // samples with a small fetch limit, so if one window were sampled
+        // far less often it'd fall out of that window and read "collecting".
+        let interval: TimeInterval = 5 * 60
+        let start = min(fiveHour.cycleStart, sevenDay.cycleStart)
+        var t = start
         var i = 0
-        while t <= now + 1 {
-            let frac = min(nowFrac, max(0, t.timeIntervalSince(cycleStart) / duration))
-            var pct = interpolateKeyframes(keyframes, at: frac)
-            if frac > 0, frac < nowFrac { pct += noise(i &* 17) * 0.8 }
-            pct = max(last, min(99, pct))
-            last = pct
-            ctx.insert(RateLimitSample(
-                sampledAt: t, window: window, usedPercentage: pct,
-                resetsAt: resetsAt, source: "oauth"
-            ))
+        var last: [String: Double] = [:]
+        while t <= now {
+            for spec in [fiveHour, sevenDay] where t >= spec.cycleStart {
+                let nowFrac = now.timeIntervalSince(spec.cycleStart) / spec.duration
+                let frac = min(nowFrac, max(0, t.timeIntervalSince(spec.cycleStart) / spec.duration))
+                var pct = interpolateKeyframes(spec.keyframes, at: frac)
+                if frac > 0, frac < nowFrac { pct += noise(i &* 17 &+ spec.window.count) * 0.8 }
+                pct = max(last[spec.window] ?? 0, min(99, pct))
+                last[spec.window] = pct
+                ctx.insert(RateLimitSample(
+                    sampledAt: t, window: spec.window, usedPercentage: pct,
+                    resetsAt: spec.resetsAt, source: "oauth"
+                ))
+            }
             t = t.addingTimeInterval(interval)
             i += 1
         }
+    }
+
+    private struct WindowSpec {
+        let window: String
+        let resetsAt: Date
+        let duration: TimeInterval
+        let keyframes: [(Double, Double)]
+        var cycleStart: Date { resetsAt.addingTimeInterval(-duration) }
     }
 
     /// Piecewise-linear lookup over `(x, y)` keyframes sorted by `x`.
@@ -388,31 +416,33 @@ extension ScreenshotMode {
         return lastKf.1
     }
 
-    /// A handful of sessions across recent projects; the first is "active"
+    /// A handful of sessions across recent projects. Real sessions run
+    /// long (hours) and are overwhelmingly Opus; the first is "active"
     /// (last write seconds ago) so the freshness pill reads live.
     private static func seedSessions(_ ctx: ModelContext, now: Date) {
-        let sessions: [(path: String, model: String, ageSeconds: Double)] = [
-            ("/Users/dev/code/atlas-api", opus, 25),
-            ("/Users/dev/code/web-dashboard", sonnet, 3 * 3_600),
-            ("/Users/dev/code/ml-pipeline", opus, 9 * 3_600),
-            ("/Users/dev/code/infra-terraform", sonnet, 26 * 3_600),
-            ("/Users/dev/dotfiles", haiku, 50 * 3_600),
+        let sessions: [(path: String, model: String, ageSeconds: Double, hours: Double, cost: Double)] = [
+            ("/Users/dev/code/atlas-api", opus, 25, 6.5, 142.0),
+            ("/Users/dev/code/web-dashboard", opus, 3 * 3_600, 4.0, 71.0),
+            ("/Users/dev/code/ml-pipeline", opus, 9 * 3_600, 8.5, 96.0),
+            ("/Users/dev/code/infra-terraform", sonnet, 26 * 3_600, 3.0, 38.0),
+            ("/Users/dev/code/payments-svc", opus, 40 * 3_600, 5.5, 64.0),
+            ("/Users/dev/dotfiles", haiku, 60 * 3_600, 1.5, 9.0),
         ]
         for (idx, s) in sessions.enumerated() {
             let last = now.addingTimeInterval(-s.ageSeconds)
-            let first = last.addingTimeInterval(-Double(2 + idx) * 3_600)
-            let cost = 6.0 + noise(idx &* 31) * 18.0
+            let first = last.addingTimeInterval(-s.hours * 3_600)
+            let t = tokens(forCost: s.cost)
             ctx.insert(SessionInfo(
                 sessionId: "screenshot-session-\(idx)",
                 firstSeenAt: first,
                 lastSeenAt: last,
                 projectPath: s.path,
                 ccVersion: "1.0.0",
-                cumulativeCostUSD: cost,
-                cumulativeInputTokens: Int64(cost * 60_000),
-                cumulativeOutputTokens: Int64(cost * 22_000),
-                cumulativeCacheReadTokens: Int64(cost * 900_000),
-                cumulativeCacheCreation5mTokens: Int64(cost * 8_000),
+                cumulativeCostUSD: s.cost,
+                cumulativeInputTokens: t.input,
+                cumulativeOutputTokens: t.output,
+                cumulativeCacheReadTokens: t.cacheRead,
+                cumulativeCacheCreation5mTokens: t.cache5m,
                 cumulativeCacheCreation1hTokens: 0,
                 topModel: s.model
             ))
@@ -420,7 +450,7 @@ extension ScreenshotMode {
     }
 
     /// A few token samples timestamped in the last minute so freshness /
-    /// live-activity surfaces read "active".
+    /// live-activity surfaces read "active". Cache-heavy, output > input.
     private static func seedRecentTokens(_ ctx: ModelContext, now: Date) {
         let today = TokenSample.formatDate(now)
         for i in 0..<5 {
@@ -428,13 +458,13 @@ extension ScreenshotMode {
             ctx.insert(TokenSample(
                 sampledAt: t,
                 date: today,
-                model: i.isMultiple(of: 2) ? opus : sonnet,
-                inputTokens: 4_200,
-                outputTokens: 1_800,
-                cacheReadTokens: 120_000,
-                cacheCreation5mTokens: 3_400,
+                model: opus,
+                inputTokens: 380,
+                outputTokens: 9_400,
+                cacheReadTokens: 2_900_000,
+                cacheCreation5mTokens: 34_000,
                 cacheCreation1hTokens: 0,
-                sourceCostUSD: 0.42,
+                sourceCostUSD: 2.1,
                 dedupKey: "screenshot-token-\(i)",
                 sessionId: "screenshot-session-0",
                 projectPath: "/Users/dev/code/atlas-api"
@@ -444,32 +474,38 @@ extension ScreenshotMode {
 
     // MARK: helpers
 
+    /// Token breakdown for a given dollar cost, shaped from real usage:
+    /// prompt caching dominates (cache reads ≈ 280× input+output), and
+    /// the *non-cached* input is tiny next to the generated output
+    /// (output ≈ 30× input). The "Today's traffic" card and the cache
+    /// hit-rate (~99.6%) fall straight out of these ratios.
+    private static func tokens(forCost c: Double)
+        -> (input: Int64, output: Int64, cacheRead: Int64, cache5m: Int64) {
+        (Int64(c * 140), Int64(c * 4_200), Int64(c * 1_300_000), Int64(c * 15_000))
+    }
+
     private static func insertDaily(
         _ ctx: ModelContext, date: String, model: String, cost: Double
     ) {
+        let t = tokens(forCost: cost)
         ctx.insert(DailyAggregate(
             date: date, model: model,
-            inputTokens: Int64(cost * 60_000),
-            outputTokens: Int64(cost * 22_000),
-            cacheReadTokens: Int64(cost * 900_000),
-            cacheCreation5mTokens: Int64(cost * 8_000),
-            cacheCreation1hTokens: 0,
-            totalCostUSD: cost
+            inputTokens: t.input, outputTokens: t.output,
+            cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m,
+            cacheCreation1hTokens: 0, totalCostUSD: cost
         ))
     }
 
     private static func insertHourly(
         _ ctx: ModelContext, date: String, hour: Int, model: String, cost: Double
     ) {
+        let t = tokens(forCost: cost)
         ctx.insert(HourlyAggregate(
             date: date, hour: hour, model: model,
-            inputTokens: Int64(cost * 60_000),
-            outputTokens: Int64(cost * 22_000),
-            cacheReadTokens: Int64(cost * 900_000),
-            cacheCreation5mTokens: Int64(cost * 8_000),
-            cacheCreation1hTokens: 0,
-            totalCostUSD: cost,
-            sampleCount: 3 + Int(cost)
+            inputTokens: t.input, outputTokens: t.output,
+            cacheReadTokens: t.cacheRead, cacheCreation5mTokens: t.cache5m,
+            cacheCreation1hTokens: 0, totalCostUSD: cost,
+            sampleCount: 4 + Int(cost / 2)
         ))
     }
 
@@ -524,19 +560,35 @@ private struct MacWindowChrome: View {
     }
 }
 
-/// The menu-bar item's readout (`MenuBarLabel`) on a dark bar that
-/// stands in for the macOS menu bar, so `statusbar.png` shows what the
-/// chips look like up top.
-private struct StatusBarPreview: View {
+/// The whole menu-bar experience in one image: a slice of the macOS menu
+/// bar carrying Pacer's readout (`MenuBarLabel`), with the click-down
+/// popover (`MenuStatusContent`) hanging beneath it, right-aligned the way
+/// it drops on screen. The bar is always dark (as the macOS menu bar is on
+/// most setups); the popover follows the capture's colour scheme.
+private struct MenuBarExperience: View {
     var body: some View {
-        MenuBarLabel()
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color.black.opacity(0.82))
-                    .shadow(color: .black.opacity(0.3), radius: 12, y: 5)
-            )
+        VStack(alignment: .trailing, spacing: 10) {
+            HStack(spacing: 18) {
+                Spacer(minLength: 40)
+                MenuBarLabel()
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 30)
+            .background(Color.black.opacity(0.88))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .environment(\.colorScheme, .dark)   // light chips on the dark bar
+
+            MenuStatusContent()
+                .frame(width: 300)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 10)
+                .padding(.trailing, 6)
+        }
     }
 }
 
@@ -585,20 +637,22 @@ private struct WidgetGallery: View {
     }
 }
 
-/// Deterministic fake `TimelineEntry` values for the widget gallery.
+/// Deterministic fake `TimelineEntry` values for the widget gallery —
+/// kept consistent with the dashboard seed (Opus-heavy, cache-dominated,
+/// 5h ≈32% / 7d ≈62%, ~$124 today).
 private enum ScreenshotEntries {
     private static let now = Date()
-    static let opus = "claude-opus-4-6"
+    static let opus = "claude-opus-4-7"
 
     static var todayCost: TodayCostEntry {
-        TodayCostEntry(date: now, costUSD: 23.40, tokens: 1_900_000, modelCount: 3, isFresh: true)
+        TodayCostEntry(date: now, costUSD: 124.0, tokens: 540_000, modelCount: 3, isFresh: true)
     }
 
     static var paceGauges: PaceGaugesEntry {
         PaceGaugesEntry(
             date: now,
-            fiveHour: .init(usedPct: 42, resetsAt: now.addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 61, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
+            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
             window: .both
         )
     }
@@ -608,19 +662,26 @@ private enum ScreenshotEntries {
             date: now,
             session: .init(
                 projectDisplayName: "atlas-api",
-                totalTokens: 486_000,
-                costUSD: 6.20,
+                totalTokens: 9_400_000,
+                costUSD: 142.0,
                 topModel: opus,
-                firstSeenAt: now.addingTimeInterval(-2 * 3600),
+                firstSeenAt: now.addingTimeInterval(-6.5 * 3600),
                 lastSeenAt: now.addingTimeInterval(-30)
             )
         )
     }
 
     static var dailyChart: DailyChartEntry {
+        // Weekday-driven with weekend dips and a spike — same shape as the
+        // dashboard's 30-day chart.
+        let cal = Calendar.current
         let days = (0..<14).map { i -> DailyChartEntry.DayCost in
-            let day = Calendar.current.date(byAdding: .day, value: -(13 - i), to: now) ?? now
-            let cost = 14.0 + Double((i * 7) % 23) + (i.isMultiple(of: 3) ? 6.0 : 0)
+            let day = cal.date(byAdding: .day, value: -(13 - i), to: now) ?? now
+            let wd = cal.component(.weekday, from: day)
+            let weekend = (wd == 1 || wd == 7)
+            var cost = weekend ? 34.0 : 120.0
+            cost *= 0.7 + 0.7 * Double((i * 7 + 3) % 11) / 11.0
+            if i == 9 { cost *= 2.6 }          // a spike day
             return DailyChartEntry.DayCost(date: TokenSample.formatDate(day), cost: cost)
         }
         let total = days.reduce(0) { $0 + $1.cost }
@@ -635,15 +696,15 @@ private enum ScreenshotEntries {
 
     static var topProjects: TopProjectsEntry {
         let rows = [
-            TopProjectsEntry.Row(displayName: "atlas-api", costUSD: 142.80),
-            TopProjectsEntry.Row(displayName: "web-dashboard", costUSD: 96.40),
-            TopProjectsEntry.Row(displayName: "ml-pipeline", costUSD: 71.10),
-            TopProjectsEntry.Row(displayName: "infra-terraform", costUSD: 38.25),
+            TopProjectsEntry.Row(displayName: "atlas-api", costUSD: 1_284.0),
+            TopProjectsEntry.Row(displayName: "ml-pipeline", costUSD: 892.0),
+            TopProjectsEntry.Row(displayName: "payments-svc", costUSD: 613.0),
+            TopProjectsEntry.Row(displayName: "web-dashboard", costUSD: 421.0),
         ]
         return TopProjectsEntry(
             date: now, range: .days7,
-            totalCostUSD: rows.reduce(0) { $0 + $1.costUSD },
-            projectCount: rows.count,
+            totalCostUSD: rows.reduce(0) { $0 + $1.costUSD } + 340,
+            projectCount: 12,
             rows: rows, focus: nil
         )
     }

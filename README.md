@@ -13,44 +13,40 @@ usage: the tokens you're burning, what they cost, how close you are to your
 model, by day. It sits quietly in your menu bar, keeps itself up to date, and
 keeps all of your data on your own Mac.
 
+<!-- The dashboard automatically shows light or dark to match your GitHub theme. -->
 <p align="center">
-  <img src="docs/screenshots/dashboard.png" width="760"
-       alt="Pacer dashboard — today's cost, 5-hour and 7-day rate-limit pacing, live burn rate, and a projected end-of-day total">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
+    <img src="docs/screenshots/dashboard.png" width="760"
+         alt="Pacer dashboard — today's cost, 5-hour and 7-day rate-limit pacing, live burn rate, and a projected end-of-day total">
+  </picture>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" valign="middle">
-      <img src="docs/screenshots/statusbar.png" width="240"
-           alt="Pacer's menu-bar readout — gauge icon with 5-hour %, 7-day %, and today's cost">
-      <br><sub><b>Menu-bar readout</b></sub>
+    <td align="center" valign="middle" width="42%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menubar-dark.png">
+        <img src="docs/screenshots/menubar.png" width="320"
+             alt="Pacer in the menu bar — the readout chips and the click-down popover with 5-hour and 7-day pace gauges">
+      </picture>
+      <br><sub><b>Menu bar &amp; click-down popover</b></sub>
     </td>
-    <td align="center" valign="middle">
-      <img src="docs/screenshots/menubar.png" width="240"
-           alt="Pacer menu-bar popover — 5-hour and 7-day pace gauges with reset times and today's cost">
-      <br><sub><b>Click-down popover</b></sub>
+    <td align="center" valign="middle" width="58%">
+      <img src="docs/screenshots/widgets.png" width="440"
+           alt="Pacer home-screen and Notification Center widgets — today's cost, rate-limit gauges, live session, daily cost chart, and top projects">
+      <br><sub><b>Home-screen &amp; Notification Center widgets</b></sub>
     </td>
   </tr>
 </table>
 
-<p align="center">
-  <img src="docs/screenshots/widgets.png" width="600"
-       alt="Pacer home-screen and Notification Center widgets — today's cost, rate-limit gauges, live session, daily cost chart, and top projects">
-  <br><sub><b>Home-screen &amp; Notification Center widgets</b></sub>
-</p>
-
 <details>
-<summary><strong>More screenshots</strong> — six-month history &amp; dark mode</summary>
+<summary><strong>More screenshots</strong> — the six-month history view</summary>
 <br>
 <p align="center">
   <img src="docs/screenshots/history.png" width="760"
        alt="Pacer history — lifetime totals, a six-month GitHub-style activity heatmap, and monthly spend">
   <br><sub><b>History — lifetime totals, six-month heatmap, monthly spend</b></sub>
-</p>
-<p align="center">
-  <img src="docs/screenshots/dashboard-dark.png" width="600"
-       alt="Pacer dashboard in dark mode">
-  <br><sub><b>Dark mode, throughout</b></sub>
 </p>
 </details>
 
