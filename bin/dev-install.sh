@@ -55,14 +55,29 @@ xcodegen generate
 # 2. Build unsigned. project.yml sets CODE_SIGNING_ALLOWED=NO globally
 #    so xcodebuild produces unsigned bundles (no provisioning profile
 #    round-trip, no Apple Development cert). We sign manually below.
+#
+#    CFBundleVersion (CURRENT_PROJECT_VERSION) is stamped with the build
+#    time as a unix timestamp, exactly like the release workflow does.
+#    Sparkle orders updates by CFBundleVersion (its sparkle:version), so
+#    the in-repo default of "1" sits *below* every published release's
+#    timestamp — which made Sparkle offer to "update" a freshly-built
+#    dev app back to the public DMG (silently replacing your local
+#    build). Stamping the build time makes a fresh local build always
+#    >= the latest release, so a manual "Check for Updates…" correctly
+#    reports up to date. (Debug builds also suppress *automatic* checks
+#    entirely — see PacerUpdater.swift — so this covers the manual path.)
+#    The override applies to both the app and the widget extension, which
+#    macOS requires to share a version.
+DEV_BUILD_VERSION="$(date -u +%s)"
 echo
-echo "==> Building Pacer.app (Debug, unsigned)"
+echo "==> Building Pacer.app (Debug, unsigned, build ${DEV_BUILD_VERSION})"
 xcodebuild \
     -project Pacer.xcodeproj \
     -scheme Pacer \
     -configuration Debug \
     -destination 'platform=macOS' \
     -derivedDataPath "${REPO_ROOT}/Build" \
+    CURRENT_PROJECT_VERSION="${DEV_BUILD_VERSION}" \
     build \
     | (grep -E '(error:|warning:|FAILED|SUCCEEDED)' || true)
 
