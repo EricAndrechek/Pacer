@@ -1,0 +1,24 @@
+# Configures GitHub's automatically-generated release notes
+# (`gh release create --generate-notes`, used by .github/workflows/release.yml).
+# These notes are also mirrored into Sparkle's update dialog via the
+# appcast <description>, so keep them clean and readable.
+changelog:
+  exclude:
+    authors:
+      - dependabot
+      - github-actions
+  categories:
+    # Label-based grouping. PRs aren't always labeled; anything without a
+    # matching label falls through to the catch-all below, so notes stay
+    # complete either way. Labelled PRs get grouped — apply these labels
+    # to make a release read at a glance.
+    - title: 🚀 Features
+      labels: [enhancement, feature]
+    - title: 🐛 Fixes
+      labels: [bug, fix]
+    - title: 🧹 Maintenance, Docs & Tests
+      labels: [chore, documentation, docs, test]
+    # Catch-all. Titled "What's Changed" so an unlabeled release reads
+    # exactly like GitHub's default while staying future-proofed.
+    - title: What's Changed
+      labels: ["*"]
