@@ -31,6 +31,43 @@ make help       # all targets
 Architecture, invariants, and the non-negotiable correctness/performance rules
 live in [`agents.md`](agents.md) — worth a skim before a non-trivial change.
 
+### Building and running it yourself
+
+`make verify` and `make test` need no signing setup — that's all CI runs, and
+it's enough to develop and validate most changes.
+
+To build a *runnable* app (`make install`), macOS needs it code-signed, and
+Pacer stores its data in an [App Group](https://developer.apple.com/documentation/xcode/configuring-app-groups)
+container shared between the app and its widget. macOS only resolves that
+container when the group's `<TeamID>.` prefix matches the signing certificate's
+team — so running your own build requires **your own Apple Developer account**
+(a `Developer ID Application` certificate; a paid membership). Point the install
+at it with environment variables — no source edits required:
+
+```sh
+PACER_SIGN_IDENTITY="Developer ID Application: <Your Name> (<TEAMID>)" make install
+```
+
+- The Team ID in parentheses is auto-detected and used to re-prefix the App
+  Group in the entitlements at sign time; `PacerStore` reads the resulting
+  identifier back from the signed binary at runtime, so the app and widget
+  share a container under *your* account.
+- Override `PACER_TEAM_ID` explicitly if your identity string doesn't end in
+  `(TEAMID)`.
+- Notarization (Apple's `pacer-notarization` keychain profile by default,
+  overridable with `PACER_NOTARY_PROFILE`) is only needed to silence the macOS
+  "access data from other apps" prompt and to run on other Macs. For a
+  local-only build you can skip it:
+
+  ```sh
+  PACER_SIGN_IDENTITY="..." PACER_DEV_SKIP_NOTARIZE=1 make install
+  ```
+
+List your available identities with `security find-identity -v -p codesigning`.
+The widget extension additionally needs the App Group registered on your
+account (Apple Developer portal → Identifiers); if it isn't, the app still runs
+but its widgets won't show data.
+
 ## Pull requests
 
 1. Branch off `main`, make your change, and make sure `make verify` and
