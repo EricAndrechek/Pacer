@@ -1,0 +1,5 @@
+# GitHub reads this to render the "Sponsor" button on the repo header
+# and the funding links in the sidebar. The `github:` key requires the
+# account to be enrolled in GitHub Sponsors (github.com/sponsors) — the
+# link 404s until enrollment is complete.
+github: EricAndrechek
