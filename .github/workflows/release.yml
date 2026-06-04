@@ -414,6 +414,22 @@ jobs:
           pubdate="$(LC_TIME=en_US.UTF-8 date -u +"%a, %d %b %Y %H:%M:%S +0000")"
           dmg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${DMG_NAME}"
 
+          # Release notes for Sparkle's update dialog. Mirror the GitHub
+          # Release body (the same `--generate-notes` content) by rendering
+          # it to HTML through GitHub's own markdown API, then embed it as
+          # the item's <description> (Sparkle shows that HTML in the
+          # "what's new" pane). Defensive: any failure leaves the
+          # description empty rather than breaking appcast generation — a
+          # missing "what's new" is cosmetic, a malformed appcast is not.
+          DESCRIPTION_BLOCK=""
+          if body="$(gh release view "v${version}" --json body -q .body 2>/dev/null)" && [ -n "${body}" ]; then
+            printf '%s' "${body}" > "${RUNNER_TEMP}/notes.md"
+            if notes_html="$(gh api --method POST /markdown -f mode=gfm -F text=@"${RUNNER_TEMP}/notes.md" 2>/dev/null)" \
+               && [ -n "${notes_html}" ]; then
+              DESCRIPTION_BLOCK="<description><![CDATA[${notes_html}]]></description>"
+            fi
+          fi
+
           # Build the <item> entry for this release. Sparkle is tolerant
           # of HTML-encoded vs raw attributes; we use the raw form that
           # `sign_update` already produced.
@@ -421,6 +437,7 @@ jobs:
           cat > "${ITEM_FILE}" <<EOF
               <item>
                   <title>Version ${version}</title>
+                  ${DESCRIPTION_BLOCK}
                   <pubDate>${pubdate}</pubDate>
                   <sparkle:version>${build}</sparkle:version>
                   <sparkle:shortVersionString>${version}</sparkle:shortVersionString>
