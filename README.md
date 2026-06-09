@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![macOS 15+](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)](https://www.apple.com/macos/)
 [![Latest release](https://img.shields.io/github/v/release/EricAndrechek/Pacer?label=download)](https://github.com/EricAndrechek/Pacer/releases/latest)
+[![Website](https://img.shields.io/badge/website-ericandrechek.github.io%2FPacer-0e9f6e)](https://ericandrechek.github.io/Pacer/)
 
 **Know what Claude Code is costing you — and how close you are to your limits — right from your Mac's menu bar.**
 
