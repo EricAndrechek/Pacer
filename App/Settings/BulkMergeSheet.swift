@@ -4,7 +4,7 @@ import PacerCore
 import PacerUI
 
 /// Payload for `BulkMergeSheet` when presented via `.sheet(item:)`.
-/// Lives at file scope so both `ProjectsView` and `ProjectAliasesCard`
+/// Lives at file scope so both `ProjectsView` and `ProjectAliasManager`
 /// can drive the same sheet without redefining the wrapper.
 ///
 /// `canonical` may be empty (sheet shows a blank picker; the user

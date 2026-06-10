@@ -29,6 +29,11 @@ struct ProjectsView: View {
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
     @State private var searchText: String = ""
+    /// Drives the project-alias manager sheet, opened from the toolbar.
+    /// Lives here (alongside `.searchable`) so the sheet attaches at the
+    /// same level as the toolbar item that opens it, outside the
+    /// PageScaffold's ScrollView.
+    @State private var showingAliasManager = false
     /// Lifted from ProjectsContent so the modal-navigation modifier
     /// can attach OUTSIDE the PageScaffold's ScrollView. Without
     /// lifting this state up, the modal overlay sat inside the
@@ -81,6 +86,19 @@ struct ProjectsView: View {
             placement: .toolbar,
             prompt: "Filter projects"
         )
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingAliasManager = true
+                } label: {
+                    Label("Aliases…", systemImage: "arrow.triangle.merge")
+                }
+                .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
+            }
+        }
+        .sheet(isPresented: $showingAliasManager) {
+            ProjectAliasManager()
+        }
         .pacerModalNavigation(root: $modalRoot)
     }
 
