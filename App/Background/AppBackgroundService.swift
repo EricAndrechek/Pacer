@@ -27,6 +27,15 @@ final class AppBackgroundService {
     /// we relay to `ScanCoordinator.runOnce()` so the user doesn't
     /// have to wait up to a backstop interval for the next cycle.
     private var immediateScanObserver: NSObjectProtocol?
+    /// Observer for `.pacerScanCycleDidComplete`. When a cycle reports
+    /// fresh rate-limit rows, we run `GlobalRateLimitReset.detect` over
+    /// the recent OAuth history and dispatch an early-reset banner if it
+    /// fires. Lives here — in the process-lived background service —
+    /// rather than in `NotificationsHost` (which only exists while the
+    /// dashboard window is open) so this notification works headless:
+    /// the whole point is to tell the user limits reset early while they
+    /// weren't looking.
+    private var globalResetObserver: NSObjectProtocol?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -80,6 +89,7 @@ final class AppBackgroundService {
         }
 
         installImmediateScanObserver()
+        installGlobalResetObserver()
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
     }
@@ -96,6 +106,10 @@ final class AppBackgroundService {
         if let observer = immediateScanObserver {
             NotificationCenter.default.removeObserver(observer)
             immediateScanObserver = nil
+        }
+        if let observer = globalResetObserver {
+            NotificationCenter.default.removeObserver(observer)
+            globalResetObserver = nil
         }
         widgetRefreshCoordinator.stop()
         pricingRefreshTask?.cancel()
@@ -207,6 +221,71 @@ final class AppBackgroundService {
                     Log.write("AppBackground", "alias migration failed: \(error)")
                 }
             }
+        }
+    }
+
+    // MARK: - Global rate-limit reset detection
+
+    /// How far back to look for the pre-reset high + the confirming low
+    /// run. Bounded to the authoritative OAuth source (~12 rows/hour/
+    /// window), so even 6 hours is ~150 rows total — cheap to scan on
+    /// the ~5-minute cadence the OAuth poller writes rate-limit rows.
+    private static let globalResetLookback: TimeInterval = 6 * 3600
+
+    /// Observe scan-cycle completions and, when one carries fresh
+    /// rate-limit rows, check whether Anthropic just reset limits early.
+    /// Gated on `rateLimitsChanged` so the chatty JSONL scan path (which
+    /// posts `samplesChanged` many times a minute) never triggers it.
+    private func installGlobalResetObserver() {
+        globalResetObserver = NotificationCenter.default.addObserver(
+            forName: .pacerScanCycleDidComplete,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            // Extract the Sendable summary outside the Task — capturing
+            // the whole Notification would carry its non-Sendable
+            // userInfo across the actor hop.
+            let rateLimitsChanged =
+                (note.object as? ScanCycleSummary)?.rateLimitsChanged ?? false
+            guard rateLimitsChanged else { return }
+            Task { @MainActor [weak self] in
+                await self?.checkForGlobalReset()
+            }
+        }
+    }
+
+    /// Run `GlobalRateLimitReset.detect` over recent OAuth samples for
+    /// each window and dispatch an early-reset banner on a hit. The
+    /// detector is the gatekeeper for "is this real / not a blip"; the
+    /// coordinator handles the settings gate and per-cycle dedup.
+    private func checkForGlobalReset() async {
+        let context = ModelContext(container)
+        let cutoff = Date().addingTimeInterval(-Self.globalResetLookback)
+        let oauthSource = RateLimitSource.oauth
+
+        for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {
+            let descriptor = FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate {
+                    $0.source == oauthSource
+                        && $0.window == window
+                        && $0.sampledAt >= cutoff
+                },
+                sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
+            )
+            guard let rows = try? context.fetch(descriptor) else { continue }
+            let observations = rows.map {
+                GlobalRateLimitReset.Observation(
+                    sampledAt: $0.sampledAt,
+                    usedPercentage: $0.usedPercentage,
+                    resetsAt: $0.resetsAt
+                )
+            }
+            guard let detection = GlobalRateLimitReset.detect(observations) else { continue }
+            await NotificationCoordinator.shared.handleGlobalRateLimitReset(
+                window: window,
+                detection: detection,
+                context: context
+            )
         }
     }
 }

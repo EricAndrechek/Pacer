@@ -303,6 +303,44 @@ public final class NotificationCoordinator {
         return f.localizedString(for: date, relativeTo: Date())
     }
 
+    /// "Anthropic reset your limits early" detection. Distinct from
+    /// `handleRateLimitReset`: that one fires on the on-schedule rollover
+    /// (the anchor advances); this fires on an *off-schedule* global
+    /// reset where utilization collapsed but the cycle anchor stayed put.
+    /// The hard part — confirming it's sustained and not a blip — is done
+    /// upstream by `GlobalRateLimitReset.detect`; this method just gates
+    /// on settings, dedups, and posts.
+    ///
+    /// Dedup is keyed on the unchanged anchor so we fire at most once per
+    /// cycle. A later cycle has a different anchor and fires fresh.
+    public func handleGlobalRateLimitReset(
+        window: String,
+        detection: GlobalRateLimitReset.Detection,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard defaults.bool(forKey: PacerSettings.Key.notifyGlobalReset) else { return }
+
+        let anchorKey = detection.resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset"
+        let cycleKey = "notif.globalreset.\(window).\(anchorKey)"
+        if alreadyNotified(key: cycleKey, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        content.title = "Pacer: \(label) limit reset early"
+        content.body = "Anthropic appears to have reset limits ahead of schedule — \(label) usage dropped from \(Int(detection.droppedFrom.rounded()))% to \(Int(detection.droppedTo.rounded()))% without your reset day moving. You've got headroom again."
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: cycleKey, in: context)
+    }
+
     /// Today's-cost ceiling notification. Fires once per day-and-threshold
     /// pair so re-launching the app doesn't re-notify.
     public func handleDailyCostUpdate(
