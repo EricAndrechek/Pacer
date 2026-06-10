@@ -43,6 +43,7 @@ struct SettingsView: View {
                 SettingsSection("Data") {
                     CostCalculationCard()
                     ProjectAliasesPointerCard()
+                    StorageCard()
                     DatabaseCard()
                     LogsCard()
                 }
@@ -1286,6 +1287,84 @@ private struct OAuthTokenOverrideCard: View {
 }
 
 // MARK: - Storage
+
+/// Disk footprint of the data Pacer touches. Measured off the main
+/// actor on appear (Claude's logs run to gigabytes) and rendered as a
+/// small breakdown. Read-only — it never writes or deletes anything,
+/// least of all Claude's transcripts.
+private struct StorageCard: View {
+    @State private var snapshot: StorageSnapshot?
+    @State private var didMeasure = false
+
+    var body: some View {
+        PacerCard("Storage", content: {
+            if let snapshot {
+                VStack(alignment: .leading, spacing: 10) {
+                    StorageRow(label: "Pacer database", bytes: snapshot.pacerDatabaseBytes)
+                    StorageRow(label: "Pacer logs", bytes: snapshot.pacerLogsBytes)
+                    Divider()
+                    StorageRow(
+                        label: "Claude Code logs",
+                        bytes: snapshot.claudeLogsBytes,
+                        detail: "\(snapshot.claudeLogFileCount.formatted()) file\(snapshot.claudeLogFileCount == 1 ? "" : "s")"
+                    )
+                }
+            } else if didMeasure {
+                Text("Couldn't measure storage.")
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Measuring…").foregroundStyle(.secondary)
+                }
+            }
+        }, footer: {
+            Text("Pacer's database is the usage history it derives from Claude Code's logs — both stay on your Mac. The Claude Code logs are the raw transcripts Pacer reads; it never modifies or deletes them.")
+        })
+        .task {
+            // Re-measure each time the Settings tab appears — sizes drift
+            // as you keep using Claude Code, and this is cheap (it stats
+            // files, never reads them).
+            let storeURL = try? PacerStore.storeURL()
+            let logsDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/Pacer")
+            let claudeDirs = (try? ClaudePathResolver().resolve())?
+                .map(\.projectsDirectory) ?? []
+            let snap = await Task.detached(priority: .utility) {
+                StorageInspector.snapshot(
+                    storeURL: storeURL,
+                    logsDirectory: logsDir,
+                    claudeProjectsDirectories: claudeDirs
+                )
+            }.value
+            snapshot = snap
+            didMeasure = true
+        }
+    }
+}
+
+/// One "label … size" line in the Storage card. Optional `detail` sits
+/// quietly after the label (e.g. a file count).
+private struct StorageRow: View {
+    let label: String
+    let bytes: Int64
+    var detail: String? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).foregroundStyle(.primary)
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 16)
+            Text(pacerBytes(bytes))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
 
 private struct DatabaseCard: View {
     private var storeURL: URL? { try? PacerStore.storeURL() }
