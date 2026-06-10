@@ -1,12 +1,55 @@
 # Predictions redesign — slope/acceleration warnings + 2nd-derivative estimates
 
-> Status: **planned, not started.** Parked here so a fresh session can
-> pick it up cold. Owner decision still open (see "Open decision").
+> Status: **shipped 2026-06-10** (PRs #46, #47, #48). See "Outcome" below
+> for what actually landed and the key finding — which overturned the
+> original plan. The sections after Outcome are the original design note,
+> kept for context.
 > Originating idea: Pacer's projections feel less sensible than Claude
 > God's because they extrapolate the *current slope* only; Claude God's
 > daily-total estimates look better because they account for the second
 > derivative (acceleration), and ideally would self-learn on personal
 > usage patterns.
+
+## Outcome (shipped 2026-06-10)
+
+**Key finding — the original premise was wrong.** Validated on Eric's real
+store (read-only copy, Apr–Jun 2026), the damped 2nd-derivative estimator
+does **not** beat Pacer's naive displayed projections, and the acceleration
+term actively *hurts* on this data:
+
+- End-of-day: naive median error 20%; the estimator (any knob setting) 27–31%.
+  Acceleration raised both error and the overshoot tail. Spend is
+  session-based and tapers in the evening — no derivative knows the day ends.
+- Monthly: a wash (~60% mid-month error either way; bursty weekday/weekend).
+- 5-hour burn: only ~1 in 17 climbing windows ever hits 100% — rarely actionable.
+- 7-day burn: the estimator beats the shipped 90-min-lookback linear
+  (precision 25%→30%, ETA less-early), but mostly because 90 min is absurd
+  for a weekly trajectory; a longer lookback gets most of it.
+
+What **does** beat naive is the user's own empirical rhythm (the "self-
+learning lite" option 2), so that's what shipped for the displayed numbers:
+
+| Piece | What shipped | PR |
+|---|---|---|
+| **Shared estimator** | `TrendEstimator` — recency-weighted slope + damped *and clamped* acceleration (a least-squares parabola's endpoint slope reverses on "ramp-then-flat", so slope comes from a linear fit; curvature is fed forward only as a bounded, saturating bend). Pure, 15 tests. | #46 |
+| **7-day burn warning** | `BurnRate.projectRecencyWeighted` (estimator, weekly lookback, **acceleration off** — it didn't help and added false alarms) returns the same `Projection` shape so 5h+7d share one warning path. The shipped 5h **linear** path is unchanged. | #47 |
+| **End-of-day projection** | `ActivityProfile` hour-of-day shape: scale spend-so-far by "you've usually done X% by now", blended with naive early in the day. p90 error 89%→68%. | #48 |
+| **Monthly projection** | `ActivityProfile` day-of-week weights reshape the remaining-days projection. Mean error 59%→48%. | #48 |
+
+**Not done / deliberately deferred:**
+
+- The **displayed** 5-hour rate-limit ETA tile (`HeroStripCard`) is unchanged
+  (linear `BurnRate.project`) — on this data the estimator gives no benefit
+  for the short window, and it's a shared displayed surface.
+- The **displayed** 7-day pace tile (`HeroStripCard.projection(forWindow:)`)
+  still uses the linear `BurnRate.project`, so it can disagree with the new
+  estimator-backed 7-day *warning*. Aligning the displayed tile to
+  `projectRecencyWeighted` is the obvious next step (needs a before/after +
+  sign-off, like any displayed change).
+- Real Core ML — out of scope, as planned.
+
+The acceleration term lives in `TrendEstimator` (built, tested, clamped) but
+no shipped surface uses it; it's available if a future signal proves it out.
 
 ## Why now
 
