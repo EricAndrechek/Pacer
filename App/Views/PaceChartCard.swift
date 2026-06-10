@@ -123,6 +123,12 @@ private struct PaceChartColumn: View {
     /// chronological by the parent.
     let windowSamples: [RateLimitSample]
 
+    /// Share affordance state. `hovering` reveals the share button only
+    /// while the cursor is over the column (Linear/Things idiom, keeps
+    /// the card clean); `sharing` drives the preview popover.
+    @State private var hovering = false
+    @State private var sharing = false
+
     private var latest: RateLimitSample? { windowSamples.first }
 
     /// Display-cycle for this column. nil only when there's no sample
@@ -167,6 +173,52 @@ private struct PaceChartColumn: View {
             chartSlot
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onHover { hovering = $0 }
+    }
+
+    /// Everything the share sheet needs to render and name this window's
+    /// chart as an image — built from the same resolved values the live
+    /// chart draws, so the shared image *is* the live chart, blown up.
+    /// `nil` (button hidden) when there's no active cycle with data.
+    private var sharePayload: PaceSharePayload? {
+        guard let chartData,
+              let cycle, !cycle.isAwaiting,
+              let latest, let resets = latest.resetsAt
+        else { return nil }
+        let windowName = duration <= 6 * 3600 ? "5-Hour" : "7-Day"
+        let slug = duration <= 6 * 3600 ? "5-hour" : "7-day"
+        return PaceSharePayload(
+            title: "\(windowName) Usage Pace",
+            data: chartData,
+            duration: duration,
+            resetsAt: resets,
+            usedPct: latest.usedPercentage,
+            paceEndPct: cycle.paceFraction * 100,
+            fileName: "pacer-\(slug)-pace.png"
+        )
+    }
+
+    /// Hover-revealed share button + its preview popover. Lives only when
+    /// there's a shareable cycle; the popover anchors here.
+    @ViewBuilder
+    private var shareButton: some View {
+        if let payload = sharePayload {
+            Button { sharing = true } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Share this chart as an image")
+            .opacity(hovering || sharing ? 1 : 0)
+            .popover(isPresented: $sharing, arrowEdge: .bottom) {
+                ChartShareSheet(
+                    fileName: payload.fileName,
+                    makeCard: { scheme in AnyView(PaceShareCard(payload: payload, scheme: scheme)) }
+                )
+            }
+        }
     }
 
     /// Renders the chart for an active cycle or a textual placeholder
@@ -199,22 +251,28 @@ private struct PaceChartColumn: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 8) {
             Eyebrow(text: title)
-            Spacer()
-            if let cycle, cycle.isAwaiting {
-                Text("cycle reset · awaiting")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            } else if let resets = latest?.resetsAt {
-                Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("resets unknown")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
+            Spacer(minLength: 8)
+            shareButton
+            caption
+        }
+    }
+
+    @ViewBuilder
+    private var caption: some View {
+        if let cycle, cycle.isAwaiting {
+            Text("cycle reset · awaiting")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        } else if let resets = latest?.resetsAt {
+            Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        } else {
+            Text("resets unknown")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
         }
     }
 
