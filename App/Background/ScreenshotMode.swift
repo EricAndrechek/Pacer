@@ -94,7 +94,63 @@ enum ScreenshotMode {
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
+        // The share-image export — the exact ImageRenderer output the
+        // in-app "Share…" action produces, for the README's share showcase.
+        captureShareCard(container: container)
+
         log("screenshots complete")
+    }
+
+    /// Render the branded 7-day pace share card the same way the in-app
+    /// share action does (`App/Share`), from the seeded rate-limit trail,
+    /// in light + dark. Documents the share feature and stays in sync via
+    /// `make screenshots`. Unlike the window scenes, this needs no
+    /// off-screen hosting: the card takes inline data, so a one-shot
+    /// `ImageRenderer` pass (what the real export uses) is faithful.
+    private static func captureShareCard(container: ModelContainer) {
+        let ctx = ModelContext(container)
+        let duration: TimeInterval = 7 * 86_400
+        let descriptor = FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.window == "seven_day" },
+            sortBy: [SortDescriptor(\.sampledAt)]
+        )
+        guard let samples = try? ctx.fetch(descriptor),
+              let latest = samples.last, let resets = latest.resetsAt else {
+            log("⚠️ share-card: no seven_day samples"); return
+        }
+        let cycleStart = resets.addingTimeInterval(-duration)
+        let now = Date()
+        var points = samples
+            .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
+            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
+        let tailTime = min(now, resets)
+        if points.last?.time != tailTime {
+            points.append(.init(time: tailTime, value: latest.usedPercentage))
+        }
+        let data = PaceChartView.Data(
+            cycleStart: cycleStart, resetsAt: resets,
+            durationSeconds: duration, points: points, usedPct: latest.usedPercentage
+        )
+        let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration, now: now)
+        let payload = PaceSharePayload(
+            title: "7-Day Usage Pace", data: data, duration: duration, resetsAt: resets,
+            usedPct: latest.usedPercentage, paceEndPct: cycle.paceFraction * 100,
+            fileName: "pacer-7-day-pace.png"
+        )
+        // Transparent margin + soft drop shadow so it drops into the README
+        // alongside the window-chrome scenes (same treatment as `card:`).
+        for scheme in [ColorScheme.light, .dark] {
+            let framed = PaceShareCard(payload: payload, scheme: scheme)
+                .shadow(color: .black.opacity(scheme == .dark ? 0.45 : 0.18), radius: 22, x: 0, y: 12)
+                .padding(40)
+            let name = scheme == .dark ? "share-card-dark" : "share-card"
+            if let png = ChartImageRenderer.pngData(for: framed, scale: 2) {
+                try? png.write(to: outputDirectory.appendingPathComponent("\(name).png"))
+                log("✓ \(name).png (\(png.count) bytes)")
+            } else {
+                log("⚠️ share-card: render failed for \(name)")
+            }
+        }
     }
 
     /// Host `content` in an off-screen window, let the SwiftUI lifecycle

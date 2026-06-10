@@ -74,28 +74,78 @@ public struct PaceChartView: View {
         self.style = style
     }
 
-    private var segments: [Segment] {
-        guard data.points.count >= 2 else { return [] }
-        var out: [Segment] = []
-        out.reserveCapacity(data.points.count - 1)
-        for i in 0..<(data.points.count - 1) {
-            let a = data.points[i]
-            let b = data.points[i + 1]
-            let pace = PaceMath.paceFraction(
-                now: a.time,
-                resetsAt: data.resetsAt,
-                windowDuration: data.durationSeconds
-            ) * 100
-            let band = PaceBand(usedPct: a.value, paceEndPct: pace)
-            out.append(Segment(id: i, start: a, end: b, band: band))
+    /// Max points plotted after downsampling. The 7-day window collects a
+    /// sample every 5 min (~2,000 per cycle); plotting all of them is both
+    /// visually jagged when blown up and a lot of Charts marks on a view
+    /// that re-renders every poll. Utilization is monotonic within a
+    /// cycle, so time-bucketing to this many points and keeping the real
+    /// sample values preserves the shape — it drops redundant samples, it
+    /// doesn't synthesize any. The 5-hour window (~60 points) is already
+    /// under this and passes through untouched.
+    private static let pointTarget = 220
+
+    /// `data.points` reduced to at most `pointTarget`, endpoints preserved.
+    /// Time-bucketed; the last sample in each bucket wins, which for
+    /// monotonic data is also the bucket's max — so the climb is never
+    /// understated.
+    private var plotPoints: [Data.Point] {
+        let target = Self.pointTarget
+        let pts = data.points
+        guard pts.count > target,
+              let first = pts.first, let last = pts.last else { return pts }
+        let start = first.time.timeIntervalSince1970
+        let span = last.time.timeIntervalSince1970 - start
+        guard span > 0 else { return pts }
+        var repByBucket: [Int: Data.Point] = [:]
+        for p in pts {
+            let frac = (p.time.timeIntervalSince1970 - start) / span
+            let bucket = min(target - 1, max(0, Int(frac * Double(target))))
+            repByBucket[bucket] = p
         }
+        var out = repByBucket.keys.sorted().map { repByBucket[$0]! }
+        if out.first?.id != first.id { out.insert(first, at: 0) }
+        if out.last?.id != last.id { out.append(last) }
         return out
     }
 
+    /// `pts` grouped into maximal runs of constant `PaceBand`, each run
+    /// sharing its boundary point with the next so the line stays
+    /// continuous across a color change. Each run renders as ONE
+    /// multi-point series (a handful total, vs. one 2-point series per
+    /// sample before): collapses the mark count, and lets the line carry a
+    /// smooth `.monotone` interpolation within the run. Band is keyed off
+    /// each segment's earlier endpoint, matching the prior per-segment
+    /// coloring exactly.
+    private func bandRuns(from pts: [Data.Point]) -> [BandRun] {
+        guard pts.count >= 2 else { return [] }
+        var runs: [BandRun] = []
+        var i = 0
+        while i < pts.count - 1 {
+            let here = band(at: pts[i])
+            var j = i
+            while j < pts.count - 1 && band(at: pts[j]) == here { j += 1 }
+            runs.append(BandRun(id: runs.count, band: here, points: Array(pts[i...j])))
+            i = j
+        }
+        return runs
+    }
+
+    /// Pace band for a single point — its used% vs. the linear pace target
+    /// at that point's time. Shared by the run grouping and the tail dot.
+    private func band(at p: Data.Point) -> PaceBand {
+        let pace = PaceMath.paceFraction(
+            now: p.time, resetsAt: data.resetsAt, windowDuration: data.durationSeconds
+        ) * 100
+        return PaceBand(usedPct: p.value, paceEndPct: pace)
+    }
+
     public var body: some View {
-        let segs = segments
-        let tail = data.points.last
-        let tailBand = segs.last?.band ?? .white
+        let pts = plotPoints
+        let runs = bandRuns(from: pts)
+        let tail = pts.last
+        // Colour the tail dot by the CURRENT point's band so it matches
+        // the dashboard hero %, rather than the band the last run began in.
+        let tailBand = tail.map { band(at: $0) } ?? .white
 
         Chart {
             // Dashed pace target.
@@ -112,23 +162,21 @@ public struct PaceChartView: View {
             .foregroundStyle(.secondary.opacity(0.4))
             .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
 
-            // Per-segment actual-usage line. Each segment is its own
-            // series so adjacent colors don't blend.
-            ForEach(segs) { seg in
-                LineMark(
-                    x: .value("time", seg.start.time),
-                    y: .value("pct", seg.start.value),
-                    series: .value("series", "seg-\(seg.id)")
-                )
-                .foregroundStyle(seg.band.color)
-                .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round))
-                LineMark(
-                    x: .value("time", seg.end.time),
-                    y: .value("pct", seg.end.value),
-                    series: .value("series", "seg-\(seg.id)")
-                )
-                .foregroundStyle(seg.band.color)
-                .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round))
+            // Actual-usage line: one multi-point series per band run, so
+            // adjacent colors don't blend and each run carries a smooth
+            // monotone interpolation (which can't overshoot, so it never
+            // implies a dip or peak the samples don't have).
+            ForEach(runs) { run in
+                ForEach(run.points) { pt in
+                    LineMark(
+                        x: .value("time", pt.time),
+                        y: .value("pct", pt.value),
+                        series: .value("series", "run-\(run.id)")
+                    )
+                    .foregroundStyle(run.band.color)
+                    .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round))
+                    .interpolationMethod(.monotone)
+                }
             }
 
             if let tail {
@@ -150,11 +198,10 @@ public struct PaceChartView: View {
         ))
     }
 
-    private struct Segment: Identifiable {
+    private struct BandRun: Identifiable {
         let id: Int
-        let start: Data.Point
-        let end: Data.Point
         let band: PaceBand
+        let points: [Data.Point]
     }
 }
 

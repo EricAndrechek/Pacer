@@ -17,6 +17,7 @@ make screenshots
 | `history.png` | History view (`HistoryView`) | lifetime totals, six-month heatmap, monthly spend |
 | `menubar.png` / `menubar-dark.png` | Menu-bar experience (`MenuBarExperience`) | the menu-bar readout chips + the click-down popover beneath, in one image; light + dark |
 | `widgets.png` | Widget gallery | one composite of the real widget views (Today, pace gauges, live session, daily cost, top projects) |
+| `share-card.png` / `share-card-dark.png` | Share-image export (`App/Share`) | the branded 7-day pace card from the in-app "Share…" action, via the same `ImageRenderer` path; light + dark |
 
 All are rendered at 2× (Retina) with transparent margins, rounded corners, and a
 soft drop shadow so they drop into the README — and a future App Store / press
