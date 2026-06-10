@@ -131,7 +131,8 @@ public actor PricingTable {
     }
 
     /// Look up a model. Returns nil only if no candidate match exists
-    /// even via substring fallback.
+    /// even via substring fallback or the built-in Anthropic fallback
+    /// table.
     public func pricing(for model: String) -> LiteLLMModelPricing? {
         if let direct = pricingByModel[model] {
             return direct
@@ -154,7 +155,10 @@ public actor PricingTable {
                 return value
             }
         }
-        return nil
+        // Built-in Anthropic rates for models LiteLLM hasn't priced
+        // yet (e.g. Fable 5 / Mythos 5 at launch). Last so LiteLLM
+        // wins as soon as it ships a real entry.
+        return AnthropicFallbackPricing.pricing(for: model)
     }
 
     public func loadedTimestamp() -> Date? { loadedAt }
@@ -178,7 +182,8 @@ public actor PricingTable {
         }
 
         /// Mirror of `PricingTable.pricing(for:)`. Same provider-prefix
-        /// fallback, same bidirectional substring fallback. Sync.
+        /// fallback, same bidirectional substring fallback, same
+        /// built-in Anthropic fallback. Sync.
         public func pricing(for model: String) -> LiteLLMModelPricing? {
             if let direct = pricingByModel[model] {
                 return direct
@@ -195,7 +200,7 @@ public actor PricingTable {
                     return value
                 }
             }
-            return nil
+            return AnthropicFallbackPricing.pricing(for: model)
         }
     }
 

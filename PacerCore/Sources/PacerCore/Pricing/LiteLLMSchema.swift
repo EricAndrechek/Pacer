@@ -53,10 +53,18 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
 
     /// True when this row has any pricing data we can use. LiteLLM
     /// includes documentation/template entries (e.g. "sample_spec")
-    /// that have the field names but null values — those should be
-    /// excluded from the lookup table.
+    /// that have the field names but null values, AND placeholder
+    /// entries where every cost is an explicit 0 (e.g.
+    /// `anthropic.claude-mythos-preview` before real prices were
+    /// published). Both kinds must be excluded from the lookup table:
+    /// a zero-priced placeholder costs the same as a missing entry,
+    /// but if kept it would shadow `AnthropicFallbackPricing` and
+    /// silently price a real model at $0.
     public var hasUsablePricing: Bool {
-        inputCostPerToken != nil || outputCostPerToken != nil
-            || cacheCreationInputTokenCost != nil || cacheReadInputTokenCost != nil
+        let costs = [
+            inputCostPerToken, outputCostPerToken,
+            cacheCreationInputTokenCost, cacheReadInputTokenCost,
+        ]
+        return costs.contains { ($0 ?? 0) > 0 }
     }
 }
