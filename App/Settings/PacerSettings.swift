@@ -153,7 +153,11 @@ public enum PacerSettings {
         Key.notifyOnDailyCost:     false,
         Key.dailyCostThresholdUSD: 50.0,
         Key.notifyOnReset:         false,
-        Key.notifyGlobalReset:     false,
+        // On by default: an off-schedule global reset is rare and
+        // high-value (fires at most once per cycle), so anyone who's
+        // enabled notifications at all should hear about it without
+        // having to find this toggle. Still gated by notificationsEnabled.
+        Key.notifyGlobalReset:     true,
         Key.notifyDailySummary:    false,
         Key.dailySummaryHour:      21,
         Key.costMode:              "auto",

@@ -772,7 +772,7 @@ private struct ResetAlertCard: View {
     private var resetEnabled: Bool = false
 
     @AppStorage(PacerSettings.Key.notifyGlobalReset, store: PacerSettings.store)
-    private var globalResetEnabled: Bool = false
+    private var globalResetEnabled: Bool = true
 
     var body: some View {
         PacerCard("Reset notifications", content: {
