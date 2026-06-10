@@ -17,6 +17,12 @@ import PacerUI
 /// minimum-data threshold.
 struct MonthlyForecastCard: View {
     @Query private var aggregates: [DailyAggregate]
+    /// Prior-months daily rollup (the ~60 days *before* this month) used to
+    /// learn the day-of-week spend profile. Scoped to `date < firstOfMonth`
+    /// so it's stable intra-month — today's writes never touch it, so it
+    /// doesn't re-materialize on every scan the way `aggregates` does — and
+    /// excluding the current month keeps the weights leak-free.
+    @Query private var priorMonths: [DailyAggregate]
     @Query(MonthlyForecastCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Cached projection refreshed on scan-meta tick. The in-body
@@ -42,6 +48,15 @@ struct MonthlyForecastCard: View {
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
         )
+        // ~60 days before this month: two prior months, enough for every
+        // weekday to appear several times (ActivityProfile needs ≥14 days).
+        let weightsCutoff = cal.date(byAdding: .day, value: -60, to: firstOfMonth) ?? firstOfMonth
+        let weightsCutoffStr = TokenSample.formatDate(weightsCutoff)
+        _priorMonths = Query(
+            filter: #Predicate<DailyAggregate> {
+                $0.date >= weightsCutoffStr && $0.date < lowerStr
+            }
+        )
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -56,7 +71,31 @@ struct MonthlyForecastCard: View {
         for row in aggregates {
             byDate[row.date, default: 0] += row.totalCostUSD
         }
-        cached = MonthlyForecast.compute(dailyCosts: byDate)
+        cached = MonthlyForecast.compute(dailyCosts: byDate, weekdayWeights: weekdayWeights())
+    }
+
+    /// Learn the day-of-week spend profile from the prior ~60 days. Walks
+    /// the calendar so quiet days count as zeros (a dead-weekend reads light,
+    /// not as missing data). Returns nil — and the projection falls back to
+    /// the flat average — when there isn't enough prior history.
+    private func weekdayWeights() -> ActivityProfile.WeekdayWeights? {
+        let cal = Calendar.current
+        guard let firstOfMonth = cal.dateInterval(of: .month, for: Date())?.start,
+              let cutoff = cal.date(byAdding: .day, value: -60, to: firstOfMonth)
+        else { return nil }
+        var costByDate: [String: Double] = [:]
+        for row in priorMonths {
+            costByDate[row.date, default: 0] += row.totalCostUSD
+        }
+        var days: [(weekday: Int, cost: Double)] = []
+        var day = cutoff
+        while day < firstOfMonth {
+            let key = TokenSample.formatDate(day)
+            days.append((weekday: cal.component(.weekday, from: day), cost: costByDate[key] ?? 0))
+            guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return ActivityProfile.weekdayWeights(days: days)
     }
 
     var body: some View {
