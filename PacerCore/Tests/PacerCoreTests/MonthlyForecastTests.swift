@@ -136,4 +136,47 @@ struct MonthlyForecastTests {
         ))
         #expect(p2024.daysInMonth == 29)
     }
+
+    @Test func weekdayWeightsReshapeTheProjection() throws {
+        // 10 equal active days so the flat baseline is clean.
+        var costs: [String: Double] = [:]
+        for d in 1...10 { costs[String(format: "2026-05-%02d", d)] = 10 }
+        // Heavy weekdays (Mon–Fri = 2…6), light weekends (1, 7).
+        let weights = ActivityProfile.WeekdayWeights(
+            weightByWeekday: [1: 0.3, 2: 1.4, 3: 1.4, 4: 1.4, 5: 1.4, 6: 1.4, 7: 0.3],
+            dayCount: 30
+        )
+        let shaped = try #require(MonthlyForecast.compute(
+            dailyCosts: costs, now: date("2026-05-10"), calendar: utc, weekdayWeights: weights))
+
+        // Exact: monthSoFar × (Σ weights over all days) / (Σ over elapsed days).
+        func w(_ d: Int) -> Double {
+            weights.weight(utc.component(.weekday, from: date(String(format: "2026-05-%02d", d))))
+        }
+        let wElapsed = (1...10).reduce(0.0) { $0 + w($1) }
+        let wAll = (1...31).reduce(0.0) { $0 + w($1) }
+        #expect(abs(shaped.projectedMonthTotal - 100.0 * wAll / wElapsed) < 1e-6)
+
+        // And it actually moves off the flat-average baseline.
+        let flat = try #require(MonthlyForecast.compute(
+            dailyCosts: costs, now: date("2026-05-10"), calendar: utc))
+        #expect(abs(shaped.projectedMonthTotal - flat.projectedMonthTotal) > 1e-6)
+        // Other fields (month-so-far, days) are untouched by the shaping.
+        #expect(abs(shaped.monthSoFar - flat.monthSoFar) < 1e-9)
+        #expect(shaped.daysInMonth == flat.daysInMonth)
+    }
+
+    @Test func uniformWeekdayWeightsLeaveAllEqualDaysProjectionUnchanged() throws {
+        // Every day active and equal → the flat baseline equals the linear
+        // pace, so uniform weights must reproduce it exactly.
+        var costs: [String: Double] = [:]
+        for d in 1...10 { costs[String(format: "2026-05-%02d", d)] = 10 }
+        let uniform = ActivityProfile.WeekdayWeights(
+            weightByWeekday: Dictionary(uniqueKeysWithValues: (1...7).map { ($0, 1.0) }), dayCount: 30)
+        let shaped = try #require(MonthlyForecast.compute(
+            dailyCosts: costs, now: date("2026-05-10"), calendar: utc, weekdayWeights: uniform))
+        let flat = try #require(MonthlyForecast.compute(
+            dailyCosts: costs, now: date("2026-05-10"), calendar: utc))
+        #expect(abs(shaped.projectedMonthTotal - flat.projectedMonthTotal) < 1e-6)
+    }
 }

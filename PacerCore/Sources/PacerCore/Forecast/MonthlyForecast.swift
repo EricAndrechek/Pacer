@@ -52,12 +52,20 @@ public enum MonthlyForecast {
     ///     this so the month boundary is deterministic.
     ///   - calendar: defaults to `.current`; tests inject UTC for
     ///     timezone-stable assertions.
+    ///   - weekdayWeights: optional empirical day-of-week profile. When
+    ///     supplied, `projectedMonthTotal` is shaped by scaling
+    ///     month-so-far across the remaining days' weekday weights instead
+    ///     of a flat daily average — so a month with a heavy-weekday stretch
+    ///     elapsed and quiet weekends remaining doesn't over-project. `nil`
+    ///     keeps the flat-average projection. (On real data the day-of-week
+    ///     shaping cut mid-month error materially; see `ActivityProfile`.)
     /// - Returns: nil if `daysWithData < minDaysWithData` or the
     ///   month-of-now is unparseable.
     public static func compute(
         dailyCosts: [String: Double],
         now: Date = Date(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        weekdayWeights: ActivityProfile.WeekdayWeights? = nil
     ) -> Projection? {
         let monthPrefix = monthPrefix(of: now, calendar: calendar)
         // Filter to the current month and skip $0 days (so a long
@@ -80,7 +88,31 @@ public enum MonthlyForecast {
         // of the month collapses to 0 remaining.
         let daysRemaining = max(0, daysInMonth - dayOfMonth)
 
-        let projectedTotal = monthSoFar + averageDailyCost * Double(daysRemaining)
+        // Flat-average projection (the baseline). When a weekday profile is
+        // supplied, reshape it so the remaining days are weighted by their
+        // weekday instead of all counting the same.
+        var projectedTotal = monthSoFar + averageDailyCost * Double(daysRemaining)
+        if let weights = weekdayWeights {
+            let year = calendar.component(.year, from: now)
+            let month = calendar.component(.month, from: now)
+            let weekday: (Int) -> Int = { day in
+                var dc = DateComponents()
+                dc.year = year; dc.month = month; dc.day = day
+                guard let date = calendar.date(from: dc) else { return 1 }
+                return calendar.component(.weekday, from: date)
+            }
+            let elapsed = (1...dayOfMonth).map(weekday)
+            let remaining = dayOfMonth < daysInMonth
+                ? Array((dayOfMonth + 1)...daysInMonth).map(weekday)
+                : []
+            projectedTotal = ActivityProfile.projectedMonthTotal(
+                monthSoFar: monthSoFar,
+                elapsedWeekdays: elapsed,
+                remainingWeekdays: remaining,
+                weights: weights,
+                naive: projectedTotal
+            )
+        }
 
         return Projection(
             daysWithData: activeCosts.count,
