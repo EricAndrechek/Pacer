@@ -292,7 +292,9 @@ final class AppBackgroundService {
                 (note.object as? ScanCycleSummary)?.rateLimitsChanged ?? false
             guard rateLimitsChanged else { return }
             Task { @MainActor [weak self] in
-                await self?.checkForGlobalReset()
+                guard let self else { return }
+                await self.checkForGlobalReset()
+                await self.checkBurnRateWarning()
             }
         }
     }
@@ -330,5 +332,44 @@ final class AppBackgroundService {
                 context: context
             )
         }
+    }
+
+    // MARK: - Burn-rate (slope) warning
+
+    /// Run `BurnRate.project` over the recent 5-hour OAuth samples and let
+    /// the coordinator decide whether to warn that the current *rate* will
+    /// blow the cap before reset. 5-hour only: the window is short enough
+    /// that burn rate is actionable, whereas a 90-minute slope on the
+    /// 7-day window would project alarming nonsense from a busy hour. (7d
+    /// burn-rate waits for the smarter estimator in the predictions work.)
+    private func checkBurnRateWarning() async {
+        let context = ModelContext(container)
+        let oauthSource = RateLimitSource.oauth
+        let window = RateLimitWindowName.fiveHour
+        // 2h comfortably covers BurnRate's 90-minute lookback.
+        let cutoff = Date().addingTimeInterval(-2 * 3600)
+
+        let descriptor = FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate {
+                $0.source == oauthSource
+                    && $0.window == window
+                    && $0.sampledAt >= cutoff
+            },
+            sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
+        )
+        guard let rows = try? context.fetch(descriptor), let latest = rows.last else { return }
+        let samples = rows.map {
+            BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage)
+        }
+        guard let projection = BurnRate.project(samples: samples, resetsAt: latest.resetsAt) else {
+            return
+        }
+        await NotificationCoordinator.shared.handleBurnRateWarning(
+            window: window,
+            projection: projection,
+            resetsAt: latest.resetsAt,
+            usedPct: latest.usedPercentage,
+            context: context
+        )
     }
 }

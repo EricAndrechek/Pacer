@@ -46,6 +46,11 @@ public enum PacerPreferenceKeys {
     /// confirms the drop holds across several minutes of polling before
     /// firing so a transient blip doesn't trigger it. Opt-in.
     public static let notifyGlobalReset      = "pacer.notifications.globalReset"
+    /// Warn when the *rate* you're burning the 5-hour window will hit the
+    /// limit before it resets — i.e. on slope, not just the fixed-percent
+    /// level the threshold alerts use. Fires at most once per 5-hour cycle.
+    /// Opt-in.
+    public static let notifyBurnRate         = "pacer.notifications.burnRate"
     /// Once-a-day "you spent X today" banner. Independent of the
     /// daily-cost ceiling above — that one fires when the threshold
     /// is exceeded; this one is purely informational at a chosen

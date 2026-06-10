@@ -30,6 +30,7 @@ struct SettingsView: View {
                 }
                 SettingsSection("Notifications") {
                     RateLimitAlertsCard()
+                    BurnRateAlertCard()
                     DailyCostAlertCard()
                     ResetAlertCard()
                     CustomRulesCard()
@@ -763,6 +764,21 @@ private struct CustomRulesCard: View {
                 return pacerTokens(Int64(rule.thresholdValue))
             }
         }
+    }
+}
+
+// MARK: - Burn-rate warning
+
+private struct BurnRateAlertCard: View {
+    @AppStorage(PacerSettings.Key.notifyBurnRate, store: PacerSettings.store)
+    private var enabled: Bool = false
+
+    var body: some View {
+        PacerCard("Burn-rate warning", content: {
+            Toggle("Warn when my 5-hour rate will hit the limit before it resets", isOn: $enabled)
+        }, footer: {
+            Text("Watches how fast you're burning the 5-hour window — not just how full it is — and warns once per cycle when, at your current rate, you'll hit the cap before the window resets. Complements the fixed-percentage alerts above (which fire on level, this fires on slope).")
+        })
     }
 }
 
