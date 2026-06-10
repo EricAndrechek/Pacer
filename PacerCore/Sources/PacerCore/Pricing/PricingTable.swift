@@ -3,7 +3,8 @@ import Foundation
 /// In-memory snapshot of model pricing data, keyed by the model name
 /// strings LiteLLM uses. Loaded once from either the embedded JSON
 /// snapshot (offline default) or a fresh fetch from LiteLLM's GitHub
-/// raw URL.
+/// raw URL, gap-filled from models.dev for Anthropic models LiteLLM
+/// hasn't priced yet (see `refresh()`).
 ///
 /// Lookup is fuzzy because Claude Code emits names like
 /// `claude-opus-4-7` while LiteLLM also keys entries under
@@ -63,16 +64,21 @@ public actor PricingTable {
         try loadEmbedded(skipCache: true)
     }
 
-    /// Fetch fresh pricing from LiteLLM's URL. On success, atomically
-    /// replace the in-memory table AND write the raw JSON to
-    /// `cacheURL` so a subsequent launch picks up the new prices
-    /// without needing the network. On failure, keep the existing
-    /// (possibly embedded) data — stale-but-real pricing beats broken
-    /// pricing.
+    /// Fetch fresh pricing: LiteLLM's URL as the primary source, then
+    /// models.dev as a best-effort secondary that fills only Anthropic
+    /// models LiteLLM doesn't cover yet (new Claude models routinely
+    /// appear in Claude Code logs days before LiteLLM merges pricing —
+    /// Fable 5 priced at $0 for exactly that reason). On success,
+    /// atomically replace the in-memory table AND write the merged
+    /// JSON to `cacheURL` so a subsequent launch picks up the new
+    /// prices without needing the network. On failure, keep the
+    /// existing (possibly embedded) data — stale-but-real pricing
+    /// beats broken pricing.
     ///
     /// Returns `true` only when the refresh produced a non-empty
     /// decoded table; callers can use this to decide whether to log /
-    /// reload the per-process cost cache.
+    /// reload the per-process cost cache. A models.dev failure never
+    /// fails the refresh — it just yields a LiteLLM-only table.
     @discardableResult
     public func refresh(
         urlSession: URLSession = .shared,
@@ -80,33 +86,85 @@ public actor PricingTable {
     ) async -> Bool {
         do {
             let (data, _) = try await urlSession.data(from: Self.liteLLMURL)
-            let decoded = try Self.decode(data: data)
-            guard !decoded.isEmpty else {
+            guard let rawJSON = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                Log.write("PricingTable", "refresh: payload not a JSON object — keeping existing snapshot")
+                return false
+            }
+            let liteDecoded = Self.decode(json: rawJSON)
+            guard !liteDecoded.isEmpty else {
                 Log.write("PricingTable", "refresh: decoded 0 models — keeping existing snapshot")
                 return false
             }
-            // Persist the raw payload (not the decoded dict) so the
-            // next launch reads from a real LiteLLM file shape and
-            // gets the same decode-and-skip-bad-entries behavior the
+
+            // Secondary source: splice in Anthropic models LiteLLM
+            // lacks. Synthesized entries use the LiteLLM field shape,
+            // so the cache file stays a plain LiteLLM-shaped document
+            // and the decode path needs no source awareness.
+            let mergedJSON = await Self.gapFillFromModelsDev(
+                into: rawJSON,
+                covered: liteDecoded,
+                urlSession: urlSession
+            )
+
+            let mergedDecoded = Self.decode(json: mergedJSON)
+            // Persist the merged payload (not the decoded dict) so the
+            // next launch reads a real LiteLLM-shaped file and gets
+            // the same decode-and-skip-bad-entries behavior the
             // embedded path uses.
             let destination = cacheURL ?? Self.cacheFileURL()
-            if let destination {
+            if let destination,
+               let mergedData = try? JSONSerialization.data(
+                withJSONObject: mergedJSON, options: [.sortedKeys]
+               ) {
                 do {
                     try FileManager.default.createDirectory(
                         at: destination.deletingLastPathComponent(),
                         withIntermediateDirectories: true
                     )
-                    try data.write(to: destination, options: [.atomic])
+                    try mergedData.write(to: destination, options: [.atomic])
                 } catch {
                     Log.write("PricingTable", "cache write failed (\(error)) — keeping in-memory only")
                 }
             }
-            replace(with: decoded, fromCache: true)
+            replace(with: mergedDecoded, fromCache: true)
             return true
         } catch {
             Log.write("PricingTable", "refresh failed (\(error)) — keeping existing snapshot")
             return false
         }
+    }
+
+    /// Fetch models.dev and add every Anthropic entry the LiteLLM
+    /// table doesn't already cover (per the same fuzzy match lookups
+    /// use, so a `anthropic.claude-x` LiteLLM key suppresses a
+    /// models.dev `claude-x` insert). Best-effort: any failure returns
+    /// the input unchanged.
+    private static func gapFillFromModelsDev(
+        into rawJSON: [String: Any],
+        covered: [String: LiteLLMModelPricing],
+        urlSession: URLSession
+    ) async -> [String: Any] {
+        let entries: [String: [String: Any]]
+        do {
+            let (data, _) = try await urlSession.data(from: ModelsDevCatalog.url)
+            entries = ModelsDevCatalog.anthropicEntries(from: data)
+        } catch {
+            Log.write("PricingTable", "models.dev fetch failed (\(error)) — LiteLLM-only refresh")
+            return rawJSON
+        }
+        var merged = rawJSON
+        var added: [String] = []
+        for (id, entry) in entries where liteLLMMatch(id, in: covered) == nil {
+            merged[id] = entry
+            added.append(id)
+        }
+        if !added.isEmpty {
+            Log.write(
+                "PricingTable",
+                "models.dev gap-fill: +\(added.count) model(s) LiteLLM lacks: \(added.sorted().joined(separator: ", "))"
+            )
+        }
+        return merged
     }
 
     /// Cache-file path in the App Group container. nil when the
@@ -130,35 +188,49 @@ public actor PricingTable {
         return Date().timeIntervalSince(mtime)
     }
 
-    /// Look up a model. Returns nil only if no candidate match exists
-    /// even via substring fallback or the built-in Anthropic fallback
-    /// table.
-    public func pricing(for model: String) -> LiteLLMModelPricing? {
-        if let direct = pricingByModel[model] {
+    /// The fuzzy lookup against a decoded table, WITHOUT the built-in
+    /// Anthropic fallback layer: literal key, then provider prefixes,
+    /// then bidirectional substring (ccusage tries this both ways:
+    /// model contains key, or key contains model — useful when Claude
+    /// Code emits a versioned name like `claude-haiku-4-5-20251001`
+    /// that's ALSO a literal LiteLLM key, and when it emits a base
+    /// name like `claude-opus-4-7` that matches several keys).
+    ///
+    /// Shared by the actor lookup, the `Snapshot` mirror, and the
+    /// `refresh()` gap-fill (which must know what the fetched table
+    /// covers BY ITSELF — including the fallback layer there would
+    /// wrongly suppress gap-fill for any model the static table
+    /// carries).
+    static func liteLLMMatch(
+        _ model: String,
+        in table: [String: LiteLLMModelPricing]
+    ) -> LiteLLMModelPricing? {
+        if let direct = table[model] {
             return direct
         }
-        for prefix in Self.providerPrefixes {
-            if let hit = pricingByModel[prefix + model] {
+        for prefix in providerPrefixes {
+            if let hit = table[prefix + model] {
                 return hit
             }
         }
-        // Bidirectional substring fallback. ccusage tries this both
-        // ways: model contains key, or key contains model. Useful when
-        // Claude Code emits a versioned name like
-        // `claude-haiku-4-5-20251001` that's ALSO a literal LiteLLM
-        // key, and when it emits a base name like `claude-opus-4-7`
-        // that matches several keys.
         let modelLower = model.lowercased()
-        for (key, value) in pricingByModel {
+        for (key, value) in table {
             let keyLower = key.lowercased()
             if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
                 return value
             }
         }
-        // Built-in Anthropic rates for models LiteLLM hasn't priced
-        // yet (e.g. Fable 5 / Mythos 5 at launch). Last so LiteLLM
-        // wins as soon as it ships a real entry.
-        return AnthropicFallbackPricing.pricing(for: model)
+        return nil
+    }
+
+    /// Look up a model. Returns nil only if no candidate match exists
+    /// even via substring fallback or the built-in Anthropic fallback
+    /// table.
+    public func pricing(for model: String) -> LiteLLMModelPricing? {
+        // Built-in Anthropic rates last, so the fetched tables win as
+        // soon as they ship a real entry.
+        Self.liteLLMMatch(model, in: pricingByModel)
+            ?? AnthropicFallbackPricing.pricing(for: model)
     }
 
     public func loadedTimestamp() -> Date? { loadedAt }
@@ -181,26 +253,11 @@ public actor PricingTable {
             self.pricingByModel = pricingByModel
         }
 
-        /// Mirror of `PricingTable.pricing(for:)`. Same provider-prefix
-        /// fallback, same bidirectional substring fallback, same
-        /// built-in Anthropic fallback. Sync.
+        /// Mirror of `PricingTable.pricing(for:)`. Same fuzzy match,
+        /// same built-in Anthropic fallback. Sync.
         public func pricing(for model: String) -> LiteLLMModelPricing? {
-            if let direct = pricingByModel[model] {
-                return direct
-            }
-            for prefix in PricingTable.providerPrefixes {
-                if let hit = pricingByModel[prefix + model] {
-                    return hit
-                }
-            }
-            let modelLower = model.lowercased()
-            for (key, value) in pricingByModel {
-                let keyLower = key.lowercased()
-                if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
-                    return value
-                }
-            }
-            return AnthropicFallbackPricing.pricing(for: model)
+            PricingTable.liteLLMMatch(model, in: pricingByModel)
+                ?? AnthropicFallbackPricing.pricing(for: model)
         }
     }
 
@@ -252,6 +309,13 @@ public actor PricingTable {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return [:]
         }
+        return decode(json: json)
+    }
+
+    /// Per-entry decode of an already-parsed top-level dictionary —
+    /// the shared tail of `decode(data:)` and the refresh merge path
+    /// (which needs the parsed dictionary anyway for gap-filling).
+    private static func decode(json: [String: Any]) -> [String: LiteLLMModelPricing] {
         var result: [String: LiteLLMModelPricing] = [:]
         result.reserveCapacity(json.count)
         let decoder = JSONDecoder()

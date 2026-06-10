@@ -57,7 +57,11 @@ public final class ScanCoordinator {
     ///         their samples aggregated at $0) and zero-priced LiteLLM
     ///         placeholder rows are now dropped at decode. Rebuild so
     ///         historical Fable/Mythos usage picks up real pricing.
-    public static let currentCostRecomputeVersion = "3"
+    /// - "4" — Mythos Preview gained real rates ($25/$125 per MTok,
+    ///         previously $0 via LiteLLM's zero placeholder) and
+    ///         pricing refresh now gap-fills from models.dev, which
+    ///         can price models LiteLLM lacked at earlier scans.
+    public static let currentCostRecomputeVersion = "4"
 
     /// Version of the project-path canonicalization rules. Bumped when
     /// a parsing/canonicalization change requires updating in-place

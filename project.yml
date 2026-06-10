@@ -129,7 +129,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
         PRODUCT_NAME: Pacer
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
-        MARKETING_VERSION: "0.2.0"
+        MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - package: PacerCore
@@ -168,7 +168,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.widgets
         PRODUCT_NAME: PacerWidgets
         CODE_SIGN_ENTITLEMENTS: Widgets/PacerWidgets.entitlements
-        MARKETING_VERSION: "0.2.0"
+        MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
     dependencies:
       - package: PacerCore
