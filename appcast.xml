@@ -100,5 +100,23 @@
             type="application/octet-stream"
             sparkle:edSignature="QHsv/G8MGm4sQ0fY+h+tN8cCYGtS1RoXvN0q7gwPSzqg4fnAli3No3Q+GelxXzBrtZ1UkJHrhDDn2Y1VizpAAA==" />
     </item>
+            <item>
+        <title>Version 0.3.1</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Export pace charts as shareable images + pace-chart perf/smoothing by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4631499529" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/33" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/33/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/33">EricAndrechek/Pacer#33</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.0...v0.3.1">EricAndrechek/Pacer@<tt>v0.3.0...v0.3.1</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 15:01:57 +0000</pubDate>
+        <sparkle:version>1781103446</sparkle:version>
+        <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.1/Pacer-0.3.1.dmg"
+            length="5560890"
+            type="application/octet-stream"
+            sparkle:edSignature="tXCurpSZQ/kRzFkqNPOtO+dsqnkpWwfhQhQN5SKFR9p78XPypK4o0JszGRo4Y49ypDN4S43EGCI7L77jB2UfDA==" />
+    </item>
         </channel>
 </rss>
