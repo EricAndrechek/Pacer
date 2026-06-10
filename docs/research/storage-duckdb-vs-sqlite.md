@@ -2,10 +2,10 @@
 
 > Status: **Part 1 (in-app storage visibility) shipped** — a "Storage"
 > card in Settings → Data, backed by `StorageInspector` in PacerCore.
-> **Part 2 (DuckDB vs SQLite research) still open** — would DuckDB save
-> meaningful at-rest space or query time vs SQLite (the SwiftData backing
-> store), especially under a future Rust/Go core? Curiosity-driven; don't
-> let it block anything.
+> **Part 2 (DuckDB vs SQLite) benchmarked — verdict: not worth adopting
+> now.** ~8.5× smaller at rest but loses on the point-lookups Pacer's UI
+> leans on and ties on analytics at current scale. The bigger, no-new-
+> dependency win is reclaiming the ~30 MB of unused Core Data history.
 
 ## Baseline measurements (this machine, 2026-06-10)
 
@@ -70,12 +70,18 @@ persistent-history change-tracking, not user data.** That's a concrete,
 *no-new-dependency* win that outranks anything DuckDB would buy:
 
 1. **Prune persistent history.** Core Data's `NSPersistentHistoryToken`
-   transaction log (`ATRANSACTION`/`ACHANGE`) accrues because something
-   enabled history tracking (the App Group + widget cross-process setup
-   often does). If no consumer actually *reads* history tokens, it can be
-   capped/pruned (`deletePersistentHistory(before:)`) or disabled —
-   reclaiming ~30 MB and bounding future growth. **Verify a consumer
-   needs it before disabling.** This is the first thing to chase.
+   transaction log (`ATRANSACTION`/`ACHANGE`) accrues because SwiftData
+   turns history tracking **on by default** for a SQLite store (the
+   container uses a plain `ModelConfiguration(url:)` — no opt-out).
+   **Confirmed: nothing in the codebase reads it** — a grep for any
+   `PersistentHistory` / `historyToken` API is empty, and widgets refresh
+   off the explicit `pacerScanCycleDidComplete` notification, not history
+   tokens. So it's pure dead weight that grows with every write. Fix: a
+   periodic `ModelContext.deleteHistory(before: now − N days)` maintenance
+   pass (SwiftData macOS 15 API) to cap it; optionally a one-time VACUUM
+   to actually shrink the file on disk (frees pages otherwise just get
+   reused). Delete only *old* history so SwiftData's own cross-context
+   `@Query` catch-up isn't disturbed. This is the first thing to chase.
 2. **Audit the 5 TokenSample indexes (~25 MB).** Each maps to a hot
    predicate (see `RateLimitSample.swift`/`TokenSample.swift` index
    docs), but at ~25 MB for ~33 MB of data it's worth confirming all
@@ -83,6 +89,42 @@ persistent-history change-tracking, not user data.** That's a concrete,
 
 These two together could roughly halve the store with zero columnar
 rewrite — and they're worth doing regardless of the DuckDB question.
+
+### DuckDB benchmark results (2026-06-10)
+
+Ran it for real: loaded the live `ZTOKENSAMPLE` (104,349 rows) into a
+native DuckDB table via the `sqlite` extension and compared.
+
+**At-rest size — DuckDB wins big (~8.5×):**
+
+| | Size |
+|---|---|
+| SQLite `ZTOKENSAMPLE`: data 33 MB + indexes 25 MB | **~58 MB** |
+| DuckDB native table | **6.8 MB** |
+
+Driver: the data is tiny-cardinality — **6 distinct models, 27 projects,
+412 sessions** across 104k rows — so columnar dictionary encoding stores
+each repeated string (model / projectPath / sessionId) once instead of
+per-row, and needs no 25 MB of B-tree indexes.
+
+**Query time — a tie, or a loss, at this scale:**
+
+| Query | SQLite | DuckDB |
+|---|---|---|
+| Analytical rollup (per date×model, full scan) | <1 ms | <1 ms |
+| Point lookup "latest 50 samples" (Pacer's hot path) | ~1 ms (indexed) | ~4–12 ms (full scan, no index) |
+
+At 104k rows both are instant on the rollup — DuckDB's vectorized-scan
+edge only matters in the millions. And on the latest-N point lookups
+Pacer's UI does constantly, SQLite's index *beats* DuckDB.
+
+**Verdict:** DuckDB is a real ~8× *storage* win but a *mixed* query
+story — it would slow the hot path and only ties on analytics at today's
+scale. Not worth swapping the backing store (and SwiftData makes it
+impractical without the Rust/Go core anyway). Reconsider only as a future
+*analytics sidecar* if history grows into the millions of rows. The
+~30 MB Core Data history reclaim (above) returns more, with no new
+dependency and no hot-path risk — do that instead.
 
 ### Frame it honestly
 
