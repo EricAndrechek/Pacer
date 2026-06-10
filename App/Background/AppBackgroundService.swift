@@ -226,11 +226,18 @@ final class AppBackgroundService {
 
     // MARK: - Global rate-limit reset detection
 
-    /// How far back to look for the pre-reset high + the confirming low
-    /// run. Bounded to the authoritative OAuth source (~12 rows/hour/
-    /// window), so even 6 hours is ~150 rows total — cheap to scan on
-    /// the ~5-minute cadence the OAuth poller writes rate-limit rows.
-    private static let globalResetLookback: TimeInterval = 6 * 3600
+    /// How far back to fetch samples when checking for an early reset on
+    /// a given window. We look across the *whole current cycle* (one
+    /// window-duration + 1h slack) rather than a fixed short window: an
+    /// early reset leaves the anchor unchanged, so the pre-reset high we
+    /// compare against necessarily sits within one window-duration of
+    /// now — and a reset that happened while the Mac was asleep/closed
+    /// must still find that high on next launch. Bounded to the
+    /// authoritative OAuth source (~12 rows/hour), so even the 7-day
+    /// window is ~2k rows scanned once per ~5-min poll — trivial.
+    private func globalResetLookback(forWindow window: String) -> TimeInterval {
+        (PaceMath.windowDuration(for: window) ?? (72 * 3600)) + 3600
+    }
 
     /// Observe scan-cycle completions and, when one carries fresh
     /// rate-limit rows, check whether Anthropic just reset limits early.
@@ -260,10 +267,10 @@ final class AppBackgroundService {
     /// coordinator handles the settings gate and per-cycle dedup.
     private func checkForGlobalReset() async {
         let context = ModelContext(container)
-        let cutoff = Date().addingTimeInterval(-Self.globalResetLookback)
         let oauthSource = RateLimitSource.oauth
 
         for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {
+            let cutoff = Date().addingTimeInterval(-globalResetLookback(forWindow: window))
             let descriptor = FetchDescriptor<RateLimitSample>(
                 predicate: #Predicate {
                     $0.source == oauthSource

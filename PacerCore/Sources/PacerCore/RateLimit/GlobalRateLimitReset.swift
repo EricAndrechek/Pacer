@@ -20,6 +20,15 @@ import Foundation
 /// `Observation` values and hand them over in any order; `detect` sorts
 /// internally. The function reads only the observations' own
 /// timestamps, never the wall clock, so it's deterministic.
+///
+/// Detection deliberately does NOT require the high→low transition to be
+/// recent: a reset that landed while the Mac was asleep or the app was
+/// closed is still worth surfacing the moment Pacer sees a sustained low
+/// on the unchanged anchor (the headroom persists until the real reset
+/// day). The caller's only obligation is to feed observations spanning
+/// the current cycle so the pre-reset high is present to compare against
+/// — which, since the anchor hasn't rolled, is always within one
+/// window-duration of now.
 public enum GlobalRateLimitReset {
 
     /// One window observation, source-agnostic. Maps from a
@@ -79,13 +88,6 @@ public enum GlobalRateLimitReset {
     /// genuinely persists fires the alert — the user's "confirm it's not
     /// just a blip" requirement.
     public static let minConfirmDuration: TimeInterval = 4 * 60
-    /// The drop must be observed *live*: the gap between the last high
-    /// reading and the first low reading must be no larger than this.
-    /// A multi-hour gap means the app was closed / asleep across the
-    /// transition, so we can't say when in that gap the reset happened
-    /// and it's probably stale — suppress rather than fire a banner
-    /// about something from this morning.
-    public static let maxDropGap: TimeInterval = 30 * 60
 
     /// Returns a `Detection` if the most recent observations show a
     /// sustained, anchor-stable collapse to near-zero preceded by a
@@ -129,14 +131,14 @@ public enum GlobalRateLimitReset {
 
         // The drop edge must itself be meaningfully high…
         guard before.usedPercentage >= highWatermark else { return nil }
-        // …carry the SAME cycle anchor as the low run (if its anchor is
-        // earlier, the cycle rolled over → normal reset, not this)…
+        // …and carry the SAME cycle anchor as the low run. If its anchor
+        // is earlier, the cycle rolled over → normal reset, not this.
+        // (This is also what keeps a long gap honest: a drop edge from
+        // before a normal rollover carries the old anchor and is
+        // rejected here, so we never mistake a rollover for an early
+        // reset no matter how far back we look.)
         guard let beforeAnchor = before.resetsAt,
               abs(beforeAnchor.timeIntervalSince(anchor)) <= anchorTolerance else { return nil }
-        // …and the high→low transition must have been seen live.
-        guard lowRun.first!.sampledAt.timeIntervalSince(before.sampledAt) <= maxDropGap else {
-            return nil
-        }
 
         return Detection(
             droppedFrom: before.usedPercentage,

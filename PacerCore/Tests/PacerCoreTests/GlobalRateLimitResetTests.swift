@@ -105,15 +105,32 @@ struct GlobalRateLimitResetTests {
         #expect(GlobalRateLimitReset.detect(series) == nil)
     }
 
-    @Test func rejectsDropAcrossLongGap() {
-        // High reading, then a multi-hour gap (app closed/asleep), then
-        // a sustained low. We can't say when in the gap the reset
-        // happened → suppress as stale.
+    @Test func detectsDropAcrossLongGap() {
+        // High reading, then a multi-hour gap (Mac asleep / app closed),
+        // then a sustained low on the SAME anchor. The headroom is real
+        // and persists, so we surface it once a sustained low confirms —
+        // the gap is fine because the anchor didn't roll.
         let series = [
             obs(minutesAgo: 200, pct: 60, anchor: anchor),
             obs(minutesAgo: 10, pct: 0, anchor: anchor),
             obs(minutesAgo: 5, pct: 0, anchor: anchor),
             obs(minutesAgo: 0, pct: 0, anchor: anchor),
+        ]
+        let d = GlobalRateLimitReset.detect(series)
+        #expect(d != nil)
+        #expect(d?.droppedFrom == 60)
+    }
+
+    @Test func rejectsRolloverEvenAcrossLongGap() {
+        // Same long gap, but the anchor advanced across it → ordinary
+        // rollover, not an early reset. Must still be rejected no matter
+        // how far back the high sits.
+        let nextAnchor = anchor.addingTimeInterval(7 * 24 * 3600)
+        let series = [
+            obs(minutesAgo: 200, pct: 60, anchor: anchor),
+            obs(minutesAgo: 10, pct: 0, anchor: nextAnchor),
+            obs(minutesAgo: 5, pct: 0, anchor: nextAnchor),
+            obs(minutesAgo: 0, pct: 0, anchor: nextAnchor),
         ]
         #expect(GlobalRateLimitReset.detect(series) == nil)
     }
