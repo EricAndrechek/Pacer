@@ -35,7 +35,8 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data perf-snapshot screenshots
+        logs logs-tail status open clean-data perf-snapshot screenshots \
+        pricing-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
 # surprising.
@@ -65,6 +66,9 @@ build: verify  ## Alias for `verify`.
 
 test:  ## Run the PacerCore unit + ground-truth tests.
 	@cd PacerCore && swift test 2>&1 | tail -3
+
+pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
+	@bin/update-pricing-snapshot.sh
 
 screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. Headless, synthetic data, no focus steal — safe to run alongside a live Pacer. Re-run after any meaningful UI change.
 	@mkdir -p "$(REPO_ROOT)/docs/screenshots"

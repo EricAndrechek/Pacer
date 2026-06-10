@@ -290,22 +290,43 @@ struct PricingTests {
 
     // MARK: - Anthropic fallback pricing (Fable / Mythos)
 
-    @Test func fableFiveResolvesViaBuiltinFallback() async throws {
-        // LiteLLM carries no Fable entry as of the embedded snapshot,
-        // so this exercises the AnthropicFallbackPricing path. If
-        // LiteLLM later ships real Fable pricing at different rates,
-        // this test failing is the signal to retire or update the
-        // fallback row.
+    @Test func fableFiveResolvesFromEmbeddedSnapshot() async throws {
+        // The embedded snapshot is the LiteLLM + models.dev merge
+        // (`make pricing-snapshot`), so Fable resolves even before the
+        // first network refresh. If a future source ships different
+        // rates, this failing is the signal to re-check them against
+        // Anthropic's published pricing.
         let table = PricingTable()
         try await table.ensureLoaded()
         let pricing = try #require(await table.pricing(for: "claude-fable-5"))
         #expect(pricing.inputCostPerToken == 1.0e-05)    // $10 / MTok
         #expect(pricing.outputCostPerToken == 5.0e-05)   // $50 / MTok
         #expect(pricing.cacheCreationInputTokenCost == 1.25e-05)
-        #expect(pricing.cacheCreationInputTokenCostAbove1hr == 2.0e-05)
         #expect(pricing.cacheReadInputTokenCost == 1.0e-06)
         // Full 1M context at standard pricing — no above-200k tier.
         #expect(pricing.inputCostPerTokenAbove200kTokens == nil)
+    }
+
+    @Test func builtinFallbackTableCarriesDocumentedRates() {
+        // Direct unit check on the static floor — these rows are what
+        // price Glasswing models (absent from every public catalog)
+        // and brand-new models on offline cold starts.
+        let fable = AnthropicFallbackPricing.pricing(for: "claude-fable-5")
+        #expect(fable?.inputCostPerToken == 1.0e-05)
+        #expect(fable?.cacheCreationInputTokenCostAbove1hr == 2.0e-05)
+
+        let mythos5 = AnthropicFallbackPricing.pricing(for: "claude-mythos-5")
+        #expect(mythos5?.inputCostPerToken == 1.0e-05)
+        #expect(mythos5?.outputCostPerToken == 5.0e-05)
+
+        // Mythos Preview: $25/$125 partner pricing, cache rates via
+        // the standard 1.25x / 2x / 0.1x multipliers.
+        let preview = AnthropicFallbackPricing.pricing(for: "claude-mythos-preview")
+        #expect(preview?.inputCostPerToken == 2.5e-05)
+        #expect(preview?.outputCostPerToken == 1.25e-04)
+        #expect(preview?.cacheCreationInputTokenCost == 3.125e-05)
+        #expect(preview?.cacheCreationInputTokenCostAbove1hr == 5.0e-05)
+        #expect(preview?.cacheReadInputTokenCost == 2.5e-06)
     }
 
     @Test func fableVariantsResolveToSameFallback() async throws {
@@ -355,11 +376,14 @@ struct PricingTests {
         let table = PricingTable()
         try await table.ensureLoaded(cacheURL: tmp)
         #expect(await table.modelCount() == 1)
-        // Mythos Preview has no published pricing and no fallback row
-        // — it resolves to nothing rather than a fake $0 entry.
-        #expect(await table.pricing(for: "claude-mythos-preview") == nil)
-        // Mythos 5 (real published pricing) resolves via the fallback
-        // even though this snapshot doesn't carry it.
+        // With the $0 placeholder dropped, Mythos Preview falls
+        // through to the fallback row carrying its reported partner
+        // pricing instead of a fake $0 entry.
+        let preview = try #require(await table.pricing(for: "claude-mythos-preview"))
+        #expect(preview.inputCostPerToken == 2.5e-05)
+        #expect(preview.outputCostPerToken == 1.25e-04)
+        // Mythos 5 resolves via the fallback even though this
+        // snapshot doesn't carry it.
         let mythos = try #require(await table.pricing(for: "claude-mythos-5"))
         #expect(mythos.inputCostPerToken == 1.0e-05)
     }
@@ -384,5 +408,79 @@ struct PricingTests {
         try await table.ensureLoaded(cacheURL: tmp)
         let pricing = try #require(await table.pricing(for: "claude-fable-5"))
         #expect(pricing.inputCostPerToken == 9.9e-05)
+    }
+
+    // MARK: - models.dev secondary source
+
+    @Test func modelsDevParserMapsAnthropicEntriesToLiteLLMShape() throws {
+        // Real shape: per-MTok dollars under cost{}, limits under
+        // limit{}. Mixed Int/Double costs both convert to per-token.
+        let json = """
+        {
+          "anthropic": {
+            "models": {
+              "claude-fable-5": {
+                "cost": {"input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5},
+                "limit": {"context": 1000000, "output": 128000}
+              },
+              "zero-priced-placeholder": {
+                "cost": {"input": 0, "output": 0}
+              },
+              "no-cost-model": {"limit": {"context": 200000}}
+            }
+          },
+          "openai": {
+            "models": {
+              "gpt-x": {"cost": {"input": 5, "output": 15}}
+            }
+          }
+        }
+        """
+        let entries = ModelsDevCatalog.anthropicEntries(from: Data(json.utf8))
+        #expect(entries.count == 1)
+        let fable = try #require(entries["claude-fable-5"])
+        #expect(fable["input_cost_per_token"] as? Double == 1.0e-05)
+        #expect(fable["output_cost_per_token"] as? Double == 5.0e-05)
+        #expect(fable["cache_read_input_token_cost"] as? Double == 1.0e-06)
+        #expect(fable["cache_creation_input_token_cost"] as? Double == 1.25e-05)
+        #expect(fable["max_input_tokens"] as? Int == 1_000_000)
+        #expect(fable["max_output_tokens"] as? Int == 128_000)
+        // The synthesized entry must decode through the normal
+        // LiteLLM per-entry path.
+        let data = try JSONSerialization.data(withJSONObject: fable)
+        let decoded = try JSONDecoder().decode(LiteLLMModelPricing.self, from: data)
+        #expect(decoded.hasUsablePricing)
+    }
+
+    @Test func gapFillCoverageUsesLiteLLMMatchSemantics() {
+        // The merge must skip models the LiteLLM table already covers
+        // — including via provider-prefixed keys through the substring
+        // match — and must NOT consult the static fallback table (or
+        // fallback-listed models would never be gap-filled).
+        let row = LiteLLMModelPricing(
+            inputCostPerToken: 1e-06,
+            outputCostPerToken: 2e-06,
+            cacheCreationInputTokenCost: nil,
+            cacheCreationInputTokenCostAbove1hr: nil,
+            cacheReadInputTokenCost: nil,
+            inputCostPerTokenAbove200kTokens: nil,
+            outputCostPerTokenAbove200kTokens: nil,
+            cacheCreationInputTokenCostAbove200kTokens: nil,
+            cacheReadInputTokenCostAbove200kTokens: nil,
+            cacheCreationInputTokenCostAbove1hrAbove200kTokens: nil,
+            maxInputTokens: nil,
+            maxOutputTokens: nil
+        )
+        let covered = [
+            "claude-sonnet-4-6": row,
+            "anthropic.claude-opus-4-8": row,
+        ]
+        // Literal key → covered.
+        #expect(PricingTable.liteLLMMatch("claude-sonnet-4-6", in: covered) != nil)
+        // Bedrock-prefixed key covers the bare ID via substring.
+        #expect(PricingTable.liteLLMMatch("claude-opus-4-8", in: covered) != nil)
+        // Absent from the table → gap-fill candidate, even though the
+        // static fallback table knows it.
+        #expect(PricingTable.liteLLMMatch("claude-fable-5", in: covered) == nil)
     }
 }

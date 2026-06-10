@@ -1,27 +1,33 @@
 import Foundation
 
-/// Last-resort pricing for Anthropic models that LiteLLM doesn't carry
-/// (real) prices for yet. New Claude models routinely show up in
-/// Claude Code logs days or weeks before LiteLLM merges a pricing
-/// entry — Fable 5 / Mythos 5 launched 2026-06-09 with no LiteLLM
-/// entry at all — and without this table their usage silently costs
-/// $0 everywhere in the app.
+/// Last-resort pricing for Anthropic models neither dynamic source
+/// carries. With `PricingTable.refresh()` merging LiteLLM (primary)
+/// and models.dev (secondary, usually live on launch day), this table
+/// is load-bearing only for:
 ///
-/// Consulted ONLY after every LiteLLM lookup path (literal, provider
-/// prefix, bidirectional substring) has missed, so LiteLLM stays
-/// authoritative the moment it ships a real entry. Zero-priced
-/// LiteLLM placeholders are dropped at decode (see
+/// - **Limited-availability models** public catalogs never list: the
+///   Project Glasswing family (`claude-mythos-5`,
+///   `claude-mythos-preview`) is invite-only and absent from both
+///   LiteLLM and models.dev, but Anthropic publishes (or press has
+///   reported) real rates for them.
+/// - **Offline cold starts** on the day a brand-new model ships,
+///   before the first successful refresh, if the embedded snapshot
+///   predates the model.
+///
+/// Consulted ONLY after every fetched-table lookup path (literal,
+/// provider prefix, bidirectional substring) has missed, so the
+/// dynamic sources win the moment they ship a real entry. Zero-priced
+/// placeholder rows are dropped at decode (see
 /// `LiteLLMModelPricing.hasUsablePricing`), so they can't shadow a
 /// row here.
-///
-/// Rates from https://platform.claude.com/docs/en/about-claude/pricing
-/// (fetched 2026-06-09). Fable 5 and Mythos 5 include the full 1M
-/// context window at standard pricing, so no above-200k tier fields.
 enum AnthropicFallbackPricing {
 
     /// Fable 5 / Mythos 5 share a price point: $10 input, $50 output,
     /// $12.50 5m cache write, $20 1h cache write, $1 cache read — per
-    /// MTok, stored per-token.
+    /// MTok, stored per-token. Both include the full 1M context window
+    /// at standard pricing (no above-200k tier). Source:
+    /// https://platform.claude.com/docs/en/about-claude/pricing
+    /// (fetched 2026-06-09).
     private static let fableTier = LiteLLMModelPricing(
         inputCostPerToken: 1.0e-05,
         outputCostPerToken: 5.0e-05,
@@ -37,13 +43,35 @@ enum AnthropicFallbackPricing {
         maxOutputTokens: 128_000
     )
 
-    /// Keyed by canonical Claude API model ID. `claude-mythos-preview`
-    /// is deliberately absent — Anthropic publishes no pricing for the
-    /// invitation-only research preview, and inventing a number would
-    /// be worse than reporting $0.
+    /// Mythos Preview partner pricing: $25 input / $125 output per
+    /// MTok ("five times the cost of Opus 4.7"), as reported at the
+    /// Fable 5 / Mythos 5 launch — Anthropic's own docs price the
+    /// successor at "under half" of Preview, consistent with $10 vs
+    /// $25. Anthropic's pricing table doesn't list Preview itself, so
+    /// cache rates are derived from the standard multipliers that
+    /// apply uniformly across the published table (5m write 1.25x,
+    /// 1h write 2x, read 0.1x). The long-context docs note Preview
+    /// includes the 1M window at standard pricing.
+    private static let mythosPreviewTier = LiteLLMModelPricing(
+        inputCostPerToken: 2.5e-05,
+        outputCostPerToken: 1.25e-04,
+        cacheCreationInputTokenCost: 3.125e-05,
+        cacheCreationInputTokenCostAbove1hr: 5.0e-05,
+        cacheReadInputTokenCost: 2.5e-06,
+        inputCostPerTokenAbove200kTokens: nil,
+        outputCostPerTokenAbove200kTokens: nil,
+        cacheCreationInputTokenCostAbove200kTokens: nil,
+        cacheReadInputTokenCostAbove200kTokens: nil,
+        cacheCreationInputTokenCostAbove1hrAbove200kTokens: nil,
+        maxInputTokens: 1_000_000,
+        maxOutputTokens: 128_000
+    )
+
+    /// Keyed by canonical Claude API model ID.
     static let table: [String: LiteLLMModelPricing] = [
         "claude-fable-5": fableTier,
         "claude-mythos-5": fableTier,
+        "claude-mythos-preview": mythosPreviewTier,
     ]
 
     /// Exact match first, then "model contains key" — which covers the
