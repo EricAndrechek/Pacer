@@ -41,6 +41,16 @@ keeps all of your data on your own Mac.
   </tr>
 </table>
 
+<!-- Share any chart as a branded image — light/dark follows the GitHub theme. -->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/share-card-dark.png">
+    <img src="docs/screenshots/share-card.png" width="520"
+         alt="Pacer share card — a blown-up 7-day rate-limit burn chart showing your usage versus the ideal pace line, exported as a branded image">
+  </picture>
+  <br><sub><b>Share any chart as an image</b> — copy, save, or AirDrop a blown-up burn chart straight from the dashboard</sub>
+</p>
+
 <details>
 <summary><strong>More screenshots</strong> — the six-month history view</summary>
 <br>
