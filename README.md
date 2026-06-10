@@ -48,7 +48,7 @@ keeps all of your data on your own Mac.
     <img src="docs/screenshots/share-card.png" width="520"
          alt="Pacer share card — a blown-up 7-day rate-limit burn chart showing your usage versus the ideal pace line, exported as a branded image">
   </picture>
-  <br><sub><b>Share any chart as an image</b> — copy, save, or AirDrop a blown-up burn chart straight from the dashboard</sub>
+  <br><sub><b>Share your 5-hour &amp; 7-day burn charts as an image</b></sub>
 </p>
 
 <details>
