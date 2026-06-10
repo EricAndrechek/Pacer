@@ -48,6 +48,24 @@ struct HeroStripCard: View {
                 $0.date >= weekAgoString && $0.date <= todayString
             }
         )
+        // 7-day burn uses the recency-weighted estimator (like the 7-day
+        // warning), which needs a multi-day lookback — not the ~2h the
+        // 48-row `recentRateLimits` query holds. Fetch a generous 3 days of
+        // 7-day OAuth samples (the same source the warning reads); the
+        // estimator trims to its own 48h lookback at compute time, so a
+        // little staleness in this init-computed cutoff is harmless.
+        let sevenDayCutoff = Calendar.current.date(byAdding: .day, value: -3, to: Date()) ?? Date()
+        let sevenDayWindow = RateLimitWindowName.sevenDay
+        let oauthSource = RateLimitSource.oauth
+        _sevenDayHistory = Query(
+            filter: #Predicate<RateLimitSample> {
+                $0.window == sevenDayWindow
+                    && $0.source == oauthSource
+                    && $0.sampledAt >= sevenDayCutoff
+            },
+            sort: \.sampledAt,
+            order: .forward
+        )
     }
 
     /// All today's per-model rollups. ≤ a handful of rows; iterating in
@@ -62,6 +80,10 @@ struct HeroStripCard: View {
     /// covers ~2 hours of both windows together with headroom for
     /// status-line bursts that bypass the 5-min cadence.
     @Query(HeroStripCard.recentRateLimits) private var rateLimits: [RateLimitSample]
+    /// ~3 days of 7-day-window OAuth samples for the recency-weighted burn
+    /// projection shown in the 7-day tile — matching the 7-day warning's
+    /// data + math so the displayed ETA and the notification can't disagree.
+    @Query private var sevenDayHistory: [RateLimitSample]
     /// Most-recent `extra_usage` sample. Only meaningful for Max-plan
     /// users who can exceed quota; nil for everyone else. fetchLimit
     /// = 1 keeps the materialization bounded.
@@ -151,8 +173,11 @@ struct HeroStripCard: View {
                 resetsAt: s.resetsAt
             )
         }
+        // 5-hour: first-to-last linear slope (actionable on a short window).
         next.fiveHourBurn = projection(forWindow: "five_hour")
-        next.sevenDayBurn = projection(forWindow: "seven_day")
+        // 7-day: recency-weighted estimator over a multi-day lookback — the
+        // same projection the 7-day warning uses, so tile and notification agree.
+        next.sevenDayBurn = sevenDayProjection()
         if let latest = extraUsages.first {
             next.extraUsageUSD = latest.amountUSD
         }
@@ -177,14 +202,26 @@ struct HeroStripCard: View {
         return (todayCost / avg, active.count)
     }
 
-    /// One-window burn-rate projection. Same algorithm as before,
-    /// just moved out of the body so we can cache it.
+    /// One-window first-to-last linear burn-rate projection (the 5-hour
+    /// tile). Cached out of the body.
     private func projection(forWindow window: String) -> BurnRate.Projection? {
         let samples = rateLimits
             .filter { $0.window == window }
             .map { BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage) }
         let resetsAt = rateLimits.first { $0.window == window }?.resetsAt
         return BurnRate.project(samples: samples, resetsAt: resetsAt)
+    }
+
+    /// 7-day burn projection via the recency-weighted estimator over the
+    /// multi-day `sevenDayHistory`, matching the 7-day warning so the
+    /// displayed ETA and the notification stay consistent.
+    private func sevenDayProjection() -> BurnRate.Projection? {
+        let samples = sevenDayHistory.map {
+            BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage)
+        }
+        // Forward-sorted, so the most recent sample (its reset) is last.
+        let resetsAt = sevenDayHistory.last?.resetsAt
+        return BurnRate.projectRecencyWeighted(samples: samples, resetsAt: resetsAt)
     }
 
     var body: some View {
