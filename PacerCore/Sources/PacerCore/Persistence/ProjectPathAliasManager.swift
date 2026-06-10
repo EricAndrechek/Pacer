@@ -181,12 +181,28 @@ public final class ProjectPathAliasManager {
     /// Remove an alias. Idempotent — removing a non-existent alias is
     /// a no-op rather than an error, so the UI's confirm-then-delete
     /// path doesn't race with a parallel re-fetch.
-    public func remove(sourcePath: String) throws {
+    ///
+    /// `rejectAutoMerge: true` also flags this path's `ProjectPathProbe`
+    /// so the auto-aliaser won't re-create the alias on the next scan.
+    /// Pass it when deleting an *auto-generated* alias — without it the
+    /// sibling-worktree pass would silently re-merge the path the moment
+    /// its alias was gone. Harmless for manual aliases (their source
+    /// usually has no probe; if it does, blocking a future auto-merge
+    /// that wasn't happening anyway is a no-op).
+    public func remove(sourcePath: String, rejectAutoMerge: Bool = false) throws {
         let descriptor = FetchDescriptor<ProjectPathAlias>(
             predicate: #Predicate<ProjectPathAlias> { $0.sourcePath == sourcePath }
         )
         for row in try context.fetch(descriptor) {
             context.delete(row)
+        }
+        if rejectAutoMerge {
+            let probeDescriptor = FetchDescriptor<ProjectPathProbe>(
+                predicate: #Predicate<ProjectPathProbe> { $0.path == sourcePath }
+            )
+            for probe in try context.fetch(probeDescriptor) {
+                probe.autoMergeRejected = true
+            }
         }
         try context.save()
     }

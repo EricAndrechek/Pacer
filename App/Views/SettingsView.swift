@@ -42,6 +42,7 @@ struct SettingsView: View {
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
+                    ProjectAliasesPointerCard()
                     DatabaseCard()
                     LogsCard()
                 }
@@ -907,6 +908,35 @@ private struct CostCalculationCard: View {
             .labelsHidden()
         }, footer: {
             Text("**Auto** matches `bun x ccusage`. **Calculate** is what you want when older Claude Code lines lack `costUSD`. **Display** only shows server-supplied numbers and ignores tokens that didn't come with one.")
+        })
+    }
+}
+
+// MARK: - Project aliases pointer
+
+/// Alias management moved to the Projects tab (page header → "Aliases…").
+/// This signpost lives where the alias card used to be (Settings → Data)
+/// so anyone who looks here is pointed to the new home, with a one-click
+/// jump that switches the sidebar to Projects.
+private struct ProjectAliasesPointerCard: View {
+    var body: some View {
+        PacerCard("Project aliases", content: {
+            HStack(spacing: 12) {
+                Text("Merge renamed folders, sibling worktrees, and cross-machine paths into one project.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                Button("Open in Projects") {
+                    NotificationCenter.default.post(
+                        name: .pacerSelectDestination,
+                        object: ContentView.Destination.projects
+                    )
+                }
+                .controlSize(.small)
+            }
+        }, footer: {
+            Text("Managed from the Projects tab now — pick a time range and open **Aliases…** in the page header.")
         })
     }
 }

@@ -43,15 +43,32 @@ public final class ProjectPathProbe {
 
     public var probedAt: Date
 
+    /// The user deleted an auto-generated alias for this path, so Pacer
+    /// must not re-create it. The git-root rollup pass already honours
+    /// deletions implicitly (it skips any path that already has a probe
+    /// row), but the sibling-worktree pass re-evaluates *every* root
+    /// probe each cycle and would otherwise re-merge a path the moment
+    /// its alias was removed. This flag is the sibling pass's "the user
+    /// said no" signal — set by `ProjectPathAliasManager.remove(...,
+    /// rejectAutoMerge: true)` and checked in
+    /// `ProjectGitRootAutoAliaser.run`. Re-adding the alias by hand is
+    /// the way back (it becomes a manual alias).
+    ///
+    /// Declared with a default so SwiftData's lightweight migration adds
+    /// the column additively (existing rows get `false`).
+    public var autoMergeRejected: Bool = false
+
     public init(
         path: String,
         gitRoot: String?,
         originURL: String? = nil,
-        probedAt: Date = Date()
+        probedAt: Date = Date(),
+        autoMergeRejected: Bool = false
     ) {
         self.path = path
         self.gitRoot = gitRoot
         self.originURL = originURL
         self.probedAt = probedAt
+        self.autoMergeRejected = autoMergeRejected
     }
 }

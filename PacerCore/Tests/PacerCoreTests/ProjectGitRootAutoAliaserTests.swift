@@ -63,6 +63,40 @@ import Testing
         #expect(aliases[0].canonicalPath == b)
     }
 
+    /// Regression: deleting an auto-generated sibling-worktree alias
+    /// must *stick*. The sibling pass re-evaluates every root probe each
+    /// cycle, so without a rejection signal it silently re-merged the
+    /// path on the very next scan. `remove(rejectAutoMerge: true)` flags
+    /// the probe (`autoMergeRejected`) and the sibling pass skips it.
+    @Test func deletedSiblingMergeStaysDeletedWhenRejected() async throws {
+        let (mainPath, secondaryPath, origin, cleanup) = try makeSiblingPair()
+        defer { cleanup() }
+
+        let container = try makeContainer()
+        let context = ModelContext(container)
+        seedProbe(in: context, path: mainPath, gitRoot: mainPath, origin: origin)
+        seedProbe(in: context, path: secondaryPath, gitRoot: secondaryPath, origin: origin)
+        try context.save()
+
+        let aliaser = ProjectGitRootAutoAliaser(context: context)
+        _ = try await aliaser.run(candidatePaths: [])
+        // The auto-merge was created (secondary → main).
+        #expect(try context.fetch(FetchDescriptor<ProjectPathAlias>()).count == 1)
+
+        // User deletes it, rejecting the auto-merge.
+        let manager = ProjectPathAliasManager(context: context)
+        try manager.remove(sourcePath: secondaryPath, rejectAutoMerge: true)
+        #expect(try context.fetch(FetchDescriptor<ProjectPathAlias>()).isEmpty)
+
+        // The next scan must NOT re-create it.
+        _ = try await aliaser.run(candidatePaths: [])
+        #expect(try context.fetch(FetchDescriptor<ProjectPathAlias>()).isEmpty)
+
+        // And the rejection is recorded durably on the probe.
+        let probes = try context.fetch(FetchDescriptor<ProjectPathProbe>())
+        #expect(probes.first { $0.path == secondaryPath }?.autoMergeRejected == true)
+    }
+
     // MARK: - reconcileSiblingMergeAliases
 
     /// The smoking-gun case: an alias was written under the old rule
