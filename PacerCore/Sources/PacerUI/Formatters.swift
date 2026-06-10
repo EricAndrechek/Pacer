@@ -154,6 +154,19 @@ public func pacerTokensExact(_ count: Int64) -> String {
     count.formatted(.number)
 }
 
+// MARK: - Bytes
+
+/// Human-readable on-disk size that matches what Finder shows ("97 MB",
+/// "1.1 GB"). Uses `ByteCountFormatter` with the `.file` count style —
+/// macOS's decimal (1000-based) convention — so Pacer's storage figures
+/// line up with what the user sees in Finder rather than diverging by
+/// the binary-vs-decimal factor. Negative inputs clamp to 0.
+public func pacerBytes(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: max(0, bytes))
+}
+
 // MARK: - Strings
 
 /// Strip provider prefixes like `anthropic/` so model labels stay tight.
