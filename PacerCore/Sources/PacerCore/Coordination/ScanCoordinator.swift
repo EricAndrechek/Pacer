@@ -52,7 +52,12 @@ public final class ScanCoordinator {
     ///         `SessionInfoRecomputer` to honor cost mode + pricing
     ///         (previously they collapsed to `sourceCostUSD ?? 0`
     ///         and showed $0 for every CC line without a stored cost).
-    public static let currentCostRecomputeVersion = "2"
+    /// - "3" — `AnthropicFallbackPricing` added for Fable 5 / Mythos 5
+    ///         (LiteLLM had no entries at their 2026-06-09 launch, so
+    ///         their samples aggregated at $0) and zero-priced LiteLLM
+    ///         placeholder rows are now dropped at decode. Rebuild so
+    ///         historical Fable/Mythos usage picks up real pricing.
+    public static let currentCostRecomputeVersion = "3"
 
     /// Version of the project-path canonicalization rules. Bumped when
     /// a parsing/canonicalization change requires updating in-place

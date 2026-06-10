@@ -287,4 +287,102 @@ struct PricingTests {
         let pricing = await table.pricing(for: "claude-opus-4-7")
         #expect(pricing != nil)
     }
+
+    // MARK: - Anthropic fallback pricing (Fable / Mythos)
+
+    @Test func fableFiveResolvesViaBuiltinFallback() async throws {
+        // LiteLLM carries no Fable entry as of the embedded snapshot,
+        // so this exercises the AnthropicFallbackPricing path. If
+        // LiteLLM later ships real Fable pricing at different rates,
+        // this test failing is the signal to retire or update the
+        // fallback row.
+        let table = PricingTable()
+        try await table.ensureLoaded()
+        let pricing = try #require(await table.pricing(for: "claude-fable-5"))
+        #expect(pricing.inputCostPerToken == 1.0e-05)    // $10 / MTok
+        #expect(pricing.outputCostPerToken == 5.0e-05)   // $50 / MTok
+        #expect(pricing.cacheCreationInputTokenCost == 1.25e-05)
+        #expect(pricing.cacheCreationInputTokenCostAbove1hr == 2.0e-05)
+        #expect(pricing.cacheReadInputTokenCost == 1.0e-06)
+        // Full 1M context at standard pricing — no above-200k tier.
+        #expect(pricing.inputCostPerTokenAbove200kTokens == nil)
+    }
+
+    @Test func fableVariantsResolveToSameFallback() async throws {
+        let table = PricingTable()
+        try await table.ensureLoaded()
+        // 1M-context beta suffix, Bedrock prefix, and Mythos 5 all
+        // land on the same fallback tier.
+        for name in ["claude-fable-5[1m]", "anthropic.claude-fable-5", "claude-mythos-5"] {
+            let pricing = try #require(await table.pricing(for: name), "\(name) should resolve")
+            #expect(pricing.inputCostPerToken == 1.0e-05)
+            #expect(pricing.outputCostPerToken == 5.0e-05)
+        }
+    }
+
+    @Test func snapshotMirrorsBuiltinFallback() async throws {
+        let table = PricingTable()
+        try await table.ensureLoaded()
+        let snapshot = await table.snapshot()
+        let pricing = try #require(snapshot.pricing(for: "claude-fable-5"))
+        #expect(pricing.outputCostPerToken == 5.0e-05)
+    }
+
+    @Test func zeroPricedPlaceholderEntriesAreDroppedAtDecode() async throws {
+        // LiteLLM ships placeholder rows with explicit $0 everywhere
+        // (anthropic.claude-mythos-preview is one). They must be
+        // dropped at decode: a $0 row costs the same as a missing row,
+        // but if kept it would shadow the built-in fallback table via
+        // the substring match and silently price real usage at $0.
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pacer-pricing-cache-test-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let fakeJSON = """
+        {
+          "dummy-real-model-1234": {
+            "input_cost_per_token": 1e-06,
+            "output_cost_per_token": 2e-06
+          },
+          "anthropic.claude-mythos-preview": {
+            "input_cost_per_token": 0,
+            "output_cost_per_token": 0,
+            "max_input_tokens": 1000000
+          }
+        }
+        """
+        try Data(fakeJSON.utf8).write(to: tmp)
+
+        let table = PricingTable()
+        try await table.ensureLoaded(cacheURL: tmp)
+        #expect(await table.modelCount() == 1)
+        // Mythos Preview has no published pricing and no fallback row
+        // — it resolves to nothing rather than a fake $0 entry.
+        #expect(await table.pricing(for: "claude-mythos-preview") == nil)
+        // Mythos 5 (real published pricing) resolves via the fallback
+        // even though this snapshot doesn't carry it.
+        let mythos = try #require(await table.pricing(for: "claude-mythos-5"))
+        #expect(mythos.inputCostPerToken == 1.0e-05)
+    }
+
+    @Test func liteLLMEntryWinsOverBuiltinFallback() async throws {
+        // The fallback is a stopgap: the moment LiteLLM ships a usable
+        // Fable row, that row must win.
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pacer-pricing-cache-test-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let fakeJSON = """
+        {
+          "claude-fable-5": {
+            "input_cost_per_token": 9.9e-05,
+            "output_cost_per_token": 9.9e-05
+          }
+        }
+        """
+        try Data(fakeJSON.utf8).write(to: tmp)
+
+        let table = PricingTable()
+        try await table.ensureLoaded(cacheURL: tmp)
+        let pricing = try #require(await table.pricing(for: "claude-fable-5"))
+        #expect(pricing.inputCostPerToken == 9.9e-05)
+    }
 }

@@ -4,7 +4,7 @@ import PacerCore
 import PacerUI
 
 /// Lightweight "things to notice today" card. Renders 1–2 hints from
-/// `UsageHints.compute` — heavy Opus share, low cache hit rate — when
+/// `UsageHints.compute` — heavy premium-model share, low cache hit rate — when
 /// the underlying conditions are clearly true. Hidden entirely when no
 /// hints fire, so the dashboard stays calm in the common case.
 struct AdvisorCard: View {
@@ -106,22 +106,22 @@ struct AdvisorCard: View {
 
     private func icon(for hint: UsageHints.Hint) -> String {
         switch hint {
-        case .heavyOpusShare: return "cpu"
+        case .heavyPremiumShare: return "cpu"
         case .lowCacheHitRate: return "bolt.horizontal"
         }
     }
 
     private func tint(for hint: UsageHints.Hint) -> Color {
         switch hint {
-        case .heavyOpusShare: return .orange
+        case .heavyPremiumShare: return .orange
         case .lowCacheHitRate: return .yellow
         }
     }
 
     private func title(for hint: UsageHints.Hint) -> String {
         switch hint {
-        case .heavyOpusShare(let pct, _):
-            return "Heavy Opus day · \(Int((pct * 100).rounded()))% of today"
+        case .heavyPremiumShare(let pct, _):
+            return "Heavy premium-model day · \(Int((pct * 100).rounded()))% of today"
         case .lowCacheHitRate(let ratio, _):
             return "Low cache hit rate · \(Int((ratio * 100).rounded()))%"
         }
@@ -129,8 +129,8 @@ struct AdvisorCard: View {
 
     private func detail(for hint: UsageHints.Hint) -> String {
         switch hint {
-        case .heavyOpusShare(_, let cost):
-            return "Sonnet 4.6 handles most coding tasks at roughly a quarter the per-token cost. Today's Opus spend so far: \(pacerCost(cost))."
+        case .heavyPremiumShare(_, let cost):
+            return "Sonnet 4.6 handles most coding tasks at a fraction of the per-token cost of Opus, Fable, or Mythos. Today's premium-model spend so far: \(pacerCost(cost))."
         case .lowCacheHitRate:
             return "Long-running sessions reuse cached system prompts. Closing Claude Code and starting fresh forces a re-cache."
         }

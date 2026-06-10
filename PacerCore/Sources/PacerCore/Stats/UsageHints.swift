@@ -14,12 +14,13 @@ public enum UsageHints {
 
     /// One hint surfaced by the advisor.
     public enum Hint: Equatable, Sendable {
-        /// Today's Opus share is high enough that switching some work
-        /// to Sonnet would noticeably reduce spend. Surfaced only when
-        /// (a) the day's cost is large enough to matter, and (b) the
-        /// user has shown they actually use Sonnet (this week, so we
-        /// don't recommend a model they've never tried).
-        case heavyOpusShare(opusPercentOfToday: Double, todayCost: Double)
+        /// Today's premium-tier share (Opus, Fable, Mythos — anything
+        /// priced well above Sonnet) is high enough that switching
+        /// some work to Sonnet would noticeably reduce spend. Surfaced
+        /// only when (a) the day's cost is large enough to matter, and
+        /// (b) the user has shown they actually use Sonnet (this week,
+        /// so we don't recommend a model they've never tried).
+        case heavyPremiumShare(premiumPercentOfToday: Double, todayCost: Double)
         /// Cache hit rate is unusually low — suggests sessions are
         /// being torn down between prompts, or new sessions are
         /// starting from scratch. Surfaced only when token volume is
@@ -50,12 +51,25 @@ public enum UsageHints {
         }
     }
 
-    /// Threshold for the "heavy Opus" hint — Opus must account for at
-    /// least this fraction of today's total cost.
-    public static let opusShareThreshold: Double = 0.7
+    /// Threshold for the "heavy premium" hint — premium-tier models
+    /// must account for at least this fraction of today's total cost.
+    public static let premiumShareThreshold: Double = 0.7
     /// Today must be at least this expensive before we'd surface the
-    /// hint — below this, even high Opus share isn't worth a card.
-    public static let opusMinTodayCost: Double = 5.0
+    /// hint — below this, even high premium share isn't worth a card.
+    public static let premiumMinTodayCost: Double = 5.0
+
+    /// Model-name fragments that count as "premium tier" for the
+    /// heavy-share hint. Opus is $5/$25 per MTok; Fable 5 and
+    /// Mythos 5 are $10/$50 — all well above Sonnet's $3/$15, so a
+    /// day dominated by any of them is worth the same "consider
+    /// Sonnet for routine work" nudge.
+    public static let premiumModelFragments: [String] = ["opus", "fable", "mythos"]
+
+    /// True when the model name belongs to a premium-tier family.
+    public static func isPremiumModel(_ model: String) -> Bool {
+        let lower = model.lowercased()
+        return premiumModelFragments.contains { lower.contains($0) }
+    }
     /// Cache-hit ratio below this is "low." 0.5 is generous (typical
     /// Claude Code workloads run 80–95%).
     public static let lowCacheHitThreshold: Double = 0.5
@@ -73,19 +87,19 @@ public enum UsageHints {
         var hints: [Hint] = []
 
         let todayCost = todayByModel.reduce(0) { $0 + $1.costUSD }
-        let opusTodayCost = todayByModel
-            .filter { $0.model.lowercased().contains("opus") }
+        let premiumTodayCost = todayByModel
+            .filter { isPremiumModel($0.model) }
             .reduce(0) { $0 + $1.costUSD }
         let usedSonnetThisWeek = thisWeekByModel.contains {
             $0.model.lowercased().contains("sonnet") && ($0.inputTokens + $0.outputTokens) > 0
         }
 
-        if todayCost >= opusMinTodayCost,
-           opusTodayCost / todayCost >= opusShareThreshold,
+        if todayCost >= premiumMinTodayCost,
+           premiumTodayCost / todayCost >= premiumShareThreshold,
            usedSonnetThisWeek {
             hints.append(
-                .heavyOpusShare(
-                    opusPercentOfToday: opusTodayCost / todayCost,
+                .heavyPremiumShare(
+                    premiumPercentOfToday: premiumTodayCost / todayCost,
                     todayCost: todayCost
                 )
             )

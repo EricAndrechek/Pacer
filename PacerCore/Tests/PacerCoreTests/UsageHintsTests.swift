@@ -26,7 +26,7 @@ struct UsageHintsTests {
         #expect(hints.isEmpty)
     }
 
-    @Test func heavyOpusFiresAtThreshold() {
+    @Test func heavyPremiumFiresAtThreshold() {
         // 80% Opus, $10 today, Sonnet used this week → fire.
         let today = [
             t("claude-opus-4-7", cost: 8),
@@ -34,15 +34,35 @@ struct UsageHintsTests {
         ]
         let week = [t("claude-sonnet-4-6", input: 1000)]
         let hints = UsageHints.compute(todayByModel: today, thisWeekByModel: week)
-        if case .heavyOpusShare(let pct, let cost) = hints.first {
+        if case .heavyPremiumShare(let pct, let cost) = hints.first {
             #expect(abs(pct - 0.8) < 1e-9)
             #expect(abs(cost - 10) < 1e-9)
         } else {
-            Issue.record("expected heavyOpusShare; got \(hints)")
+            Issue.record("expected heavyPremiumShare; got \(hints)")
         }
     }
 
-    @Test func heavyOpusSuppressedWhenSonnetNotUsedThisWeek() {
+    @Test func heavyPremiumFiresForFableAndMythos() {
+        // Premium families combine: Fable + Opus + Mythos together
+        // carry 80% of a $20 day. A pure-Fable day used to slip past
+        // the old "opus"-substring filter entirely.
+        let today = [
+            t("claude-fable-5", cost: 9),
+            t("claude-opus-4-8", cost: 4),
+            t("claude-mythos-5", cost: 3),
+            t("claude-sonnet-4-6", cost: 4)
+        ]
+        let week = [t("claude-sonnet-4-6", input: 1000)]
+        let hints = UsageHints.compute(todayByModel: today, thisWeekByModel: week)
+        if case .heavyPremiumShare(let pct, let cost) = hints.first {
+            #expect(abs(pct - 0.8) < 1e-9)
+            #expect(abs(cost - 20) < 1e-9)
+        } else {
+            Issue.record("expected heavyPremiumShare; got \(hints)")
+        }
+    }
+
+    @Test func heavyPremiumSuppressedWhenSonnetNotUsedThisWeek() {
         // User never tried Sonnet → don't recommend it.
         let today = [
             t("claude-opus-4-7", cost: 8),
@@ -52,7 +72,7 @@ struct UsageHintsTests {
         #expect(hints.isEmpty)
     }
 
-    @Test func heavyOpusSuppressedWhenCostTooSmall() {
+    @Test func heavyPremiumSuppressedWhenCostTooSmall() {
         // Total cost is below the $5 floor; not worth surfacing.
         let today = [
             t("claude-opus-4-7", cost: 1.5),
@@ -63,7 +83,7 @@ struct UsageHintsTests {
         #expect(hints.isEmpty)
     }
 
-    @Test func heavyOpusSuppressedBelowShareThreshold() {
+    @Test func heavyPremiumSuppressedBelowShareThreshold() {
         // 60% Opus — below the 70% threshold.
         let today = [
             t("claude-opus-4-7", cost: 6),
