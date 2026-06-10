@@ -39,6 +39,13 @@ public enum PacerPreferenceKeys {
     /// moves forward). Useful for users who pace work around the 5-hour
     /// window — they can be told "OK, you can keep going."
     public static let notifyOnReset          = "pacer.notifications.reset"
+    /// Fire a banner when Anthropic resets rate limits *early* — an
+    /// off-schedule global reset where utilization collapses to near-zero
+    /// but the `resetsAt` cycle anchor does NOT move forward (distinct
+    /// from `notifyOnReset`, which is the on-schedule rollover). Pacer
+    /// confirms the drop holds across several minutes of polling before
+    /// firing so a transient blip doesn't trigger it. Opt-in.
+    public static let notifyGlobalReset      = "pacer.notifications.globalReset"
     /// Once-a-day "you spent X today" banner. Independent of the
     /// daily-cost ceiling above — that one fires when the threshold
     /// is exceeded; this one is purely informational at a chosen

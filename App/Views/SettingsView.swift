@@ -771,11 +771,17 @@ private struct ResetAlertCard: View {
     @AppStorage(PacerSettings.Key.notifyOnReset, store: PacerSettings.store)
     private var resetEnabled: Bool = false
 
+    @AppStorage(PacerSettings.Key.notifyGlobalReset, store: PacerSettings.store)
+    private var globalResetEnabled: Bool = false
+
     var body: some View {
         PacerCard("Reset notifications", content: {
-            Toggle("Notify when a rate-limit window resets", isOn: $resetEnabled)
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Notify when a rate-limit window resets", isOn: $resetEnabled)
+                Toggle("Notify when Anthropic resets limits early", isOn: $globalResetEnabled)
+            }
         }, footer: {
-            Text("Fires when the 5-hour or 7-day window rolls over (usage drops near zero and the next reset moves forward). Quiet, informational banner — useful for pacing work around the rolling window.")
+            Text("The first fires on a normal rollover — the 5-hour or 7-day window rolling over on schedule (usage drops near zero and the next reset moves forward). The second fires when Anthropic resets everyone's limits ahead of schedule: usage collapses to zero but your reset day doesn't move. Pacer waits for the drop to hold across a few minutes of polling, so a transient blip won't trigger it.")
         })
     }
 }
