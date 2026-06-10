@@ -49,6 +49,11 @@ final class AppBackgroundService {
     /// entangling them would make the scan path responsible for
     /// network/CDN fallibility.
     private var pricingRefreshTask: Task<Void, Never>?
+    /// Gentle backstop that trims unused SwiftData persistent history so
+    /// the `ATRANSACTION`/`ACHANGE` log can't grow unbounded over years.
+    /// Deliberately infrequent (weekly) with a generous 30-day retention
+    /// — the data is small, so this is housekeeping, not management.
+    private var historyPruneTask: Task<Void, Never>?
 
     init(container: ModelContainer) {
         self.container = container
@@ -92,6 +97,7 @@ final class AppBackgroundService {
         installGlobalResetObserver()
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
+        startHistoryPruneTask()
     }
 
     func stop() async {
@@ -114,6 +120,8 @@ final class AppBackgroundService {
         widgetRefreshCoordinator.stop()
         pricingRefreshTask?.cancel()
         pricingRefreshTask = nil
+        historyPruneTask?.cancel()
+        historyPruneTask = nil
     }
 
     // MARK: - Pricing refresh
@@ -186,6 +194,34 @@ final class AppBackgroundService {
                 do {
                     try await Task.sleep(
                         nanoseconds: UInt64(delay * 1_000_000_000)
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    // MARK: - History prune
+
+    /// Weekly cadence. With a 30-day retention window, pruning weekly
+    /// means the log never holds more than ~37 days of history — plenty
+    /// of headroom, and idle enough to read as housekeeping.
+    private static let historyPruneInterval: TimeInterval = 7 * 24 * 3600
+
+    /// Prune unused persistent history at launch, then weekly. Runs on
+    /// the main actor (`StoreMaintenance.pruneHistory` is `@MainActor`);
+    /// `deleteHistory` is a cheap metadata operation, so doing it inline
+    /// on the first tick during launch is fine.
+    private func startHistoryPruneTask() {
+        guard historyPruneTask == nil else { return }
+        let container = self.container
+        historyPruneTask = Task { @MainActor in
+            while !Task.isCancelled {
+                StoreMaintenance.pruneHistory(container: container)
+                do {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(Self.historyPruneInterval * 1_000_000_000)
                     )
                 } catch {
                     return
