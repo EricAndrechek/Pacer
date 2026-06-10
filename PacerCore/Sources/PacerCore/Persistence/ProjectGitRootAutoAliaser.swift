@@ -182,7 +182,18 @@ public final class ProjectGitRootAutoAliaser {
         // been folded into another canonical and shouldn't be
         // grouped here.
         let aliasesAfterGitRoot = try loadAliasedSources()
-        let groupable = allRootProbes.filter { !aliasesAfterGitRoot.contains($0.path) }
+        // Paths whose auto-merge the user explicitly deleted. Without
+        // this the sibling pass re-creates the alias on the very next
+        // scan (it only knows about *currently* aliased paths), so a
+        // deleted sibling-worktree merge wouldn't stick. The git-root
+        // rollup pass needs no equivalent — it already skips any path
+        // that has a probe row.
+        let rejectedPaths = Set(
+            existingProbes.values.filter { $0.autoMergeRejected }.map { $0.path }
+        )
+        let groupable = allRootProbes.filter {
+            !aliasesAfterGitRoot.contains($0.path) && !rejectedPaths.contains($0.path)
+        }
         let groupedByOrigin = Dictionary(grouping: groupable, by: { $0.originURL })
 
         if groupedByOrigin.values.contains(where: { $0.count >= 2 }) {

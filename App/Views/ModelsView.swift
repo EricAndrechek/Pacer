@@ -30,7 +30,25 @@ struct ModelsView: View {
     }
 
     var body: some View {
-        PageScaffold("Models", subtitle: "How traffic splits across Claude models.") {
+        PageScaffold(
+            "Models",
+            subtitle: "How traffic splits across Claude models.",
+            trailing: {
+                // Page-header range picker — scopes every card on the tab
+                // (Token share, Trend, and the list), so it lives here
+                // rather than in one card's header. Matches History and
+                // Projects.
+                Picker("Time range", selection: rangeBinding) {
+                    ForEach(TimeRange.allCases) { r in
+                        Text(r.shortLabel).tag(r)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .controlSize(.small)
+                .labelsHidden()
+            }
+        ) {
             ModelsContent(
                 range: range,
                 sort: sort,
@@ -493,19 +511,9 @@ private struct ModelsContent: View {
     }
 
     private var listCard: some View {
-        PacerCard("All models", trailing: {
-            // Inline range picker — same "controls live next to the data
-            // they scope" pattern as ProjectsView.
-            Picker("Time range", selection: rangeBinding) {
-                ForEach(TimeRange.allCases) { r in
-                    Text(r.label).tag(r)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 320)
-            .controlSize(.small)
-            .labelsHidden()
-        }) {
+        // Range picker moved to the page header (it scopes the whole tab,
+        // not just this list) — see `ModelsView.body`.
+        PacerCard("All models") {
             VStack(alignment: .leading, spacing: 0) {
                 tableHeader
                 Divider().padding(.vertical, 4)

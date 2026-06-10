@@ -53,7 +53,11 @@ struct ProjectsView: View {
     }
 
     var body: some View {
-        PageScaffold("Projects", subtitle: "Per-project rollup of cost and tokens.") {
+        PageScaffold(
+            "Projects",
+            subtitle: "Per-project rollup of cost and tokens.",
+            trailing: { headerControls }
+        ) {
             ProjectsContent(
                 range: range,
                 sort: sort,
@@ -86,20 +90,39 @@ struct ProjectsView: View {
             placement: .toolbar,
             prompt: "Filter projects"
         )
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingAliasManager = true
-                } label: {
-                    Label("Aliases…", systemImage: "arrow.triangle.merge")
-                }
-                .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
-            }
-        }
         .sheet(isPresented: $showingAliasManager) {
             ProjectAliasManager()
         }
         .pacerModalNavigation(root: $modalRoot)
+    }
+
+    /// Tab-level controls in the page header: the alias-manager entry
+    /// point and the time-range picker. Both belong to the whole tab —
+    /// the range picker scopes the "Top projects" donut AND the table,
+    /// and the alias manager acts across every project — so they live in
+    /// the page header rather than a single card's header, matching the
+    /// History tab. (Previously the picker sat in the "All projects" card
+    /// header, which made it read as if it only scoped the list.)
+    @ViewBuilder
+    private var headerControls: some View {
+        HStack(spacing: 10) {
+            Button {
+                showingAliasManager = true
+            } label: {
+                Label("Aliases…", systemImage: "arrow.triangle.merge")
+            }
+            .controlSize(.small)
+            .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
+            Picker("Time range", selection: rangeBinding) {
+                ForEach(TimeRange.allCases) { r in
+                    Text(r.shortLabel).tag(r)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 280)
+            .controlSize(.small)
+            .labelsHidden()
+        }
     }
 
     private var rangeBinding: Binding<TimeRange> {
@@ -755,50 +778,20 @@ private struct ProjectsContent: View {
         }
     }
 
-    /// Big project list with sortable column headers + range picker
-    /// inline in the card header. The range picker lives here (not in
-    /// the page toolbar) per the "closer to the thing we are showing"
-    /// principle — every card that scopes its data to a time window
-    /// announces the window right next to the data.
+    /// Big project list with sortable column headers. The time-range
+    /// picker and the alias-manager entry point used to live in this
+    /// card header; both moved to the page header (`headerControls`) once
+    /// the range was understood to scope the whole tab (donut + list),
+    /// not just this card. Bulk merge is now reached from the alias
+    /// manager's "Merge multiple…" button; per-row merges stay on the
+    /// row context menu below.
     ///
-    /// The text filter moved out of the card trailing into the window
-    /// toolbar via `.searchable` on the parent view — gives users the
-    /// native macOS search field (system clear button, accessibility
-    /// label, placement consistency with Mail / Finder / Notes).
+    /// The text filter lives in the window toolbar via `.searchable` on
+    /// the parent view — the native macOS search field (system clear
+    /// button, accessibility label, placement consistency with Mail /
+    /// Finder / Notes).
     private var projectListCard: some View {
-        PacerCard("All projects", trailing: {
-            HStack(spacing: 10) {
-                // Quick entry into the bulk-merge dialog. Hidden when
-                // there's fewer than 2 real projects on screen — with
-                // 0 or 1 there's nothing to merge.
-                //
-                // `.fixedSize()` keeps the button at its natural width
-                // so it doesn't get truncated to "M..." when the
-                // time-range picker tries to claim its full 320pt
-                // ideal width. The picker now uses `maxWidth` so it
-                // shrinks rather than fighting the button for space.
-                if mergeCandidates.count >= 2 {
-                    Button {
-                        bulkMergeDraft = BulkMergeDraft(canonical: "", sources: [])
-                    } label: {
-                        Label("Merge…", systemImage: "arrow.triangle.merge")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .controlSize(.small)
-                    .fixedSize()
-                    .help("Open the bulk-merge dialog: pick a canonical project and check every path that should fold into it.")
-                }
-                Picker("Time range", selection: rangeBinding) {
-                    ForEach(TimeRange.allCases) { r in
-                        Text(r.label).tag(r)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 320)
-                .controlSize(.small)
-                .labelsHidden()
-            }
-        }) {
+        PacerCard("All projects") {
             // `LazyVStack` around the row `ForEach` so that on a project
             // list of any size the cards below the card-bottom (and
             // below the viewport) aren't realized. Each row carries a
