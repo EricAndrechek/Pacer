@@ -336,24 +336,52 @@ final class AppBackgroundService {
 
     // MARK: - Burn-rate (slope) warning
 
-    /// Run `BurnRate.project` over the recent 5-hour OAuth samples and let
-    /// the coordinator decide whether to warn that the current *rate* will
-    /// blow the cap before reset. 5-hour only: the window is short enough
-    /// that burn rate is actionable, whereas a 90-minute slope on the
-    /// 7-day window would project alarming nonsense from a busy hour. (7d
-    /// burn-rate waits for the smarter estimator in the predictions work.)
+    /// Warn when the *rate* you're burning a window will blow the cap before
+    /// it resets. Both windows flow through the same coordinator path; only
+    /// the projection math differs:
+    ///
+    /// - **5-hour**: short window, so the first-to-last linear `BurnRate.project`
+    ///   over a 90-minute lookback is actionable and stays as-is (its
+    ///   displayed ETA is unchanged).
+    /// - **7-day**: a 90-minute linear slope projects alarming nonsense from
+    ///   one busy hour, so it uses the recency-weighted `TrendEstimator`
+    ///   (`projectRecencyWeighted`) over a multi-day lookback — the piece
+    ///   deferred from the 5-hour-only warning.
     private func checkBurnRateWarning() async {
         let context = ModelContext(container)
-        let oauthSource = RateLimitSource.oauth
-        let window = RateLimitWindowName.fiveHour
-        // 2h comfortably covers BurnRate's 90-minute lookback.
-        let cutoff = Date().addingTimeInterval(-2 * 3600)
+        let now = Date()
+        await evaluateBurnWarning(
+            window: RateLimitWindowName.fiveHour,
+            fetchCutoff: now.addingTimeInterval(-2 * 3600),   // covers the 90-min lookback
+            context: context,
+            project: { samples, resetsAt in
+                BurnRate.project(samples: samples, resetsAt: resetsAt)
+            })
+        await evaluateBurnWarning(
+            window: RateLimitWindowName.sevenDay,
+            fetchCutoff: now.addingTimeInterval(-BurnRate.sevenDayLookbackSeconds),
+            context: context,
+            project: { samples, resetsAt in
+                BurnRate.projectRecencyWeighted(samples: samples, resetsAt: resetsAt, now: now)
+            })
+    }
 
+    /// Fetch a window's recent OAuth samples, build a projection via the
+    /// supplied strategy, and hand it to the coordinator. The coordinator
+    /// owns the warning decision (`BurnRate.warrantsWarning`), the
+    /// per-cycle dedup, and the opt-in gate — shared verbatim across windows.
+    private func evaluateBurnWarning(
+        window: String,
+        fetchCutoff: Date,
+        context: ModelContext,
+        project: ([BurnRate.Sample], Date?) -> BurnRate.Projection?
+    ) async {
+        let oauthSource = RateLimitSource.oauth
         let descriptor = FetchDescriptor<RateLimitSample>(
             predicate: #Predicate {
                 $0.source == oauthSource
                     && $0.window == window
-                    && $0.sampledAt >= cutoff
+                    && $0.sampledAt >= fetchCutoff
             },
             sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
         )
@@ -361,9 +389,7 @@ final class AppBackgroundService {
         let samples = rows.map {
             BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage)
         }
-        guard let projection = BurnRate.project(samples: samples, resetsAt: latest.resetsAt) else {
-            return
-        }
+        guard let projection = project(samples, latest.resetsAt) else { return }
         await NotificationCoordinator.shared.handleBurnRateWarning(
             window: window,
             projection: projection,

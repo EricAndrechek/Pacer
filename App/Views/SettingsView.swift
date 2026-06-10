@@ -775,9 +775,9 @@ private struct BurnRateAlertCard: View {
 
     var body: some View {
         PacerCard("Burn-rate warning", content: {
-            Toggle("Warn when my 5-hour rate will hit the limit before it resets", isOn: $enabled)
+            Toggle("Warn when my usage rate will hit a limit before it resets", isOn: $enabled)
         }, footer: {
-            Text("Watches how fast you're burning the 5-hour window — not just how full it is — and warns once per cycle when, at your current rate, you'll hit the cap before the window resets. Complements the fixed-percentage alerts above (which fire on level, this fires on slope).")
+            Text("Watches how fast you're burning the 5-hour and 7-day windows — not just how full they are — and warns once per cycle when, at your current rate, you'll hit the cap before the window resets. The 7-day projection is recency-weighted so a single busy hour doesn't cry wolf. Complements the fixed-percentage alerts above (which fire on level, this fires on slope).")
         })
     }
 }
