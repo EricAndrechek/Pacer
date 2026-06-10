@@ -82,5 +82,23 @@
             type="application/octet-stream"
             sparkle:edSignature="vPZ5loGvlWzLxAO5fph9G4TEbZcZdxZ3LlhhNxrKMLN9xbGjMmbsl2DAkRuUlGC6W+hzj5BzC5HO9AedJSp+Cw==" />
     </item>
+            <item>
+        <title>Version 0.3.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(pricing): self-updating multi-source pricing + Mythos Preview rates by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4627591403" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/32" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/32/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/32">EricAndrechek/Pacer#32</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.2.0...v0.3.0">EricAndrechek/Pacer@<tt>v0.2.0...v0.3.0</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 03:22:53 +0000</pubDate>
+        <sparkle:version>1781061574</sparkle:version>
+        <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.0/Pacer-0.3.0.dmg"
+            length="5491847"
+            type="application/octet-stream"
+            sparkle:edSignature="QHsv/G8MGm4sQ0fY+h+tN8cCYGtS1RoXvN0q7gwPSzqg4fnAli3No3Q+GelxXzBrtZ1UkJHrhDDn2Y1VizpAAA==" />
+    </item>
         </channel>
 </rss>
