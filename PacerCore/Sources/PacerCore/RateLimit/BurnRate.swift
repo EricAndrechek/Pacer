@@ -183,4 +183,87 @@ public enum BurnRate {
     ) -> Bool {
         projection.willHitLimitBeforeReset && usedPct >= floor
     }
+
+    // MARK: - Recency-weighted projection (7-day window)
+
+    /// Lookback for the recency-weighted 7-day projection. A weekly
+    /// trajectory has to be read over days, not the 90-minute window the
+    /// linear `project` uses — a single busy hour inside 90 minutes
+    /// projects "you'll blow the weekly cap tonight" nonsense. Two days of
+    /// OAuth samples (≥570 rows at 5-min cadence) is enough to see the
+    /// real weekly slope while staying responsive to a genuine ramp.
+    public static let sevenDayLookbackSeconds: TimeInterval = 48 * 3600
+    /// Recency half-life for the 7-day projection. A sample 18h old counts
+    /// half as much as one now — recent days dominate (so a heavy Monday
+    /// doesn't dictate the whole week) without the line whipping around on
+    /// a single hour the way the 90-minute linear slope does.
+    public static let sevenDayHalfLifeSeconds: TimeInterval = 18 * 3600
+    /// Minimum span for the 7-day projection — hours, not the 5 minutes the
+    /// 5-hour window tolerates. Below this there isn't enough of a weekly
+    /// trajectory to trust.
+    public static let sevenDayMinWindowSeconds: TimeInterval = 3 * 3600
+
+    /// Project a window's full-time using the recency-weighted
+    /// `TrendEstimator` instead of the first-to-last linear slope, returning
+    /// the **same** `Projection` shape so the warning path
+    /// (`warrantsWarning`, the notification coordinator) is shared verbatim
+    /// with the 5-hour linear path.
+    ///
+    /// This is the 7-day window's projection: the estimator's recency
+    /// weighting over a multi-day lookback gives a stable weekly slope where
+    /// the 90-minute linear slope projects alarming nonsense from one busy
+    /// hour. Acceleration is left **off** (`maxAccelSlopeFraction: 0`) — on
+    /// real usage the 2nd-derivative term didn't improve weekly-cap
+    /// prediction and only added false alarms, so the warning rides the
+    /// stable recency-weighted slope alone.
+    ///
+    /// Mirrors `project`'s contract: non-positive slope or already-maxed →
+    /// slope is returned but `projectedFullAt` is nil; a crossing that lands
+    /// after `resetsAt` → nil (the window resets first).
+    public static func projectRecencyWeighted(
+        samples: [Sample],
+        resetsAt: Date?,
+        now: Date = Date(),
+        lookbackSeconds: TimeInterval = sevenDayLookbackSeconds,
+        recencyHalfLifeSeconds: TimeInterval = sevenDayHalfLifeSeconds,
+        minSamples: Int = minSamples,
+        minWindowSeconds: TimeInterval = sevenDayMinWindowSeconds
+    ) -> Projection? {
+        // Horizon: only up to the reset (the window resets before any later
+        // crossing matters). Unknown reset → a generous one-week cap.
+        let horizon = resetsAt.map { max(0, $0.timeIntervalSince(now)) } ?? (7 * 24 * 3600)
+        guard horizon > 0 else { return nil }
+
+        let estSamples = samples.map { TrendEstimator.Sample(at: $0.sampledAt, value: $0.usedPercentage) }
+        guard let fit = TrendEstimator.fit(samples: estSamples, parameters: .init(
+            now: now,
+            minSamples: minSamples,
+            minSpanSeconds: minWindowSeconds,
+            lookbackSeconds: lookbackSeconds,
+            recencyHalfLifeSeconds: recencyHalfLifeSeconds,
+            dampingTauSeconds: max(3600, horizon),
+            maxAccelSlopeFraction: 0
+        )) else { return nil }
+
+        let slope = fit.slopePerHour
+        // Non-positive trend: report the slope, project no limit hit.
+        guard slope > 0 else {
+            return Projection(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil)
+        }
+        // Already maxed: the card shows 100% directly; suppress the eta.
+        let currentPct = samples.filter { $0.sampledAt <= now }.max { $0.sampledAt < $1.sampledAt }?.usedPercentage ?? 0
+        guard currentPct < 100 else {
+            return Projection(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil)
+        }
+        // Crossing within the horizon (which already stops at the reset, so a
+        // hit that lands after reset returns nil — the window resets first).
+        guard let full = fit.crossingDate(target: 100, now: now, maxHorizon: horizon) else {
+            return Projection(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil)
+        }
+        return Projection(
+            slopePercentPerHour: slope,
+            projectedFullAt: full,
+            etaSeconds: full.timeIntervalSince(now)
+        )
+    }
 }
