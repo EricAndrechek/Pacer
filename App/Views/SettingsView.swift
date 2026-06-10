@@ -42,7 +42,6 @@ struct SettingsView: View {
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
-                    ProjectAliasesCard()
                     DatabaseCard()
                     LogsCard()
                 }
