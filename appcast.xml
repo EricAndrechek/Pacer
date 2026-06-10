@@ -118,5 +118,24 @@
             type="application/octet-stream"
             sparkle:edSignature="tXCurpSZQ/kRzFkqNPOtO+dsqnkpWwfhQhQN5SKFR9p78XPypK4o0JszGRo4Y49ypDN4S43EGCI7L77jB2UfDA==" />
     </item>
+            <item>
+        <title>Version 0.3.2</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Move project-alias management to the Projects tab; collapse auto-detected rows by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4633828517" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/35" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/35/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/35">EricAndrechek/Pacer#35</a></li>
+<li>Projects/Models: range picker → page header, single alias entry, fix sibling un-merge by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4634021286" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/36" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/36/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/36">EricAndrechek/Pacer#36</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.1...v0.3.2">EricAndrechek/Pacer@<tt>v0.3.1...v0.3.2</tt></a></p>]]></description>
+        <pubDate>Wed, 10 Jun 2026 18:51:29 +0000</pubDate>
+        <sparkle:version>1781117273</sparkle:version>
+        <sparkle:shortVersionString>0.3.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.2/Pacer-0.3.2.dmg"
+            length="5590630"
+            type="application/octet-stream"
+            sparkle:edSignature="mbq9Y+yGsg7w/ull0dYuQJdV4pVKkU+n1JHGoIfDvwiX4XWrFbcwAKdhZSvB+kt1LmITkxMbMsedLZ5OgCLRCg==" />
+    </item>
         </channel>
 </rss>
