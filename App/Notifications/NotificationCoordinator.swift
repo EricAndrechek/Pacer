@@ -303,6 +303,52 @@ public final class NotificationCoordinator {
         return f.localizedString(for: date, relativeTo: Date())
     }
 
+    /// Burn-rate (slope) warning. Fires when, at the current consumption
+    /// *rate*, the window's linear projection hits 100% before it resets —
+    /// the "slow down" signal the fixed-percentage threshold alerts can't
+    /// give (those only see how full it is, not how fast it's filling).
+    /// The trigger decision lives in `BurnRate.warrantsWarning`; this just
+    /// gates on settings, dedups per cycle, and formats the banner.
+    ///
+    /// Dedup is keyed on the cycle anchor so it fires at most once per
+    /// window cycle even as the rate keeps tripping the condition.
+    public func handleBurnRateWarning(
+        window: String,
+        projection: BurnRate.Projection,
+        resetsAt: Date?,
+        usedPct: Double,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        guard defaults.bool(forKey: PacerSettings.Key.notifyBurnRate) else { return }
+        guard BurnRate.warrantsWarning(projection, usedPct: usedPct) else { return }
+        guard let projectedFullAt = projection.projectedFullAt else { return }
+
+        let anchorKey = resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset"
+        let cycleKey = "notif.burnrate.\(window).\(anchorKey)"
+        if alreadyNotified(key: cycleKey, in: context) {
+            return
+        }
+
+        await requestAuthorizationIfNeeded()
+        let content = UNMutableNotificationContent()
+        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        content.title = "Pacer \(label) burn-rate warning"
+        let hit = Self.formatRelative(projectedFullAt)
+        if let resetsAt {
+            content.body = "At your current rate you'll hit the \(label) limit \(hit) — before it resets \(Self.formatRelative(resetsAt)). You're at \(Int(usedPct.rounded()))%."
+        } else {
+            content.body = "At your current rate you'll hit the \(label) limit \(hit). You're at \(Int(usedPct.rounded()))%."
+        }
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+
+        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
+        try? await center.add(request)
+        markNotified(key: cycleKey, in: context)
+    }
+
     /// "Anthropic reset your limits early" detection. Distinct from
     /// `handleRateLimitReset`: that one fires on the on-schedule rollover
     /// (the anchor advances); this fires on an *off-schedule* global

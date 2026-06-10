@@ -152,4 +152,34 @@ struct BurnRateTests {
         #expect(result.slopePercentPerHour > 0)
         #expect(result.projectedFullAt == nil)
     }
+
+    // MARK: - warrantsWarning
+
+    /// Build a projection that hits the limit before reset (or not) without
+    /// going through `project` — `warrantsWarning` only reads the two fields.
+    private func projection(hitsBeforeReset: Bool) -> BurnRate.Projection {
+        BurnRate.Projection(
+            slopePercentPerHour: 10,
+            projectedFullAt: hitsBeforeReset ? Date() : nil,
+            etaSeconds: hitsBeforeReset ? 3600 : nil
+        )
+    }
+
+    @Test func warnsWhenHittingLimitAndPastFloor() {
+        #expect(BurnRate.warrantsWarning(projection(hitsBeforeReset: true), usedPct: 60) == true)
+    }
+
+    @Test func doesNotWarnBelowFloorEvenIfHitting() {
+        // Steep early-window slope, but only 30% used — suppress as noise.
+        #expect(BurnRate.warrantsWarning(projection(hitsBeforeReset: true), usedPct: 30) == false)
+    }
+
+    @Test func doesNotWarnWhenResetComesFirst() {
+        // High usage but the window resets before the projection lands.
+        #expect(BurnRate.warrantsWarning(projection(hitsBeforeReset: false), usedPct: 90) == false)
+    }
+
+    @Test func warnsExactlyAtFloor() {
+        #expect(BurnRate.warrantsWarning(projection(hitsBeforeReset: true), usedPct: 50) == true)
+    }
 }

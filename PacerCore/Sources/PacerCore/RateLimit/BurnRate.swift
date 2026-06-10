@@ -164,4 +164,23 @@ public enum BurnRate {
             etaSeconds: projectedAt.timeIntervalSince(now)
         )
     }
+
+    /// Don't raise a burn-rate warning below this utilization. Early in a
+    /// window a brief burst projects an alarming slope that almost always
+    /// flattens out; gating on a floor keeps the warning from crying wolf
+    /// at, say, 15%. Distinct from the fixed-percentage threshold alerts —
+    /// those fire on *level*, this on *rate*.
+    public static let warningUsedFloor: Double = 50
+
+    /// Whether a projection warrants a "you'll hit the limit before it
+    /// resets" warning: the linear projection lands before the reset
+    /// boundary (`willHitLimitBeforeReset`) AND you're already past the
+    /// floor. Pure so the notification layer stays a thin caller.
+    public static func warrantsWarning(
+        _ projection: Projection,
+        usedPct: Double,
+        floor: Double = warningUsedFloor
+    ) -> Bool {
+        projection.willHitLimitBeforeReset && usedPct >= floor
+    }
 }
