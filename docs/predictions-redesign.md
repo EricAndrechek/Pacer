@@ -41,12 +41,12 @@ learning lite" option 2), so that's what shipped for the displayed numbers:
 - The **displayed** 5-hour rate-limit ETA tile (`HeroStripCard`) is unchanged
   (linear `BurnRate.project`) — on this data the estimator gives no benefit
   for the short window, and it's a shared displayed surface.
-- The **displayed** 7-day pace tile (`HeroStripCard.projection(forWindow:)`)
-  still uses the linear `BurnRate.project`, so it can disagree with the new
-  estimator-backed 7-day *warning*. Aligning the displayed tile to
-  `projectRecencyWeighted` is the obvious next step (needs a before/after +
-  sign-off, like any displayed change).
 - Real Core ML — out of scope, as planned.
+
+**Done after the initial pass:** the **displayed** 7-day pace tile
+(`HeroStripCard`) now also uses `projectRecencyWeighted` (#50) over a 3-day
+query, so it matches the 7-day warning's data + math — they can no longer
+disagree. The 5-hour tile stays linear.
 
 The acceleration term lives in `TrendEstimator` (built, tested, clamped) but
 no shipped surface uses it; it's available if a future signal proves it out.
