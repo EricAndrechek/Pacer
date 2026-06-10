@@ -99,11 +99,22 @@ public actor PricingTable {
             // Secondary source: splice in Anthropic models LiteLLM
             // lacks. Synthesized entries use the LiteLLM field shape,
             // so the cache file stays a plain LiteLLM-shaped document
-            // and the decode path needs no source awareness.
-            let mergedJSON = await Self.gapFillFromModelsDev(
+            // and the decode path needs no source awareness. The fetch
+            // happens here (Sendable `Data` is all that crosses the
+            // actor boundary; the parsed non-Sendable dictionaries
+            // stay on this executor) and the merge is synchronous.
+            // Best-effort: a models.dev failure yields a LiteLLM-only
+            // table.
+            var modelsDevData: Data?
+            do {
+                modelsDevData = try await urlSession.data(from: ModelsDevCatalog.url).0
+            } catch {
+                Log.write("PricingTable", "models.dev fetch failed (\(error)) — LiteLLM-only refresh")
+            }
+            let mergedJSON = Self.gapFill(
+                modelsDevData: modelsDevData,
                 into: rawJSON,
-                covered: liteDecoded,
-                urlSession: urlSession
+                covered: liteDecoded
             )
 
             let mergedDecoded = Self.decode(json: mergedJSON)
@@ -134,24 +145,20 @@ public actor PricingTable {
         }
     }
 
-    /// Fetch models.dev and add every Anthropic entry the LiteLLM
-    /// table doesn't already cover (per the same fuzzy match lookups
-    /// use, so a `anthropic.claude-x` LiteLLM key suppresses a
-    /// models.dev `claude-x` insert). Best-effort: any failure returns
-    /// the input unchanged.
-    private static func gapFillFromModelsDev(
+    /// Add every Anthropic entry from a fetched models.dev payload
+    /// that the LiteLLM table doesn't already cover (per the same
+    /// fuzzy match lookups use, so an `anthropic.claude-x` LiteLLM
+    /// key suppresses a models.dev `claude-x` insert). Synchronous on
+    /// purpose: an async signature would send the non-Sendable JSON
+    /// dictionaries across an isolation boundary. Best-effort: nil or
+    /// unparseable data returns the input unchanged.
+    static func gapFill(
+        modelsDevData: Data?,
         into rawJSON: [String: Any],
-        covered: [String: LiteLLMModelPricing],
-        urlSession: URLSession
-    ) async -> [String: Any] {
-        let entries: [String: [String: Any]]
-        do {
-            let (data, _) = try await urlSession.data(from: ModelsDevCatalog.url)
-            entries = ModelsDevCatalog.anthropicEntries(from: data)
-        } catch {
-            Log.write("PricingTable", "models.dev fetch failed (\(error)) — LiteLLM-only refresh")
-            return rawJSON
-        }
+        covered: [String: LiteLLMModelPricing]
+    ) -> [String: Any] {
+        guard let modelsDevData else { return rawJSON }
+        let entries = ModelsDevCatalog.anthropicEntries(from: modelsDevData)
         var merged = rawJSON
         var added: [String] = []
         for (id, entry) in entries where liteLLMMatch(id, in: covered) == nil {
