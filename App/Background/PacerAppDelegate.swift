@@ -83,6 +83,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     // is main-actor isolated, matching the inner Task.
     private var menuBarLastChipsEmpty: Bool = false
 
+    /// One-shot screen hint for the cold-open path. When the user opens
+    /// Pacer from the menu bar / hotkey but the window scene was torn
+    /// down (closed dashboard → SwiftUI `Window` destroys its NSWindow),
+    /// we can't reposition the window synchronously — it doesn't exist
+    /// yet. We capture the screen the gesture happened on here and let
+    /// the `didBecomeKey` observer reseat the freshly-materialized
+    /// window onto it exactly once. Captured at gesture time (not read
+    /// in the observer) because the cursor may drift between the click
+    /// and the async window creation.
+    private var pendingActiveScreen: NSScreen?
+
     override init() {
         // Screenshot/demo mode: never touch the user's real store, logs,
         // or the single-instance gate (we may be running alongside a live
@@ -340,10 +351,20 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             // diagnoses as a data-race risk.
             let window = note.object as? NSWindow
             Task { @MainActor in
-                self?.applyActivationPolicyForCurrentWindows()
+                guard let self else { return }
+                self.applyActivationPolicyForCurrentWindows()
                 if let window {
                     Self.ensureWindowAutosaves(window)
                     Self.ensureWindowOnScreen(window)
+                    // Cold-open reseat: a window we asked AppKit to
+                    // materialize (closed dashboard → reopened from the
+                    // menu bar) just became key. Move it onto the screen
+                    // the user opened us from, then clear the one-shot
+                    // hint so ordinary refocus events never relocate it.
+                    if let screen = self.pendingActiveScreen {
+                        self.pendingActiveScreen = nil
+                        Self.reposition(window, onto: screen)
+                    }
                 }
             }
         }
@@ -430,6 +451,59 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         guard !onSomeScreen else { return }
         window.center()
         window.saveFrame(usingName: window.frameAutosaveName)
+    }
+
+    /// The screen the user is currently working on — the one whose menu
+    /// bar they just clicked, or where the cursor sits when the global
+    /// hotkey fires. `NSEvent.mouseLocation` and `NSScreen.frame` share
+    /// the same bottom-left-origin global coordinate space, so a simple
+    /// containment test resolves it. Falls back to `NSScreen.main` (the
+    /// screen with the key window / active menu bar) when the cursor is
+    /// in a gap between displays.
+    private static func activeScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+    }
+
+    /// Move the main window onto `target` when — and only when — it's
+    /// currently on a *different* display. A user who keeps Pacer on one
+    /// screen and positions it deliberately is never disturbed; a
+    /// multi-monitor user gets the window to follow them to whichever
+    /// display they opened it from. We preserve the window's relative
+    /// position within the screen (top-left stays top-left, etc.) rather
+    /// than always centering, so the layout stays familiar across the
+    /// jump, then clamp so the whole frame lands inside the visible area.
+    private static func reposition(_ window: NSWindow, onto target: NSScreen) {
+        guard window.canBecomeMain, !(window is NSPanel) else { return }
+        let frame = window.frame
+        let center = NSPoint(x: frame.midX, y: frame.midY)
+        // Already on the target display? Leave the in-screen position
+        // exactly as the user left it — we only ever relocate across
+        // displays, never nudge within one.
+        if target.frame.contains(center) { return }
+
+        let targetVF = target.visibleFrame
+        let source = NSScreen.screens.first { $0.frame.contains(center) }
+        var origin: NSPoint
+        if let sourceVF = source?.visibleFrame, sourceVF.width > 0, sourceVF.height > 0 {
+            let relX = (frame.minX - sourceVF.minX) / sourceVF.width
+            let relY = (frame.minY - sourceVF.minY) / sourceVF.height
+            origin = NSPoint(x: targetVF.minX + relX * targetVF.width,
+                             y: targetVF.minY + relY * targetVF.height)
+        } else {
+            // Window wasn't on any screen (e.g. a stale off-screen
+            // autosaved frame) — center it on the target instead.
+            origin = NSPoint(x: targetVF.midX - frame.width / 2,
+                             y: targetVF.midY - frame.height / 2)
+        }
+        // Clamp fully on-screen. `max(targetVF.minX, maxX)` keeps the
+        // lower bound sane when the window is wider/taller than the
+        // target's visible area (pins to top-left instead of inverting).
+        let maxX = targetVF.maxX - frame.width
+        let maxY = targetVF.maxY - frame.height
+        origin.x = min(max(origin.x, targetVF.minX), max(targetVF.minX, maxX))
+        origin.y = min(max(origin.y, targetVF.minY), max(targetVF.minY, maxY))
+        window.setFrameOrigin(origin)
     }
 
     /// `.regular` when at least one user-visible window is open
@@ -684,6 +758,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // brings us forward when called from one of those gestures.
         // The deprecated form would silently leave the window behind
         // whatever app was previously frontmost.
+        // Resolve the display the user opened us from BEFORE anything
+        // async runs — the cursor may drift afterward.
+        let target = Self.activeScreen()
         NSApp.activate()
         if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
             // Pin the menu-bar-app collection behavior BEFORE
@@ -692,10 +769,18 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
             // than bouncing the user via Mission Control to wherever
             // the window was last left.
             Self.applyMenuBarAppBehavior(window)
+            // Follow the user to the screen they opened us from (no-op
+            // if it's already there). Done before ordering front so
+            // there's no visible jump across displays.
+            if let target { Self.reposition(window, onto: target) }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
             return true
         }
+        // Cold open: the window doesn't exist yet and will materialize
+        // asynchronously via the reopen flow below. Stash the target
+        // screen so `didBecomeKey` reseats the new window onto it once.
+        pendingActiveScreen = target
         // No window exists. With `LSUIElement=true` and a SwiftUI
         // `Window("Pacer", id: "main")` scene, closing the dashboard
         // tears the window down — the scene is still in memory but no
