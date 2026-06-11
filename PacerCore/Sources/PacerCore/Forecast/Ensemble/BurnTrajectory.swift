@@ -1,0 +1,161 @@
+import Foundation
+
+/// Forward-trajectory forecasting for a rate-limit window's usage curve — the
+/// model layer behind the dashed projection overlaid on the 5h/7d pace charts.
+///
+/// Unlike the end-of-period *total* ensemble (which returns a scalar), a burn
+/// surface wants the whole forward *curve*: usage% at every future instant
+/// from now to the window reset, so it can be drawn against the actual line.
+/// Same tournament idea though — several curve fits compete, scored by how
+/// well they predicted the *remainder* of the user's past cycles, and the
+/// per-window winner's trajectory is what we plot.
+///
+/// On real data there's no universal winner (recency-weighted tracks the 5h
+/// window best; plain linear-over-a-recent-window tracks the 7d best), which
+/// is exactly why this is a backtest-selected ensemble rather than one
+/// hardcoded fit.
+public enum BurnTrajectory {
+
+    /// One usage observation in a cycle.
+    public struct Sample: Sendable, Equatable {
+        public let at: Date
+        public let usedPercentage: Double
+        public init(at: Date, usedPercentage: Double) {
+            self.at = at
+            self.usedPercentage = usedPercentage
+        }
+    }
+
+    /// A cycle's samples plus its boundaries. `now` is the projection origin
+    /// (the latest real sample for the live chart; a past cut for backtests).
+    public struct PartialCycle: Sendable {
+        public let samples: [Sample]      // within [cycleStart, now], time-ordered
+        public let now: Date
+        public let cycleStart: Date
+        public let resetsAt: Date
+        public init(samples: [Sample], now: Date, cycleStart: Date, resetsAt: Date) {
+            self.samples = samples.filter { $0.at <= now }.sorted { $0.at < $1.at }
+            self.now = now
+            self.cycleStart = cycleStart
+            self.resetsAt = resetsAt
+        }
+        public var durationHours: Double { resetsAt.timeIntervalSince(cycleStart) / 3600 }
+        public var nowHours: Double { now.timeIntervalSince(cycleStart) / 3600 }
+        func hours(_ date: Date) -> Double { date.timeIntervalSince(cycleStart) / 3600 }
+        public var usedNow: Double { samples.last?.usedPercentage ?? 0 }
+    }
+
+    /// A complete past cycle, used for backtesting.
+    public struct Cycle: Sendable {
+        public let samples: [Sample]
+        public let cycleStart: Date
+        public let resetsAt: Date
+        public init(samples: [Sample], cycleStart: Date, resetsAt: Date) {
+            self.samples = samples.sorted { $0.at < $1.at }
+            self.cycleStart = cycleStart
+            self.resetsAt = resetsAt
+        }
+    }
+
+    /// A curve-fit candidate. `fit` returns a closure giving projected usage%
+    /// at any future date, or nil when it can't fit the cycle-so-far.
+    public protocol Model: Sendable {
+        var id: String { get }
+        var complexity: Int { get }
+        func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)?
+    }
+
+    /// The selected fit's forward trajectory, sampled for plotting.
+    public struct Trajectory: Sendable, Equatable {
+        public let modelId: String
+        /// Points from `now` to `resetsAt`, inclusive, clamped to 0…100 for display.
+        public let points: [Sample]
+        /// First future instant the (unclamped) projection reaches 100%, if any.
+        public let crossesFullAt: Date?
+    }
+
+    /// Default roster. Quadratic is deliberately excluded — it reliably
+    /// explodes on real cycles and was the worst fit in every backtest.
+    public static var defaultModels: [any Model] {
+        [
+            LinearRecent(),
+            RecencyWeighted(),
+            DampedAcceleration(),
+            Saturating(),
+        ]
+    }
+
+    // MARK: - Backtest + selection
+
+    /// Score each model by how well it predicted the *remainder* of past
+    /// cycles, reusing the ensemble's `Backtester.Score` so the shared
+    /// `ForecastSelector` can pick the winner. Error is median absolute
+    /// percentage-*points* over the unseen tail of each cycle.
+    public static func score(
+        models: [any Model],
+        cycles: [Cycle],
+        cutFractions: [Double] = [0.5, 0.6, 0.7]
+    ) -> [Backtester.Score] {
+        models.map { model in
+            var errors: [Double] = []
+            var attempts = 0
+            for cycle in cycles {
+                let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
+                for cf in cutFractions {
+                    let now = cycle.cycleStart.addingTimeInterval(duration * cf)
+                    let seen = cycle.samples.filter { $0.at <= now }
+                    let future = cycle.samples.filter { $0.at > now }
+                    guard seen.count >= 3, future.count >= 2 else { continue }
+                    attempts += 1
+                    let partial = PartialCycle(samples: seen, now: now,
+                                               cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
+                    guard let projection = model.fit(partial) else { continue }
+                    let absErrors = future.map { abs(projection($0.at) - $0.usedPercentage) }
+                    errors.append(absErrors.sorted()[absErrors.count / 2])  // per-cycle median
+                }
+            }
+            let coverage = attempts == 0 ? 0 : Double(errors.count) / Double(attempts)
+            return Backtester.Score(
+                id: model.id, complexity: model.complexity,
+                medianAbsPctError: median(errors),
+                meanAbsPctError: errors.isEmpty ? .infinity : errors.reduce(0, +) / Double(errors.count),
+                coverage: coverage, scoredCount: errors.count)
+        }
+    }
+
+    /// Backtest-select the best model for `history`, fit it to the current
+    /// cycle, and return its forward trajectory sampled `sampleCount` times
+    /// from now to reset. Falls back to the first model that can fit when the
+    /// backtest is inconclusive (too little history). `nil` if nothing fits.
+    public static func bestTrajectory(
+        current: PartialCycle,
+        history: [Cycle],
+        models: [any Model] = defaultModels,
+        selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
+        sampleCount: Int = 48
+    ) -> Trajectory? {
+        let scores = score(models: models, cycles: history)
+        let pick = ForecastSelector.select(scores: scores, policy: selectionPolicy)
+        let chosen = models.first { $0.id == pick.id }
+            ?? models.first { $0.fit(current) != nil }
+        guard let model = chosen, let projection = model.fit(current) else { return nil }
+
+        let span = current.resetsAt.timeIntervalSince(current.now)
+        guard span > 0 else { return nil }
+        var points: [Sample] = []
+        var crossing: Date?
+        for i in 0...sampleCount {
+            let date = current.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+            let raw = projection(date)
+            if crossing == nil, raw >= 100 { crossing = date }
+            points.append(Sample(at: date, usedPercentage: min(100, max(0, raw))))
+        }
+        return Trajectory(modelId: model.id, points: points, crossesFullAt: crossing)
+    }
+
+    static func median(_ xs: [Double]) -> Double {
+        guard !xs.isEmpty else { return .infinity }
+        let s = xs.sorted(); let n = s.count
+        return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
+    }
+}
