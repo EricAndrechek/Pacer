@@ -67,8 +67,9 @@ public actor UsageIntelligenceEngine {
     private var features: EngineFeatures?
     /// The per-user fit derived from `features`.
     private var fit = Fit()
-    /// The per-user end-of-day method track record, refreshed each recompute.
-    private var eodAccuracy: EngineSelfEval.Accuracy?
+    /// Per-surface method track records (end-of-day, rate-limit windows),
+    /// refreshed each recompute.
+    private var accuracyBySurface: [String: EngineSelfEval.Accuracy] = [:]
 
     /// Per-user fitted state cached between scans. Holds the shapes that are
     /// expensive to derive (calibrators, the diurnal rate table); the cheap,
@@ -114,24 +115,50 @@ public actor UsageIntelligenceEngine {
             lastArrivalAt: fetchLastArrival())
         self.features = f
 
-        // Self-eval feedback loop: score any newly-completed days into the
-        // persisted scoreboard (idempotent), then drive end-of-day selection
-        // from the accumulated per-user track record — not a value recomputed
-        // cold each launch. Empty store ⇒ no records ⇒ clock-only (safe).
+        // Self-eval feedback loop: score newly-completed periods into the
+        // persisted scoreboard (idempotent), then drive selection from the
+        // accumulated per-user track record — not a value recomputed cold each
+        // launch. Empty store ⇒ no records ⇒ safe defaults.
         recordNewEODOutcomes(periods: f.dailyPeriods, calendar: calendar, now: now)
-        let records = fetchEODRecords()
-        self.eodAccuracy = EngineSelfEval.accuracy(from: records)
-        self.fit = Self.makeFit(f, eodCrossover: EngineSelfEval.crossover(from: records))
+        recordNewRLOutcomes(features: f, calendar: calendar, now: now)
+
+        let eodRecords = fetchRecords(surface: EngineSelfEval.surfaceEOD)
+        accuracyBySurface[EngineSelfEval.surfaceEOD] = EngineSelfEval.accuracy(from: eodRecords)
+
+        // Pick each rate-limit window's outlook model from its accumulated
+        // record (the diurnal model now competes here on realized accuracy).
+        var rlSelection: [String: String] = [:]
+        for window in RateLimitWindowKind.allCases {
+            let surface = EngineSelfEval.rlSurface(window.rawValue)
+            let recs = fetchRecords(surface: surface)
+            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs)
+            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(window)) {
+                rlSelection[window.rawValue] = pick
+            }
+        }
+
+        self.fit = Self.makeFit(f, eodCrossover: EngineSelfEval.crossover(from: eodRecords), rlSelection: rlSelection)
     }
 
     /// Number of historical days the fit was trained on — for a future
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
 
-    /// How each end-of-day prediction method is doing on this user's own data —
-    /// median absolute % error and how many completed days back it, best-first.
-    /// `nil` before the first recompute; empty methods until some days complete.
-    public func selfEvalAccuracy() -> EngineSelfEval.Accuracy? { eodAccuracy }
+    /// How each prediction method is doing on this user's own data for a surface
+    /// (`EngineSelfEval.surfaceEOD`, or `EngineSelfEval.rlSurface(window)`):
+    /// median absolute % error and how many completed periods back it,
+    /// best-first. `nil` before the first recompute or for an unscored surface.
+    public func selfEvalAccuracy(surface: String = EngineSelfEval.surfaceEOD) -> EngineSelfEval.Accuracy? {
+        accuracyBySurface[surface]
+    }
+
+    /// Roster complexities for a rate-limit window — so the persisted-scoreboard
+    /// pick can break near-ties toward the simpler model.
+    static func rlComplexities(_ window: RateLimitWindowKind) -> [String: Int] {
+        var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
+        if window == .sevenDay { c["diurnal-rate"] = 3 }
+        return c
+    }
 
     // MARK: - Ask (the typed question → Estimate contract)
 
@@ -284,7 +311,7 @@ public actor UsageIntelligenceEngine {
     /// Build the per-user fit. `eodCrossover` is the learned clock→shape switch
     /// fraction, resolved by `recompute` from the persisted self-eval scoreboard
     /// (`.infinity` = clock all day, the safe default before any track record).
-    static func makeFit(_ f: EngineFeatures, eodCrossover: Double = .infinity) -> Fit {
+    static func makeFit(_ f: EngineFeatures, eodCrossover: Double = .infinity, rlSelection: [String: String] = [:]) -> Fit {
         var fit = Fit()
         let shape = RegimeGatedEOD()
         let clock = AverageRateForecaster()
@@ -313,13 +340,15 @@ public actor UsageIntelligenceEngine {
                 roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
             }
 
+            // Prefer the accumulated per-user track record (`rlSelection`);
+            // fall back to a cold on-the-fly backtest, then a hardcoded default
+            // (diurnal for 7d — it works off the activity prior even with no
+            // completed cycles — recency-weighted for 5h).
             let scores = BurnTrajectory.score(models: roster, cycles: history)
-            let picked = ForecastSelector.select(
+            let onTheFly = ForecastSelector.select(
                 scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
-            // Cold-start default: the diurnal model for 7d (it works off the
-            // activity prior even with no completed cycles), recency-weighted
-            // for 5h (tracks that window best on real data).
-            let selectedId = picked ?? (window == .sevenDay ? "diurnal-rate" : "recency-weighted")
+            let selectedId = rlSelection[window.rawValue] ?? onTheFly
+                ?? (window == .sevenDay ? "diurnal-rate" : "recency-weighted")
             let model = roster.first { $0.id == selectedId } ?? roster.first
             let calibrator = model.map { rateLimitCalibrator(model: $0, history: history, duration: duration) }
 
@@ -510,22 +539,19 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Self-eval persistence
 
-    private func fetchEODRecords() -> [EngineSelfEval.Record] {
-        let surface = EngineSelfEval.surfaceEOD
+    private func fetchRecords(surface: String) -> [EngineSelfEval.Record] {
         let descriptor = FetchDescriptor<EngineEvalOutcome>(predicate: #Predicate { $0.surface == surface })
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
                                 predicted: $0.predicted, truth: $0.truth) }
     }
 
-    /// Score the prior complete days' candidates into persisted outcomes, once
-    /// each (idempotent by key) — the standing re-score that grows the per-user
-    /// track record on every scan.
-    private func recordNewEODOutcomes(periods: [ForecastInput.PriorPeriod], calendar: Calendar, now: Date) {
-        let surface = EngineSelfEval.surfaceEOD
+    private func existingKeys(surface: String) -> Set<String> {
         let descriptor = FetchDescriptor<EngineEvalOutcome>(predicate: #Predicate { $0.surface == surface })
-        let existingKeys = Set((try? modelContext.fetch(descriptor))?.map { $0.key } ?? [])
-        let news = EngineSelfEval.newOutcomesEOD(periods: periods, calendar: calendar, existingKeys: existingKeys)
+        return Set((try? modelContext.fetch(descriptor))?.map { $0.key } ?? [])
+    }
+
+    private func persist(_ news: [EngineSelfEval.NewOutcome], now: Date) {
         guard !news.isEmpty else { return }
         for n in news {
             modelContext.insert(EngineEvalOutcome(
@@ -533,5 +559,31 @@ public actor UsageIntelligenceEngine {
                 predicted: n.predicted, truth: n.truth, recordedAt: now))
         }
         try? modelContext.save()
+    }
+
+    /// Score the prior complete days' candidates into persisted outcomes, once
+    /// each (idempotent by key) — the standing re-score that grows the per-user
+    /// track record on every scan.
+    private func recordNewEODOutcomes(periods: [ForecastInput.PriorPeriod], calendar: Calendar, now: Date) {
+        let news = EngineSelfEval.newOutcomesEOD(
+            periods: periods, calendar: calendar, existingKeys: existingKeys(surface: EngineSelfEval.surfaceEOD))
+        persist(news, now: now)
+    }
+
+    /// Score each rate-limit window's roster over its newly-completed cycles —
+    /// the diurnal model (7d) finally earns a persistent per-user track record.
+    private func recordNewRLOutcomes(features f: EngineFeatures, calendar: Calendar, now: Date) {
+        for window in RateLimitWindowKind.allCases {
+            guard let samples = f.rateLimit[window.rawValue], !samples.isEmpty,
+                  let duration = PaceMath.windowDuration(for: window.rawValue) else { continue }
+            let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: now)
+            let completed = history.filter { $0.resetsAt <= now }
+            guard !completed.isEmpty else { continue }
+            let news = EngineSelfEval.newOutcomesRL(
+                window: window.rawValue, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
+                existingKeys: existingKeys(surface: EngineSelfEval.rlSurface(window.rawValue)),
+                includeDiurnal: window == .sevenDay)
+            persist(news, now: now)
+        }
     }
 }

@@ -100,6 +100,53 @@ struct EngineSelfEvalTests {
         #expect(second.isEmpty)
     }
 
+    // MARK: - Rate-limit outlook self-eval
+
+    /// Build `n` complete 7-day cycles, each ramping 0 → ~60%.
+    private func sevenDayCycles(_ n: Int) -> [BurnTrajectory.Cycle] {
+        let duration: TimeInterval = 7 * 24 * 3600
+        return (0..<n).map { c in
+            let start = Self.now.addingTimeInterval(-Double(n - c) * duration)
+            let reset = start.addingTimeInterval(duration)
+            var samples: [BurnTrajectory.Sample] = []
+            var pct = 0.0, t = start
+            while t <= reset {
+                samples.append(.init(at: t, usedPercentage: min(60, pct)))
+                t = t.addingTimeInterval(6 * 3600); pct += 2.2
+            }
+            return BurnTrajectory.Cycle(samples: samples, cycleStart: start, resetsAt: reset)
+        }
+    }
+
+    @Test func rlOutcomesIncludeDiurnalAndAreIdempotent() {
+        let cycles = sevenDayCycles(4)
+        let grid = [[Double]](repeating: [Double](repeating: 1, count: 24), count: 7)
+        let first = EngineSelfEval.newOutcomesRL(
+            window: "seven_day", cycles: cycles, activityGrid: grid, calendar: Self.utc,
+            existingKeys: [], includeDiurnal: true)
+        #expect(!first.isEmpty)
+        #expect(first.contains { $0.method == "diurnal-rate" })          // the diurnal model earns a record
+        #expect(first.contains { $0.method == "linear-recent" })
+
+        let keys = Set(first.map { EngineEvalOutcome.makeKey(surface: $0.surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey) })
+        let second = EngineSelfEval.newOutcomesRL(
+            window: "seven_day", cycles: cycles, activityGrid: grid, calendar: Self.utc,
+            existingKeys: keys, includeDiurnal: true)
+        #expect(second.isEmpty)
+    }
+
+    @Test func bestMethodPrefersLowerErrorAcrossPeriods() {
+        var records: [EngineSelfEval.Record] = []
+        for i in 0..<4 {
+            let p = "c\(i)", truth = 60.0
+            records.append(.init(method: "diurnal-rate", bucket: "cut=0.50", periodKey: p, predicted: 58, truth: truth))   // APE ~3
+            records.append(.init(method: "linear-recent", bucket: "cut=0.50", periodKey: p, predicted: 90, truth: truth))  // APE 50
+        }
+        #expect(EngineSelfEval.bestMethod(from: records) == "diurnal-rate")
+        // Below the min-periods bar, no pick (engine falls back to on-the-fly).
+        #expect(EngineSelfEval.bestMethod(from: Array(records.prefix(1)), minPeriods: 2) == nil)
+    }
+
     // MARK: - End-to-end actor persistence
 
     @Test func recomputePersistsScoreboardAndIsIdempotent() async throws {
@@ -135,5 +182,35 @@ struct EngineSelfEvalTests {
         let acc = await engine.selfEvalAccuracy()
         #expect(acc != nil)
         #expect(acc?.methods.contains { $0.method == "average-rate" } == true)
+    }
+
+    @Test func recomputePersistsRateLimitTrackRecordIncludingDiurnal() async throws {
+        let container = try PacerStore.makeInMemoryContainer()
+        let cal = Self.utc
+        let duration: TimeInterval = 7 * 24 * 3600
+
+        // Seed 3 complete 7-day cycles of OAuth utilisation samples.
+        let seed = ModelContext(container)
+        for c in 0..<3 {
+            let start = Self.now.addingTimeInterval(-Double(3 - c) * duration)
+            let reset = start.addingTimeInterval(duration)
+            var pct = 0.0, t = start
+            while t <= reset {
+                seed.insert(RateLimitSample(sampledAt: t, window: "seven_day", usedPercentage: min(60, pct), resetsAt: reset, source: "oauth"))
+                t = t.addingTimeInterval(6 * 3600); pct += 2.2
+            }
+        }
+        try seed.save()
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Self.now, calendar: cal)
+
+        let rows = try ModelContext(container).fetch(FetchDescriptor<EngineEvalOutcome>())
+        let rl = rows.filter { $0.surface == EngineSelfEval.rlSurface("seven_day") }
+        #expect(!rl.isEmpty)
+        #expect(rl.contains { $0.method == "diurnal-rate" })   // diurnal now has a persisted track record
+
+        let acc = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface("seven_day"))
+        #expect(acc != nil)
     }
 }

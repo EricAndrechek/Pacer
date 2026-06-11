@@ -161,6 +161,88 @@ public enum EngineSelfEval {
         return Accuracy(surface: surface, methods: methods)
     }
 
+    // MARK: - Rate-limit outlook self-eval
+
+    /// Surface id for a rate-limit window's outlook track record.
+    public static func rlSurface(_ window: String) -> String { "rl-\(window)" }
+    /// Cut grid for scoring completed cycles (mirrors `scoreCompletedCycle`).
+    static let rlCutFractions = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+    /// Score the rate-limit roster over *completed* cycles and emit the
+    /// outcomes not already persisted — the rate-limit analogue of
+    /// `newOutcomesEOD`, and how the diurnal model finally earns a persistent
+    /// per-user track record instead of being re-picked cold each scan.
+    ///
+    /// Leak-free by walk-forward: the diurnal model scored against cycle *i* is
+    /// fit only on cycles *before* it (plus the activity-grid prior, which is a
+    /// cost-activity shape, not the rate-limit data being scored).
+    public static func newOutcomesRL(
+        window: String,
+        cycles: [BurnTrajectory.Cycle],
+        activityGrid: [[Double]],
+        calendar: Calendar,
+        existingKeys: Set<String>,
+        includeDiurnal: Bool
+    ) -> [NewOutcome] {
+        let surface = rlSurface(window)
+        let sorted = cycles.sorted { $0.cycleStart < $1.cycleStart }
+        var out: [NewOutcome] = []
+        for (i, cycle) in sorted.enumerated() {
+            let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
+            guard trueFinal > 0 else { continue }
+            let periodKey = periodKeyRL(cycle.resetsAt)
+            var roster = BurnTrajectory.defaultModels
+            if includeDiurnal {
+                let table = DiurnalBurnModel.rateTable(cycles: Array(sorted[0..<i]), calendar: calendar, prior: activityGrid)
+                roster.append(DiurnalBurnModel(rate: table, calendar: calendar))
+            }
+            let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
+            guard duration > 0 else { continue }
+            for cf in rlCutFractions {
+                let now = cycle.cycleStart.addingTimeInterval(duration * cf)
+                let seen = cycle.samples.filter { $0.at <= now }
+                guard seen.count >= 3 else { continue }
+                let partial = BurnTrajectory.PartialCycle(
+                    samples: seen, now: now, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
+                let bucket = "cut=\(String(format: "%.2f", cf))"
+                for m in roster {
+                    let key = EngineEvalOutcome.makeKey(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey)
+                    guard !existingKeys.contains(key) else { continue }
+                    guard let proj = m.fit(partial) else { continue }
+                    out.append(NewOutcome(surface: surface, method: m.id, bucket: bucket,
+                                          periodKey: periodKey, predicted: proj(cycle.resetsAt), truth: trueFinal))
+                }
+            }
+        }
+        return out
+    }
+
+    /// Pick the best method from an accumulated record: lowest median absolute
+    /// error, breaking near-ties (within 2pp) toward the simpler model. `nil`
+    /// until at least `minPeriods` completed periods back a method — the engine
+    /// then falls back to its cold on-the-fly backtest.
+    public static func bestMethod(
+        from records: [Record],
+        minPeriods: Int = 2,
+        complexity: [String: Int] = [:]
+    ) -> String? {
+        let byMethod = Dictionary(grouping: records, by: { $0.method })
+        let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
+            guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
+            return (id, median(rows.map { $0.absPctError }), complexity[id] ?? 3)
+        }
+        guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
+        return scored.filter { $0.err <= best.err + 2 }
+            .min { ($0.cx, $0.err) < ($1.cx, $1.err) }?.id
+    }
+
+    /// Cycle identity, rounded to the minute so reset jitter doesn't split a
+    /// cycle across scans (matches `BurnTrajectory.segment`).
+    static func periodKeyRL(_ reset: Date) -> String {
+        let rounded = Date(timeIntervalSince1970: (reset.timeIntervalSince1970 / 60).rounded() * 60)
+        return ISO8601DateFormatter().string(from: rounded)
+    }
+
     // MARK: - Stats
 
     static func median(_ xs: [Double]) -> Double {
