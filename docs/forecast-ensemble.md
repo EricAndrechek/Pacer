@@ -68,10 +68,17 @@ So the tournament reproduces the right choice with no human in the loop.
    then swap (displayed change → before/after + sign-off, as always). Since
    the selector currently picks the already-shipped method, the first wire-in
    is a no-op on the displayed numbers — it just moves the *choice* into data.
-3. **On-device ML candidate** — featurize (hour-of-day, day-of-week, recent
-   rate, time-into-period) into a Create ML `MLBoostedTreeRegressor` (or the
-   Create ML Components time-series forecaster), trained on-device, entered as
-   *just another candidate*. It only gets used for a user if it wins the
-   backtest — so ML can only help, never regress a user's numbers.
+3. **On-device ML candidate — built (#53).** `MLFeatures` featurizes
+   (soFar, elapsed-fraction, hour-of-day, weekday, recent rate, pace
+   baseline) → training rows replayed from prior periods; `CreateMLTrainer`
+   (guarded `#if canImport(CreateML)`) trains an `MLBoostedTreeRegressor`
+   on-device and hands back a pure prediction closure; `RegressorForecaster`
+   enters it as *just another candidate*. Validated on the real store
+   (out-of-sample, 79 cases): the model trains fine but **loses** to
+   `hour-of-day-shape` (37.6% vs 14.5% median) on ~28 days of training data,
+   so the selector correctly doesn't pick it — exactly the de-risk: ML can
+   only help, never regress. It'll be selected automatically if it starts
+   winning (more history, or better features — stacking the simple
+   forecasters' outputs as features is the obvious next lever).
 4. **Uncertainty** — the spread of candidate predictions is a cheap interval
    ("$10.5k–$12k"), more honest than a single point.
