@@ -188,6 +188,66 @@ public enum BurnTrajectory {
         return (current, history.sorted { $0.cycleStart < $1.cycleStart })
     }
 
+    /// One model's forward trajectory plus its backtest accuracy — for the
+    /// "show all models" detail view.
+    public struct ScoredTrajectory: Sendable, Identifiable {
+        public let modelId: String
+        public let complexity: Int
+        public let trajectory: Trajectory
+        /// Median absolute error (percentage points) over the remainder of
+        /// past cycles. `.infinity` when there wasn't enough history to score.
+        public let medianAbsError: Double
+        public let coverage: Double
+        public let isSelected: Bool
+        public var id: String { modelId }
+    }
+
+    /// Fit *every* model to the current cycle and pair each trajectory with
+    /// its backtest accuracy, flagging the one the selector would pick. Powers
+    /// the detail view that plots all candidates side by side.
+    public static func allTrajectories(
+        current: PartialCycle,
+        history: [Cycle],
+        models: [any Model] = defaultModels,
+        selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
+        sampleCount: Int = 48
+    ) -> [ScoredTrajectory] {
+        let scores = score(models: models, cycles: history)
+        let selectedId = ForecastSelector.select(scores: scores, policy: selectionPolicy).id
+        let span = current.resetsAt.timeIntervalSince(current.now)
+        guard span > 0 else { return [] }
+
+        return models.compactMap { model -> ScoredTrajectory? in
+            guard let projection = model.fit(current) else { return nil }
+            var points: [Sample] = []
+            var crossing: Date?
+            for i in 0...sampleCount {
+                let date = current.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+                let raw = projection(date)
+                if crossing == nil, raw >= 100 { crossing = date }
+                points.append(Sample(at: date, usedPercentage: min(100, max(0, raw))))
+            }
+            let s = scores.first { $0.id == model.id }
+            return ScoredTrajectory(
+                modelId: model.id, complexity: model.complexity,
+                trajectory: Trajectory(modelId: model.id, points: points, crossesFullAt: crossing),
+                medianAbsError: s?.medianAbsPctError ?? .infinity,
+                coverage: s?.coverage ?? 0,
+                isSelected: model.id == selectedId)
+        }
+    }
+
+    /// Friendly display name for a model id.
+    public static func displayName(_ modelId: String) -> String {
+        switch modelId {
+        case "linear-recent": return "Linear (recent)"
+        case "recency-weighted": return "Recency-weighted"
+        case "damped-acceleration": return "Damped acceleration"
+        case "saturating": return "Saturating"
+        default: return modelId
+        }
+    }
+
     static func median(_ xs: [Double]) -> Double {
         guard !xs.isEmpty else { return .infinity }
         let s = xs.sorted(); let n = s.count

@@ -175,6 +175,7 @@ private struct PaceChartColumn: View {
     /// the card clean); `sharing` drives the preview popover.
     @State private var hovering = false
     @State private var sharing = false
+    @State private var showingDetail = false
 
     private var latest: RateLimitSample? { windowSamples.first }
 
@@ -235,9 +236,49 @@ private struct PaceChartColumn: View {
             header
             heroLine
             chartSlot
+            compareButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onHover { hovering = $0 }
+        .sheet(isPresented: $showingDetail) { detailSheet }
+    }
+
+    /// "Compare models" — opens the all-models projection detail. Shown only
+    /// when there's an active cycle with a chart to compare against.
+    @ViewBuilder
+    private var compareButton: some View {
+        if cycle?.isAwaiting == false, chartData != nil {
+            Button { showingDetail = true } label: {
+                Label("Compare models", systemImage: "chart.xyaxis.line")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("See every forecast model's projection and its fit accuracy")
+        }
+    }
+
+    /// Builds the detail sheet on demand: fit all candidate models to the
+    /// current cycle and score them against past cycles.
+    @ViewBuilder
+    private var detailSheet: some View {
+        let now = Date()
+        let tuples = windowSamples.compactMap { s -> (at: Date, usedPercentage: Double, resetsAt: Date)? in
+            guard let resets = s.resetsAt else { return nil }
+            return (s.sampledAt, s.usedPercentage, resets)
+        }
+        let segmented = BurnTrajectory.segment(samples: tuples, duration: duration, now: now)
+        if let current = segmented.current, let data = chartData {
+            ProjectionDetailView(
+                title: "\(title) projection",
+                cycleStart: data.cycleStart,
+                resetsAt: data.resetsAt,
+                durationSeconds: duration,
+                actual: data.points,
+                trajectories: BurnTrajectory.allTrajectories(current: current, history: segmented.history))
+        } else {
+            Text("Not enough data to compare models yet.").padding(40)
+        }
     }
 
     /// Everything the share sheet needs to render and name this window's
