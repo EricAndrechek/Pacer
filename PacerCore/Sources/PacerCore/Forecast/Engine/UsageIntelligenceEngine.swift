@@ -67,6 +67,8 @@ public actor UsageIntelligenceEngine {
     private var features: EngineFeatures?
     /// The per-user fit derived from `features`.
     private var fit = Fit()
+    /// The per-user end-of-day method track record, refreshed each recompute.
+    private var eodAccuracy: EngineSelfEval.Accuracy?
 
     /// Per-user fitted state cached between scans. Holds the shapes that are
     /// expensive to derive (calibrators, the diurnal rate table); the cheap,
@@ -111,12 +113,25 @@ public actor UsageIntelligenceEngine {
             rate: fetchRate(now: now),
             lastArrivalAt: fetchLastArrival())
         self.features = f
-        self.fit = Self.makeFit(f)
+
+        // Self-eval feedback loop: score any newly-completed days into the
+        // persisted scoreboard (idempotent), then drive end-of-day selection
+        // from the accumulated per-user track record — not a value recomputed
+        // cold each launch. Empty store ⇒ no records ⇒ clock-only (safe).
+        recordNewEODOutcomes(periods: f.dailyPeriods, calendar: calendar, now: now)
+        let records = fetchEODRecords()
+        self.eodAccuracy = EngineSelfEval.accuracy(from: records)
+        self.fit = Self.makeFit(f, eodCrossover: EngineSelfEval.crossover(from: records))
     }
 
     /// Number of historical days the fit was trained on — for a future
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
+
+    /// How each end-of-day prediction method is doing on this user's own data —
+    /// median absolute % error and how many completed days back it, best-first.
+    /// `nil` before the first recompute; empty methods until some days complete.
+    public func selfEvalAccuracy() -> EngineSelfEval.Accuracy? { eodAccuracy }
 
     // MARK: - Ask (the typed question → Estimate contract)
 
@@ -266,18 +281,16 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Fitting (pure; testable without a store)
 
-    /// Cut fractions the EOD router scores the experts at (early morning →
-    /// late evening). The crossover where the learned shape starts beating the
-    /// clock baseline is learned per-user, not assumed.
-    static let eodCutFractions = [0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
-
-    static func makeFit(_ f: EngineFeatures) -> Fit {
+    /// Build the per-user fit. `eodCrossover` is the learned clock→shape switch
+    /// fraction, resolved by `recompute` from the persisted self-eval scoreboard
+    /// (`.infinity` = clock all day, the safe default before any track record).
+    static func makeFit(_ f: EngineFeatures, eodCrossover: Double = .infinity) -> Fit {
         var fit = Fit()
         let shape = RegimeGatedEOD()
         let clock = AverageRateForecaster()
         fit.eodShapeCalibrator = eodCalibrator(model: shape, periods: f.dailyPeriods, calendar: f.calendar)
         fit.eodClockCalibrator = eodCalibrator(model: clock, periods: f.dailyPeriods, calendar: f.calendar)
-        fit.eodShapeCrossover = eodShapeCrossover(periods: f.dailyPeriods, calendar: f.calendar)
+        fit.eodShapeCrossover = eodCrossover
 
         // Norm bands + baselines from zero-filled prior complete days.
         let prior = priorDays(f)
@@ -439,7 +452,7 @@ public actor UsageIntelligenceEngine {
         model: any Forecaster,
         periods: [ForecastInput.PriorPeriod],
         calendar: Calendar,
-        cutFractions: [Double] = eodCutFractions
+        cutFractions: [Double] = EngineSelfEval.cutFractions
     ) -> ConformalCalibrator {
         let sorted = periods.sorted { $0.start < $1.start }
         var preds: [Double] = []
@@ -458,59 +471,6 @@ public actor UsageIntelligenceEngine {
             }
         }
         return ConformalCalibrator.fromPairs(mode: .multiplicative, predictions: preds, truths: truths)
-    }
-
-    /// Minimum fraction of a bucket's days the shape must actually produce a
-    /// projection for before it's trusted to beat clock there. Early in the day
-    /// the shape declines on most days (a tiny fraction-done explodes the
-    /// scale-up), so it would otherwise be "selected" on a favourable handful.
-    static let eodShapeMinCoverage = 0.6
-    static let eodShapeMinShared = 10
-    /// Fraction of shared days the shape must be strictly closer than clock on
-    /// before it's trusted (a sign test). Deterministic at small n — unlike the
-    /// bootstrap-CI width, which flaps run-to-run on a borderline bucket because
-    /// the case ordering (dictionary/set iteration) isn't stable.
-    static let eodShapeMinWinFraction = 0.6
-
-    /// Learn the fraction-of-day from which the hour-of-day shape *robustly*
-    /// beats clock-linear on the user's own history. Four guards make this
-    /// honest (the throwaway real-store harness caught each): compare on the
-    /// **shared** cases each could project (a paired delta, not two independent
-    /// medians on different subsets); require the shape to **cover** most of the
-    /// bucket's days (else it wins by only ever projecting the easy ones);
-    /// require the shape to be strictly closer than clock on a **majority of
-    /// shared days** (a sign test, `winFraction`) with a negative median delta,
-    /// so a within-noise in-sample edge (round-2's early-cut weekday signal,
-    /// Wilcoxon p≈0.19) never trades the simple line for a noisier model; and
-    /// take only the **contiguous evening tail** of winning buckets, because the
-    /// shape's advantage is monotone in fraction-observed — an isolated midday
-    /// bucket clearing the bar is an artifact, not a real crossover.
-    ///
-    /// On real data this lands the crossover in the evening (clock through the
-    /// morning/afternoon, the learned shape only once most of the day is seen),
-    /// which is exactly where the shape's win is significant and durable. This
-    /// is the EOD analogue of the burn tournament's selector.
-    static func eodShapeCrossover(periods: [ForecastInput.PriorPeriod], calendar: Calendar) -> Double {
-        let shape = RegimeGatedEOD(), clock = AverageRateForecaster()
-        let cases = WalkForward.cases(
-            periods: periods, periodEnd: { $0.start.addingTimeInterval(86400) },
-            cutFractions: eodCutFractions, calendar: calendar)
-        let coverage = WalkForward.score(models: [shape], cases: cases)
-        let paired = WalkForward.paired(model: shape, baseline: clock, cases: cases)
-        func robustWin(at cf: Double) -> Bool {
-            let bucket = "cut=\(String(format: "%.2f", cf))|all"
-            let cov = coverage.first { $0.bucket == bucket }?.coverage ?? 0
-            guard let p = paired.first(where: { $0.bucket == bucket }) else { return false }
-            return cov >= eodShapeMinCoverage && p.n >= eodShapeMinShared
-                && p.winFraction >= eodShapeMinWinFraction && p.medianDelta < 0
-        }
-        // Walk fractions high → low; the crossover is the lowest fraction whose
-        // bucket and every later bucket are robust shape wins.
-        var crossover = Double.infinity
-        for cf in eodCutFractions.sorted(by: >) {
-            if robustWin(at: cf) { crossover = cf } else { break }
-        }
-        return crossover
     }
 
     static func clampPct(_ r: ClosedRange<Double>) -> ClosedRange<Double> {
@@ -546,5 +506,32 @@ public actor UsageIntelligenceEngine {
         var descriptor = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         descriptor.fetchLimit = 1
         return (try? modelContext.fetch(descriptor))?.first?.sampledAt
+    }
+
+    // MARK: - Self-eval persistence
+
+    private func fetchEODRecords() -> [EngineSelfEval.Record] {
+        let surface = EngineSelfEval.surfaceEOD
+        let descriptor = FetchDescriptor<EngineEvalOutcome>(predicate: #Predicate { $0.surface == surface })
+        let rows = (try? modelContext.fetch(descriptor)) ?? []
+        return rows.map { .init(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
+                                predicted: $0.predicted, truth: $0.truth) }
+    }
+
+    /// Score the prior complete days' candidates into persisted outcomes, once
+    /// each (idempotent by key) — the standing re-score that grows the per-user
+    /// track record on every scan.
+    private func recordNewEODOutcomes(periods: [ForecastInput.PriorPeriod], calendar: Calendar, now: Date) {
+        let surface = EngineSelfEval.surfaceEOD
+        let descriptor = FetchDescriptor<EngineEvalOutcome>(predicate: #Predicate { $0.surface == surface })
+        let existingKeys = Set((try? modelContext.fetch(descriptor))?.map { $0.key } ?? [])
+        let news = EngineSelfEval.newOutcomesEOD(periods: periods, calendar: calendar, existingKeys: existingKeys)
+        guard !news.isEmpty else { return }
+        for n in news {
+            modelContext.insert(EngineEvalOutcome(
+                surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                predicted: n.predicted, truth: n.truth, recordedAt: now))
+        }
+        try? modelContext.save()
     }
 }
