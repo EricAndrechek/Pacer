@@ -66,6 +66,42 @@ struct BurnTrajectoryTests {
         #expect(traj.crossesFullAt == nil)
     }
 
+    @Test func scoreCompletedCycleMeasuresAccuracyAndConvergence() {
+        // A clean linear cycle to ~90%. linear/recency models should track it
+        // well (low error) and lock in early (low convergence fraction).
+        let c = cycle(durationHours: 5) { min(95, 18 * $0) }
+        let scores = BurnTrajectory.scoreCompletedCycle(c)
+        let linear = scores.first { $0.modelId == "linear-recent" }
+        #expect(linear != nil)
+        #expect(linear!.meanAbsError < 15)
+        #expect(linear!.convergenceFraction <= 0.6)
+        // Every score reports a convergence fraction in [0, 1].
+        #expect(scores.allSatisfy { $0.convergenceFraction >= 0 && $0.convergenceFraction <= 1 })
+    }
+
+    @Test func scoreboardPrefersEarlyConvergersAtEqualAccuracy() {
+        // "early" is slightly less accurate but converges much sooner;
+        // "late" is marginally more accurate but only locks in at the end.
+        let records = [
+            ForecastScoreboard.Record(window: "five_hour", modelId: "early", meanAbsError: 5, convergenceFraction: 0.3),
+            ForecastScoreboard.Record(window: "five_hour", modelId: "late", meanAbsError: 4, convergenceFraction: 0.9),
+        ]
+        let scores = ForecastScoreboard.scores(for: "five_hour", records: records)
+        // effective: early = 5 + 15·0.3 = 9.5 ; late = 4 + 15·0.9 = 17.5.
+        let pick = ForecastSelector.select(scores: scores, policy: .init(minScoredCases: 1, minCoverage: 0.5))
+        #expect(pick.id == "early")
+    }
+
+    @Test func scoreboardFiltersByWindow() {
+        let records = [
+            ForecastScoreboard.Record(window: "five_hour", modelId: "a", meanAbsError: 5, convergenceFraction: 0.2),
+            ForecastScoreboard.Record(window: "seven_day", modelId: "b", meanAbsError: 9, convergenceFraction: 0.2),
+        ]
+        let five = ForecastScoreboard.scores(for: "five_hour", records: records)
+        #expect(five.count == 1)
+        #expect(five.first?.id == "a")
+    }
+
     @Test func segmentSplitsCurrentCycleFromHistory() throws {
         // Three back-to-back 5h cycles resetting at 5h, 10h, 15h.
         var rows: [(at: Date, usedPercentage: Double, resetsAt: Date)] = []
