@@ -131,12 +131,13 @@ public enum BurnTrajectory {
         current: PartialCycle,
         history: [Cycle],
         models: [any Model] = defaultModels,
+        priorScores: [Backtester.Score]? = nil,
         selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
         sampleCount: Int = 48
     ) -> Trajectory? {
-        let scores = score(models: models, cycles: history)
-        let pick = ForecastSelector.select(scores: scores, policy: selectionPolicy)
-        let chosen = models.first { $0.id == pick.id }
+        let pickId = selectModel(history: history, models: models,
+                                 priorScores: priorScores, policy: selectionPolicy)
+        let chosen = models.first { $0.id == pickId }
             ?? models.first { $0.fit(current) != nil }
         guard let model = chosen, let projection = model.fit(current) else { return nil }
 
@@ -188,6 +189,22 @@ public enum BurnTrajectory {
         return (current, history.sorted { $0.cycleStart < $1.cycleStart })
     }
 
+    /// Choose the model id: prefer the persisted scoreboard (`priorScores`)
+    /// when it yields an eligible pick — that's the self-improving feedback
+    /// loop — otherwise fall back to the cold-start on-the-fly backtest over
+    /// `history`.
+    static func selectModel(
+        history: [Cycle],
+        models: [any Model],
+        priorScores: [Backtester.Score]?,
+        policy: ForecastSelector.Policy
+    ) -> String? {
+        if let priorScores, let learned = ForecastSelector.select(scores: priorScores, policy: policy).id {
+            return learned
+        }
+        return ForecastSelector.select(scores: score(models: models, cycles: history), policy: policy).id
+    }
+
     /// One model's forward trajectory plus its backtest accuracy — for the
     /// "show all models" detail view.
     public struct ScoredTrajectory: Sendable, Identifiable {
@@ -209,11 +226,13 @@ public enum BurnTrajectory {
         current: PartialCycle,
         history: [Cycle],
         models: [any Model] = defaultModels,
+        priorScores: [Backtester.Score]? = nil,
         selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
         sampleCount: Int = 48
     ) -> [ScoredTrajectory] {
         let scores = score(models: models, cycles: history)
-        let selectedId = ForecastSelector.select(scores: scores, policy: selectionPolicy).id
+        let selectedId = selectModel(history: history, models: models,
+                                     priorScores: priorScores, policy: selectionPolicy)
         let span = current.resetsAt.timeIntervalSince(current.now)
         guard span > 0 else { return [] }
 

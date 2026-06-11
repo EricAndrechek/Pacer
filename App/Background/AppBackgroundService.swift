@@ -295,6 +295,9 @@ final class AppBackgroundService {
                 guard let self else { return }
                 await self.checkForGlobalReset()
                 await self.checkBurnRateWarning()
+                // Score any rate-limit cycles that finished since last scan,
+                // feeding the self-improving model scoreboard. Idempotent.
+                ForecastOutcomeRecorder.record(in: ModelContext(self.container))
             }
         }
     }

@@ -14,6 +14,9 @@ struct PaceChartCard: View {
     /// its own filter pass.
     @Query private var samples: [RateLimitSample]
     @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    /// Completed-cycle model verdicts — the self-improving scoreboard that
+    /// biases which fit is selected. Small table; no predicate needed.
+    @Query private var outcomes: [ForecastModelOutcome]
 
     /// Forecast trajectory per window, recomputed on the scan tick (the
     /// backtest is cheap but not per-render cheap). Keyed by window string.
@@ -54,13 +57,26 @@ struct PaceChartCard: View {
             }
             let (current, history) = BurnTrajectory.segment(samples: tuples, duration: duration, now: now)
             guard let current,
-                  let traj = BurnTrajectory.bestTrajectory(current: current, history: history)
+                  let traj = BurnTrajectory.bestTrajectory(
+                    current: current, history: history, priorScores: priorScores(for: window))
             else { continue }
             next[window] = WindowProjection(
                 points: traj.points.map { .init(time: $0.at, value: $0.usedPercentage) },
                 crossesFullAt: traj.crossesFullAt)
         }
         projections = next
+    }
+
+    /// Scoreboard-derived scores for a window from accumulated completed-cycle
+    /// outcomes. Empty until enough cycles finish — selection then falls back
+    /// to the on-the-fly backtest.
+    func priorScores(for window: String) -> [Backtester.Score] {
+        let records = outcomes
+            .filter { $0.window == window }
+            .map { ForecastScoreboard.Record(
+                window: $0.window, modelId: $0.modelId,
+                meanAbsError: $0.meanAbsError, convergenceFraction: $0.convergenceFraction) }
+        return ForecastScoreboard.scores(for: window, records: records)
     }
 
     private struct Bucketed {
@@ -94,7 +110,8 @@ struct PaceChartCard: View {
                         title: "5-hour",
                         duration: 5 * 3600,
                         windowSamples: b.fiveHour,
-                        projection: projections[RateLimitWindowName.fiveHour]
+                        projection: projections[RateLimitWindowName.fiveHour],
+                        priorScores: priorScores(for: RateLimitWindowName.fiveHour)
                     )
                     Divider()
                         .frame(height: 110)
@@ -102,7 +119,8 @@ struct PaceChartCard: View {
                         title: "7-day",
                         duration: 7 * 86400,
                         windowSamples: b.sevenDay,
-                        projection: projections[RateLimitWindowName.sevenDay]
+                        projection: projections[RateLimitWindowName.sevenDay],
+                        priorScores: priorScores(for: RateLimitWindowName.sevenDay)
                     )
                 }
             }
@@ -169,6 +187,8 @@ private struct PaceChartColumn: View {
     /// Forecast trajectory for this window (nil when unavailable). Drawn only
     /// on the live dashboard chart — deliberately not on the shared image.
     var projection: PaceChartCard.WindowProjection?
+    /// Scoreboard scores for this window (feeds the detail view's selection).
+    var priorScores: [Backtester.Score] = []
 
     /// Share affordance state. `hovering` reveals the share button only
     /// while the cursor is over the column (Linear/Things idiom, keeps
@@ -275,7 +295,8 @@ private struct PaceChartColumn: View {
                 resetsAt: data.resetsAt,
                 durationSeconds: duration,
                 actual: data.points,
-                trajectories: BurnTrajectory.allTrajectories(current: current, history: segmented.history))
+                trajectories: BurnTrajectory.allTrajectories(
+                    current: current, history: segmented.history, priorScores: priorScores))
         } else {
             Text("Not enough data to compare models yet.").padding(40)
         }

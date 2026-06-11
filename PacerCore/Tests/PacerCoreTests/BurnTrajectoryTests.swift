@@ -102,6 +102,33 @@ struct BurnTrajectoryTests {
         #expect(five.first?.id == "a")
     }
 
+    @Test func recorderEmitsCompletedCyclesOnceEach() {
+        // Three 5h cycles (reset at 5h, 10h, 15h); now mid-third → cycles 1 & 2
+        // are complete, the third is current.
+        var rows: [(at: Date, usedPercentage: Double, resetsAt: Date)] = []
+        for c in 0..<3 {
+            let reset = at(Double((c + 1) * 5))
+            var h = Double(c * 5)
+            while h < Double((c + 1) * 5) {
+                rows.append((at(h), 10 + (h - Double(c * 5)) * 16, reset)); h += 0.5
+            }
+        }
+        let now = at(13)
+        let first = ForecastOutcomeRecorder.newOutcomes(
+            samples: rows, window: "five_hour", duration: 5 * 3600, now: now, existingKeys: [])
+        #expect(Set(first.map { $0.resetsAt }).count == 2)        // two completed cycles
+        #expect(first.allSatisfy { $0.window == "five_hour" })
+        #expect(!first.isEmpty)
+
+        // Idempotent: re-running with those keys recorded emits nothing new.
+        let keys = Set(first.map {
+            ForecastModelOutcome.makeKey(window: $0.window, resetsAt: $0.resetsAt, modelId: $0.modelId)
+        })
+        let second = ForecastOutcomeRecorder.newOutcomes(
+            samples: rows, window: "five_hour", duration: 5 * 3600, now: now, existingKeys: keys)
+        #expect(second.isEmpty)
+    }
+
     @Test func segmentSplitsCurrentCycleFromHistory() throws {
         // Three back-to-back 5h cycles resetting at 5h, 10h, 15h.
         var rows: [(at: Date, usedPercentage: Double, resetsAt: Date)] = []
