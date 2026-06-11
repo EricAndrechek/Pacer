@@ -36,6 +36,21 @@ final class AppBackgroundService {
     /// the whole point is to tell the user limits reset early while they
     /// weren't looking.
     private var globalResetObserver: NSObjectProtocol?
+    /// The on-device usage-intelligence engine. Owns its own `ModelContext`,
+    /// rebuilds the per-user feature representation and refits its models on
+    /// each scan tick, and answers the typed `EngineQuestion` → `Estimate`
+    /// contract views call. Lives here so it's warmed headless (a view that
+    /// opens later gets an already-fitted engine), and so it shares the one
+    /// container the rest of the process uses.
+    private var engine: UsageIntelligenceEngine?
+    /// Observer for `.pacerScanCycleDidComplete` that drives `engine.recompute`.
+    private var engineRecomputeObserver: NSObjectProtocol?
+    /// Coalesce engine recomputes — the JSONL scan path posts `samplesChanged`
+    /// many times a minute, and refitting is cheap but not free, so we refit at
+    /// most this often. The next scan after the interval picks up everything
+    /// missed in between (the engine reads the whole store, not a delta).
+    private static let engineRecomputeMinInterval: TimeInterval = 20
+    private var lastEngineRecomputeAt: Date?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -95,6 +110,7 @@ final class AppBackgroundService {
 
         installImmediateScanObserver()
         installGlobalResetObserver()
+        startEngine()
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
         startHistoryPruneTask()
@@ -117,6 +133,12 @@ final class AppBackgroundService {
             NotificationCenter.default.removeObserver(observer)
             globalResetObserver = nil
         }
+        if let observer = engineRecomputeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            engineRecomputeObserver = nil
+        }
+        engine = nil
+        lastEngineRecomputeAt = nil
         widgetRefreshCoordinator.stop()
         pricingRefreshTask?.cancel()
         pricingRefreshTask = nil
@@ -298,6 +320,43 @@ final class AppBackgroundService {
                 // Score any rate-limit cycles that finished since last scan,
                 // feeding the self-improving model scoreboard. Idempotent.
                 ForecastOutcomeRecorder.record(in: ModelContext(self.container))
+            }
+        }
+    }
+
+    // MARK: - Intelligence engine
+
+    /// Create the engine on the shared container and warm it once, then keep it
+    /// fresh by recomputing (throttled) whenever a scan cycle reports new cost
+    /// or rate-limit data. The initial recompute matters because a quiet launch
+    /// (no new samples) posts no `samplesChanged`, so without it a freshly
+    /// opened view would see an unwarmed engine until the next real change.
+    private func startEngine() {
+        guard engine == nil else { return }
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        self.engine = engine
+        Task { await engine.recompute(now: Date()) }
+        installEngineRecomputeObserver()
+    }
+
+    private func installEngineRecomputeObserver() {
+        engineRecomputeObserver = NotificationCenter.default.addObserver(
+            forName: .pacerScanCycleDidComplete,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            // Recompute on either cost (`samplesChanged`) or rate-limit data,
+            // since the engine answers both cost and rate-limit questions.
+            let summary = note.object as? ScanCycleSummary
+            let relevant = (summary?.samplesChanged ?? false) || (summary?.rateLimitsChanged ?? false)
+            guard relevant else { return }
+            Task { @MainActor [weak self] in
+                guard let self, let engine = self.engine else { return }
+                let now = Date()
+                if let last = self.lastEngineRecomputeAt,
+                   now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
+                self.lastEngineRecomputeAt = now
+                await engine.recompute(now: now)
             }
         }
     }
