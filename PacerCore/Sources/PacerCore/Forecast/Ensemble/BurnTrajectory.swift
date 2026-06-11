@@ -237,6 +237,59 @@ public enum BurnTrajectory {
         }
     }
 
+    // MARK: - Completed-cycle scoring (the feedback loop)
+
+    /// A model's verdict over one completed cycle: overall accuracy and how
+    /// early it converged.
+    public struct CycleScore: Sendable, Equatable {
+        public let modelId: String
+        public let meanAbsError: Double
+        public let convergenceFraction: Double
+    }
+
+    /// Within this many percentage points of the realized final counts as
+    /// "locked in" for the convergence metric.
+    public static let convergenceTolerance: Double = 5
+
+    /// Score each model over a *completed* cycle: replay it at a grid of cut
+    /// points, projecting the final each time, and measure (a) mean absolute
+    /// error vs the realized final and (b) the earliest cut fraction from
+    /// which it stayed within `tolerance`. This is what gets persisted as
+    /// `ForecastModelOutcome` and aggregated by `ForecastScoreboard`.
+    public static func scoreCompletedCycle(
+        _ cycle: Cycle,
+        models: [any Model] = defaultModels,
+        cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        tolerance: Double = convergenceTolerance
+    ) -> [CycleScore] {
+        let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
+        guard trueFinal > 0 else { return [] }
+        let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
+        guard duration > 0 else { return [] }
+
+        return models.compactMap { model -> CycleScore? in
+            var graded: [(f: Double, err: Double)] = []
+            for f in cutFractions {
+                let now = cycle.cycleStart.addingTimeInterval(duration * f)
+                let seen = cycle.samples.filter { $0.at <= now }
+                guard seen.count >= 3 else { continue }
+                let partial = PartialCycle(samples: seen, now: now,
+                                           cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
+                guard let projection = model.fit(partial) else { continue }
+                graded.append((f, abs(projection(cycle.resetsAt) - trueFinal)))
+            }
+            guard !graded.isEmpty else { return nil }
+            let mean = graded.reduce(0) { $0 + $1.err } / Double(graded.count)
+            // Convergence: earliest f from which every later cut stayed within
+            // tolerance. Walk from the latest cut backward while still in band.
+            var convergence = 1.0
+            for g in graded.sorted(by: { $0.f > $1.f }) {
+                if g.err <= tolerance { convergence = g.f } else { break }
+            }
+            return CycleScore(modelId: model.id, meanAbsError: mean, convergenceFraction: convergence)
+        }
+    }
+
     /// Friendly display name for a model id.
     public static func displayName(_ modelId: String) -> String {
         switch modelId {

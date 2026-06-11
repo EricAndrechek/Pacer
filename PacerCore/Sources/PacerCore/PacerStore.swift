@@ -113,6 +113,7 @@ public enum PacerStore {
         ProjectPathProbe.self,
         ProjectBudget.self,
         AlertRule.self,
+        ForecastModelOutcome.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {
