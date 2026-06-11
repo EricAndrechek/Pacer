@@ -13,6 +13,16 @@ struct PaceChartCard: View {
     /// — pre-bucketed by window in `bucketed` so neither column does
     /// its own filter pass.
     @Query private var samples: [RateLimitSample]
+    @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+
+    /// Forecast trajectory per window, recomputed on the scan tick (the
+    /// backtest is cheap but not per-render cheap). Keyed by window string.
+    @State private var projections: [String: WindowProjection] = [:]
+
+    struct WindowProjection: Equatable {
+        var points: [PaceChartView.Data.Point]
+        var crossesFullAt: Date?
+    }
 
     init() {
         let cutoff = Date().addingTimeInterval(-8 * 86400)
@@ -21,6 +31,36 @@ struct PaceChartCard: View {
             sort: \.sampledAt,
             order: .reverse
         )
+    }
+
+    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+        return FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
+        )
+    }()
+
+    /// Backtest-select a curve fit per window and sample its forward
+    /// trajectory. Cheap fits, but the backtest loops past cycles — so it runs
+    /// on the scan tick, not every render.
+    private func refreshProjections() {
+        let now = Date()
+        var next: [String: WindowProjection] = [:]
+        for (window, duration) in [(RateLimitWindowName.fiveHour, 5.0 * 3600),
+                                    (RateLimitWindowName.sevenDay, 7.0 * 86400)] {
+            let tuples = samples.compactMap { s -> (at: Date, usedPercentage: Double, resetsAt: Date)? in
+                guard s.window == window, let resets = s.resetsAt else { return nil }
+                return (s.sampledAt, s.usedPercentage, resets)
+            }
+            let (current, history) = BurnTrajectory.segment(samples: tuples, duration: duration, now: now)
+            guard let current,
+                  let traj = BurnTrajectory.bestTrajectory(current: current, history: history)
+            else { continue }
+            next[window] = WindowProjection(
+                points: traj.points.map { .init(time: $0.at, value: $0.usedPercentage) },
+                crossesFullAt: traj.crossesFullAt)
+        }
+        projections = next
     }
 
     private struct Bucketed {
@@ -53,18 +93,22 @@ struct PaceChartCard: View {
                     PaceChartColumn(
                         title: "5-hour",
                         duration: 5 * 3600,
-                        windowSamples: b.fiveHour
+                        windowSamples: b.fiveHour,
+                        projection: projections[RateLimitWindowName.fiveHour]
                     )
                     Divider()
                         .frame(height: 110)
                     PaceChartColumn(
                         title: "7-day",
                         duration: 7 * 86400,
-                        windowSamples: b.sevenDay
+                        windowSamples: b.sevenDay,
+                        projection: projections[RateLimitWindowName.sevenDay]
                     )
                 }
             }
         }
+        .onAppear { refreshProjections() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshProjections() }
     }
 
     @ViewBuilder
@@ -122,6 +166,9 @@ private struct PaceChartColumn: View {
     /// Already filtered to this column's window and pre-sorted reverse-
     /// chronological by the parent.
     let windowSamples: [RateLimitSample]
+    /// Forecast trajectory for this window (nil when unavailable). Drawn only
+    /// on the live dashboard chart — deliberately not on the shared image.
+    var projection: PaceChartCard.WindowProjection?
 
     /// Share affordance state. `hovering` reveals the share button only
     /// while the cursor is over the column (Linear/Things idiom, keeps
@@ -163,6 +210,23 @@ private struct PaceChartColumn: View {
             durationSeconds: duration,
             points: points,
             usedPct: latest.usedPercentage
+        )
+    }
+
+    /// `chartData` plus the forecast overlay — used only by the live dashboard
+    /// chart. `chartData` itself stays projection-free so the shared image
+    /// (which renders from it) is unchanged.
+    private var liveChartData: PaceChartView.Data? {
+        guard let base = chartData else { return nil }
+        guard let projection else { return base }
+        return PaceChartView.Data(
+            cycleStart: base.cycleStart,
+            resetsAt: base.resetsAt,
+            durationSeconds: base.durationSeconds,
+            points: base.points,
+            usedPct: base.usedPct,
+            projection: projection.points,
+            projectionCrossesFullAt: projection.crossesFullAt
         )
     }
 
@@ -239,8 +303,8 @@ private struct PaceChartColumn: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .frame(height: 96, alignment: .topLeading)
-        } else if let chartData {
-            PaceChartView(data: chartData, style: .detailed)
+        } else if let liveChartData {
+            PaceChartView(data: liveChartData, style: .detailed)
                 .frame(height: 96)
         } else {
             Text("collecting…")

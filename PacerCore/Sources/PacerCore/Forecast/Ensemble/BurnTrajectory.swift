@@ -153,6 +153,41 @@ public enum BurnTrajectory {
         return Trajectory(modelId: model.id, points: points, crossesFullAt: crossing)
     }
 
+    /// Segment a flat run of samples (each carrying its window's `resetsAt`)
+    /// into the current partial cycle and the prior complete cycles, by
+    /// grouping on the reset boundary. The group whose reset is latest is the
+    /// current cycle; the rest are history for the backtest. `duration` is the
+    /// window length (5h or 7d). Order-agnostic.
+    public static func segment(
+        samples: [(at: Date, usedPercentage: Double, resetsAt: Date)],
+        duration: TimeInterval,
+        now: Date
+    ) -> (current: PartialCycle?, history: [Cycle]) {
+        let sorted = samples.sorted { $0.at < $1.at }
+        var groups: [Date: [(at: Date, usedPercentage: Double, resetsAt: Date)]] = [:]
+        // Bucket by reset rounded to the minute so jitter doesn't split a cycle.
+        for s in sorted {
+            let key = Date(timeIntervalSince1970: (s.resetsAt.timeIntervalSince1970 / 60).rounded() * 60)
+            groups[key, default: []].append(s)
+        }
+        guard let currentReset = groups.keys.max() else { return (nil, []) }
+
+        var history: [Cycle] = []
+        var current: PartialCycle?
+        for (key, rows) in groups {
+            // Use the real reset from the readings, not the rounded group key.
+            let reset = rows.map { $0.resetsAt }.max() ?? key
+            let cycleStart = reset.addingTimeInterval(-duration)
+            let samples = rows.map { Sample(at: $0.at, usedPercentage: $0.usedPercentage) }
+            if key == currentReset {
+                current = PartialCycle(samples: samples, now: now, cycleStart: cycleStart, resetsAt: reset)
+            } else {
+                history.append(Cycle(samples: samples, cycleStart: cycleStart, resetsAt: reset))
+            }
+        }
+        return (current, history.sorted { $0.cycleStart < $1.cycleStart })
+    }
+
     static func median(_ xs: [Double]) -> Double {
         guard !xs.isEmpty else { return .infinity }
         let s = xs.sorted(); let n = s.count
