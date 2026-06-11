@@ -66,6 +66,24 @@ struct BurnTrajectoryTests {
         #expect(traj.crossesFullAt == nil)
     }
 
+    @Test func segmentSplitsCurrentCycleFromHistory() throws {
+        // Three back-to-back 5h cycles resetting at 5h, 10h, 15h.
+        var rows: [(at: Date, usedPercentage: Double, resetsAt: Date)] = []
+        for c in 0..<3 {
+            let reset = at(Double((c + 1) * 5))
+            var h = Double(c * 5)
+            while h < Double((c + 1) * 5) {
+                rows.append((at(h), 10 + (h - Double(c * 5)) * 15, reset))
+                h += 0.5
+            }
+        }
+        let (current, history) = BurnTrajectory.segment(samples: rows, duration: 5 * 3600, now: at(13))
+        #expect(history.count == 2)                           // first two cycles
+        let cur = try #require(current)
+        #expect(abs(cur.resetsAt.timeIntervalSince(at(15))) < 1) // latest reset is current
+        #expect(cur.samples.allSatisfy { $0.at <= at(13) })   // only up to now
+    }
+
     @Test func backtestSelectsTheModelThatTracksTheData() {
         // Linear cycles → a linear/recency fit should win (low error); the
         // selector should return a non-nil pick with enough cycles.

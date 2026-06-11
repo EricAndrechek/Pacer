@@ -29,6 +29,14 @@ public struct PaceChartView: View {
         public let durationSeconds: TimeInterval
         public let points: [Point]
         public let usedPct: Double
+        /// Optional forecast: the projected usage trajectory from "now" to the
+        /// reset, drawn as a faint dashed line so you can see where the curve
+        /// is heading vs. where it's been. `nil` (the default) draws nothing —
+        /// so widgets and the share card are unaffected unless they opt in.
+        public let projection: [Point]?
+        /// First instant the projection reaches 100% within the window, if
+        /// any — marked on the chart as the forecast limit-hit.
+        public let projectionCrossesFullAt: Date?
 
         public struct Point: Equatable, Identifiable {
             public let time: Date
@@ -46,13 +54,17 @@ public struct PaceChartView: View {
             resetsAt: Date,
             durationSeconds: TimeInterval,
             points: [Point],
-            usedPct: Double
+            usedPct: Double,
+            projection: [Point]? = nil,
+            projectionCrossesFullAt: Date? = nil
         ) {
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
             self.durationSeconds = durationSeconds
             self.points = points
             self.usedPct = usedPct
+            self.projection = projection
+            self.projectionCrossesFullAt = projectionCrossesFullAt
         }
     }
 
@@ -176,6 +188,31 @@ public struct PaceChartView: View {
                     .foregroundStyle(run.band.color)
                     .lineStyle(StrokeStyle(lineWidth: style.lineWidth, lineCap: .round))
                     .interpolationMethod(.monotone)
+                }
+            }
+
+            // Forecast trajectory: a faint dashed continuation from "now" to
+            // the reset. Drawn under the tail dot, distinct from the gray
+            // pace line, so it reads as "where this is heading" without
+            // pretending to be observed data. Red-tinted when it's projected
+            // to hit the cap before the window resets.
+            if let projection = data.projection, projection.count >= 2 {
+                let crosses = data.projectionCrossesFullAt != nil
+                ForEach(projection) { pt in
+                    LineMark(
+                        x: .value("time", pt.time),
+                        y: .value("pct", pt.value),
+                        series: .value("series", "projection")
+                    )
+                    .foregroundStyle((crosses ? Color.red : Color.primary).opacity(0.4))
+                    .lineStyle(StrokeStyle(lineWidth: style.lineWidth * 0.85, dash: [5, 4]))
+                    .interpolationMethod(.monotone)
+                }
+                if let crossAt = data.projectionCrossesFullAt {
+                    PointMark(x: .value("time", crossAt), y: .value("pct", 100.0))
+                        .foregroundStyle(Color.red.opacity(0.6))
+                        .symbolSize(style.tailSymbolSize * 0.7)
+                        .symbol(.circle)
                 }
             }
 
