@@ -18,8 +18,11 @@ import Testing
         await watcher.manualTrigger()
     }
 
-    // Race the trigger against a 1s safety timeout so a miss fails
-    // loudly rather than hanging the suite.
+    // Race the trigger against a safety timeout so a miss fails loudly
+    // rather than hanging the suite. 5s, not 1s: the trigger fires after
+    // ~50ms, but on a loaded/slow CI runner (where the whole suite's tests
+    // run in parallel) scheduling that task within 1s isn't guaranteed — a
+    // too-tight timeout turns a scheduling delay into a spurious failure.
     let received = await withTaskGroup(of: Date?.self) { group in
         group.addTask {
             for await date in stream {
@@ -28,7 +31,7 @@ import Testing
             return nil
         }
         group.addTask {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
             return nil
         }
         let first = await group.next() ?? nil
