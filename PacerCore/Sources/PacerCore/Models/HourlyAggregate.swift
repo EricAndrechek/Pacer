@@ -7,7 +7,7 @@ import SwiftData
 ///
 /// The hourly grain matters because two view cards on the dashboard
 /// — `TodayTimelineCard` (24-bar hour-of-day chart) and
-/// `LiveActivityCard` (last-hour burn rate) — were the last surfaces
+/// `NowStrip` (last-hour burn rate) — were the last surfaces
 /// that walked raw `TokenSample` rows on every scan tick. On a busy
 /// day with ~3000 samples, each tick was thousands of
 /// `effectiveCostUSD(mode:)` calls + dictionary inserts just to bucket
@@ -24,7 +24,7 @@ import SwiftData
 public final class HourlyAggregate {
     // Hot predicates: today-scoped `date == today` (TodayTimelineCard,
     // PerModelTodayCard if we later migrate it), and last-hours-scoped
-    // `date >= cutoff` (LiveActivityCard). The single-column `date`
+    // `date >= cutoff` (NowStrip). The single-column `date`
     // index covers both. The compound `(date, hour)` lets the
     // recomputer's per-bucket upsert path resolve a row in one shot.
     #Index<HourlyAggregate>([\.date], [\.date, \.hour], [\.date, \.hour, \.model])
@@ -43,7 +43,7 @@ public final class HourlyAggregate {
     /// Stored so the read path doesn't have to re-apply pricing.
     public var totalCostUSD: Double
     /// Distinct `TokenSample` rows in this bucket. Surfaces as the
-    /// "N samples in the last hour" hint on `LiveActivityCard`.
+    /// "N samples in the last hour" hint on `NowStrip`.
     public var sampleCount: Int
 
     public init(

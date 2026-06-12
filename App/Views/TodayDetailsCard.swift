@@ -3,16 +3,11 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// "Today details" — token-flow breakdown for the current day. Sits
-/// below the HeroStripCard which already shows today's cost; this card
-/// answers the next-level question: where did those tokens come from?
-/// Input vs output vs cache reads, how much cache writing happened,
-/// how many distinct models the user touched.
-///
-/// Renamed from the original `TodaySummaryCard` (which had the cost
-/// headline) — the redesign promotes today's cost into the hero strip,
-/// so the body of this card focuses on the breakdown the hero strip
-/// can't show.
+/// "Today details" — token-flow breakdown for the current day. The Now
+/// strip's Today tile carries the cost headline, so this card answers
+/// the next-level question: where did those tokens come from? Input vs
+/// output vs cache reads, how much cache writing happened, how many
+/// distinct models the user touched.
 struct TodayDetailsCard: View {
     @Query private var aggregates: [DailyAggregate]
 

@@ -68,7 +68,7 @@ public func pacerCurrencySymbol(for code: String) -> String {
 /// where the LazyVGrid hero column started to lose. Always-compact is
 /// the only shape that survives Lifetime + 5-digit costs in the same
 /// layout. Pair with `.help(pacerCostExact(v))` wherever the precise
-/// number matters — see `MetricTile` usages in HeroStripCard /
+/// number matters — see `MetricTile` usages in MonthOutlookCard /
 /// LifetimeSummary for the canonical pattern.
 public func pacerCost(_ usd: Double) -> String {
     let symbol = pacerCurrencySymbol(for: pacerDisplayCurrencyCode)
