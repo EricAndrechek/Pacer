@@ -775,9 +775,9 @@ private struct BurnRateAlertCard: View {
 
     var body: some View {
         PacerCard("Burn-rate warning", content: {
-            Toggle("Warn when my usage pace will hit a cap before it resets", isOn: $enabled)
+            Toggle("Warn when my usage pace will hit a limit before it resets", isOn: $enabled)
         }, footer: {
-            Text("Pacer projects each window forward along your own daily rhythm and warns you ahead of time if you're on track to hit a cap before it resets — with a follow-up only if the situation gets meaningfully worse. Fires only once you're past 50% used.")
+            Text("Pacer projects each window forward along your own daily rhythm and warns you ahead of time if you're on track to hit a limit before it resets — with a follow-up only if the situation gets meaningfully worse. Fires only once you're past 50% used.")
         })
     }
 }

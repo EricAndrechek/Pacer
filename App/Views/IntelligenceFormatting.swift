@@ -108,14 +108,14 @@ enum IntelligenceFormatting {
 
     // MARK: - Rate-limit copy
 
-    /// "topped 90% in 3 of 73 cycles · capped 1×" — natural-frequency risk,
-    /// never a fitted probability; never "0%" from a short record.
+    /// "topped 90% in 3 of 73 cycles · hit the limit 1×" — natural-frequency
+    /// risk, never a fitted probability; never "0%" from a short record.
     static func frequencyLine(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
         guard o.cyclesObserved >= 5 else { return nil }
         let top = o.cyclesPeakOver90 == 0
             ? "never topped 90% in \(o.cyclesObserved) cycles"
             : "topped 90% in \(o.cyclesPeakOver90) of \(o.cyclesObserved) cycles"
-        let cap = o.cyclesHit100 == 0 ? "never capped" : "capped \(o.cyclesHit100)×"
+        let cap = o.cyclesHit100 == 0 ? "never hit the limit" : "hit the limit \(o.cyclesHit100)×"
         return "\(top) · \(cap)"
     }
 
@@ -123,9 +123,11 @@ enum IntelligenceFormatting {
     /// earliest–latest range whenever the engine has one: the point crossing
     /// alone over-promises (model selection optimizes end-of-cycle error, and
     /// the candidates' crossing *times* legitimately spread hours apart).
-    /// Same-day ranges read as clock times ("→ cap 4 PM–9 PM"), multi-day
-    /// ones as day labels ("→ cap tomorrow–Sat"). When the lower band never
-    /// crosses — the reset may genuinely win — the verb softens to "may cap".
+    /// Same-day ranges read as clock times ("→ limit 4 PM–9 PM"), multi-day
+    /// ones as day labels ("→ limit tomorrow–Sat"). When the lower band never
+    /// crosses — the reset may genuinely win — the phrasing softens to "may
+    /// hit limit". ("Limit", not "cap": Eric flagged "cap" as a poor word,
+    /// and "limit" matches the hero chip + Anthropic's own term.)
     static func crossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
         crossingPhrase(at: o.projectedFullAt, earliest: o.projectedFullAtEarliest,
                        latest: o.projectedFullAtLatest, usedPct: o.usedPct)
@@ -143,14 +145,14 @@ enum IntelligenceFormatting {
                     ? .dateTime.hour().minute() : .dateTime.hour()
                 let lo = earliest.formatted(fmt)
                 let hi = latest.formatted(fmt)
-                return lo == hi ? "→ cap around \(lo)" : "→ cap \(lo)–\(hi)"
+                return lo == hi ? "→ limit around \(lo)" : "→ limit \(lo)–\(hi)"
             }
             let lo = dayLabel(earliest), hi = dayLabel(latest)
             if lo == hi {
                 let dp0 = dayPart(earliest), dp1 = dayPart(latest)
-                return dp0 == dp1 ? "→ cap \(lo) \(dp0)" : "→ cap \(lo) \(dp0)–\(dp1)"
+                return dp0 == dp1 ? "→ limit \(lo) \(dp0)" : "→ limit \(lo) \(dp0)–\(dp1)"
             }
-            return "→ cap \(lo)–\(hi)"
+            return "→ limit \(lo)–\(hi)"
         }
         let pointFmt: Date.FormatStyle = hit.timeIntervalSinceNow < 3 * 3600
             ? .dateTime.hour().minute() : .dateTime.hour()
@@ -163,9 +165,9 @@ enum IntelligenceFormatting {
         // "may". (No bands at all keeps the plain assertion: there's no
         // evidence either way, and the point is the model's best answer.)
         if earliest != nil, latest == nil, usedPct < 90 {
-            return "→ may cap \(point)"
+            return "→ may hit limit \(point)"
         }
-        return "→ cap \(point)"
+        return "→ limit \(point)"
     }
 
     /// "in 45 min" / "in 3–8 hr" / "in 2–4 days" — the relative form of the
@@ -215,18 +217,12 @@ enum IntelligenceFormatting {
         return d.formatted(.dateTime.weekday(.abbreviated))
     }
 
-    /// Burn rate framed against the **sustainable pace** — the rate you could
-    /// hold and exactly NOT hit the cap before the window resets (100% ÷
-    /// window length). Raw "%/hr" means nothing without that referent:
-    /// +13%/hr is leisurely for a 5-hour window (sustainable 20%/hr) and a
-    /// blowout for a 7-day one (sustainable ~0.6%/hr). Number + referent:
-    /// "0.3× sustainable pace".
-    static func capPaceLabel(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String? {
-        let ratio = capPaceRatio(slopePercentPerHour: slope, windowSeconds: windowSeconds)
-        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
-        return "\(multiple(ratio)) sustainable pace"
-    }
-
+    /// Current burn relative to the rate that exactly reaches 100% at reset
+    /// (100% ÷ window length). >1 means the limit comes before the reset if
+    /// the rate holds. Kept as the *color* driver for the burn chip; the
+    /// "0.5× sustainable pace" text form it used to feed read as jargon
+    /// (Eric, 2026-06-12) and is gone — chips now say what happens instead
+    /// ("≈52% at reset" / "limit in 7 hr").
     static func capPaceRatio(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> Double {
         let capPace = 100.0 / (windowSeconds / 3600)
         return capPace > 0 ? slope / capPace : 0
@@ -237,11 +233,10 @@ enum IntelligenceFormatting {
         ratio >= 10 ? String(format: "%.0f×", ratio) : String(format: "%.1f×", ratio)
     }
 
-    /// Tooltip companion for `capPaceLabel` — the raw numbers, for anyone who
-    /// wants them.
+    /// Burn-chip tooltip: the raw rate plus what it means in plain words.
     static func capPaceHelp(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String {
         let capPace = 100.0 / (windowSeconds / 3600)
-        return String(format: "burning %+.1f%%/hr — the sustainable pace for this window is %.1f%%/hr (any faster hits the cap before reset)", slope, capPace)
+        return String(format: "Burning %+.1f%%/hr. A steady %.1f%%/hr would land exactly at 100%% when this window resets — anything faster hits the limit early.", slope, capPace)
     }
 
     static func dayPart(_ d: Date) -> String {
