@@ -44,7 +44,7 @@ public struct PickupForecaster: Forecaster {
         var regimeRems: [Double] = []
         var pooledRems: [Double] = []
         for p in input.priorPeriods {
-            guard let costs = HourOfDayShapeForecaster.hourlyCosts(points: p.points, start: p.start, calendar: input.calendar) else { continue }
+            guard let costs = p.cachedHourlyCosts ?? HourOfDayShapeForecaster.hourlyCosts(points: p.points, start: p.start, calendar: input.calendar) else { continue }
             let total = costs.reduce(0, +)
             let throughCut = costs[0...hour].reduce(0, +)
             let remainder = max(0, total - throughCut)

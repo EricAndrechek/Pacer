@@ -78,7 +78,7 @@ public struct HourOfDayShapeForecaster: Forecaster {
 
     public func projectTotal(_ input: ForecastInput) -> Double? {
         let days = input.priorPeriods.compactMap {
-            Self.hourlyCosts(points: $0.points, start: $0.start, calendar: input.calendar)
+            $0.cachedHourlyCosts ?? Self.hourlyCosts(points: $0.points, start: $0.start, calendar: input.calendar)
         }
         guard let shape = ActivityProfile.hourOfDayShape(days: days) else { return nil }
         let hour = input.calendar.component(.hour, from: input.now)
