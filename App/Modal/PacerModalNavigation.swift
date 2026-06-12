@@ -50,12 +50,16 @@ public enum PacerModalDestination: Hashable, Identifiable {
     case project(path: String, displayName: String, since: Date?)
     /// One session's full transcript metadata.
     case session(sessionId: String, projectDisplayName: String)
+    /// The compare-models projection detail for one rate-limit window
+    /// ("five_hour" / "seven_day").
+    case projection(window: String)
 
     public var id: String {
         switch self {
         case .day(let d):                return "day:\(d)"
         case .project(let path, _, _):   return "project:\(path)"
         case .session(let sid, _):       return "session:\(sid)"
+        case .projection(let w):         return "projection:\(w)"
         }
     }
 }
@@ -143,6 +147,8 @@ struct PacerModalRouter: View {
                 sessionId: sessionId,
                 projectDisplayName: projectDisplayName
             )
+        case .projection(let window):
+            ProjectionCompareModal(windowKey: window)
         }
     }
 }

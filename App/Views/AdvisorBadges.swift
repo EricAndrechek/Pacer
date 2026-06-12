@@ -3,14 +3,16 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// Lightweight "things to notice today" card. Renders 1–2 hints from
-/// `UsageHints.compute` — heavy premium-model share, low cache hit rate — when
-/// the underlying conditions are clearly true. Hidden entirely when no
-/// hints fire, so the dashboard stays calm in the common case.
-struct AdvisorCard: View {
+/// Lightweight "things to notice today" badge strip, rendered in the
+/// Dashboard page header's trailing slot (zero vertical cost — it used to
+/// own a whole card row). Shows 1–2 hints from `UsageHints.compute` —
+/// heavy premium-model share, low cache hit rate — plus engine notices,
+/// when the underlying conditions are clearly true. Hidden entirely when
+/// no hints fire, so the header stays calm in the common case.
+struct AdvisorBadges: View {
     @Query private var todayAggregates: [DailyAggregate]
     @Query private var weekAggregates: [DailyAggregate]
-    @Query(AdvisorCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @Query(AdvisorBadges.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Hints cached behind the scan-meta tick. Without this, the
     /// in-body `UsageHints.compute` call was re-iterating today + week
@@ -77,21 +79,18 @@ struct AdvisorCard: View {
         // EmptyView'd entirely when no hints — kept inside a single
         // container so .onAppear/.onChange land in the view tree at
         // a stable identity. Without the wrapping Group, the
-        // .onAppear-attached PacerCard appears and disappears as
+        // .onAppear-attached strip appears and disappears as
         // hints flip in/out, which (a) tears down + rebuilds the
         // SwiftData @Query subscriptions and (b) loses the
         // .onChange observer mid-tick.
         Group {
             if !cachedHints.isEmpty || !engineHints.isEmpty {
-                // No title — card is a slim badge strip, not a section header.
-                PacerCard {
-                    HStack(spacing: 8) {
-                        ForEach(engineHints) { hint in
-                            engineBadge(hint)
-                        }
-                        ForEach(cachedHints.indices, id: \.self) { idx in
-                            hintBadge(cachedHints[idx])
-                        }
+                HStack(spacing: 8) {
+                    ForEach(engineHints) { hint in
+                        engineBadge(hint)
+                    }
+                    ForEach(cachedHints.indices, id: \.self) { idx in
+                        hintBadge(cachedHints[idx])
                     }
                 }
             }

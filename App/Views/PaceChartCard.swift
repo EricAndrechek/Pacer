@@ -9,23 +9,26 @@ import PacerUI
 /// view. This card just sources the data from SwiftData and arranges
 /// the two columns.
 struct PaceChartCard: View {
+    /// Open the compare-models modal for a window key ("five_hour" /
+    /// "seven_day"). Wired by the dashboard to its modal-navigation root,
+    /// so the detail presents through the house dismissible modal like
+    /// every other drill-down.
+    let onCompare: ((String) -> Void)?
+
     /// 8-day window of rate-limit samples. Body never reads the array
     /// — pre-bucketed by window in `bucketed` so neither column does
     /// its own filter pass.
     @Query private var samples: [RateLimitSample]
 
     /// The shared intelligence engine — single source of the forecast
-    /// trajectories (the dashed overlay AND the compare-models sheet), with
-    /// each model's accuracy coming from the engine's persisted per-user
-    /// track record.
+    /// trajectories (the dashed overlay; the compare-models modal asks the
+    /// engine itself), with each model's accuracy coming from the engine's
+    /// persisted per-user track record.
     @Environment(\.usageEngine) private var engine
 
     /// Forecast trajectory per window, refreshed when the engine refits.
     /// Keyed by window string.
     @State private var projections: [String: WindowProjection] = [:]
-    /// Every candidate model's trajectory per window (selected one flagged),
-    /// for the compare-models sheet. Same engine call as `projections`.
-    @State private var allTrajectories: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
     /// Per-window outlook (projected end-of-window + band, crossing range,
     /// cycle frequency facts) for the caption line under each chart.
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
@@ -36,7 +39,8 @@ struct PaceChartCard: View {
         var crossesFullAt: Date?
     }
 
-    init() {
+    init(onCompare: ((String) -> Void)? = nil) {
+        self.onCompare = onCompare
         let cutoff = Date().addingTimeInterval(-8 * 86400)
         _samples = Query(
             filter: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
@@ -46,12 +50,11 @@ struct PaceChartCard: View {
     }
 
     /// Re-ask the engine for both windows' answers. One pass powers the
-    /// overlay (selected model), the detail sheet (all models), and the
-    /// outlook caption (projected end + band, crossing, frequency facts).
+    /// overlay (selected model) and the outlook caption (projected end +
+    /// band, crossing, frequency facts).
     private func refreshProjections() async {
         guard let engine else { return }
         var nextSelected: [String: WindowProjection] = [:]
-        var nextAll: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         var nextEnds: [String: Estimate] = [:]
         for window in RateLimitWindowKind.allCases {
@@ -59,7 +62,6 @@ struct PaceChartCard: View {
             nextEnds[window.rawValue] = await engine.ask(.rateLimitOutlook(window))
             let list = await engine.rateLimitTrajectories(window: window)
             guard !list.isEmpty else { continue }
-            nextAll[window.rawValue] = list
             if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
                 nextSelected[window.rawValue] = WindowProjection(
                     points: chosen.trajectory.points.map { .init(time: $0.at, value: $0.usedPercentage) },
@@ -67,7 +69,6 @@ struct PaceChartCard: View {
             }
         }
         projections = nextSelected
-        allTrajectories = nextAll
         outlooks = nextOutlooks
         endEstimates = nextEnds
     }
@@ -101,23 +102,25 @@ struct PaceChartCard: View {
                 HStack(alignment: .top, spacing: 24) {
                     PaceChartColumn(
                         title: "5-hour",
+                        windowKey: RateLimitWindowName.fiveHour,
                         duration: 5 * 3600,
                         windowSamples: b.fiveHour,
                         projection: projections[RateLimitWindowName.fiveHour],
-                        trajectories: allTrajectories[RateLimitWindowName.fiveHour] ?? [],
                         outlook: outlooks[RateLimitWindowName.fiveHour],
-                        endEstimate: endEstimates[RateLimitWindowName.fiveHour]
+                        endEstimate: endEstimates[RateLimitWindowName.fiveHour],
+                        onCompare: onCompare
                     )
                     Divider()
                         .frame(height: 110)
                     PaceChartColumn(
                         title: "7-day",
+                        windowKey: RateLimitWindowName.sevenDay,
                         duration: 7 * 86400,
                         windowSamples: b.sevenDay,
                         projection: projections[RateLimitWindowName.sevenDay],
-                        trajectories: allTrajectories[RateLimitWindowName.sevenDay] ?? [],
                         outlook: outlooks[RateLimitWindowName.sevenDay],
-                        endEstimate: endEstimates[RateLimitWindowName.sevenDay]
+                        endEstimate: endEstimates[RateLimitWindowName.sevenDay],
+                        onCompare: onCompare
                     )
                 }
             }
@@ -162,7 +165,7 @@ struct PaceChartCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Waiting for the first rate-limit reading")
                     .font(.body.weight(.medium))
-                Text("Pacer checks Anthropic every 5 minutes. If you're signed into Claude Code, the 5-hour and 7-day pace will appear here shortly.")
+                Text("Pacer checks Anthropic every 5 minutes. If you're signed into Claude Code, the 5-hour and 7-day pace will appear within about 5 minutes.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -179,6 +182,9 @@ struct PaceChartCard: View {
 /// chart pixel-for-pixel.
 private struct PaceChartColumn: View {
     let title: String
+    /// "five_hour" / "seven_day" — the key the compare-models modal route
+    /// is opened with.
+    let windowKey: String
     let duration: TimeInterval
     /// Already filtered to this column's window and pre-sorted reverse-
     /// chronological by the parent.
@@ -186,20 +192,19 @@ private struct PaceChartColumn: View {
     /// Forecast trajectory for this window (nil when unavailable). Drawn only
     /// on the live dashboard chart — deliberately not on the shared image.
     var projection: PaceChartCard.WindowProjection?
-    /// Every candidate model's trajectory + realized accuracy (engine-sourced),
-    /// for the compare-models detail sheet.
-    var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     /// Engine burn outlook (crossing range + cycle frequency facts) and the
     /// projected end-of-window estimate, for the outlook caption.
     var outlook: UsageIntelligenceEngine.BurnOutlook?
     var endEstimate: Estimate?
+    /// Opens the compare-models modal (threaded from the dashboard's
+    /// modal-navigation root).
+    var onCompare: ((String) -> Void)?
 
     /// Share affordance state. `hovering` reveals the share button only
     /// while the cursor is over the column (Linear/Things idiom, keeps
     /// the card clean); `sharing` drives the preview popover.
     @State private var hovering = false
     @State private var sharing = false
-    @State private var showingDetail = false
 
     private var latest: RateLimitSample? { windowSamples.first }
 
@@ -264,7 +269,6 @@ private struct PaceChartColumn: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onHover { hovering = $0 }
-        .sheet(isPresented: $showingDetail) { detailSheet }
     }
 
     /// The window's forecast, integrated where the chart already is: one line
@@ -282,7 +286,7 @@ private struct PaceChartColumn: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.red)
                         .lineLimit(1)
-                        .help("Projected to reach the cap before this window resets, at your typical rhythm")
+                        .help("Projected to reach the cap before this window resets, at your typical rhythm. A time range spans the engine's calibrated uncertainty about when; \"may cap\" means the reset could plausibly come first.")
                 } else if let e = endEstimate, !e.isInsufficient {
                     let band = e.interval80.map {
                         " · \(Int($0.lowerBound.rounded()))–\(Int($0.upperBound.rounded()))% range"
@@ -303,14 +307,14 @@ private struct PaceChartColumn: View {
         }
     }
 
-    /// "Compare models" — opens the all-models projection detail. Lives in
+    /// "Compare models" — opens the all-models projection modal. Lives in
     /// the column header next to the share button, hover-revealed (the
     /// Linear/Things idiom): the affordance is there when you reach for it,
     /// invisible when you're just reading the chart.
     @ViewBuilder
     private var compareButton: some View {
-        if cycle?.isAwaiting == false, chartData != nil, !trajectories.isEmpty {
-            Button { showingDetail = true } label: {
+        if let onCompare, cycle?.isAwaiting == false, chartData != nil, projection != nil {
+            Button { onCompare(windowKey) } label: {
                 Image(systemName: "chart.xyaxis.line")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
@@ -318,24 +322,7 @@ private struct PaceChartColumn: View {
             }
             .buttonStyle(.plain)
             .help("Compare every forecast model's projection and its accuracy on your cycles")
-            .opacity(hovering || sharing || showingDetail ? 1 : 0)
-        }
-    }
-
-    /// The compare-models detail sheet — every candidate's trajectory with its
-    /// realized accuracy, straight from the engine's persisted track record.
-    @ViewBuilder
-    private var detailSheet: some View {
-        if !trajectories.isEmpty, let data = chartData {
-            ProjectionDetailView(
-                title: "\(title) projection",
-                cycleStart: data.cycleStart,
-                resetsAt: data.resetsAt,
-                durationSeconds: duration,
-                actual: data.points,
-                trajectories: trajectories)
-        } else {
-            Text("Not enough data to compare models yet.").padding(40)
+            .opacity(hovering || sharing ? 1 : 0)
         }
     }
 

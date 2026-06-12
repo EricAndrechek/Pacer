@@ -119,20 +119,100 @@ enum IntelligenceFormatting {
         return "\(top) · \(cap)"
     }
 
-    /// The crossing as window-scaled copy: same-day → clock time, later →
-    /// weekday + day-part; with the earliest–latest range when it's tight
-    /// enough to be meaningful.
+    /// The crossing as window-scaled copy, leading with the conformal
+    /// earliest–latest range whenever the engine has one: the point crossing
+    /// alone over-promises (model selection optimizes end-of-cycle error, and
+    /// the candidates' crossing *times* legitimately spread hours apart).
+    /// Same-day ranges read as clock times ("→ cap 4 PM–9 PM"), multi-day
+    /// ones as day labels ("→ cap tomorrow–Sat"). When the lower band never
+    /// crosses — the reset may genuinely win — the verb softens to "may cap".
     static func crossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
-        guard let hit = o.projectedFullAt else { return nil }
+        crossingPhrase(at: o.projectedFullAt, earliest: o.projectedFullAtEarliest,
+                       latest: o.projectedFullAtLatest, usedPct: o.usedPct)
+    }
+
+    static func crossingPhrase(at hit: Date?, earliest: Date?, latest: Date?, usedPct: Double) -> String? {
+        guard let hit else { return nil }
+        if let earliest, let latest, latest > earliest {
+            let bothToday = earliest.timeIntervalSinceNow < 22 * 3600
+                && latest.timeIntervalSinceNow < 22 * 3600
+            if bothToday {
+                // Keep minutes when the whole range lands within ~3 hours —
+                // "around 10 AM" for a 25-minute-away crossing reads stale.
+                let fmt: Date.FormatStyle = latest.timeIntervalSinceNow < 3 * 3600
+                    ? .dateTime.hour().minute() : .dateTime.hour()
+                let lo = earliest.formatted(fmt)
+                let hi = latest.formatted(fmt)
+                return lo == hi ? "→ cap around \(lo)" : "→ cap \(lo)–\(hi)"
+            }
+            let lo = dayLabel(earliest), hi = dayLabel(latest)
+            if lo == hi {
+                let dp0 = dayPart(earliest), dp1 = dayPart(latest)
+                return dp0 == dp1 ? "→ cap \(lo) \(dp0)" : "→ cap \(lo) \(dp0)–\(dp1)"
+            }
+            return "→ cap \(lo)–\(hi)"
+        }
+        let pointFmt: Date.FormatStyle = hit.timeIntervalSinceNow < 3 * 3600
+            ? .dateTime.hour().minute() : .dateTime.hour()
         let point = hit.timeIntervalSinceNow < 22 * 3600
-            ? "around \(hit.formatted(.dateTime.hour()))"
+            ? "around \(hit.formatted(pointFmt))"
             : "\(hit.formatted(.dateTime.weekday(.abbreviated))) \(dayPart(hit))"
-        if let early = o.projectedFullAtEarliest, let late = o.projectedFullAtLatest,
-           late.timeIntervalSince(early) < 12 * 3600,
-           early.timeIntervalSinceNow < 22 * 3600, late.timeIntervalSinceNow < 22 * 3600 {
-            return "→ cap \(early.formatted(.dateTime.hour()))–\(late.formatted(.dateTime.hour()))"
+        // A calibrated earliest with no latest-plausible crossing means the
+        // lower band says the reset might come first — assert the cap only
+        // when usage is already so high it's near-inevitable; otherwise say
+        // "may". (No bands at all keeps the plain assertion: there's no
+        // evidence either way, and the point is the model's best answer.)
+        if earliest != nil, latest == nil, usedPct < 90 {
+            return "→ may cap \(point)"
         }
         return "→ cap \(point)"
+    }
+
+    /// "in 45 min" / "in 3–8 hr" / "in 2–4 days" — the relative form of the
+    /// crossing for the hero-tile chip, the menu bar, and notification
+    /// titles. Same honesty rule as `crossingPhrase`: lead with the
+    /// calibrated range, collapsing to a point only when both ends round to
+    /// the same words.
+    static func relativeCrossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
+        relativeCrossingPhrase(at: o.projectedFullAt, earliest: o.projectedFullAtEarliest,
+                               latest: o.projectedFullAtLatest)
+    }
+
+    static func relativeCrossingPhrase(at hit: Date?, earliest: Date?, latest: Date?) -> String? {
+        guard let hit else { return nil }
+        if let earliest, let latest, latest > earliest {
+            let a = coarseEta(earliest), b = coarseEta(latest)
+            if a.text == b.text { return "in \(a.text)" }
+            if a.unit == b.unit { return "in \(a.amount)–\(b.amount) \(b.unit)" }
+            return "in \(a.text)–\(b.text)"
+        }
+        return "in \(coarseEta(hit).text)"
+    }
+
+    /// Coarse duration words — minutes under 90 (rounded to 5), hours under
+    /// 48, days beyond. Crossing forecasts carry hours of uncertainty;
+    /// finer-grained units would be false precision.
+    private static func coarseEta(_ d: Date) -> (amount: String, unit: String, text: String) {
+        let s = max(0, d.timeIntervalSinceNow)
+        if s < 90 * 60 {
+            let m = max(5, Int((s / 300).rounded()) * 5)
+            return ("\(m)", "min", "\(m) min")
+        }
+        if s < 48 * 3600 {
+            let h = max(2, Int((s / 3600).rounded()))
+            return ("\(h)", "hr", "\(h) hr")
+        }
+        let days = max(2, Int((s / 86400).rounded()))
+        return ("\(days)", "days", "\(days) days")
+    }
+
+    /// "today" / "tomorrow" / "Sat" — day-scale label for multi-day
+    /// crossing ranges.
+    static func dayLabel(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return "today" }
+        if cal.isDateInTomorrow(d) { return "tomorrow" }
+        return d.formatted(.dateTime.weekday(.abbreviated))
     }
 
     /// Burn rate framed against the **sustainable pace** — the rate you could

@@ -545,8 +545,8 @@ struct MenuStatusContent: View {
                     // The trailing caption escalates to the projected cap hit
                     // when the engine sees one coming — same answer the
                     // dashboard tiles and the notification share.
-                    if let hit = outlook?.projectedFullAt {
-                        Text("cap \(pacerRelative(hit, style: .short))")
+                    if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                        Text("cap \(eta)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                             .lineLimit(1)
