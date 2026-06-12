@@ -24,15 +24,23 @@ struct DashboardView: View {
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage.",
-            // Notice badges live in the header's trailing slot — they cost
-            // zero vertical pixels there, instead of owning a card row.
-            trailing: { AdvisorBadges() }
+            // Notice badges + the data-source freshness chip live in the
+            // header's trailing slot — zero vertical pixels, and both
+            // describe the page as a whole rather than any one card.
+            trailing: {
+                HStack(spacing: 10) {
+                    AdvisorBadges()
+                    RateLimitSourceChip()
+                }
+            }
         ) {
             WelcomeCard()
-            HeroStripCard(onTodayTap: openToday)
-            PaceChartCard(onCompare: { window in
-                modalRoot = .projection(window: window)
-            })
+            PaceOverviewStrip(
+                onTodayTap: openToday,
+                onCompare: { window in
+                    modalRoot = .projection(window: window)
+                }
+            )
             LiveActivityCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
