@@ -242,6 +242,7 @@ private struct PaceChartColumn: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             heroLine
+            chipRow
             chartSlot
             outlookLines
         }
@@ -249,39 +250,99 @@ private struct PaceChartColumn: View {
         .onHover { hovering = $0 }
     }
 
-    /// The window's forecast, integrated where the chart already is: one line
-    /// for "where this window is heading" (projected end-of-window with its
-    /// calibrated range — or, when a pre-reset cap hit is projected, the
-    /// crossing window in red), and one muted line of the user's own history
-    /// with this window ("topped 90% in 3 of 73 cycles · capped 1×").
+    /// Status + burn chips under the hero numbers — the at-a-glance verdict
+    /// row: behind/on pace/ahead/danger, and the burn outcome ("≈52% at
+    /// reset" / "limit in 7 hr"). Crossing details, the calibrated range,
+    /// and the raw %/hr live in the burn chip's tooltip.
+    @ViewBuilder
+    private var chipRow: some View {
+        if let latest, let cycle, !cycle.isAwaiting {
+            let band = PaceBand(
+                usedPct: latest.usedPercentage,
+                paceEndPct: cycle.paceFraction * 100)
+            HStack(spacing: 6) {
+                paceChip(band: band)
+                burnChipView
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paceChip(band: PaceBand) -> some View {
+        Group {
+            switch band {
+            case .green:
+                Chip(text: "behind", systemImage: "checkmark", tint: .green, size: .compact)
+            case .white:
+                Chip(text: "on pace", tint: .secondary, size: .compact)
+            case .yellow:
+                Chip(text: "ahead", systemImage: "exclamationmark", tint: .yellow, size: .compact)
+            case .red:
+                Chip(text: "danger", systemImage: "exclamationmark.triangle.fill", tint: .red, size: .compact)
+            }
+        }
+        .fixedSize()
+    }
+
+    @ViewBuilder
+    private var burnChipView: some View {
+        if let outlook,
+           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate, duration: duration) {
+            Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
+                .fixedSize()
+                .help(chip.help)
+        }
+    }
+
+    /// Chip text + tint + tooltip for the burn outlook. nil when effectively
+    /// idle (chip hidden). Outcome language, not rate ratios: "limit in
+    /// 7 hr" (red) when a pre-reset hit is projected, "≈52% at reset"
+    /// (colored by burn health) otherwise, raw "+2.1%/hr" as the
+    /// young-history fallback.
+    private static func burnChip(
+        outlook: UsageIntelligenceEngine.BurnOutlook,
+        endEstimate: Estimate?,
+        duration: TimeInterval
+    ) -> (text: String, tint: Color, help: String)? {
+        let ratio = IntelligenceFormatting.capPaceRatio(
+            slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
+        var help = IntelligenceFormatting.capPaceHelp(
+            slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        if outlook.willHitLimitBeforeReset,
+           let eta = IntelligenceFormatting.relativeCrossingPhrase(outlook) {
+            // The absolute crossing time complements the chip's relative
+            // form, demoted to hover so the same fact isn't printed twice.
+            if let phrase = IntelligenceFormatting.crossingPhrase(outlook) {
+                let when = phrase
+                    .replacingOccurrences(of: "→ may hit limit ", with: "")
+                    .replacingOccurrences(of: "→ limit ", with: "")
+                help += " Crossing projected \(when), at your typical rhythm."
+            }
+            return ("limit \(eta)", .red, help)
+        }
+        let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
+        if let e = endEstimate, !e.isInsufficient {
+            if let band = e.interval80 {
+                help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
+                               band.lowerBound, band.upperBound)
+            }
+            return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
+        }
+        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help)
+    }
+
+    /// One muted line of the user's own history with this window
+    /// ("topped 90% in 3 of 73 cycles · hit the limit 1×"). The forecast
+    /// itself lives in the chip row above the chart now.
     @ViewBuilder
     private var outlookLines: some View {
-        if cycle?.isAwaiting == false {
-            VStack(alignment: .leading, spacing: 2) {
-                if let o = outlook, o.willHitLimitBeforeReset,
-                   let crossing = IntelligenceFormatting.crossingPhrase(o) {
-                    Text(crossing)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.red)
-                        .lineLimit(1)
-                        .help("Projected to reach 100% before this window resets, at your typical rhythm. A time range spans the engine's calibrated uncertainty about when; \"may\" means the reset could plausibly come first.")
-                } else if let e = endEstimate, !e.isInsufficient {
-                    let band = e.interval80.map {
-                        " · \(Int($0.lowerBound.rounded()))–\(Int($0.upperBound.rounded()))% range"
-                    } ?? ""
-                    Text("on pace to end ~\(Int(e.value.rounded()))%\(band)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help("Projected utilization when this window resets, with its calibrated 80% range")
-                }
-                if let o = outlook, let freq = IntelligenceFormatting.frequencyLine(o) {
-                    Text(freq)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
+        if cycle?.isAwaiting == false, let o = outlook,
+           let freq = IntelligenceFormatting.frequencyLine(o) {
+            Text(freq)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
     }
 

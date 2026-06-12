@@ -3,12 +3,13 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// Primary view a user sees when opening Pacer:
+/// Primary view a user sees when opening Pacer, ordered by immediacy:
 ///
 ///   1. Welcome banner (auto-hidden once any data lands).
-///   2. Spend strip — Today + This month (with the month-end projection).
-///   3. PaceChart card (full width, the two big 5h/7d charts).
-///   4. Live activity, today's breakdowns, weekly comparison, 30-day cost.
+///   2. Now strip — Live (last-hour burn) + Today (spend, outlook, budget).
+///   3. PaceChart card (full width, the two big 5h/7d charts with their
+///      status + burn chips).
+///   4. Today's breakdowns, weekly comparison, 30-day cost, month outlook.
 ///
 /// Each card is its own `View` and owns its own `@Query` so SwiftData
 /// updates stay incremental: a new TokenSample only invalidates the
@@ -31,11 +32,10 @@ struct DashboardView: View {
             }
         ) {
             WelcomeCard()
-            SpendOverviewStrip(onTodayTap: openToday)
+            NowStrip(onTodayTap: openToday)
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
             })
-            LiveActivityCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
@@ -43,6 +43,7 @@ struct DashboardView: View {
             DailyCostChartCard(onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
+            MonthOutlookCard()
         }
         .pacerModalNavigation(root: $modalRoot)
     }
