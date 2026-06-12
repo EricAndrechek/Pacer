@@ -3,20 +3,26 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// The dashboard's top strip, ordered by immediacy — what's burning right
-/// now, then what today has cost:
+/// The dashboard's top strip — two categorically different facts, not two
+/// sizes of the same bucket:
 ///
-///   1. **Live** — last-hour cost & tokens, with the live/last-sample
-///      freshness signal (absorbs the old LiveActivityCard's live half).
-///   2. **Today** — spend so far, outlook chip, tokens, budget bar, and
-///      the spent→projected end-of-day bar once the projection is
-///      decision-useful (absorbs the card's projection half).
+///   1. **Now** — what's *happening*: the burn rate ($/hr over the last
+///      hour) and the running session (project · duration · session cost).
+///      Rates and running sessions are genuinely "now" facts; a shorter
+///      dollar bucket labelled "live" was arbitrary (Eric: "isn't today
+///      live too?"). Clicking opens the running session's detail.
+///   2. **Today** — what it has *added up to*: spend so far, outlook chip,
+///      budget bar, and the spent→projected end-of-day bar once the
+///      projection is decision-useful.
 ///
-/// The month outlook lives further down with the other trend cards
-/// (`MonthOutlookCard`) — it's a planning number, not a "right now" one.
+/// The time-bucket ladder continues down the page (today's breakdowns →
+/// week → 30 days → month outlook with the trend cards).
 struct NowStrip: View {
     /// Open today's day-detail modal (Today tile click).
     let onTodayTap: (() -> Void)?
+    /// Open a session's detail modal (Now tile click while a session is
+    /// running). Arguments: sessionId, project display name.
+    let onSessionTap: ((String, String) -> Void)?
 
     @AppStorage(PacerSettings.Key.notifyOnDailyCost, store: PacerSettings.store)
     private var dailyBudgetEnabled: Bool = false
@@ -37,13 +43,16 @@ struct NowStrip: View {
     /// Most-recent sample (any age) so the quiet state can say "last
     /// activity 3h ago" instead of a flat "no samples".
     @Query(NowStrip.latestSampleProbe) private var latestSamples: [TokenSample]
+    /// Most-recently-touched session, for the Now tile's session line.
+    @Query(NowStrip.latestSessionProbe) private var latestSessions: [SessionInfo]
     @Query(NowStrip.recentExtraUsage) private var extraUsages: [ExtraUsageSample]
     @Query(NowStrip.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @Environment(\.usageEngine) private var engine
 
-    init(onTodayTap: (() -> Void)? = nil) {
+    init(onTodayTap: (() -> Void)? = nil, onSessionTap: ((String, String) -> Void)? = nil) {
         self.onTodayTap = onTodayTap
+        self.onSessionTap = onSessionTap
         let now = Date()
         let cal = Calendar.current
         let todayString = TokenSample.formatDate(now)
@@ -80,6 +89,14 @@ struct NowStrip: View {
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }()
+
+    private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
+        var d = FetchDescriptor<SessionInfo>(
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
@@ -168,7 +185,7 @@ struct NowStrip: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            liveTile
+            nowTile
             costTile
         }
         .onAppear { refreshFacts() }
@@ -182,28 +199,71 @@ struct NowStrip: View {
         }
     }
 
-    // MARK: - Live tile
+    // MARK: - Now tile
 
-    private var liveTile: some View {
+    /// The session counts as "running" when its last write is recent —
+    /// same 10-minute freshness window the live indicator uses.
+    private var runningSession: SessionInfo? {
+        guard let s = latestSessions.first,
+              Date().timeIntervalSince(s.lastSeenAt) < 600 else { return nil }
+        return s
+    }
+
+    private var nowTile: some View {
         let s = stats
-        return StripTile(label: "Live", header: { freshnessChip(stats: s) }) {
+        let session = runningSession
+        return StripTile(
+            label: "Now",
+            onTap: (session != nil && onSessionTap != nil) ? {
+                if let session {
+                    onSessionTap?(session.sessionId, pacerShortPath(session.projectPath))
+                }
+            } : nil,
+            tapHelp: "Open this session's details",
+            header: { freshnessChip(stats: s) }
+        ) {
             if s.sampleCount == 0 {
-                liveEmptyState
+                nowQuietState
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(pacerCost(s.costLastHour)).help(pacerCostExact(s.costLastHour))
-                        .font(.system(size: 32, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                    Text("last hour · \(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s")")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help("\(pacerTokensExact(s.tokensLastHour)) tokens over the last 1–2 hour buckets")
+                    // The hero is a RATE, not another dollar bucket —
+                    // that's what makes this tile "now" rather than a
+                    // smaller "today".
+                    HStack(alignment: .firstTextBaseline, spacing: 2) {
+                        Text(pacerCost(s.costLastHour))
+                            .font(.system(size: 32, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                        Text("/hr")
+                            .font(.system(size: 18, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    .help("\(pacerCostExact(s.costLastHour)) over the last hour — \(pacerTokensExact(s.tokensLastHour)) tokens, \(s.sampleCount) samples")
+                    if let session {
+                        Text("\(pacerShortPath(session.projectPath)) · \(sessionDuration(session)) session · \(pacerCost(session.cumulativeCostUSD))")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help("Session total \(pacerCostExact(session.cumulativeCostUSD)) since \(session.firstSeenAt.formatted(date: .omitted, time: .shortened))")
+                    } else {
+                        Text("\(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s") this hour")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             }
         }
+    }
+
+    private func sessionDuration(_ s: SessionInfo) -> String {
+        let hours = s.lastSeenAt.timeIntervalSince(s.firstSeenAt) / 3600
+        if hours < 1 {
+            return "\(max(1, Int((hours * 60).rounded()))) min"
+        }
+        return String(format: "%.1f hr", hours)
     }
 
     @ViewBuilder
@@ -218,13 +278,13 @@ struct NowStrip: View {
     }
 
     @ViewBuilder
-    private var liveEmptyState: some View {
+    private var nowQuietState: some View {
         if let latest = latestSamples.first {
             VStack(alignment: .leading, spacing: 4) {
-                Text("No traffic in the last hour.")
+                Text("Nothing running.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text("Last sample \(pacerRelative(latest.sampledAt)) — \(pacerShortModel(latest.model)).")
+                Text("Last activity \(pacerRelative(latest.sampledAt)) — \(pacerShortModel(latest.model)).")
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }

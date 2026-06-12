@@ -32,7 +32,12 @@ struct DashboardView: View {
             }
         ) {
             WelcomeCard()
-            NowStrip(onTodayTap: openToday)
+            NowStrip(
+                onTodayTap: openToday,
+                onSessionTap: { sessionId, displayName in
+                    modalRoot = .session(sessionId: sessionId, projectDisplayName: displayName)
+                }
+            )
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
             })
