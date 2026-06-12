@@ -51,9 +51,18 @@ public struct ForecastInput: Sendable {
     public struct PriorPeriod: Sendable {
         public let start: Date
         public let points: [Point]
-        public init(start: Date, points: [Point]) {
+        /// Optional precomputed per-hour costs for a day-length period.
+        /// Reconstructing these from `points` costs 24 Calendar operations
+        /// per call, and the engine's walk-forward calibration evaluates each
+        /// prior day thousands of times per refit — the cache is what keeps a
+        /// full refit in the low hundreds of milliseconds. Builders that have
+        /// the hourly rollup at hand (EngineFeatures) populate it; consumers
+        /// fall back to deriving from `points` when nil.
+        public let cachedHourlyCosts: [Double]?
+        public init(start: Date, points: [Point], cachedHourlyCosts: [Double]? = nil) {
             self.start = start
             self.points = points
+            self.cachedHourlyCosts = cachedHourlyCosts
         }
         /// The period's realized total (last cumulative point).
         public var total: Double { points.last?.cumulative ?? 0 }

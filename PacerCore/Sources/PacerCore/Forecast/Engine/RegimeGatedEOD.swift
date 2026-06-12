@@ -98,7 +98,7 @@ public struct RegimeGatedEOD: Forecaster {
         var byRegime: [DayRegime: [[Double]]] = [.weekday: [], .weekend: []]
         var all: [[Double]] = []
         for p in priors {
-            guard let costs = HourOfDayShapeForecaster.hourlyCosts(points: p.points, start: p.start, calendar: calendar) else { continue }
+            guard let costs = p.cachedHourlyCosts ?? HourOfDayShapeForecaster.hourlyCosts(points: p.points, start: p.start, calendar: calendar) else { continue }
             let total = costs.reduce(0, +)
             guard total > 0 else { continue }
             var cum = 0.0

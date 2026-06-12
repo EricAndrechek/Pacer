@@ -88,7 +88,12 @@ struct EngineFeatures: Sendable {
         for key in kept {
             guard let start = parseDay(key, calendar: calendar),
                   let pts = cumulativePoints(hourCost[key]!, dayStart: start, cap: nil) else { continue }
-            dailyPeriods.append(.init(start: start, points: pts))
+            // Carry the per-hour costs alongside the cumulative series — the
+            // walk-forward calibration reads them thousands of times per
+            // refit, and deriving them back from points costs 24 Calendar
+            // operations a call (the difference between a ~1.5s and a
+            // sub-200ms refit on a 50-day store).
+            dailyPeriods.append(.init(start: start, points: pts, cachedHourlyCosts: hourCost[key]!))
         }
 
         // Today so far — last point pinned to `now`.
