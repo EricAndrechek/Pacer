@@ -183,12 +183,13 @@ struct HeroStripCard: View {
             return ("≈\(IntelligenceFormatting.approxCost(e.value)) by tonight", help)
         }
         if let r = paceVsNow {
-            let help = "Spend so far vs the median spend by this hour on your \(dayName)s"
             if r >= 1.3 || (r <= 0.7 && cached.todayCost > 1) {
-                return ("\(IntelligenceFormatting.multiple(r)) your usual \(dayName) by now", help)
+                let help = "Dollars spent so far today vs the median spent by this hour on your \(dayName)s"
+                return ("\(IntelligenceFormatting.multiple(r)) your usual \(dayName) spend by now", help)
             }
             if r > 0 {
-                return ("on your usual \(dayName) pace", help)
+                let help = "Spend so far vs the median spend by this hour on your \(dayName)s"
+                return ("on your usual \(dayName) spending pace", help)
             }
         }
         if let p = pacePercentile {
