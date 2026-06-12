@@ -158,7 +158,8 @@ struct MonthlyForecastCard: View {
                      point: p.value,
                      reference: cached.monthSoFar,
                      lowerLabel: pacerCost(shown.lowerBound),
-                     upperLabel: pacerCost(shown.upperBound))
+                     upperLabel: pacerCost(shown.upperBound),
+                     referenceLegend: "spent so far")
                 .help("Month's likely range (80%), dot = projection · tick = spent so far (\(pacerCost(cached.monthSoFar)))")
         }
     }

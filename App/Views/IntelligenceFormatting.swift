@@ -135,15 +135,16 @@ enum IntelligenceFormatting {
         return "→ cap \(point)"
     }
 
-    /// Burn rate framed against **cap pace** — the rate that would exhaust
-    /// the window exactly at its reset (100% ÷ window length). Raw "%/hr"
-    /// means nothing without that denominator: +13%/hr is leisurely for a
-    /// 5-hour window (cap pace 20%/hr) and a blowout for a 7-day one
-    /// (cap pace ~0.6%/hr). Number + referent: "0.3× cap pace".
+    /// Burn rate framed against the **sustainable pace** — the rate you could
+    /// hold and exactly NOT hit the cap before the window resets (100% ÷
+    /// window length). Raw "%/hr" means nothing without that referent:
+    /// +13%/hr is leisurely for a 5-hour window (sustainable 20%/hr) and a
+    /// blowout for a 7-day one (sustainable ~0.6%/hr). Number + referent:
+    /// "0.3× sustainable pace".
     static func capPaceLabel(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String? {
         let ratio = capPaceRatio(slopePercentPerHour: slope, windowSeconds: windowSeconds)
         guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
-        return "\(multiple(ratio)) cap pace"
+        return "\(multiple(ratio)) sustainable pace"
     }
 
     static func capPaceRatio(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> Double {
@@ -160,7 +161,7 @@ enum IntelligenceFormatting {
     /// wants them.
     static func capPaceHelp(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String {
         let capPace = 100.0 / (windowSeconds / 3600)
-        return String(format: "burning %+.1f%%/hr · cap pace for this window is %.1f%%/hr", slope, capPace)
+        return String(format: "burning %+.1f%%/hr — the sustainable pace for this window is %.1f%%/hr (any faster hits the cap before reset)", slope, capPace)
     }
 
     static func dayPart(_ d: Date) -> String {

@@ -31,6 +31,12 @@ public struct RangeBar: View {
     /// uninterpretable; with them it needs no caption at all.
     public let lowerLabel: String?
     public let upperLabel: String?
+    /// The word to show next to the reference-tick swatch in the micro-legend,
+    /// e.g. "typical Friday" or "spent so far". When this is non-nil (or when
+    /// `range` is non-nil), a self-contained legend row is appended below the
+    /// bar so the tick, segment, and dot are all named — user feedback
+    /// identified these as uninterpretable without labels or tooltips.
+    public let referenceLegend: String?
     public var tint: Color
 
     public init(
@@ -40,6 +46,7 @@ public struct RangeBar: View {
         reference: Double? = nil,
         lowerLabel: String? = nil,
         upperLabel: String? = nil,
+        referenceLegend: String? = nil,
         tint: Color = .accentColor
     ) {
         self.domain = domain
@@ -48,29 +55,73 @@ public struct RangeBar: View {
         self.reference = reference
         self.lowerLabel = lowerLabel
         self.upperLabel = upperLabel
+        self.referenceLegend = referenceLegend
         self.tint = tint
     }
 
     public var body: some View {
-        if lowerLabel != nil || upperLabel != nil {
-            HStack(spacing: 8) {
-                if let lowerLabel {
-                    Text(lowerLabel)
-                        .font(.caption.weight(.medium)).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .layoutPriority(1)
+        let labeledBar = Group {
+            if lowerLabel != nil || upperLabel != nil {
+                HStack(spacing: 8) {
+                    if let lowerLabel {
+                        Text(lowerLabel)
+                            .font(.caption.weight(.medium)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .layoutPriority(1)
+                    }
+                    bar
+                    if let upperLabel {
+                        Text(upperLabel)
+                            .font(.caption.weight(.medium)).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .layoutPriority(1)
+                    }
                 }
+            } else {
                 bar
-                if let upperLabel {
-                    Text(upperLabel)
-                        .font(.caption.weight(.medium)).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .layoutPriority(1)
-                }
+            }
+        }
+        if range != nil || referenceLegend != nil {
+            VStack(alignment: .leading, spacing: 4) {
+                labeledBar
+                legend
             }
         } else {
-            bar
+            labeledBar
         }
+    }
+
+    /// Micro-legend: one swatch+word pair per visual element present in the
+    /// bar, rendered at 9pt tertiary so it reads as annotation rather than
+    /// content. Only shown when there is something to label (a range segment
+    /// or a reference tick); the dot is always present so it is always listed.
+    @ViewBuilder private var legend: some View {
+        HStack(spacing: 10) {
+            if range != nil {
+                HStack(spacing: 4) {
+                    RoundedRectangle(cornerRadius: 2.5)
+                        .fill(tint.opacity(0.35))
+                        .frame(width: 14, height: 5)
+                    Text("likely range")
+                }
+            }
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 7, height: 7)
+                Text("projected")
+            }
+            if reference != nil, let referenceLegend {
+                HStack(spacing: 4) {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.7))
+                        .frame(width: 1.5, height: 9)
+                    Text(referenceLegend)
+                }
+            }
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.tertiary)
     }
 
     private var bar: some View {

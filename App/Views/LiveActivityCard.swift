@@ -128,12 +128,14 @@ struct LiveActivityCard: View {
         if let e = eodEstimate, !e.isInsufficient, let band = e.interval80,
            e.value >= todayCostSoFar * 0.98 {
             let shown = IntelligenceFormatting.outward(band)
+            let typicalValid = !(typical?.isInsufficient ?? true)
             RangeBar(domain: projectionDomain(e),
                      range: shown,
                      point: e.value,
-                     reference: (typical?.isInsufficient ?? true) ? nil : typical?.value,
+                     reference: typicalValid ? typical?.value : nil,
                      lowerLabel: pacerCost(max(shown.lowerBound, todayCostSoFar)),
-                     upperLabel: pacerCost(shown.upperBound))
+                     upperLabel: pacerCost(shown.upperBound),
+                     referenceLegend: typicalValid ? "typical \(Date().formatted(.dateTime.weekday(.wide)))" : nil)
                 .help(rangeBarHelp)
         }
     }

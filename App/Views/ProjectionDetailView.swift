@@ -28,13 +28,122 @@ struct ProjectionDetailView: View {
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
 
-    /// Models sorted best-accuracy first (selected, then lowest error).
-    private var ranked: [BurnTrajectory.ScoredTrajectory] {
-        trajectories.sorted {
-            if $0.isSelected != $1.isSelected { return $0.isSelected }
-            return $0.medianAbsError < $1.medianAbsError
+    // MARK: - Zoom domain
+
+    /// The instant all trajectories branch from (their shared first point).
+    private var trajectoryNow: Date? {
+        trajectories.first?.trajectory.points.first?.at
+    }
+
+    /// Chart x-axis left edge: "now" minus 25% of the remaining span,
+    /// clamped so we never show before cycleStart.
+    private var zoomStart: Date {
+        guard let now = trajectoryNow else { return cycleStart }
+        let remaining = resetsAt.timeIntervalSince(now)
+        let lookback = remaining * 0.25
+        return max(cycleStart, now.addingTimeInterval(-lookback))
+    }
+
+    // MARK: - Filtered actuals (for the zoomed x-domain)
+
+    /// Actual points at or after zoomStart, with one leading bridging point
+    /// (the last point before zoomStart) so the line enters from the left edge.
+    private var filteredActuals: [PaceChartView.Data.Point] {
+        let splitIdx = actual.firstIndex(where: { $0.time >= zoomStart }) ?? actual.endIndex
+        var result: [PaceChartView.Data.Point] = []
+        if splitIdx > 0 {
+            result.append(actual[splitIdx - 1])   // bridging point
+        }
+        result.append(contentsOf: actual[splitIdx...])
+        return result
+    }
+
+    // MARK: - Y domain
+
+    /// Zoomed y-domain based on filtered actuals + all trajectories.
+    private var yMax: Double {
+        let actMax = filteredActuals.map(\.value).max() ?? 0
+        let trajMax = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
+        let dataMax = max(actMax, trajMax)
+        return min(105, max(25, dataMax * 1.3))
+    }
+
+    private var yMin: Double {
+        let actMin = filteredActuals.map(\.value).min() ?? 0
+        let trajMin = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
+        let minVisible = min(actMin, trajMin)
+        guard minVisible > 30 else { return 0 }
+        return (floor((minVisible - 10) / 10) * 10)
+    }
+
+    // MARK: - Envelope
+
+    /// One shared time step for the min/max fan envelope.
+    struct EnvelopeStep {
+        let t: Date
+        let lo: Double
+        let hi: Double
+    }
+
+    /// ~24 linearly-spaced steps from trajectoryNow → resetsAt. For each step,
+    /// interpolate every trajectory's value (clamping at 100 once capped).
+    private var envelopeSteps: [EnvelopeStep] {
+        guard let now = trajectoryNow, !trajectories.isEmpty else { return [] }
+        let span = resetsAt.timeIntervalSince(now)
+        guard span > 0 else { return [] }
+        let steps = 24
+        return (0...steps).compactMap { i in
+            let frac = Double(i) / Double(steps)
+            let t = now.addingTimeInterval(span * frac)
+            var vals: [Double] = []
+            for st in trajectories {
+                vals.append(interpolatedValue(st.trajectory.points, at: t))
+            }
+            guard !vals.isEmpty else { return nil }
+            return EnvelopeStep(t: t, lo: vals.min()!, hi: vals.max()!)
         }
     }
+
+    /// Linear interpolation of a trajectory's usedPercentage at time t.
+    /// Past the last point: treat as its last value (typically 100 at cap).
+    private func interpolatedValue(_ points: [BurnTrajectory.Sample], at t: Date) -> Double {
+        guard !points.isEmpty else { return 100 }
+        if t <= points.first!.at { return points.first!.usedPercentage }
+        if t >= points.last!.at  { return points.last!.usedPercentage }
+        for i in 1..<points.count {
+            let a = points[i - 1], b = points[i]
+            if t >= a.at && t <= b.at {
+                let span = b.at.timeIntervalSince(a.at)
+                guard span > 0 else { return a.usedPercentage }
+                let frac = t.timeIntervalSince(a.at) / span
+                return a.usedPercentage + frac * (b.usedPercentage - a.usedPercentage)
+            }
+        }
+        return points.last!.usedPercentage
+    }
+
+    // MARK: - Ranked list (visual order = descending value at right edge)
+
+    /// Models ordered by their value at the chart's right edge, descending
+    /// (highest line on chart = first row). Capped trajectories whose last
+    /// point is 100 are sorted earliest-cap-first among ties. The selected
+    /// model keeps its highlight but does not jump the order.
+    private var ranked: [BurnTrajectory.ScoredTrajectory] {
+        trajectories.sorted { a, b in
+            let aVal = a.trajectory.points.last?.usedPercentage ?? 0
+            let bVal = b.trajectory.points.last?.usedPercentage ?? 0
+            if aVal != bVal { return aVal > bVal }
+            // tie-break: earlier cap crossing first
+            switch (a.trajectory.crossesFullAt, b.trajectory.crossesFullAt) {
+            case (let ac?, let bc?): return ac < bc
+            case (.some, .none):     return true
+            case (.none, .some):     return false
+            default:                 return false
+            }
+        }
+    }
+
+    // MARK: - Body
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -50,7 +159,7 @@ struct ProjectionDetailView: View {
             }
             chart.frame(height: 240)
             accuracyTable
-            Text("Solid — actual · dashed — each model's projection · the highlighted model drives the dashboard.")
+            Text("Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -65,37 +174,50 @@ struct ProjectionDetailView: View {
         return [used, resets].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
-    /// Zoomed y-domain: a 6%-used cycle shouldn't be a flat line squashed at
-    /// the bottom of a fixed 0–105 frame. Spans the data (actuals + every
-    /// trajectory) with headroom; the cap line + pace reference only render
-    /// when they're in view.
-    private var yMax: Double {
-        let dataMax = max(
-            actual.map(\.value).max() ?? 0,
-            trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
-        )
-        return min(105, max(25, dataMax * 1.3))
-    }
-
     private var chart: some View {
         Chart {
+            envelopeMarks
             paceMarks
             actualMarks
             trajectoryMarks
+            nowRuleMark
         }
-        .chartXScale(domain: cycleStart...resetsAt)
-        .chartYScale(domain: 0...yMax)
+        .chartXScale(domain: zoomStart...resetsAt)
+        .chartYScale(domain: yMin...yMax)
         .chartYAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisGridLine(); AxisValueLabel() } }
+    }
+
+    // MARK: - Chart marks
+
+    /// Filled envelope band spanning the per-step min/max across all trajectories.
+    /// Drawn first so it sits behind all lines.
+    @ChartContentBuilder private var envelopeMarks: some ChartContent {
+        ForEach(Array(envelopeSteps.enumerated()), id: \.offset) { _, step in
+            AreaMark(
+                x: .value("t", step.t),
+                yStart: .value("lo", step.lo),
+                yEnd: .value("hi", step.hi),
+                series: .value("s", "envelope")
+            )
+            .foregroundStyle(Color.secondary.opacity(0.08))
+            .interpolationMethod(.monotone)
+        }
     }
 
     /// The 0→100 ideal-burn reference. Both marks carry the style — a
     /// modifier after the second LineMark styles only that mark, and the
     /// first then renders in the chart's default (blue, solid) series color.
     @ChartContentBuilder private var paceMarks: some ChartContent {
-        ForEach([(cycleStart, 0.0), (resetsAt, min(100, yMax))], id: \.0) { t, v in
+        let leftVal = PaceMath.paceFraction(
+            now: zoomStart, resetsAt: resetsAt, windowDuration: durationSeconds) * 100
+        // The right end is ALWAYS (reset, 100) — that's what the ideal-burn
+        // line means. When the zoomed y-domain tops out below 100 the explicit
+        // chartYScale clips the line at the frame edge with its true slope
+        // intact; pinning the endpoint to yMax instead would bend it.
+        ForEach([(zoomStart, leftVal), (resetsAt, 100.0)], id: \.0) { t, v in
             LineMark(x: .value("t", t), y: .value("pct", v), series: .value("s", "pace"))
-                .foregroundStyle(.secondary.opacity(0.35))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .foregroundStyle(Color.secondary.opacity(0.6))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
         }
         if yMax >= 100 {
             RuleMark(y: .value("full", 100))
@@ -106,8 +228,9 @@ struct ProjectionDetailView: View {
 
     /// Actuals colored by pace band per run — the same green/yellow/red
     /// grammar the dashboard chart uses, instead of one undifferentiated line.
+    /// Operates on filteredActuals to match the zoomed x-domain.
     @ChartContentBuilder private var actualMarks: some ChartContent {
-        ForEach(actualRuns) { run in
+        ForEach(filteredRuns) { run in
             ForEach(run.points) { p in
                 LineMark(x: .value("t", p.time), y: .value("pct", p.value),
                          series: .value("s", "actual-\(run.id)"))
@@ -116,29 +239,46 @@ struct ProjectionDetailView: View {
                     .interpolationMethod(.monotone)
             }
         }
-        if let tail = actual.last {
+        if let tail = filteredActuals.last {
             PointMark(x: .value("t", tail.time), y: .value("pct", tail.value))
                 .foregroundStyle(bandColor(at: tail))
                 .symbolSize(60)
         }
     }
 
-    /// Contiguous same-band runs of the actual line (mirrors PaceChartView).
+    /// Vertical rule at "now" (where trajectories branch off).
+    @ChartContentBuilder private var nowRuleMark: some ChartContent {
+        if let now = trajectoryNow {
+            RuleMark(x: .value("now", now))
+                .foregroundStyle(Color.secondary.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+        }
+    }
+
+    // MARK: - Actual runs (zoomed)
+
+    /// Contiguous same-band runs of the actual line (mirrors PaceChartView),
+    /// operating on the zoomed filtered actuals.
     private struct BandRun: Identifiable {
         let id: Int
         let points: [PaceChartView.Data.Point]
         let color: Color
     }
-    private var actualRuns: [BandRun] {
+
+    private var filteredRuns: [BandRun] {
+        buildRuns(from: filteredActuals)
+    }
+
+    private func buildRuns(from pts: [PaceChartView.Data.Point]) -> [BandRun] {
         var runs: [BandRun] = []
         var i = 0
-        while i < actual.count {
-            let color = bandColor(at: actual[i])
+        while i < pts.count {
+            let c = bandColor(at: pts[i])
             var j = i + 1
-            while j < actual.count, bandColor(at: actual[j]) == color { j += 1 }
+            while j < pts.count, bandColor(at: pts[j]) == c { j += 1 }
             // Overlap one point so adjacent runs connect without gaps.
-            let upper = min(j + 1, actual.count)
-            runs.append(BandRun(id: runs.count, points: Array(actual[i..<upper]), color: color))
+            let upper = min(j + 1, pts.count)
+            runs.append(BandRun(id: runs.count, points: Array(pts[i..<upper]), color: c))
             i = j
         }
         return runs
@@ -149,6 +289,8 @@ struct ProjectionDetailView: View {
             now: p.time, resetsAt: resetsAt, windowDuration: durationSeconds) * 100
         return PaceBand(usedPct: p.value, paceEndPct: pace).color
     }
+
+    // MARK: - Trajectory marks
 
     /// Pre-resolved styling so the chart builder stays trivial (the inline
     /// ternaries overwhelmed the type-checker).
@@ -182,6 +324,8 @@ struct ProjectionDetailView: View {
         }
     }
 
+    // MARK: - Accuracy table
+
     private var accuracyTable: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Column headers make the right-hand number self-explanatory —
@@ -190,7 +334,7 @@ struct ProjectionDetailView: View {
             HStack {
                 Text("MODEL")
                 Spacer()
-                Text("TYPICAL MISS, PAST CYCLES")
+                Text("TYPICAL ACCURACY, PAST CYCLES")
                     .help("Median |projected final − actual final| across your completed cycles, in percentage points — lower is better")
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
@@ -218,7 +362,7 @@ struct ProjectionDetailView: View {
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
                     Text(st.medianAbsError.isFinite
-                         ? String(format: "±%.0f pts", st.medianAbsError)
+                         ? String(format: "within ±%.0f%%", st.medianAbsError)
                          : "—")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(.secondary)

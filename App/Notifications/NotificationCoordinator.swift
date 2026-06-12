@@ -363,7 +363,7 @@ public final class NotificationCoordinator {
         }
         var status = "You're at \(Int(usedPct.rounded()))%"
         if let ratio = capPaceRatio, ratio > 0.05 {
-            status += String(format: ", burning %.1f× cap pace", ratio)
+            status += String(format: ", burning %.1f× the sustainable pace", ratio)
         }
         parts.append(status + ".")
         content.body = parts.joined(separator: " — ").replacingOccurrences(of: " — You're", with: ". You're")
