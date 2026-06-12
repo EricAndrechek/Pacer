@@ -52,6 +52,9 @@ final class AppBackgroundService {
     /// missed in between (the engine reads the whole store, not a delta).
     private static let engineRecomputeMinInterval: TimeInterval = 20
     private var lastEngineRecomputeAt: Date?
+    /// Consecutive engine refits that projected a pre-reset cap hit, per
+    /// window — the burn warning's debounce counter.
+    private var burnHitStreak: [String: Int] = [:]
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -418,7 +421,23 @@ final class AppBackgroundService {
     private func checkBurnRateWarning() async {
         let context = ModelContext(container)
         for window in RateLimitWindowKind.allCases {
-            guard let outlook = await engine.burnOutlook(window: window) else { continue }
+            guard let outlook = await engine.burnOutlook(window: window) else {
+                burnHitStreak[window.rawValue] = 0
+                continue
+            }
+            // Debounce (industry-converged forecast-alert pattern: lead-time
+            // AND level gate AND k-consecutive confirmation): require the
+            // pre-reset crossing to hold across two consecutive engine refits
+            // before the coordinator may fire, so one transient burst between
+            // OAuth polls can't page the user. The level gate (≥50% used)
+            // stays in BurnRate.warrantsWarning; the per-cycle dedup stays in
+            // the coordinator.
+            if outlook.willHitLimitBeforeReset {
+                burnHitStreak[window.rawValue, default: 0] += 1
+            } else {
+                burnHitStreak[window.rawValue] = 0
+            }
+            guard (burnHitStreak[window.rawValue] ?? 0) >= 2 else { continue }
             let projection = BurnRate.Projection(
                 slopePercentPerHour: outlook.slopePercentPerHour,
                 projectedFullAt: outlook.projectedFullAt,
