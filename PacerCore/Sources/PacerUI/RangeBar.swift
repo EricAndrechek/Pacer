@@ -4,19 +4,24 @@ import SwiftUI
 /// the context of what's normal" — the horizontal range bar Apple's Weather
 /// uses for daily temperature spans, adapted to dashboard rows.
 ///
-/// Anatomy (back to front):
-///   - full-width 6pt capsule *track* — the context domain (e.g. zero to a
+/// Anatomy (back to front), at Weather's own row geometry — a 12pt bar
+/// whose range segment is the saturated primary object, not a tint wash:
+///   - full-width 12pt capsule *track* — the context domain (e.g. zero to a
 ///     high percentile of the user's own daily totals), in a quiet fill;
-///   - inner capsule *segment* — the calibrated 80% range, in accent;
-///   - a *tick* — an optional reference value (e.g. the user's typical day);
-///   - an 8pt circle *marker* — the point estimate, stroked so it reads on
-///     top of the segment.
+///   - inner full-height capsule *segment* — the calibrated 80% range, in
+///     near-opaque accent;
+///   - a *tick* — an optional reference value (e.g. the user's typical day),
+///     extending past the track edges so it reads as a marker, not a gap;
+///   - a 14pt ringed circle *marker* — the point estimate, stroked in the
+///     card background and softly shadowed so it sits on top of the segment.
 ///
 /// Deliberately not a Gauge (a gauge needle implies meaningful scale
 /// endpoints a forecast doesn't have) and not error-bar whiskers (lay
 /// viewers misread within-bar values as likelier — Newman & Scholl 2012).
-/// One encoding, no gradients, no animation (decorative animation measurably
-/// cost MainActor time in this app's perf history).
+/// One encoding, no gradients (a value-correlated ramp would read as
+/// "likelier toward this end", which an 80% interval doesn't claim), no
+/// animation (decorative animation measurably cost MainActor time in this
+/// app's perf history).
 public struct RangeBar: View {
     /// Context domain the whole bar spans.
     public let domain: ClosedRange<Double>
@@ -99,9 +104,9 @@ public struct RangeBar: View {
         HStack(spacing: 10) {
             if range != nil {
                 HStack(spacing: 4) {
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(tint.opacity(0.35))
-                        .frame(width: 14, height: 5)
+                    Capsule()
+                        .fill(tint.opacity(0.8))
+                        .frame(width: 14, height: 6)
                     Text("likely range")
                 }
             }
@@ -114,7 +119,7 @@ public struct RangeBar: View {
             if reference != nil, let referenceLegend {
                 HStack(spacing: 4) {
                     Rectangle()
-                        .fill(Color.secondary.opacity(0.7))
+                        .fill(Color.secondary.opacity(0.75))
                         .frame(width: 1.5, height: 9)
                     Text(referenceLegend)
                 }
@@ -129,31 +134,32 @@ public struct RangeBar: View {
             let w = geo.size.width
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(height: 8)
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 12)
                 if let range {
                     let x0 = x(range.lowerBound, in: w)
                     let x1 = x(range.upperBound, in: w)
                     Capsule()
-                        .fill(tint.opacity(0.45))
-                        .frame(width: max(8, x1 - x0), height: 8)
+                        .fill(tint.opacity(0.8))
+                        .frame(width: max(12, x1 - x0), height: 12)
                         .offset(x: x0)
                 }
                 if let reference {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.7))
-                        .frame(width: 2, height: 14)
-                        .offset(x: x(reference, in: w) - 0.75)
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.secondary.opacity(0.75))
+                        .frame(width: 2, height: 18)
+                        .offset(x: x(reference, in: w) - 1)
                 }
                 Circle()
                     .fill(tint)
-                    .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 1.5)
-                    .frame(width: 11, height: 11)
-                    .offset(x: x(point, in: w) - 5.5)
+                    .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 2)
+                    .frame(width: 14, height: 14)
+                    .shadow(color: .black.opacity(0.25), radius: 1.5, x: 0, y: 0.5)
+                    .offset(x: x(point, in: w) - 7)
             }
-            .frame(height: 14)
+            .frame(height: 18)
         }
-        .frame(height: 14)
+        .frame(height: 18)
     }
 
     private func x(_ value: Double, in width: CGFloat) -> CGFloat {
