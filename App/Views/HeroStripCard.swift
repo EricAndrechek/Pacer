@@ -114,6 +114,9 @@ struct HeroStripCard: View {
     /// line ("≈$650 by tonight" once actionable; pace-vs-normal before that).
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
+    /// Spend-so-far ÷ typical-by-this-hour for today's day-type — the
+    /// engine's most insightful midday number.
+    @State private var paceVsNow: Double?
     /// Pace-ladder hysteresis (the label can't flap intra-day).
     @State private var heldLadder: Int?
 
@@ -158,6 +161,8 @@ struct HeroStripCard: View {
         fiveHourBurn = await engine.burnOutlook(window: .fiveHour)
         sevenDayBurn = await engine.burnOutlook(window: .sevenDay)
         todayEOD = await engine.ask(.projectedCost(.today))
+        let vsNow = await engine.ask(.paceVsNow)
+        paceVsNow = vsNow.isInsufficient ? nil : vsNow.value
         let pace = await engine.ask(.pace)
         pacePercentile = pace.isInsufficient ? nil : pace.value
         if let p = pacePercentile {
@@ -165,19 +170,31 @@ struct HeroStripCard: View {
         }
     }
 
-    /// The Today tile's one-line outlook. Evening (range actionable):
-    /// "≈$650 by tonight" with the asymmetric anchors in the tooltip.
-    /// Earlier: the pace-vs-your-normal phrase — the signal that IS
-    /// supported early, instead of a not-yet-useful dollar range.
+    /// The Today tile's one-line outlook — the single most insightful
+    /// statistic available right now, with a number that carries a referent:
+    ///   evening → "≈$650 by tonight" (anchors in the tooltip);
+    ///   midday, notably off-pace → "1.8× your usual Friday by now";
+    ///   midday, on pace → "on your usual Friday pace";
+    ///   otherwise → the percentile ladder phrase.
     private var todayOutlook: (text: String, help: String)? {
+        let dayName = Date().formatted(.dateTime.weekday(.wide))
         if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: cached.todayCost) {
             let help = e.interval80.map { IntelligenceFormatting.anchors($0) } ?? pacerCostExact(e.value)
             return ("≈\(IntelligenceFormatting.approxCost(e.value)) by tonight", help)
         }
+        if let r = paceVsNow {
+            let help = "Spend so far vs the median spend by this hour on your \(dayName)s"
+            if r >= 1.3 || (r <= 0.7 && cached.todayCost > 1) {
+                return ("\(IntelligenceFormatting.multiple(r)) your usual \(dayName) by now", help)
+            }
+            if r > 0 {
+                return ("on your usual \(dayName) pace", help)
+            }
+        }
         if let p = pacePercentile {
             let label = IntelligenceFormatting.paceLabel(
                 index: IntelligenceFormatting.heldIndex(p, held: heldLadder),
-                dayName: Date().formatted(.dateTime.weekday(.wide)))
+                dayName: dayName)
             return (label, "Today's projected total sits at the \(Int((p * 100).rounded()))th percentile of your days")
         }
         return nil

@@ -463,11 +463,15 @@ final class AppBackgroundService {
                 slopePercentPerHour: outlook.slopePercentPerHour,
                 projectedFullAt: outlook.projectedFullAt,
                 etaSeconds: outlook.etaSeconds)
+            let duration = PaceMath.windowDuration(for: window.rawValue) ?? 1
             await NotificationCoordinator.shared.handleBurnRateWarning(
                 window: window.rawValue,
                 projection: projection,
                 resetsAt: outlook.resetsAt,
                 usedPct: outlook.usedPct,
+                hitRangeEarliest: outlook.projectedFullAtEarliest,
+                hitRangeLatest: outlook.projectedFullAtLatest,
+                capPaceRatio: outlook.slopePercentPerHour / (100.0 / (duration / 3600)),
                 context: context
             )
         }

@@ -50,10 +50,9 @@ struct ProjectionDetailView: View {
             }
             chart.frame(height: 240)
             accuracyTable
-            Text("Every candidate is fit on this cycle so far; solid is what actually happened, dashed is each model's projection (it stops where it would reach the cap). Accuracy is each model's median miss against the realized final of your completed cycles — the highlighted model is what the dashboard draws, picked from that record.")
+            Text("Solid — actual · dashed — each model's projection · the highlighted model drives the dashboard.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(24)
         .frame(width: 620)
@@ -66,6 +65,18 @@ struct ProjectionDetailView: View {
         return [used, resets].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
+    /// Zoomed y-domain: a 6%-used cycle shouldn't be a flat line squashed at
+    /// the bottom of a fixed 0–105 frame. Spans the data (actuals + every
+    /// trajectory) with headroom; the cap line + pace reference only render
+    /// when they're in view.
+    private var yMax: Double {
+        let dataMax = max(
+            actual.map(\.value).max() ?? 0,
+            trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
+        )
+        return min(105, max(25, dataMax * 1.3))
+    }
+
     private var chart: some View {
         Chart {
             paceMarks
@@ -73,27 +84,70 @@ struct ProjectionDetailView: View {
             trajectoryMarks
         }
         .chartXScale(domain: cycleStart...resetsAt)
-        .chartYScale(domain: 0...105)
-        .chartYAxis { AxisMarks(values: [0, 50, 100]) { AxisGridLine(); AxisValueLabel() } }
+        .chartYScale(domain: 0...yMax)
+        .chartYAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisGridLine(); AxisValueLabel() } }
     }
 
+    /// The 0→100 ideal-burn reference. Both marks carry the style — a
+    /// modifier after the second LineMark styles only that mark, and the
+    /// first then renders in the chart's default (blue, solid) series color.
     @ChartContentBuilder private var paceMarks: some ChartContent {
-        LineMark(x: .value("t", cycleStart), y: .value("pct", 0.0), series: .value("s", "pace"))
-        LineMark(x: .value("t", resetsAt), y: .value("pct", 100.0), series: .value("s", "pace"))
-            .foregroundStyle(.secondary.opacity(0.35))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-        RuleMark(y: .value("full", 100))
-            .foregroundStyle(.secondary.opacity(0.25))
-            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+        ForEach([(cycleStart, 0.0), (resetsAt, min(100, yMax))], id: \.0) { t, v in
+            LineMark(x: .value("t", t), y: .value("pct", v), series: .value("s", "pace"))
+                .foregroundStyle(.secondary.opacity(0.35))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+        }
+        if yMax >= 100 {
+            RuleMark(y: .value("full", 100))
+                .foregroundStyle(.secondary.opacity(0.25))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 4]))
+        }
     }
 
+    /// Actuals colored by pace band per run — the same green/yellow/red
+    /// grammar the dashboard chart uses, instead of one undifferentiated line.
     @ChartContentBuilder private var actualMarks: some ChartContent {
-        ForEach(actual) { p in
-            LineMark(x: .value("t", p.time), y: .value("pct", p.value), series: .value("s", "actual"))
-                .foregroundStyle(.primary)
-                .lineStyle(StrokeStyle(lineWidth: 2.4, lineCap: .round))
-                .interpolationMethod(.monotone)
+        ForEach(actualRuns) { run in
+            ForEach(run.points) { p in
+                LineMark(x: .value("t", p.time), y: .value("pct", p.value),
+                         series: .value("s", "actual-\(run.id)"))
+                    .foregroundStyle(run.color)
+                    .lineStyle(StrokeStyle(lineWidth: 2.4, lineCap: .round))
+                    .interpolationMethod(.monotone)
+            }
         }
+        if let tail = actual.last {
+            PointMark(x: .value("t", tail.time), y: .value("pct", tail.value))
+                .foregroundStyle(bandColor(at: tail))
+                .symbolSize(60)
+        }
+    }
+
+    /// Contiguous same-band runs of the actual line (mirrors PaceChartView).
+    private struct BandRun: Identifiable {
+        let id: Int
+        let points: [PaceChartView.Data.Point]
+        let color: Color
+    }
+    private var actualRuns: [BandRun] {
+        var runs: [BandRun] = []
+        var i = 0
+        while i < actual.count {
+            let color = bandColor(at: actual[i])
+            var j = i + 1
+            while j < actual.count, bandColor(at: actual[j]) == color { j += 1 }
+            // Overlap one point so adjacent runs connect without gaps.
+            let upper = min(j + 1, actual.count)
+            runs.append(BandRun(id: runs.count, points: Array(actual[i..<upper]), color: color))
+            i = j
+        }
+        return runs
+    }
+
+    private func bandColor(at p: PaceChartView.Data.Point) -> Color {
+        let pace = PaceMath.paceFraction(
+            now: p.time, resetsAt: resetsAt, windowDuration: durationSeconds) * 100
+        return PaceBand(usedPct: p.value, paceEndPct: pace).color
     }
 
     /// Pre-resolved styling so the chart builder stays trivial (the inline
@@ -110,8 +164,8 @@ struct ProjectionDetailView: View {
             StyledLine(
                 id: st.modelId,
                 points: st.trajectory.points,
-                color: color(st.modelId).opacity(st.isSelected ? 0.95 : 0.5),
-                width: st.isSelected ? 2.4 : 1.4,
+                color: color(st.modelId).opacity(st.isSelected ? 1.0 : 0.75),
+                width: st.isSelected ? 2.6 : 1.8,
                 dash: st.isSelected ? [6, 3] : [4, 4])
         }
     }
@@ -130,6 +184,21 @@ struct ProjectionDetailView: View {
 
     private var accuracyTable: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Column headers make the right-hand number self-explanatory —
+            // it's how far each model's final-value calls have missed on
+            // this user's completed cycles.
+            HStack {
+                Text("MODEL")
+                Spacer()
+                Text("TYPICAL MISS, PAST CYCLES")
+                    .help("Median |projected final − actual final| across your completed cycles, in percentage points — lower is better")
+            }
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(.tertiary)
+            .tracking(0.5)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 4)
+
             ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
                 HStack(spacing: 10) {
                     RoundedRectangle(cornerRadius: 2)
@@ -149,11 +218,10 @@ struct ProjectionDetailView: View {
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
                     Text(st.medianAbsError.isFinite
-                         ? String(format: "typically ±%.0f pts off", st.medianAbsError)
-                         : "no track record yet")
+                         ? String(format: "±%.0f pts", st.medianAbsError)
+                         : "—")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .help("Median miss vs the realized final across your completed cycles")
                 }
                 .padding(.vertical, 7)
                 .padding(.horizontal, 10)

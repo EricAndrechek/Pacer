@@ -124,10 +124,12 @@ struct MonthlyForecastCard: View {
                 hint: "\(cached.daysWithData) day\(cached.daysWithData == 1 ? "" : "s") with usage",
                 tooltip: pacerCostExact(cached.averageDailyCost)
             )
+            // The range itself lives on the labeled bar below; the tile's
+            // hint keeps the differently-informative pace comparison.
             MetricTile(
                 value: projectedValueText,
                 label: "projected month",
-                hint: bandHint ?? trajectoryHint,
+                hint: trajectoryHint,
                 tooltip: projectedTooltip
             )
             MetricTile(
@@ -150,19 +152,15 @@ struct MonthlyForecastCard: View {
         if let p = projection, !p.isInsufficient, let band = p.interval80,
            p.value >= cached.monthSoFar * 0.98 {
             let hi = max(band.upperBound * 1.05, p.value * 1.15)
+            let shown = IntelligenceFormatting.outward(band)
             RangeBar(domain: 0...max(hi, 1),
-                     range: IntelligenceFormatting.outward(band),
+                     range: shown,
                      point: p.value,
-                     reference: cached.monthSoFar)
-                .help("Projected month total with its 80% range · tick = spent so far (\(pacerCost(cached.monthSoFar)))")
+                     reference: cached.monthSoFar,
+                     lowerLabel: pacerCost(shown.lowerBound),
+                     upperLabel: pacerCost(shown.upperBound))
+                .help("Month's likely range (80%), dot = projection · tick = spent so far (\(pacerCost(cached.monthSoFar)))")
         }
-    }
-
-    /// "likely $8.4k–$12k" — the calibrated range, outward-rounded, as the
-    /// visible hint; pace comparison + exact value live in the tooltip.
-    private var bandHint: String? {
-        guard let p = projection, !p.isInsufficient, let band = p.interval80 else { return nil }
-        return "likely \(IntelligenceFormatting.costRange(IntelligenceFormatting.outward(band)))"
     }
 
     private var projectedTooltip: String? {

@@ -31,6 +31,12 @@ public enum EngineQuestion: Sendable, Equatable {
     case rateLimitOutlook(RateLimitWindowKind)
     /// Today's projected spend as a percentile of the user's own daily norm.
     case pace
+    /// Spend-so-far vs the user's typical spend **by this hour** on this kind
+    /// of day (weekday/weekend regime). `value` is the multiple — 1.8 means
+    /// "1.8× your usual Friday by now". The most insightful intraday number:
+    /// it compares like-for-like at the same clock position instead of
+    /// against a whole-day figure.
+    case paceVsNow
     /// Typical daily cost for today's weekday (the personal "normal" band).
     case typicalUsage
     /// Whether the most recent complete day was anomalous (z-score; `note`
@@ -249,6 +255,7 @@ public actor UsageIntelligenceEngine {
         case .projectedCost(.thisMonth): return MonthlyProjector.project(dailyCosts: f.dailyCosts, now: f.now, calendar: f.calendar)
         case .rateLimitOutlook(let w):   return rateLimitOutlook(f, fit, window: w)
         case .pace:                      return pace(f, fit)
+        case .paceVsNow:                 return paceVsNow(f)
         case .typicalUsage:              return typicalUsage(fit, weekday: f.calendar.component(.weekday, from: f.now))
         case .isAnomalous:               return fit.anomaly
         case .shortHorizon:              return shortHorizon(f, fit)
@@ -325,7 +332,10 @@ public actor UsageIntelligenceEngine {
         guard let model, let projection = model.fit(current) else {
             return .insufficient(method: "rate-limit", note: "too early in the cycle to project", support: rf.historyCount)
         }
-        let raw = projection(current.resetsAt)
+        // Live-value anchoring, matching burnOutlook/trajectories (shift up
+        // only — smoothed fits can sit under a spiking last sample).
+        let anchor = max(0, current.usedNow - projection(f.now))
+        let raw = projection(current.resetsAt) + anchor
         let point = min(100, max(current.usedNow, raw))
         // Band from the stratum matching where we are in this cycle (early/
         // late × weekday/weekend), pooled fallback when the stratum was thin.
@@ -416,6 +426,12 @@ public actor UsageIntelligenceEngine {
                                cyclesObserved: rf.cyclesObserved,
                                cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100)
         }
+        // Anchor the curve to the live value: the smoothed fits (recency-
+        // weighted, saturating) deliberately sit under a spiking last sample,
+        // so the raw projection can start BELOW where the user currently is —
+        // which on the chart reads as the forecast dipping under the dot.
+        // Shift up only, never down.
+        let anchor = max(0, current.usedNow - projection(f.now))
 
         // Crossings before the reset, walked in 5-minute steps (the sampling
         // cadence — finer adds nothing). The point crossing comes from the
@@ -431,7 +447,7 @@ public actor UsageIntelligenceEngine {
             let loShift = calibrator?.quantile(0.1) ?? 0   // lower band → latest plausible
             var t = f.now.addingTimeInterval(5 * 60)
             while t <= current.resetsAt {
-                let p = projection(t)
+                let p = projection(t) + anchor
                 if earliest == nil, p + max(hiShift, 0) >= 100 { earliest = t }
                 if crossing == nil, p >= 100 { crossing = t }
                 if latest == nil, p + min(loShift, 0) >= 100 { latest = t }
@@ -512,27 +528,33 @@ public actor UsageIntelligenceEngine {
         }
         return rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
             guard let projection = model.fit(current) else { return nil }
+            // Anchor to the live value (same rule as `burnOutlook`): smoothed
+            // fits sit under a spiking last sample, and an un-anchored curve
+            // starts BELOW the user's current dot on the chart. Shift up only.
+            let anchor = max(0, current.usedNow - projection(f.now))
             // Crossing walked at the 5-minute sampling cadence — same walk as
             // `burnOutlook`, so the chart's marker and the tile's ETA agree.
             var crossing: Date?
             if current.usedNow < 100 {
                 var t = f.now.addingTimeInterval(5 * 60)
                 while t <= current.resetsAt {
-                    if projection(t) >= 100 { crossing = t; break }
+                    if projection(t) + anchor >= 100 { crossing = t; break }
                     t = t.addingTimeInterval(5 * 60)
                 }
             }
             // The trajectory ENDS at the crossing: a dashed line pinned at
             // 100% for the rest of the window is noise — the curve already
-            // said everything at the moment it touched the cap.
-            var points: [BurnTrajectory.Sample] = []
-            for i in 0...sampleCount {
+            // said everything at the moment it touched the cap. The first
+            // point is pinned to the live value so the dashed line continues
+            // the solid one without a step.
+            var points: [BurnTrajectory.Sample] = [.init(at: f.now, usedPercentage: current.usedNow)]
+            for i in 1...sampleCount {
                 let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
                 if let crossing, date >= crossing {
                     points.append(.init(at: crossing, usedPercentage: 100))
                     break
                 }
-                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date)))))
+                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date) + anchor))))
             }
             let stat = statFor(model.id)
             return BurnTrajectory.ScoredTrajectory(
@@ -562,6 +584,42 @@ public actor UsageIntelligenceEngine {
         let confidence: Estimate.Confidence = fit.dailyBaseline.count >= 14 ? .medium : .low
         return Estimate(value: rank, method: "pace-rank", confidence: confidence,
                         support: fit.dailyBaseline.count, note: note)
+    }
+
+    /// Spend-so-far ÷ the median historical spend **by this hour** on this
+    /// day-regime. Regime-matched with a pooled fallback (same rule as the
+    /// pickup forecaster); insufficient when the typical-by-now figure is too
+    /// small to divide by honestly (pre-dawn — everyone's at ~$0, so any
+    /// spend would read as an absurd multiple).
+    static func paceVsNow(_ f: EngineFeatures) -> Estimate {
+        let hour = min(23, max(0, f.calendar.component(.hour, from: f.now)))
+        let regime = DayRegime.of(f.now, calendar: f.calendar)
+        var regimeCums: [Double] = []
+        var pooledCums: [Double] = []
+        for p in f.dailyPeriods {
+            guard let costs = p.cachedHourlyCosts else { continue }
+            let cum = costs[0...hour].reduce(0, +)
+            pooledCums.append(cum)
+            if DayRegime.of(p.start, calendar: f.calendar) == regime { regimeCums.append(cum) }
+        }
+        let cums = regimeCums.count >= 5 ? regimeCums : pooledCums
+        guard cums.count >= 7 else {
+            return .insufficient(method: "pace-vs-now", note: "not enough history yet", support: cums.count)
+        }
+        let typicalByNow = EngineSelfEval.median(cums)
+        let typicalDay = EngineSelfEval.median(cums.isEmpty ? [0] : f.dailyPeriods.map { $0.total })
+        // Below ~2% of a typical day (or under a dollar) the denominator is
+        // noise — a $3 pre-dawn spend shouldn't render as "40× usual".
+        guard typicalByNow >= max(1.0, typicalDay * 0.02) else {
+            return .insufficient(method: "pace-vs-now",
+                                 note: "too early on this kind of day to compare", support: cums.count)
+        }
+        let soFar = f.todayElapsed.last?.cumulative ?? 0
+        let ratio = soFar / typicalByNow
+        return Estimate(value: ratio, method: "pace-vs-now",
+                        confidence: cums.count >= 14 ? .medium : .low,
+                        support: cums.count,
+                        note: regime == .weekend ? "vs your usual weekend by now" : "vs your usual weekday by now")
     }
 
     // MARK: - Typical usage / short horizon (norm bands)

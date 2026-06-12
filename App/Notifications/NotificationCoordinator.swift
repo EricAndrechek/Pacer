@@ -303,20 +303,22 @@ public final class NotificationCoordinator {
         return f.localizedString(for: date, relativeTo: Date())
     }
 
-    /// Burn-rate (slope) warning. Fires when, at the current consumption
-    /// *rate*, the window's linear projection hits 100% before it resets —
-    /// the "slow down" signal the fixed-percentage threshold alerts can't
-    /// give (those only see how full it is, not how fast it's filling).
-    /// The trigger decision lives in `BurnRate.warrantsWarning`; this just
-    /// gates on settings, dedups per cycle, and formats the banner.
-    ///
-    /// Dedup is keyed on the cycle anchor so it fires at most once per
-    /// window cycle even as the rate keeps tripping the condition.
+    /// Burn-rate warning — fires when the engine projects the window will hit
+    /// its cap before resetting. Tiered per cycle via `BurnWarningPolicy`:
+    /// a **heads-up** on the first projected crossing, an **imminent**
+    /// escalation when the hit comes within the user's configured window,
+    /// and (optionally) a re-send when the projection gets materially worse.
+    /// This method gates on settings + the ≥50% used floor, persists the
+    /// per-cycle notified state, and formats the banner; the send/stay-silent
+    /// decision itself is the pure policy.
     public func handleBurnRateWarning(
         window: String,
         projection: BurnRate.Projection,
         resetsAt: Date?,
         usedPct: Double,
+        hitRangeEarliest: Date? = nil,
+        hitRangeLatest: Date? = nil,
+        capPaceRatio: Double? = nil,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
@@ -327,26 +329,77 @@ public final class NotificationCoordinator {
 
         let anchorKey = resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset"
         let cycleKey = "notif.burnrate.\(window).\(anchorKey)"
-        if alreadyNotified(key: cycleKey, in: context) {
-            return
-        }
+        let now = Date()
+        let imminentMinutes = defaults.object(forKey: PacerSettings.Key.burnRateImminentMinutes) as? Double ?? 60
+        let rearm = defaults.bool(forKey: PacerSettings.Key.notifyBurnRateRearm)
+
+        let prior = notifiedBurnState(key: cycleKey, in: context)
+        guard let tier = BurnWarningPolicy.decide(
+            prior: prior,
+            projectedFullAt: projectedFullAt,
+            now: now,
+            imminentSeconds: imminentMinutes * 60,
+            rearmEnabled: rearm
+        ) else { return }
 
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
         let label: String = window == "five_hour" ? "5-hour" : "7-day"
-        content.title = "Pacer \(label) burn-rate warning"
-        let hit = Self.formatRelative(projectedFullAt)
-        if let resetsAt {
-            content.body = "At your current rate you'll hit the \(label) limit \(hit) — before it resets \(Self.formatRelative(resetsAt)). You're at \(Int(usedPct.rounded()))%."
-        } else {
-            content.body = "At your current rate you'll hit the \(label) limit \(hit). You're at \(Int(usedPct.rounded()))%."
-        }
-        content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        content.title = tier == .imminent
+            ? "\(label) cap imminent — projected \(Self.formatRelative(projectedFullAt))"
+            : "On pace to hit the \(label) cap \(Self.formatRelative(projectedFullAt))"
 
-        let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
+        // Body: the hit (with its plausible range when meaningfully tight),
+        // the reset it beats, the current level, and the pace multiple.
+        var parts: [String] = []
+        if let early = hitRangeEarliest, let late = hitRangeLatest,
+           late.timeIntervalSince(early) < projectedFullAt.timeIntervalSince(now) * 1.5,
+           late > early {
+            let fmt = Date.FormatStyle.dateTime.hour(.defaultDigits(amPM: .abbreviated)).minute()
+            parts.append("Likely between \(early.formatted(fmt)) and \(late.formatted(fmt))")
+        }
+        if let resetsAt {
+            parts.append("the window resets \(Self.formatRelative(resetsAt))")
+        }
+        var status = "You're at \(Int(usedPct.rounded()))%"
+        if let ratio = capPaceRatio, ratio > 0.05 {
+            status += String(format: ", burning %.1f× cap pace", ratio)
+        }
+        parts.append(status + ".")
+        content.body = parts.joined(separator: " — ").replacingOccurrences(of: " — You're", with: ". You're")
+        content.sound = .default
+        content.interruptionLevel = tier == .imminent ? .timeSensitive : .active
+
+        // Distinct identifier per tier so an escalation doesn't silently
+        // replace the earlier banner in Notification Center.
+        let request = UNNotificationRequest(
+            identifier: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))",
+            content: content, trigger: nil)
         try? await center.add(request)
-        markNotified(key: cycleKey, in: context)
+        markBurnNotified(key: cycleKey,
+                         state: .init(tier: tier, etaUnix: projectedFullAt.timeIntervalSince1970),
+                         in: context)
+    }
+
+    /// Per-cycle burn-warning state, persisted as JSON in `ClaudeCodeMeta`
+    /// (same table the boolean dedups use; richer payload).
+    private func notifiedBurnState(key: String, in context: ModelContext) -> BurnWarningPolicy.NotifiedState? {
+        let predicate = #Predicate<ClaudeCodeMeta> { $0.key == key }
+        guard let raw = try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(predicate: predicate)).first?.value,
+              let data = raw.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(BurnWarningPolicy.NotifiedState.self, from: data)
+    }
+
+    private func markBurnNotified(key: String, state: BurnWarningPolicy.NotifiedState, in context: ModelContext) {
+        guard let data = try? JSONEncoder().encode(state),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let predicate = #Predicate<ClaudeCodeMeta> { $0.key == key }
+        if let existing = try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(predicate: predicate)).first {
+            existing.value = json
+        } else {
+            context.insert(ClaudeCodeMeta(key: key, value: json))
+        }
+        try? context.save()
     }
 
     /// "Anthropic reset your limits early" detection. Distinct from

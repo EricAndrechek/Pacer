@@ -773,11 +773,32 @@ private struct BurnRateAlertCard: View {
     @AppStorage(PacerSettings.Key.notifyBurnRate, store: PacerSettings.store)
     private var enabled: Bool = false
 
+    @AppStorage(PacerSettings.Key.notifyBurnRateRearm, store: PacerSettings.store)
+    private var rearmEnabled: Bool = true
+
+    @AppStorage(PacerSettings.Key.burnRateImminentMinutes, store: PacerSettings.store)
+    private var imminentMinutes: Double = 60
+
     var body: some View {
         PacerCard("Burn-rate warning", content: {
-            Toggle("Warn when my usage rate will hit a limit before it resets", isOn: $enabled)
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Warn when my usage pace will hit a cap before it resets", isOn: $enabled)
+                if enabled {
+                    Toggle("Re-alert if the projection gets significantly worse", isOn: $rearmEnabled)
+                    LabeledControlRow(label: "Treat as imminent within") {
+                        Picker("", selection: $imminentMinutes) {
+                            Text("30 minutes").tag(30.0)
+                            Text("1 hour").tag(60.0)
+                            Text("2 hours").tag(120.0)
+                            Text("4 hours").tag(240.0)
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                    }
+                }
+            }
         }, footer: {
-            Text("Watches how fast you're burning the 5-hour and 7-day windows — not just how full they are — and warns once per cycle when, at your current rate, you'll hit the cap before the window resets. The 7-day projection is recency-weighted so a single busy hour doesn't cry wolf. Complements the fixed-percentage alerts above (which fire on level, this fires on slope).")
+            Text("Watches how fast you're burning the 5-hour and 7-day windows, using your own daily rhythm (an overnight lull won't be projected as daytime burn). You get a heads-up the first time a pre-reset cap hit is projected, an escalation when the hit comes within your imminence window, and — if re-alerting is on — another when the projected hit moves meaningfully earlier. Fires only past 50% used.")
         })
     }
 }

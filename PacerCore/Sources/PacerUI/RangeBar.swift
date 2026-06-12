@@ -26,6 +26,11 @@ public struct RangeBar: View {
     public let point: Double
     /// Optional reference tick (e.g. "your typical day").
     public let reference: Double?
+    /// Endpoint labels flanking the bar — the units the bar is read in
+    /// (Weather's lo°/hi° row pattern). Without them a bare bar is
+    /// uninterpretable; with them it needs no caption at all.
+    public let lowerLabel: String?
+    public let upperLabel: String?
     public var tint: Color
 
     public init(
@@ -33,16 +38,42 @@ public struct RangeBar: View {
         range: ClosedRange<Double>?,
         point: Double,
         reference: Double? = nil,
+        lowerLabel: String? = nil,
+        upperLabel: String? = nil,
         tint: Color = .accentColor
     ) {
         self.domain = domain
         self.range = range
         self.point = point
         self.reference = reference
+        self.lowerLabel = lowerLabel
+        self.upperLabel = upperLabel
         self.tint = tint
     }
 
     public var body: some View {
+        if lowerLabel != nil || upperLabel != nil {
+            HStack(spacing: 8) {
+                if let lowerLabel {
+                    Text(lowerLabel)
+                        .font(.caption.weight(.medium)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .layoutPriority(1)
+                }
+                bar
+                if let upperLabel {
+                    Text(upperLabel)
+                        .font(.caption.weight(.medium)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .layoutPriority(1)
+                }
+            }
+        } else {
+            bar
+        }
+    }
+
+    private var bar: some View {
         GeometryReader { geo in
             let w = geo.size.width
             ZStack(alignment: .leading) {

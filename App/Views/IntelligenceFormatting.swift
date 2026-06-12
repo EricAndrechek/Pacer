@@ -139,19 +139,21 @@ enum IntelligenceFormatting {
     /// the window exactly at its reset (100% ÷ window length). Raw "%/hr"
     /// means nothing without that denominator: +13%/hr is leisurely for a
     /// 5-hour window (cap pace 20%/hr) and a blowout for a 7-day one
-    /// (cap pace ~0.6%/hr).
+    /// (cap pace ~0.6%/hr). Number + referent: "0.3× cap pace".
     static func capPaceLabel(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String? {
+        let ratio = capPaceRatio(slopePercentPerHour: slope, windowSeconds: windowSeconds)
+        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
+        return "\(multiple(ratio)) cap pace"
+    }
+
+    static func capPaceRatio(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> Double {
         let capPace = 100.0 / (windowSeconds / 3600)
-        guard capPace > 0 else { return nil }
-        let ratio = slope / capPace
-        switch ratio {
-        case ..<0.05:  return nil                       // effectively idle — say nothing
-        case ..<0.5:   return "well under cap pace"
-        case ..<0.9:   return "under cap pace"
-        case ..<1.15:  return "at cap pace"
-        case ..<1.75:  return "above cap pace"
-        default:       return String(format: "%.1f× cap pace", ratio)
-        }
+        return capPace > 0 ? slope / capPace : 0
+    }
+
+    /// "0.3×" / "1.8×" / "12×" — one decimal below ten, whole above.
+    static func multiple(_ ratio: Double) -> String {
+        ratio >= 10 ? String(format: "%.0f×", ratio) : String(format: "%.1f×", ratio)
     }
 
     /// Tooltip companion for `capPaceLabel` — the raw numbers, for anyone who
