@@ -135,6 +135,32 @@ enum IntelligenceFormatting {
         return "→ cap \(point)"
     }
 
+    /// Burn rate framed against **cap pace** — the rate that would exhaust
+    /// the window exactly at its reset (100% ÷ window length). Raw "%/hr"
+    /// means nothing without that denominator: +13%/hr is leisurely for a
+    /// 5-hour window (cap pace 20%/hr) and a blowout for a 7-day one
+    /// (cap pace ~0.6%/hr).
+    static func capPaceLabel(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String? {
+        let capPace = 100.0 / (windowSeconds / 3600)
+        guard capPace > 0 else { return nil }
+        let ratio = slope / capPace
+        switch ratio {
+        case ..<0.05:  return nil                       // effectively idle — say nothing
+        case ..<0.5:   return "well under cap pace"
+        case ..<0.9:   return "under cap pace"
+        case ..<1.15:  return "at cap pace"
+        case ..<1.75:  return "above cap pace"
+        default:       return String(format: "%.1f× cap pace", ratio)
+        }
+    }
+
+    /// Tooltip companion for `capPaceLabel` — the raw numbers, for anyone who
+    /// wants them.
+    static func capPaceHelp(slopePercentPerHour slope: Double, windowSeconds: TimeInterval) -> String {
+        let capPace = 100.0 / (windowSeconds / 3600)
+        return String(format: "burning %+.1f%%/hr · cap pace for this window is %.1f%%/hr", slope, capPace)
+    }
+
     static func dayPart(_ d: Date) -> String {
         switch Calendar.current.component(.hour, from: d) {
         case ..<12: return "morning"

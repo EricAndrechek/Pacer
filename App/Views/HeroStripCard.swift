@@ -37,25 +37,14 @@ struct HeroStripCard: View {
     init(onTodayTap: (() -> Void)? = nil) {
         self.onTodayTap = onTodayTap
         let todayString = TokenSample.formatDate(Date())
-        let weekAgoString = TokenSample.formatDate(
-            Calendar.current.date(byAdding: .day, value: -6, to: Date()) ?? Date()
-        )
         _todayAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == todayString }
-        )
-        _weekAggregates = Query(
-            filter: #Predicate<DailyAggregate> {
-                $0.date >= weekAgoString && $0.date <= todayString
-            }
         )
     }
 
     /// All today's per-model rollups. ≤ a handful of rows; iterating in
     /// body is sub-millisecond.
     @Query private var todayAggregates: [DailyAggregate]
-    /// Last 7 calendar days for the "vs avg" trend chip on the cost
-    /// tile. ≤ 50 rows.
-    @Query private var weekAggregates: [DailyAggregate]
     /// Recent rate-limit samples — used only for the *current state*
     /// snapshot per tile (used %, reset time). The burn projection itself
     /// now comes from the intelligence engine, which owns the history.
@@ -107,8 +96,6 @@ struct HeroStripCard: View {
     private struct Cached {
         var todayCost: Double = 0
         var todayTokens: Int64 = 0
-        var weekDeltaRatio: Double?
-        var weekDeltaActiveDays: Int = 0
         var fiveHour: SampleSnapshot?
         var sevenDay: SampleSnapshot?
         /// Latest `extra_usage` value in USD. nil when Anthropic
@@ -144,10 +131,6 @@ struct HeroStripCard: View {
         next.todayCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
         next.todayTokens = todayAggregates.reduce(0) {
             $0 + $1.inputTokens + $1.outputTokens
-        }
-        if let (ratio, activeDays) = computeWeekDelta() {
-            next.weekDeltaRatio = ratio
-            next.weekDeltaActiveDays = activeDays
         }
         if let s = rateLimits.first(where: { $0.window == "five_hour" }) {
             next.fiveHour = SampleSnapshot(
@@ -200,24 +183,6 @@ struct HeroStripCard: View {
         return nil
     }
 
-    private func computeWeekDelta() -> (ratio: Double, activeDays: Int)? {
-        let todayString = TokenSample.formatDate(Date())
-        var todayCost = 0.0
-        var priorByDate: [String: Double] = [:]
-        for r in weekAggregates {
-            if r.date == todayString {
-                todayCost += r.totalCostUSD
-            } else {
-                priorByDate[r.date, default: 0] += r.totalCostUSD
-            }
-        }
-        let active = priorByDate.values.filter { $0 > 0.01 }
-        guard !active.isEmpty else { return nil }
-        let avg = active.reduce(0, +) / Double(active.count)
-        guard avg > 0.01 else { return nil }
-        return (todayCost / avg, active.count)
-    }
-
     var body: some View {
         HStack(spacing: 12) {
             costTile
@@ -258,6 +223,9 @@ struct HeroStripCard: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                // One plain-language outlook line replaces the old "0.2×
+                // vs-week-average" chip — the pace phrase says the same
+                // thing against the user's own norms, in words.
                 if let outlook = todayOutlook {
                     Text(outlook.text)
                         .font(.system(size: 11, weight: .medium))
@@ -266,9 +234,6 @@ struct HeroStripCard: View {
                         .help(outlook.help)
                 }
                 HStack(spacing: 6) {
-                    if let ratio = cached.weekDeltaRatio {
-                        trendChip(ratio: ratio)
-                    }
                     if let extra = cached.extraUsageUSD, extra > 0 {
                         // Max-plan overage. Tint orange (significant but
                         // not catastrophic — at Anthropic's metered
@@ -335,20 +300,6 @@ struct HeroStripCard: View {
         }
     }
 
-    @ViewBuilder
-    private func trendChip(ratio: Double) -> some View {
-        let icon: String = ratio < 0.8 ? "arrow.down.right"
-            : ratio < 1.2 ? "equal"
-            : "arrow.up.right"
-        let tint: Color = ratio < 0.8 ? .green
-            : ratio < 1.5 ? .secondary
-            : .orange
-        let label: String = ratio >= 10 ? String(format: "%.0f×", ratio)
-            : String(format: "%.1f×", ratio)
-        Chip(text: label, systemImage: icon, tint: tint, size: .compact)
-            .fixedSize()
-    }
-
     // MARK: - Pace tile
 
     @ViewBuilder
@@ -395,7 +346,7 @@ struct HeroStripCard: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                        burnRow(burn)
+                        burnRow(burn, duration: duration)
                     }
                 }
             } else {
@@ -430,34 +381,36 @@ struct HeroStripCard: View {
         }
     }
 
-    /// Optional burn-rate row inside a pace tile. Renders only when the
-    /// engine produced an outlook with a positive recent slope.
-    /// When a limit hit is projected within the window (per the engine's
-    /// selected model — for 7d that's the diurnal shape, which knows the
-    /// overnight lull is coming), prefix with "→ limit at HH:MM"; otherwise
-    /// just the rate. Tint red when projecting a pre-reset hit.
+    /// Optional burn-outlook row inside a pace tile, in plain language:
+    /// the rate framed against **cap pace** (the rate that would exhaust the
+    /// window at its reset — raw "%/hr" means nothing without that
+    /// denominator), and the projected limit hit when the engine's selected
+    /// model sees one coming. Raw numbers live in the tooltip.
     @ViewBuilder
-    private func burnRow(_ projection: UsageIntelligenceEngine.BurnOutlook?) -> some View {
-        if let projection, projection.slopePercentPerHour > 0 {
-            let rateText = "+\(formatSlope(projection.slopePercentPerHour))%/hr"
+    private func burnRow(_ projection: UsageIntelligenceEngine.BurnOutlook?, duration: TimeInterval) -> some View {
+        let label = projection.flatMap {
+            IntelligenceFormatting.capPaceLabel(
+                slopePercentPerHour: $0.slopePercentPerHour, windowSeconds: duration)
+        }
+        if let projection, let label {
             HStack(spacing: 6) {
                 Image(systemName: "flame.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(projection.willHitLimitBeforeReset ? Color.red : Color.secondary)
                 if let projected = projection.projectedFullAt {
-                    Text("\(rateText) · limit \(pacerRelative(projected, style: .short))")
+                    Text("\(label) · limit \(pacerRelative(projected, style: .short))")
                         .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
                         .foregroundStyle(.red)
                         .lineLimit(1)
                 } else {
-                    Text(rateText)
+                    Text(label)
                         .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
+            .help(IntelligenceFormatting.capPaceHelp(
+                slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration))
         } else {
             // Empty placeholder of the same vertical footprint so the
             // tile height matches its sibling whose burn rate did
@@ -466,17 +419,6 @@ struct HeroStripCard: View {
             Text(" ")
                 .font(.system(size: 11))
                 .opacity(0)
-        }
-    }
-
-    /// Round burn-rate slope for display: integer when ≥10, one
-    /// decimal place otherwise. Avoids the "0.428%/hr" precision that
-    /// looks more authoritative than the linear extrapolation deserves.
-    private func formatSlope(_ pctPerHour: Double) -> String {
-        if pctPerHour >= 10 {
-            return String(format: "%.0f", pctPerHour)
-        } else {
-            return String(format: "%.1f", pctPerHour)
         }
     }
 

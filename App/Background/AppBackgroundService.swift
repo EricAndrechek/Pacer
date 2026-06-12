@@ -363,14 +363,35 @@ final class AppBackgroundService {
 
     /// Throttled engine refit. Posts `.pacerEngineDidRecompute` after a real
     /// recompute so every engine-consuming card refreshes exactly when fresh
-    /// answers exist — not speculatively on raw scan ticks.
+    /// answers exist — not speculatively on raw scan ticks. Also exports the
+    /// compact outlook snapshot the widgets read (they run out-of-process and
+    /// can't reach the engine actor).
     private func recomputeEngineIfDue(force: Bool = false) async {
         let now = Date()
         if !force, let last = lastEngineRecomputeAt,
            now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
         lastEngineRecomputeAt = now
         await engine.recompute(now: now)
+        await exportEngineSnapshot()
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+    }
+
+    /// Upsert the engine's outlook snapshot into `ClaudeCodeMeta` so the
+    /// widget process can draw the same trajectory + outlook the dashboard
+    /// shows.
+    private func exportEngineSnapshot() async {
+        guard let json = await engine.snapshot().encodedJSON() else { return }
+        let context = ModelContext(container)
+        let key = EngineSnapshot.metaKey
+        let descriptor = FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })
+        if let existing = try? context.fetch(descriptor).first {
+            guard existing.value != json else { return }
+            existing.value = json
+        } else {
+            context.insert(ClaudeCodeMeta(key: key, value: json))
+        }
+        try? context.save()
     }
 
     /// Run `GlobalRateLimitReset.detect` over recent OAuth samples for

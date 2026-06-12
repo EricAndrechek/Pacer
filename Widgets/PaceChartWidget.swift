@@ -94,12 +94,29 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             )
             descriptor.fetchLimit = 6000
             let rows = try context.fetch(descriptor)
-            let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds)
-            let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds)
+            // The engine's exported outlook (the app writes it after every
+            // refit): the same dashed trajectory + crossing the dashboard
+            // draws, so the widget matches instead of showing a bare line.
+            let snapshot = Self.engineSnapshot(context: context)
+            let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
+                                   outlook: snapshot?.fiveHour)
+            let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
+                                    outlook: snapshot?.sevenDay)
             return PaceChartEntry(date: Date(), fiveHour: five, sevenDay: seven, window: window)
         } catch {
             return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
         }
+    }
+
+    /// Read + decode the engine's outlook export. `nil` when absent or stale
+    /// (the app may not be running; an old projection is worse than none).
+    private static func engineSnapshot(context: ModelContext) -> EngineSnapshot? {
+        let key = EngineSnapshot.metaKey
+        let descriptor = FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })
+        guard let json = try? context.fetch(descriptor).first?.value,
+              let snapshot = EngineSnapshot.decode(json), snapshot.isFresh else { return nil }
+        return snapshot
     }
 
     /// Filter all samples to one window key and bucket the most-recent
@@ -109,7 +126,8 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     private static func window(
         rows: [RateLimitSample],
         key: String,
-        duration: TimeInterval
+        duration: TimeInterval,
+        outlook: EngineSnapshot.WindowOutlook? = nil
     ) -> PaceChartEntry.WindowState? {
         let windowRows = rows.filter { $0.window == key }
         guard let latest = windowRows.first, let resetsAt = latest.resetsAt else { return nil }
@@ -126,12 +144,28 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         if points.last?.time != tailTime {
             points.append(.init(time: tailTime, value: latest.usedPercentage))
         }
+        // Attach the engine's trajectory only when it belongs to THIS cycle
+        // (same reset, ±2 min) — a snapshot from a previous cycle would draw
+        // a nonsense overlay — and clip it to the chart's domain.
+        var projection: [PaceChartView.Data.Point]?
+        var crossing: Date?
+        if let outlook, abs(outlook.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
+            let pts = outlook.trajectory
+                .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
+                .filter { $0.time >= cycleStart && $0.time <= resetsAt }
+            if pts.count >= 2 {
+                projection = pts
+                crossing = outlook.crossingDate
+            }
+        }
         let chart = PaceChartView.Data(
             cycleStart: cycleStart,
             resetsAt: resetsAt,
             durationSeconds: duration,
             points: points,
-            usedPct: latest.usedPercentage
+            usedPct: latest.usedPercentage,
+            projection: projection,
+            projectionCrossesFullAt: crossing
         )
         return PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt)
     }

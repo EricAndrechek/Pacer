@@ -685,6 +685,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
                 DayKeyedContent {
                     MenuStatusContent()
                         .modelContainer(self.container)
+                        .environment(\.usageEngine, self.backgroundService.engine)
                 }
             )
         )
