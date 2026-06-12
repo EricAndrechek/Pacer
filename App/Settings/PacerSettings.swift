@@ -128,6 +128,8 @@ public enum PacerSettings {
         public static let notifyOnReset          = PacerPreferenceKeys.notifyOnReset
         public static let notifyGlobalReset      = PacerPreferenceKeys.notifyGlobalReset
         public static let notifyBurnRate         = PacerPreferenceKeys.notifyBurnRate
+        public static let notifyBurnRateRearm    = PacerPreferenceKeys.notifyBurnRateRearm
+        public static let burnRateImminentMinutes = PacerPreferenceKeys.burnRateImminentMinutes
         public static let notifyDailySummary     = PacerPreferenceKeys.notifyDailySummary
         public static let dailySummaryHour       = PacerPreferenceKeys.dailySummaryHour
         public static let costMode               = PacerPreferenceKeys.costMode
@@ -160,6 +162,8 @@ public enum PacerSettings {
         // having to find this toggle. Still gated by notificationsEnabled.
         Key.notifyGlobalReset:     true,
         Key.notifyBurnRate:        false,
+        Key.notifyBurnRateRearm:   true,
+        Key.burnRateImminentMinutes: 60,
         Key.notifyDailySummary:    false,
         Key.dailySummaryHour:      21,
         Key.costMode:              "auto",

@@ -46,11 +46,18 @@ public enum PacerPreferenceKeys {
     /// confirms the drop holds across several minutes of polling before
     /// firing so a transient blip doesn't trigger it. Opt-in.
     public static let notifyGlobalReset      = "pacer.notifications.globalReset"
-    /// Warn when the *rate* you're burning the 5-hour window will hit the
-    /// limit before it resets — i.e. on slope, not just the fixed-percent
-    /// level the threshold alerts use. Fires at most once per 5-hour cycle.
-    /// Opt-in.
+    /// Warn when the *rate* you're burning a window will hit the limit
+    /// before it resets — i.e. on slope, not just the fixed-percent level
+    /// the threshold alerts use. Tiered per cycle (heads-up → imminent) via
+    /// `BurnWarningPolicy`. Opt-in.
     public static let notifyBurnRate         = "pacer.notifications.burnRate"
+    /// Re-send the burn warning when the projected hit moves materially
+    /// earlier within the same cycle (`BurnWarningPolicy.rearmFraction`).
+    /// Default on — a projection that got dramatically worse is news.
+    public static let notifyBurnRateRearm    = "pacer.notifications.burnRateRearm"
+    /// Minutes-to-projected-hit below which the warning escalates to the
+    /// "imminent" tier (time-sensitive, second notification allowed).
+    public static let burnRateImminentMinutes = "pacer.notifications.burnRateImminentMinutes"
     /// Once-a-day "you spent X today" banner. Independent of the
     /// daily-cost ceiling above — that one fires when the threshold
     /// is exceeded; this one is purely informational at a chosen

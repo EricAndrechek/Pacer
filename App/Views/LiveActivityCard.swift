@@ -127,22 +127,14 @@ struct LiveActivityCard: View {
     @ViewBuilder private var projectionRow: some View {
         if let e = eodEstimate, !e.isInsufficient, let band = e.interval80,
            e.value >= todayCostSoFar * 0.98 {
-            VStack(alignment: .leading, spacing: 5) {
-                RangeBar(domain: projectionDomain(e),
-                         range: IntelligenceFormatting.outward(band),
-                         point: e.value,
-                         reference: (typical?.isInsufficient ?? true) ? nil : typical?.value)
-                    .help(rangeBarHelp)
-                if IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCostSoFar) {
-                    Text("today: \(IntelligenceFormatting.anchors(band))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("today's range — wide this early, tightens through the day")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            let shown = IntelligenceFormatting.outward(band)
+            RangeBar(domain: projectionDomain(e),
+                     range: shown,
+                     point: e.value,
+                     reference: (typical?.isInsufficient ?? true) ? nil : typical?.value,
+                     lowerLabel: pacerCost(max(shown.lowerBound, todayCostSoFar)),
+                     upperLabel: pacerCost(shown.upperBound))
+                .help(rangeBarHelp)
         }
     }
 
@@ -154,7 +146,7 @@ struct LiveActivityCard: View {
     }
 
     private var rangeBarHelp: String {
-        var s = "Today's projected total with its 80% range"
+        var s = "Today's likely range (80%), dot = projection"
         if let t = typical, !t.isInsufficient {
             s += " · tick = your typical \(Date().formatted(.dateTime.weekday(.wide))) (\(pacerCost(t.value)))"
         }
