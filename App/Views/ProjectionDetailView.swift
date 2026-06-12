@@ -181,8 +181,10 @@ struct ProjectionDetailView: View {
     /// Zoomed y-domain based on filtered actuals + all trajectories. The
     /// `dataMax + 12` cap keeps the 100% line out of frame when nothing
     /// comes near it, instead of always forcing a third of the plot empty.
+    /// Hard ceiling at 100 — utilization can't exceed it, and axis room
+    /// above 100% reads as if it could (Eric, 2026-06-12).
     private var yMax: Double {
-        min(105, max(25, min(dataMax * 1.3, dataMax + 12)))
+        min(100, max(25, min(dataMax * 1.3, dataMax + 12)))
     }
 
     /// Padding below the lowest visible value scales with the data's
@@ -484,7 +486,7 @@ struct ProjectionDetailView: View {
                     }
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
-                        Text("caps \(pacerRelative(crossAt, style: .short))")
+                        Text("limit \(pacerRelative(crossAt, style: .short))")
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
                     Text(st.medianAbsError.isFinite

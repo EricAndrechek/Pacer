@@ -379,7 +379,7 @@ struct MenuStatusContent: View {
     @Query private var todayAggregates: [DailyAggregate]
 
     /// Engine answers for the outlook touches: per-window crossing (the
-    /// trailing caption goes red "cap ~6 PM" when a pre-reset hit is
+    /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
     /// projected) and the fixed Outlook row (projection once actionable,
     /// pace-vs-normal before). Row COUNT stays constant — NSMenuItem.view
     /// is measured at attach time, so conditional rows would clip.
@@ -546,7 +546,7 @@ struct MenuStatusContent: View {
                     // when the engine sees one coming — same answer the
                     // dashboard tiles and the notification share.
                     if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
-                        Text("cap \(eta)")
+                        Text("limit \(eta)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                             .lineLimit(1)

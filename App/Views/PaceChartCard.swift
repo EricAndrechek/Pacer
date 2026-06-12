@@ -286,7 +286,7 @@ private struct PaceChartColumn: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.red)
                         .lineLimit(1)
-                        .help("Projected to reach the cap before this window resets, at your typical rhythm. A time range spans the engine's calibrated uncertainty about when; \"may cap\" means the reset could plausibly come first.")
+                        .help("Projected to reach 100% before this window resets, at your typical rhythm. A time range spans the engine's calibrated uncertainty about when; \"may\" means the reset could plausibly come first.")
                 } else if let e = endEstimate, !e.isInsufficient {
                     let band = e.interval80.map {
                         " · \(Int($0.lowerBound.rounded()))–\(Int($0.upperBound.rounded()))% range"

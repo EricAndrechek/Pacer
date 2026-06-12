@@ -110,6 +110,10 @@ struct HeroStripCard: View {
     /// never show an answer the engine hasn't computed yet.
     @State private var fiveHourBurn: UsageIntelligenceEngine.BurnOutlook?
     @State private var sevenDayBurn: UsageIntelligenceEngine.BurnOutlook?
+    /// Projected end-of-window utilization per window — what the burn chip
+    /// says when no pre-reset limit hit is projected ("≈52% at reset").
+    @State private var fiveHourEnd: Estimate?
+    @State private var sevenDayEnd: Estimate?
     /// End-of-day projection + pace percentile for the Today tile's outlook
     /// line ("≈$650 by tonight" once actionable; pace-vs-normal before that).
     @State private var todayEOD: Estimate?
@@ -160,6 +164,8 @@ struct HeroStripCard: View {
         guard let engine else { return }
         fiveHourBurn = await engine.burnOutlook(window: .fiveHour)
         sevenDayBurn = await engine.burnOutlook(window: .sevenDay)
+        fiveHourEnd = await engine.ask(.rateLimitOutlook(.fiveHour))
+        sevenDayEnd = await engine.ask(.rateLimitOutlook(.sevenDay))
         todayEOD = await engine.ask(.projectedCost(.today))
         let vsNow = await engine.ask(.paceVsNow)
         paceVsNow = vsNow.isInsufficient ? nil : vsNow.value
@@ -220,12 +226,14 @@ struct HeroStripCard: View {
                 label: "5-hour pace",
                 sample: cached.fiveHour,
                 burn: fiveHourBurn,
+                endEstimate: fiveHourEnd,
                 duration: 5 * 3600
             )
             paceTile(
                 label: "7-day pace",
                 sample: cached.sevenDay,
                 burn: sevenDayBurn,
+                endEstimate: sevenDayEnd,
                 duration: 7 * 86400
             )
         }
@@ -336,6 +344,7 @@ struct HeroStripCard: View {
         label: String,
         sample: SampleSnapshot?,
         burn: UsageIntelligenceEngine.BurnOutlook?,
+        endEstimate: Estimate?,
         duration: TimeInterval
     ) -> some View {
         HeroTile(label: label) {
@@ -375,7 +384,7 @@ struct HeroStripCard: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                        burnRow(burn, duration: duration)
+                        burnRow(burn, endEstimate: endEstimate, duration: duration)
                     }
                 }
             } else {
@@ -411,22 +420,22 @@ struct HeroStripCard: View {
     }
 
     /// Optional burn-outlook row inside a pace tile, rendered as a single
-    /// chip: semantic color (green/secondary/orange/red) + flame icon so the
-    /// user can see rate health without parsing the text. The projected limit
-    /// hit is appended inline when the engine sees one coming. Raw numbers
+    /// chip: semantic color (green/secondary/orange/red) + flame icon, and
+    /// text that says what *happens* rather than a rate ratio — "limit in
+    /// 7 hr" when a pre-reset hit is projected, "≈52% at reset" otherwise.
+    /// (The old "0.5× sustainable" framing read as jargon.) Raw %/hr numbers
     /// live in the tooltip.
     @ViewBuilder
-    private func burnRow(_ projection: UsageIntelligenceEngine.BurnOutlook?, duration: TimeInterval) -> some View {
-        let label = projection.flatMap {
-            IntelligenceFormatting.capPaceLabel(
-                slopePercentPerHour: $0.slopePercentPerHour, windowSeconds: duration)
-        }
-        if let projection, let label {
-            let chip = Self.burnChip(projection: projection, label: label, duration: duration)
+    private func burnRow(
+        _ projection: UsageIntelligenceEngine.BurnOutlook?,
+        endEstimate: Estimate?,
+        duration: TimeInterval
+    ) -> some View {
+        if let projection,
+           let chip = Self.burnChip(projection: projection, endEstimate: endEstimate, duration: duration) {
             Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
                 .fixedSize()
-                .help(IntelligenceFormatting.capPaceHelp(
-                    slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration))
+                .help(chip.help)
         } else {
             // Empty placeholder of the same vertical footprint so the
             // tile height matches its sibling whose burn rate did
@@ -438,21 +447,34 @@ struct HeroStripCard: View {
         }
     }
 
-    /// Chip text + tint for a burn outlook ("0.8× sustainable" green;
-    /// "1.6× sustainable · limit in 6 hr" red). Plain function because
-    /// branch-assignments don't belong in a ViewBuilder.
+    /// Chip text + tint + tooltip for a burn outlook. nil when effectively
+    /// idle (chip hidden). Plain function because branch-assignments don't
+    /// belong in a ViewBuilder.
     private static func burnChip(
-        projection: UsageIntelligenceEngine.BurnOutlook, label: String, duration: TimeInterval
-    ) -> (text: String, tint: Color) {
-        // Shorten "sustainable pace" → "sustainable" to fit the chip.
-        let shortLabel = label.replacingOccurrences(of: "sustainable pace", with: "sustainable")
-        if projection.willHitLimitBeforeReset,
-           let eta = IntelligenceFormatting.relativeCrossingPhrase(projection) {
-            return ("\(shortLabel) · limit \(eta)", .red)
-        }
+        projection: UsageIntelligenceEngine.BurnOutlook,
+        endEstimate: Estimate?,
+        duration: TimeInterval
+    ) -> (text: String, tint: Color, help: String)? {
         let ratio = IntelligenceFormatting.capPaceRatio(
             slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration)
-        return (shortLabel, ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange)
+        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
+        var help = IntelligenceFormatting.capPaceHelp(
+            slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration)
+        if projection.willHitLimitBeforeReset,
+           let eta = IntelligenceFormatting.relativeCrossingPhrase(projection) {
+            return ("limit \(eta)", .red, help)
+        }
+        let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
+        if let e = endEstimate, !e.isInsufficient {
+            if let band = e.interval80 {
+                help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
+                               band.lowerBound, band.upperBound)
+            }
+            return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
+        }
+        // No calibrated end estimate yet (young history): fall back to the
+        // raw rate, which at least is a real unit.
+        return (String(format: "%+.1f%%/hr", projection.slopePercentPerHour), tint, help)
     }
 
     @ViewBuilder

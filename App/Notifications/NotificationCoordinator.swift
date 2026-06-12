@@ -350,8 +350,8 @@ public final class NotificationCoordinator {
         // don't have. Imminent keeps the point: by then the range has
         // collapsed and "in 45 minutes" is the actionable fact.
         content.title = tier == .imminent
-            ? "\(label) cap imminent — projected \(Self.formatRelative(projectedFullAt))"
-            : "On pace to hit the \(label) cap \(IntelligenceFormatting.relativeCrossingPhrase(at: projectedFullAt, earliest: hitRangeEarliest, latest: hitRangeLatest) ?? Self.formatRelative(projectedFullAt))"
+            ? "\(label) limit imminent — projected \(Self.formatRelative(projectedFullAt))"
+            : "On pace to hit the \(label) limit \(IntelligenceFormatting.relativeCrossingPhrase(at: projectedFullAt, earliest: hitRangeEarliest, latest: hitRangeLatest) ?? Self.formatRelative(projectedFullAt))"
 
         // Body: the hit (with its plausible range when meaningfully tight),
         // the reset it beats, the current level, and the pace multiple.
@@ -367,7 +367,12 @@ public final class NotificationCoordinator {
         }
         var status = "You're at \(Int(usedPct.rounded()))%"
         if let ratio = capPaceRatio, ratio > 0.05 {
-            status += String(format: ", burning %.1f× the sustainable pace", ratio)
+            // Plain %/hr, not the "N× sustainable pace" jargon (Eric,
+            // 2026-06-12). Derive the rate from the ratio so this stays a
+            // pure function of what the caller already passes.
+            let windowHours = window == RateLimitWindowName.fiveHour ? 5.0 : 7.0 * 24
+            let slope = ratio * (100.0 / windowHours)
+            status += String(format: ", burning about %.1f%%/hr", slope)
         }
         parts.append(status + ".")
         content.body = parts.joined(separator: " — ").replacingOccurrences(of: " — You're", with: ". You're")
