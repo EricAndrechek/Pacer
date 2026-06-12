@@ -84,7 +84,10 @@ struct MonthlyForecastCard: View {
     var body: some View {
         PacerCard("This month") {
             if cached.hasAnyData {
-                content
+                VStack(alignment: .leading, spacing: 12) {
+                    content
+                    monthRangeBar
+                }
             } else {
                 Text("Not enough data yet — a projection appears once Pacer has seen some usage this month.")
                     .font(.callout)
@@ -138,6 +141,21 @@ struct MonthlyForecastCard: View {
     private var projectedValueText: String {
         guard let p = projection, !p.isInsufficient else { return "—" }
         return pacerCost(p.value)
+    }
+
+    /// The month projection in context: track spans zero → just past the
+    /// band; tick = spent so far (how much of the projection is already
+    /// banked); segment = the calibrated 80% range; marker = the projection.
+    @ViewBuilder private var monthRangeBar: some View {
+        if let p = projection, !p.isInsufficient, let band = p.interval80,
+           p.value >= cached.monthSoFar * 0.98 {
+            let hi = max(band.upperBound * 1.05, p.value * 1.15)
+            RangeBar(domain: 0...max(hi, 1),
+                     range: IntelligenceFormatting.outward(band),
+                     point: p.value,
+                     reference: cached.monthSoFar)
+                .help("Projected month total with its 80% range · tick = spent so far (\(pacerCost(cached.monthSoFar)))")
+        }
     }
 
     /// "likely $8.4k–$12k" — the calibrated range, outward-rounded, as the

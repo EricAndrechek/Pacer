@@ -117,23 +117,31 @@ struct LiveActivityCard: View {
         return "likely \(pacerCost(max(band.lowerBound, todayCostSoFar)))–\(pacerCost(band.upperBound))"
     }
 
-    /// Once the range is decision-useful: the projection in the context of
-    /// the user's own typical range — a Weather-style range bar (calibrated
-    /// 80% band as the segment, point marker, tick at the typical day) with
-    /// the asymmetric anchors beneath. Hidden while it's still early; the
-    /// projected-EOD tile's "early read" hint carries that state.
+    /// The projection in the context of the user's own typical range — a
+    /// Weather-style range bar (calibrated 80% band as the segment, point
+    /// marker, tick at the typical day). The bar itself shows whenever a
+    /// consistent band exists — a *wide* segment honestly communicates "still
+    /// uncertain" at a glance, which words can't do as gently. Only the
+    /// dollar-anchors caption is gated to when the range is decision-useful;
+    /// before that the caption says what the width means instead.
     @ViewBuilder private var projectionRow: some View {
-        if let e = eodEstimate, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCostSoFar),
-           let band = e.interval80 {
+        if let e = eodEstimate, !e.isInsufficient, let band = e.interval80,
+           e.value >= todayCostSoFar * 0.98 {
             VStack(alignment: .leading, spacing: 5) {
                 RangeBar(domain: projectionDomain(e),
                          range: IntelligenceFormatting.outward(band),
                          point: e.value,
                          reference: (typical?.isInsufficient ?? true) ? nil : typical?.value)
                     .help(rangeBarHelp)
-                Text("today: \(IntelligenceFormatting.anchors(band))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCostSoFar) {
+                    Text("today: \(IntelligenceFormatting.anchors(band))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("today's range — wide this early, tightens through the day")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

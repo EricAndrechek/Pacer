@@ -378,6 +378,28 @@ struct MenuStatusContent: View {
     private var rateLimits: [RateLimitSample]
     @Query private var todayAggregates: [DailyAggregate]
 
+    /// Engine answers for the outlook touches: per-window crossing (the
+    /// trailing caption goes red "cap ~6 PM" when a pre-reset hit is
+    /// projected) and the fixed Outlook row (projection once actionable,
+    /// pace-vs-normal before). Row COUNT stays constant — NSMenuItem.view
+    /// is measured at attach time, so conditional rows would clip.
+    @Environment(\.usageEngine) private var engine
+    @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+    @State private var todayEOD: Estimate?
+    @State private var pacePercentile: Double?
+
+    private func refreshEngine() async {
+        guard let engine else { return }
+        var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+        for w in RateLimitWindowKind.allCases {
+            if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+        }
+        outlooks = next
+        todayEOD = await engine.ask(.projectedCost(.today))
+        let pace = await engine.ask(.pace)
+        pacePercentile = pace.isInsufficient ? nil : pace.value
+    }
+
     private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
@@ -414,8 +436,10 @@ struct MenuStatusContent: View {
         // matches typical Apple status menu widths (Wi-Fi ~280pt,
         // Battery ~260pt).
         VStack(alignment: .leading, spacing: 4) {
-            paceRow(label: "5-HOUR", sample: fiveHour, duration: 5 * 3600)
-            paceRow(label: "7-DAY", sample: sevenDay, duration: 7 * 86400)
+            paceRow(label: "5-HOUR", sample: fiveHour, duration: 5 * 3600,
+                    outlook: outlooks[RateLimitWindowName.fiveHour])
+            paceRow(label: "7-DAY", sample: sevenDay, duration: 7 * 86400,
+                    outlook: outlooks[RateLimitWindowName.sevenDay])
             // Native NSMenu items don't have inset separators; ours
             // here is a SwiftUI Divider that runs the content width —
             // close enough that the eye doesn't catch it as "off."
@@ -423,14 +447,48 @@ struct MenuStatusContent: View {
                 .padding(.vertical, 4)
             todayValueRow(label: "Today", value: pacerCost(todayCost), tooltip: pacerCostExact(todayCost))
             todayValueRow(label: "Tokens", value: pacerTokens(todayTokens), tooltip: "\(pacerTokensExact(todayTokens)) tokens")
+            outlookRow
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .frame(width: 280, alignment: .leading)
+        .task { await refreshEngine() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            Task { await refreshEngine() }
+        }
+    }
+
+    /// Fixed Outlook row, same language as the dashboard's Today tile:
+    /// "≈$650 by tonight" once the range is actionable, the pace phrase
+    /// before that, an em dash while warming up (constant row count).
+    @ViewBuilder private var outlookRow: some View {
+        let value: String = {
+            if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCost) {
+                return "≈\(IntelligenceFormatting.approxCost(e.value)) by tonight"
+            }
+            if let p = pacePercentile {
+                return IntelligenceFormatting.paceLabel(
+                    index: IntelligenceFormatting.ladderIndex(p),
+                    dayName: Date().formatted(.dateTime.weekday(.wide)))
+            }
+            return "—"
+        }()
+        HStack(spacing: 8) {
+            Text("Outlook")
+                .font(.system(size: 12))
+                .foregroundStyle(.primary)
+                .frame(width: 48, alignment: .leading)
+            Spacer()
+            Text(value)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 
     @ViewBuilder
-    private func paceRow(label: String, sample: RateLimitSample?, duration: TimeInterval) -> some View {
+    private func paceRow(label: String, sample: RateLimitSample?, duration: TimeInterval,
+                         outlook: UsageIntelligenceEngine.BurnOutlook? = nil) -> some View {
         HStack(spacing: 8) {
             Text(label)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -484,10 +542,20 @@ struct MenuStatusContent: View {
 
                     Spacer(minLength: 4)
 
-                    Text("resets \(pacerRelative(resets, style: .short))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    // The trailing caption escalates to the projected cap hit
+                    // when the engine sees one coming — same answer the
+                    // dashboard tiles and the notification share.
+                    if let hit = outlook?.projectedFullAt {
+                        Text("cap \(pacerRelative(hit, style: .short))")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.red)
+                            .lineLimit(1)
+                    } else {
+                        Text("resets \(pacerRelative(resets, style: .short))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             } else {
                 Text("collecting…")

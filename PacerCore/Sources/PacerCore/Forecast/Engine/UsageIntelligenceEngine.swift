@@ -459,6 +459,32 @@ public actor UsageIntelligenceEngine {
         return rf.calibrators[key] ?? rf.calibrators["pooled"]
     }
 
+    /// The compact outlook export the widgets read (they can't reach this
+    /// actor from their process). Trajectories downsampled to ≤24 points and
+    /// already truncated at the crossing.
+    public func snapshot() -> EngineSnapshot {
+        func windowOutlook(_ window: RateLimitWindowKind) -> EngineSnapshot.WindowOutlook? {
+            guard let f = features, let o = Self.burnOutlook(f, fit, window: window) else { return nil }
+            let end = Self.rateLimitOutlook(f, fit, window: window)
+            let selected = Self.rateLimitTrajectories(f, fit, window: window, accuracy: nil, sampleCount: 24)
+                .first { $0.isSelected }
+            return EngineSnapshot.WindowOutlook(
+                usedPct: o.usedPct,
+                endPct: end.isInsufficient ? nil : end.value,
+                endLoPct: end.interval80?.lowerBound,
+                endHiPct: end.interval80?.upperBound,
+                crossingUnix: o.projectedFullAt?.timeIntervalSince1970,
+                resetsUnix: o.resetsAt.timeIntervalSince1970,
+                trajectory: (selected?.trajectory.points ?? []).map {
+                    .init(t: $0.at.timeIntervalSince1970, v: $0.usedPercentage)
+                })
+        }
+        return EngineSnapshot(
+            generatedUnix: Date().timeIntervalSince1970,
+            fiveHour: windowOutlook(.fiveHour),
+            sevenDay: windowOutlook(.sevenDay))
+    }
+
     /// Every candidate model's forward trajectory for a window's current cycle,
     /// paired with its realized accuracy from the persisted per-user record and
     /// flagged with the engine's selection — one source of truth for the pace
@@ -486,11 +512,6 @@ public actor UsageIntelligenceEngine {
         }
         return rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
             guard let projection = model.fit(current) else { return nil }
-            var points: [BurnTrajectory.Sample] = []
-            for i in 0...sampleCount {
-                let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
-                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date)))))
-            }
             // Crossing walked at the 5-minute sampling cadence — same walk as
             // `burnOutlook`, so the chart's marker and the tile's ETA agree.
             var crossing: Date?
@@ -500,6 +521,18 @@ public actor UsageIntelligenceEngine {
                     if projection(t) >= 100 { crossing = t; break }
                     t = t.addingTimeInterval(5 * 60)
                 }
+            }
+            // The trajectory ENDS at the crossing: a dashed line pinned at
+            // 100% for the rest of the window is noise — the curve already
+            // said everything at the moment it touched the cap.
+            var points: [BurnTrajectory.Sample] = []
+            for i in 0...sampleCount {
+                let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+                if let crossing, date >= crossing {
+                    points.append(.init(at: crossing, usedPercentage: 100))
+                    break
+                }
+                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date)))))
             }
             let stat = statFor(model.id)
             return BurnTrajectory.ScoredTrajectory(

@@ -38,20 +38,32 @@ struct ProjectionDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text(title).font(.title3.weight(.semibold))
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.title3.weight(.semibold))
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             chart.frame(height: 240)
             accuracyTable
-            Text("Projections are fit on this cycle so far. “Fit error” is each model’s median absolute error (percentage points) against the realized final of your completed cycles — lower is better; the selected model is what the dashboard draws.")
+            Text("Every candidate is fit on this cycle so far; solid is what actually happened, dashed is each model's projection (it stops where it would reach the cap). Accuracy is each model's median miss against the realized final of your completed cycles — the highlighted model is what the dashboard draws, picked from that record.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(24)
         .frame(width: 620)
+    }
+
+    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
+    private var subtitle: String {
+        let used = actual.last.map { "\(Int($0.value.rounded()))% used" } ?? ""
+        let resets = "resets \(resetsAt.formatted(.dateTime.weekday(.abbreviated).hour()))"
+        return [used, resets].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private var chart: some View {
@@ -117,8 +129,8 @@ struct ProjectionDetailView: View {
     }
 
     private var accuracyTable: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(ranked) { st in
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
                 HStack(spacing: 10) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(color(st.modelId))
@@ -126,19 +138,33 @@ struct ProjectionDetailView: View {
                     Text(BurnTrajectory.displayName(st.modelId))
                         .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
                     if st.isSelected {
-                        Text("selected").font(.system(size: 10, weight: .semibold))
+                        Text("on the dashboard").font(.system(size: 10, weight: .semibold))
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(Capsule().fill(color(st.modelId).opacity(0.18)))
                             .foregroundStyle(color(st.modelId))
                     }
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
-                        Text("hits 100% \(pacerRelative(crossAt, style: .short))")
-                            .font(.system(size: 11)).foregroundStyle(.red.opacity(0.8))
+                        Text("caps \(pacerRelative(crossAt, style: .short))")
+                            .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
-                    Text(st.medianAbsError.isFinite ? String(format: "fit ±%.1f pp", st.medianAbsError) : "no history yet")
+                    Text(st.medianAbsError.isFinite
+                         ? String(format: "typically ±%.0f pts off", st.medianAbsError)
+                         : "no track record yet")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .help("Median miss vs the realized final across your completed cycles")
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 10)
+                .background(
+                    st.isSelected
+                        ? RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(color(st.modelId).opacity(0.07))
+                        : nil
+                )
+                if idx != ranked.indices.last {
+                    Divider().opacity(0.25).padding(.leading, 34)
                 }
             }
         }

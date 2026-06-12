@@ -261,7 +261,6 @@ private struct PaceChartColumn: View {
             heroLine
             chartSlot
             outlookLines
-            compareButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onHover { hovering = $0 }
@@ -304,18 +303,22 @@ private struct PaceChartColumn: View {
         }
     }
 
-    /// "Compare models" — opens the all-models projection detail. Shown only
-    /// when there's an active cycle with a chart to compare against.
+    /// "Compare models" — opens the all-models projection detail. Lives in
+    /// the column header next to the share button, hover-revealed (the
+    /// Linear/Things idiom): the affordance is there when you reach for it,
+    /// invisible when you're just reading the chart.
     @ViewBuilder
     private var compareButton: some View {
-        if cycle?.isAwaiting == false, chartData != nil {
+        if cycle?.isAwaiting == false, chartData != nil, !trajectories.isEmpty {
             Button { showingDetail = true } label: {
-                Label("Compare models", systemImage: "chart.xyaxis.line")
-                    .font(.system(size: 10, weight: .medium))
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("See every forecast model's projection and its fit accuracy")
+            .help("Compare every forecast model's projection and its accuracy on your cycles")
+            .opacity(hovering || sharing || showingDetail ? 1 : 0)
         }
     }
 
@@ -414,6 +417,7 @@ private struct PaceChartColumn: View {
         HStack(spacing: 8) {
             Eyebrow(text: title)
             Spacer(minLength: 8)
+            compareButton
             shareButton
             caption
         }
