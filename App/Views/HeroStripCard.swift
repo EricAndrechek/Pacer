@@ -118,11 +118,17 @@ struct HeroStripCard: View {
         var extraUsageUSD: Double?
     }
 
-    /// Engine-produced burn outlooks per tile, refreshed when the engine
-    /// posts a fresh fit (`.pacerEngineDidRecompute`) — not on raw scan ticks,
-    /// so the tile never shows an answer the engine hasn't computed yet.
+    /// Engine-produced answers, refreshed when the engine posts a fresh fit
+    /// (`.pacerEngineDidRecompute`) — not on raw scan ticks, so the tiles
+    /// never show an answer the engine hasn't computed yet.
     @State private var fiveHourBurn: UsageIntelligenceEngine.BurnOutlook?
     @State private var sevenDayBurn: UsageIntelligenceEngine.BurnOutlook?
+    /// End-of-day projection + pace percentile for the Today tile's outlook
+    /// line ("≈$650 by tonight" once actionable; pace-vs-normal before that).
+    @State private var todayEOD: Estimate?
+    @State private var pacePercentile: Double?
+    /// Pace-ladder hysteresis (the label can't flap intra-day).
+    @State private var heldLadder: Int?
 
     /// Sendable extract of the rate-limit row's display-relevant fields.
     /// SwiftData @Model classes aren't Sendable, so we copy what we
@@ -163,11 +169,35 @@ struct HeroStripCard: View {
         cached = next
     }
 
-    /// Re-ask the engine for both windows' burn outlooks.
+    /// Re-ask the engine for both windows' burn outlooks + today's outlook.
     private func refreshBurn() async {
         guard let engine else { return }
         fiveHourBurn = await engine.burnOutlook(window: .fiveHour)
         sevenDayBurn = await engine.burnOutlook(window: .sevenDay)
+        todayEOD = await engine.ask(.projectedCost(.today))
+        let pace = await engine.ask(.pace)
+        pacePercentile = pace.isInsufficient ? nil : pace.value
+        if let p = pacePercentile {
+            heldLadder = IntelligenceFormatting.heldIndex(p, held: heldLadder)
+        }
+    }
+
+    /// The Today tile's one-line outlook. Evening (range actionable):
+    /// "≈$650 by tonight" with the asymmetric anchors in the tooltip.
+    /// Earlier: the pace-vs-your-normal phrase — the signal that IS
+    /// supported early, instead of a not-yet-useful dollar range.
+    private var todayOutlook: (text: String, help: String)? {
+        if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: cached.todayCost) {
+            let help = e.interval80.map { IntelligenceFormatting.anchors($0) } ?? pacerCostExact(e.value)
+            return ("≈\(IntelligenceFormatting.approxCost(e.value)) by tonight", help)
+        }
+        if let p = pacePercentile {
+            let label = IntelligenceFormatting.paceLabel(
+                index: IntelligenceFormatting.heldIndex(p, held: heldLadder),
+                dayName: Date().formatted(.dateTime.weekday(.wide)))
+            return (label, "Today's projected total sits at the \(Int((p * 100).rounded()))th percentile of your days")
+        }
+        return nil
     }
 
     private func computeWeekDelta() -> (ratio: Double, activeDays: Int)? {
@@ -228,6 +258,13 @@ struct HeroStripCard: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                if let outlook = todayOutlook {
+                    Text(outlook.text)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(outlook.help)
+                }
                 HStack(spacing: 6) {
                     if let ratio = cached.weekDeltaRatio {
                         trendChip(ratio: ratio)

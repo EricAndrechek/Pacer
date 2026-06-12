@@ -31,12 +31,16 @@ struct LiveActivityCard: View {
     /// dashboard after a break. fetchLimit=1 keeps it cheap.
     @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
 
-    /// The shared intelligence engine — owns the end-of-day projection (the
-    /// per-user clock↔shape router with its idle gate), so this card no longer
-    /// learns its own hour-of-day profile.
+    /// The shared intelligence engine — owns the end-of-day projection, so
+    /// this card no longer learns its own hour-of-day profile.
     @Environment(\.usageEngine) private var engine
-    /// Engine's end-of-day estimate, refreshed when the engine refits.
+    /// Engine answers, refreshed when the engine refits: the projection, the
+    /// typical-day band (the range bar's reference tick), and the engine's
+    /// earned evening accuracy (the footer).
     @State private var eodEstimate: Estimate?
+    @State private var typical: Estimate?
+    @State private var record: UsageIntelligenceEngine.TrackRecord?
+    @State private var trainingDays = 0
 
     init() {
         // Two-hour window covers the current hour bucket plus the
@@ -92,10 +96,13 @@ struct LiveActivityCard: View {
         )
     }()
 
-    /// Re-ask the engine for the end-of-day estimate.
+    /// Re-ask the engine for the end-of-day answers.
     private func refreshEOD() async {
         guard let engine else { return }
         eodEstimate = await engine.ask(.projectedCost(.today))
+        typical = await engine.ask(.typicalUsage)
+        record = await engine.eveningTrackRecord()
+        trainingDays = await engine.trainingDayCount()
     }
 
     /// Hint under the projected-EOD tile: the calibrated range when it's
@@ -104,9 +111,56 @@ struct LiveActivityCard: View {
     private var eodHint: String? {
         guard let e = eodEstimate, !e.isInsufficient else { return "if rate holds" }
         guard let band = e.interval80, e.value > 0 else { return nil }
-        let widthRatio = (band.upperBound - band.lowerBound) / e.value
-        guard widthRatio <= 2.5 else { return "early read — wide range" }
-        return "likely \(pacerCost(band.lowerBound))–\(pacerCost(band.upperBound))"
+        guard IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCostSoFar) else {
+            return "early read — wide range"
+        }
+        return "likely \(pacerCost(max(band.lowerBound, todayCostSoFar)))–\(pacerCost(band.upperBound))"
+    }
+
+    /// Once the range is decision-useful: the projection in the context of
+    /// the user's own typical range — a Weather-style range bar (calibrated
+    /// 80% band as the segment, point marker, tick at the typical day) with
+    /// the asymmetric anchors beneath. Hidden while it's still early; the
+    /// projected-EOD tile's "early read" hint carries that state.
+    @ViewBuilder private var projectionRow: some View {
+        if let e = eodEstimate, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: todayCostSoFar),
+           let band = e.interval80 {
+            VStack(alignment: .leading, spacing: 5) {
+                RangeBar(domain: projectionDomain(e),
+                         range: IntelligenceFormatting.outward(band),
+                         point: e.value,
+                         reference: (typical?.isInsufficient ?? true) ? nil : typical?.value)
+                    .help(rangeBarHelp)
+                Text("today: \(IntelligenceFormatting.anchors(band))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func projectionDomain(_ e: Estimate) -> ClosedRange<Double> {
+        var hi = e.value * 1.2
+        if let band = e.interval80 { hi = max(hi, band.upperBound * 1.05) }
+        if let t = typical, !t.isInsufficient, let t80 = t.interval80 { hi = max(hi, t80.upperBound) }
+        return 0...max(hi, 1)
+    }
+
+    private var rangeBarHelp: String {
+        var s = "Today's projected total with its 80% range"
+        if let t = typical, !t.isInsufficient {
+            s += " · tick = your typical \(Date().formatted(.dateTime.weekday(.wide))) (\(pacerCost(t.value)))"
+        }
+        return s
+    }
+
+    /// The engine's earned accuracy, in plain frequency terms — only shown
+    /// once there's a real track record.
+    @ViewBuilder private var accuracyFooter: some View {
+        if let r = record {
+            Text("Evening projections have landed within ~\(Int(r.medianAbsPctError.rounded()))% for you · \(r.days) days scored")
+        } else if trainingDays > 0 && eodEstimate != nil {
+            Text("Projection still calibrating — \(trainingDays) days observed")
+        }
     }
 
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
@@ -163,7 +217,9 @@ struct LiveActivityCard: View {
     /// "(last-hour rate) × (hours left)" only when the engine can't answer
     /// yet (cold start, no spend today).
     private func projectedEndOfDay(stats: LiveStats) -> Double {
-        if let e = eodEstimate, !e.isInsufficient { return e.value }
+        // Floor at spend-so-far: the engine refits up to ~20s behind the live
+        // rollup, and a projection below money already displayed reads broken.
+        if let e = eodEstimate, !e.isInsufficient { return max(e.value, todayCostSoFar) }
         let now = Date()
         let endOfDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: now) ?? now
         let hoursLeft = max(0, endOfDay.timeIntervalSince(now) / 3600.0)
@@ -176,8 +232,13 @@ struct LiveActivityCard: View {
             if s.sampleCount == 0 {
                 emptyState
             } else {
-                metricGrid(stats: s)
+                VStack(alignment: .leading, spacing: 12) {
+                    metricGrid(stats: s)
+                    projectionRow
+                }
             }
+        } footer: {
+            accuracyFooter
         }
         // The pricing cache needs an explicit reload when the user
         // toggles cost mode — `effectiveCostUSD` reads it. Body re-eval
