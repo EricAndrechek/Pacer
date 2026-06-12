@@ -13,14 +13,19 @@ struct PaceChartCard: View {
     /// — pre-bucketed by window in `bucketed` so neither column does
     /// its own filter pass.
     @Query private var samples: [RateLimitSample]
-    @Query(PaceChartCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    /// Completed-cycle model verdicts — the self-improving scoreboard that
-    /// biases which fit is selected. Small table; no predicate needed.
-    @Query private var outcomes: [ForecastModelOutcome]
 
-    /// Forecast trajectory per window, recomputed on the scan tick (the
-    /// backtest is cheap but not per-render cheap). Keyed by window string.
+    /// The shared intelligence engine — single source of the forecast
+    /// trajectories (the dashed overlay AND the compare-models sheet), with
+    /// each model's accuracy coming from the engine's persisted per-user
+    /// track record.
+    @Environment(\.usageEngine) private var engine
+
+    /// Forecast trajectory per window, refreshed when the engine refits.
+    /// Keyed by window string.
     @State private var projections: [String: WindowProjection] = [:]
+    /// Every candidate model's trajectory per window (selected one flagged),
+    /// for the compare-models sheet. Same engine call as `projections`.
+    @State private var allTrajectories: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
 
     struct WindowProjection: Equatable {
         var points: [PaceChartView.Data.Point]
@@ -36,47 +41,24 @@ struct PaceChartCard: View {
         )
     }
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }()
-
-    /// Backtest-select a curve fit per window and sample its forward
-    /// trajectory. Cheap fits, but the backtest loops past cycles — so it runs
-    /// on the scan tick, not every render.
-    private func refreshProjections() {
-        let now = Date()
-        var next: [String: WindowProjection] = [:]
-        for (window, duration) in [(RateLimitWindowName.fiveHour, 5.0 * 3600),
-                                    (RateLimitWindowName.sevenDay, 7.0 * 86400)] {
-            let tuples = samples.compactMap { s -> (at: Date, usedPercentage: Double, resetsAt: Date)? in
-                guard s.window == window, let resets = s.resetsAt else { return nil }
-                return (s.sampledAt, s.usedPercentage, resets)
+    /// Re-ask the engine for both windows' trajectories. One call powers both
+    /// the overlay (selected model) and the detail sheet (all models).
+    private func refreshProjections() async {
+        guard let engine else { return }
+        var nextSelected: [String: WindowProjection] = [:]
+        var nextAll: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
+        for window in RateLimitWindowKind.allCases {
+            let list = await engine.rateLimitTrajectories(window: window)
+            guard !list.isEmpty else { continue }
+            nextAll[window.rawValue] = list
+            if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
+                nextSelected[window.rawValue] = WindowProjection(
+                    points: chosen.trajectory.points.map { .init(time: $0.at, value: $0.usedPercentage) },
+                    crossesFullAt: chosen.trajectory.crossesFullAt)
             }
-            let (current, history) = BurnTrajectory.segment(samples: tuples, duration: duration, now: now)
-            guard let current,
-                  let traj = BurnTrajectory.bestTrajectory(
-                    current: current, history: history, priorScores: priorScores(for: window))
-            else { continue }
-            next[window] = WindowProjection(
-                points: traj.points.map { .init(time: $0.at, value: $0.usedPercentage) },
-                crossesFullAt: traj.crossesFullAt)
         }
-        projections = next
-    }
-
-    /// Scoreboard-derived scores for a window from accumulated completed-cycle
-    /// outcomes. Empty until enough cycles finish — selection then falls back
-    /// to the on-the-fly backtest.
-    func priorScores(for window: String) -> [Backtester.Score] {
-        let records = outcomes
-            .filter { $0.window == window }
-            .map { ForecastScoreboard.Record(
-                window: $0.window, modelId: $0.modelId,
-                meanAbsError: $0.meanAbsError, convergenceFraction: $0.convergenceFraction) }
-        return ForecastScoreboard.scores(for: window, records: records)
+        projections = nextSelected
+        allTrajectories = nextAll
     }
 
     private struct Bucketed {
@@ -111,7 +93,7 @@ struct PaceChartCard: View {
                         duration: 5 * 3600,
                         windowSamples: b.fiveHour,
                         projection: projections[RateLimitWindowName.fiveHour],
-                        priorScores: priorScores(for: RateLimitWindowName.fiveHour)
+                        trajectories: allTrajectories[RateLimitWindowName.fiveHour] ?? []
                     )
                     Divider()
                         .frame(height: 110)
@@ -120,13 +102,15 @@ struct PaceChartCard: View {
                         duration: 7 * 86400,
                         windowSamples: b.sevenDay,
                         projection: projections[RateLimitWindowName.sevenDay],
-                        priorScores: priorScores(for: RateLimitWindowName.sevenDay)
+                        trajectories: allTrajectories[RateLimitWindowName.sevenDay] ?? []
                     )
                 }
             }
         }
-        .onAppear { refreshProjections() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshProjections() }
+        .task { await refreshProjections() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            Task { await refreshProjections() }
+        }
     }
 
     @ViewBuilder
@@ -187,8 +171,9 @@ private struct PaceChartColumn: View {
     /// Forecast trajectory for this window (nil when unavailable). Drawn only
     /// on the live dashboard chart — deliberately not on the shared image.
     var projection: PaceChartCard.WindowProjection?
-    /// Scoreboard scores for this window (feeds the detail view's selection).
-    var priorScores: [Backtester.Score] = []
+    /// Every candidate model's trajectory + realized accuracy (engine-sourced),
+    /// for the compare-models detail sheet.
+    var trajectories: [BurnTrajectory.ScoredTrajectory] = []
 
     /// Share affordance state. `hovering` reveals the share button only
     /// while the cursor is over the column (Linear/Things idiom, keeps
@@ -278,25 +263,18 @@ private struct PaceChartColumn: View {
         }
     }
 
-    /// Builds the detail sheet on demand: fit all candidate models to the
-    /// current cycle and score them against past cycles.
+    /// The compare-models detail sheet — every candidate's trajectory with its
+    /// realized accuracy, straight from the engine's persisted track record.
     @ViewBuilder
     private var detailSheet: some View {
-        let now = Date()
-        let tuples = windowSamples.compactMap { s -> (at: Date, usedPercentage: Double, resetsAt: Date)? in
-            guard let resets = s.resetsAt else { return nil }
-            return (s.sampledAt, s.usedPercentage, resets)
-        }
-        let segmented = BurnTrajectory.segment(samples: tuples, duration: duration, now: now)
-        if let current = segmented.current, let data = chartData {
+        if !trajectories.isEmpty, let data = chartData {
             ProjectionDetailView(
                 title: "\(title) projection",
                 cycleStart: data.cycleStart,
                 resetsAt: data.resetsAt,
                 durationSeconds: duration,
                 actual: data.points,
-                trajectories: BurnTrajectory.allTrajectories(
-                    current: current, history: segmented.history, priorScores: priorScores))
+                trajectories: trajectories)
         } else {
             Text("Not enough data to compare models yet.").padding(40)
         }

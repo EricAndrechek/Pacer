@@ -24,6 +24,15 @@ public extension Notification.Name {
     static let pacerScanCycleDidComplete = Notification.Name(
         "com.ericandrechek.pacer.scanCycleDidComplete"
     )
+
+    /// The intelligence engine finished a refit and has fresh answers.
+    /// Engine-consuming cards refresh on THIS (not on raw scan ticks) so they
+    /// re-ask exactly when the answers changed — never one tick stale, never
+    /// speculatively. Posted on the main queue by the background service after
+    /// every (throttled) `UsageIntelligenceEngine.recompute`.
+    static let pacerEngineDidRecompute = Notification.Name(
+        "com.ericandrechek.pacer.engineDidRecompute"
+    )
 }
 
 /// What changed in one scan cycle, from the perspective of UI surfaces
