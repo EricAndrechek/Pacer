@@ -21,15 +21,26 @@ import Foundation
 public enum EngineSelfEval {
 
     public static let surfaceEOD = "eod"
-    /// Candidate ids compared on the end-of-day surface.
-    static let clockId = "average-rate"
-    static let shapeId = "regime-gated-eod"
+    /// The end-of-day candidate roster: clock-linear (the strong simple
+    /// baseline), the learned hour-of-day shape, and the additive pickup.
+    public static var eodCandidates: [any Forecaster] {
+        [AverageRateForecaster(), RegimeGatedEOD(), PickupForecaster()]
+    }
     /// Cut fractions (early morning → late evening) the experts are scored at.
     public static let cutFractions = [0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
-    /// Selection bar — applied to each user's *own* accumulated record.
-    static let minShared = 10
-    static let minCoverage = 0.6
-    static let minWinFraction = 0.6
+    /// Pool-trimming bar — applied to each user's *own* accumulated record.
+    /// A method joins a cut's pool when its per-cut median APE is within
+    /// `poolTolerance` (relative) of the best method's, with at least
+    /// `poolMinPeriods` scored days behind it.
+    static let poolTolerance = 1.25
+    static let poolMinPeriods = 10
+    /// Selection looks at only the most recent scored days per cut — drift
+    /// insurance. Validated on the real store: with the all-time record the
+    /// hour-of-day shape (strong in the first weeks, weak in the current
+    /// month's regime) re-entered the morning pools and dragged the median;
+    /// a trailing window keeps selection tracking the regime the user is IN,
+    /// while the all-time record still powers the accuracy display.
+    static let poolRecencyWindow = 30
 
     // MARK: - Decoupled value types (SwiftData-free)
 
@@ -68,7 +79,7 @@ public enum EngineSelfEval {
         periods: [ForecastInput.PriorPeriod],
         calendar: Calendar,
         existingKeys: Set<String>,
-        candidates: [any Forecaster] = [AverageRateForecaster(), RegimeGatedEOD()]
+        candidates: [any Forecaster] = eodCandidates
     ) -> [NewOutcome] {
         let cases = WalkForward.cases(
             periods: periods, periodEnd: { $0.start.addingTimeInterval(86400) },
@@ -89,53 +100,40 @@ public enum EngineSelfEval {
         return out
     }
 
-    // MARK: - Selection (from the persisted scoreboard)
+    // MARK: - Selection (pool-then-average, from the persisted scoreboard)
 
-    private struct BucketStat { let cf: Double; let coverage: Double; let winFraction: Double; let medianDelta: Double; let n: Int }
-
-    /// The learned fraction-of-day from which the shape beats clock, computed
-    /// from the accumulated per-user record. `.infinity` when the shape never
-    /// robustly wins (so clock all day) — also the safe answer on thin data.
-    public static func crossover(from records: [Record]) -> Double {
-        crossoverFromTail(cutFractions.map { stat(at: $0, records: records) })
-    }
-
-    /// Per-bucket paired stats from the persisted records: pair clock vs shape
-    /// on the days where *both* predicted, and measure how often (and by how
-    /// much) the shape was closer.
-    private static func stat(at cf: Double, records: [Record]) -> BucketStat {
+    /// Per-cut **trimmed pool**: the candidate methods whose accumulated
+    /// per-cut record is within `poolTolerance` of the best, ordered
+    /// best-first. The engine takes the *median* of the pool members' live
+    /// projections — combination over selection, per the M4-competition
+    /// evidence (12 of the 17 best M4 submissions were combinations; equal
+    /// weights beat estimated weights at small N — the "forecast combination
+    /// puzzle"). Trimming matters: on the real store an untrimmed pool let
+    /// the midday-weak shape drag the median, while the trimmed pool tracked
+    /// the per-cut best everywhere.
+    ///
+    /// Cold start (no method clears `poolMinPeriods` at this cut) returns all
+    /// candidate ids — median-of-everything, the safest prior.
+    public static func poolMembers(
+        forCut cf: Double,
+        records: [Record],
+        candidateIds: [String] = eodCandidates.map { $0.id }
+    ) -> [String] {
         let bucket = "cut=\(String(format: "%.2f", cf))|all"
         let inBucket = records.filter { $0.bucket == bucket }
-        let byPeriod = Dictionary(grouping: inBucket, by: { $0.periodKey })
-        var clockDays = 0, shared = 0, wins = 0
-        var deltas: [Double] = []
-        for (_, rows) in byPeriod {
-            guard let clock = rows.first(where: { $0.method == clockId }) else { continue }
-            clockDays += 1
-            guard let shape = rows.first(where: { $0.method == shapeId }) else { continue }
-            shared += 1
-            deltas.append(shape.absPctError - clock.absPctError)
-            if shape.absPctError < clock.absPctError { wins += 1 }
+        // Trailing selection window: the most recent `poolRecencyWindow`
+        // scored days at this cut (periodKeys are yyyy-MM-dd — sortable).
+        let recentKeys = Set(Set(inBucket.map { $0.periodKey }).sorted().suffix(poolRecencyWindow))
+        let recent = inBucket.filter { recentKeys.contains($0.periodKey) }
+        let byMethod = Dictionary(grouping: recent, by: { $0.method })
+        let scored = candidateIds.compactMap { id -> (id: String, err: Double)? in
+            guard let rows = byMethod[id], Set(rows.map { $0.periodKey }).count >= poolMinPeriods else { return nil }
+            return (id, median(rows.map { $0.absPctError }))
         }
-        let coverage = clockDays > 0 ? Double(shared) / Double(clockDays) : 0
-        let winFraction = shared > 0 ? Double(wins) / Double(shared) : 0
-        return BucketStat(cf: cf, coverage: coverage, winFraction: winFraction,
-                          medianDelta: median(deltas), n: shared)
-    }
-
-    /// Take only the contiguous *evening* tail of robust shape wins — the
-    /// shape's advantage is monotone in fraction-observed, so an isolated midday
-    /// bucket clearing the bar is an artifact, not a real crossover.
-    private static func crossoverFromTail(_ stats: [BucketStat]) -> Double {
-        func robust(_ s: BucketStat) -> Bool {
-            s.n >= minShared && s.coverage >= minCoverage
-                && s.winFraction >= minWinFraction && s.medianDelta < 0
-        }
-        var crossover = Double.infinity
-        for s in stats.sorted(by: { $0.cf > $1.cf }) {
-            if robust(s) { crossover = s.cf } else { break }
-        }
-        return crossover
+        guard let best = scored.min(by: { $0.err < $1.err }) else { return candidateIds }
+        return scored.filter { $0.err <= best.err * poolTolerance }
+            .sorted { $0.err < $1.err }
+            .map { $0.id }
     }
 
     // MARK: - Accuracy report (transparency)

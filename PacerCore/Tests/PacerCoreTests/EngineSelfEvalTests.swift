@@ -19,45 +19,37 @@ struct EngineSelfEvalTests {
         .init(method: method, bucket: bucket(cf), periodKey: period, predicted: predicted, truth: truth)
     }
 
-    // MARK: - Crossover from the persisted record
+    // MARK: - Per-cut trimmed pools from the persisted record
 
-    @Test func crossoverPicksEveningTailWhereShapeRobustlyWins() {
-        // Shape is much closer than clock only at the late buckets (>=0.75);
-        // clock wins earlier. Crossover should land at the start of that tail.
+    @Test func poolTrimsTheWeakMethodPerCut() {
+        // At early cuts the shape is far off (it would drag a plain median);
+        // at late cuts it's the best. The pool must exclude it early and
+        // include it (first) late.
         var records: [EngineSelfEval.Record] = []
         for i in 0..<12 {
             let p = "p\(i)", truth = 100.0
             for cf in EngineSelfEval.cutFractions {
-                let lateWin = cf >= 0.75
-                records.append(rec("regime-gated-eod", cf, p, lateWin ? 100 : 150, truth))  // APE 0 late, 50 early
-                records.append(rec("average-rate", cf, p, lateWin ? 130 : 110, truth))       // APE 30 late, 10 early
+                let late = cf >= 0.75
+                records.append(rec("regime-gated-eod", cf, p, late ? 102 : 200, truth))  // 2% late, 100% early
+                records.append(rec("average-rate", cf, p, 110, truth))                    // 10% always
+                records.append(rec("additive-pickup", cf, p, 112, truth))                 // 12% always
             }
         }
-        #expect(EngineSelfEval.crossover(from: records) == 0.75)
+        let early = EngineSelfEval.poolMembers(forCut: 0.375, records: records)
+        #expect(!early.contains("regime-gated-eod"))
+        #expect(early.contains("average-rate") && early.contains("additive-pickup"))
+        let late = EngineSelfEval.poolMembers(forCut: 0.875, records: records)
+        #expect(late.first == "regime-gated-eod")   // best-first ordering
     }
 
-    @Test func crossoverIsInfinityWhenShapeNeverRobustlyWins() {
-        // Shape always worse → never selected → clock all day.
+    @Test func poolColdStartReturnsAllCandidates() {
+        // Below the min-periods bar nothing is trusted → median-of-everything.
         var records: [EngineSelfEval.Record] = []
-        for i in 0..<12 {
-            let p = "p\(i)", truth = 100.0
-            for cf in EngineSelfEval.cutFractions {
-                records.append(rec("regime-gated-eod", cf, p, 200, truth))   // APE 100
-                records.append(rec("average-rate", cf, p, 110, truth))       // APE 10
-            }
+        for i in 0..<5 {                      // < poolMinPeriods
+            records.append(rec("average-rate", 0.5, "p\(i)", 110, 100))
         }
-        #expect(EngineSelfEval.crossover(from: records) == .infinity)
-    }
-
-    @Test func crossoverIsInfinityOnThinData() {
-        // Even a clean shape win doesn't get trusted below the shared-day bar.
-        var records: [EngineSelfEval.Record] = []
-        for i in 0..<5 {                      // < minShared
-            let p = "p\(i)", truth = 100.0
-            records.append(rec("regime-gated-eod", 0.875, p, 100, truth))
-            records.append(rec("average-rate", 0.875, p, 140, truth))
-        }
-        #expect(EngineSelfEval.crossover(from: records) == .infinity)
+        let pool = EngineSelfEval.poolMembers(forCut: 0.5, records: records)
+        #expect(Set(pool) == Set(EngineSelfEval.eodCandidates.map { $0.id }))
     }
 
     // MARK: - Accuracy report
