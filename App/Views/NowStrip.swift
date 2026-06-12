@@ -480,6 +480,11 @@ struct StripTile<Header: View, Content: View>: View {
                 }
             }
             content()
+            // Greedy tail so every tile in the strip's HStack fills to the
+            // tallest sibling — without it a short tile (Live) renders
+            // visibly shorter than its neighbor and the row looks lopsided.
+            // Same trick the old HeroTile used.
+            Spacer(minLength: 0)
         }
         .padding(PacerDesign.cardPadding)
         .frame(maxWidth: .infinity, minHeight: 116, alignment: .topLeading)
