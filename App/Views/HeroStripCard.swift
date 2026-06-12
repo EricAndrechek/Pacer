@@ -446,8 +446,9 @@ struct HeroStripCard: View {
     ) -> (text: String, tint: Color) {
         // Shorten "sustainable pace" → "sustainable" to fit the chip.
         let shortLabel = label.replacingOccurrences(of: "sustainable pace", with: "sustainable")
-        if projection.willHitLimitBeforeReset, let projected = projection.projectedFullAt {
-            return ("\(shortLabel) · limit \(pacerRelative(projected, style: .short))", .red)
+        if projection.willHitLimitBeforeReset,
+           let eta = IntelligenceFormatting.relativeCrossingPhrase(projection) {
+            return ("\(shortLabel) · limit \(eta)", .red)
         }
         let ratio = IntelligenceFormatting.capPaceRatio(
             slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration)

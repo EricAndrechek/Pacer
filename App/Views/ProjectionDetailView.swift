@@ -1,22 +1,121 @@
 import SwiftUI
+import SwiftData
 import Charts
 import PacerCore
 import PacerUI
 
-/// "Compare models" detail sheet for one rate-limit window: the actual usage
-/// curve with **every** candidate forecaster's projection overlaid and
-/// labelled, plus each model's backtest accuracy. Opened from the little
-/// button under each 5h/7d pace chart, for when you want to see the whole
-/// tournament rather than just the winner the dashboard draws.
+/// "Compare models" modal destination for one rate-limit window. Resolves
+/// its own data — actuals from SwiftData, every candidate forecaster's
+/// trajectory from the engine — so it can live behind a plain
+/// `PacerModalDestination.projection(window:)` route and refresh live when
+/// the engine refits while it's open. Presented through the app's standard
+/// dismissible-modal navigation (tap-outside / Esc / ⌘W all dismiss), like
+/// every other detail surface.
+struct ProjectionCompareModal: View {
+    let windowKey: String
+
+    @Environment(\.usageEngine) private var engine
+    @Query private var samples: [RateLimitSample]
+    @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
+    @State private var loaded = false
+
+    init(windowKey: String) {
+        self.windowKey = windowKey
+        let cutoff = Date().addingTimeInterval(-8 * 86400)
+        _samples = Query(
+            filter: #Predicate<RateLimitSample> {
+                $0.window == windowKey && $0.sampledAt >= cutoff
+            },
+            sort: \.sampledAt
+        )
+    }
+
+    private var duration: TimeInterval {
+        windowKey == RateLimitWindowName.fiveHour ? 5 * 3600 : 7 * 86400
+    }
+    private var windowTitle: String {
+        windowKey == RateLimitWindowName.fiveHour ? "5-hour" : "7-day"
+    }
+    private var kind: RateLimitWindowKind {
+        RateLimitWindowKind(rawValue: windowKey) ?? .fiveHour
+    }
+
+    /// Same snapshot shape `PaceChartColumn` builds for the live chart —
+    /// current-cycle actuals with a synthesized "now" tail.
+    private var chartData: PaceChartView.Data? {
+        guard let latest = samples.last, let resets = latest.resetsAt else { return nil }
+        let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
+        guard !cycle.isAwaiting else { return nil }
+        let cycleStart = resets.addingTimeInterval(-duration)
+        let now = Date()
+        var points = samples
+            .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
+            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
+        let tailTime = min(now, resets)
+        if points.last?.time != tailTime {
+            points.append(.init(time: tailTime, value: latest.usedPercentage))
+        }
+        return PaceChartView.Data(
+            cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
+            points: points, usedPct: latest.usedPercentage
+        )
+    }
+
+    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
+    private var subtitle: String? {
+        guard let data = chartData else { return nil }
+        let used = "\(Int(data.usedPct.rounded()))% used"
+        let resets = "resets \(data.resetsAt.formatted(.dateTime.weekday(.abbreviated).hour()))"
+        return "\(used) · \(resets)"
+    }
+
+    var body: some View {
+        PacerModalContent(
+            title: "\(windowTitle) projection",
+            subtitle: subtitle,
+            minHeight: 480,
+            idealHeight: 580
+        ) {
+            if let data = chartData, !trajectories.isEmpty {
+                ProjectionDetailView(
+                    cycleStart: data.cycleStart,
+                    resetsAt: data.resetsAt,
+                    durationSeconds: duration,
+                    actual: data.points,
+                    trajectories: trajectories
+                )
+            } else if loaded {
+                Text("Not enough data to compare models yet.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 200)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 200)
+            }
+        }
+        .task { await refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            Task { await refresh() }
+        }
+    }
+
+    private func refresh() async {
+        guard let engine else { loaded = true; return }
+        trajectories = await engine.rateLimitTrajectories(window: kind)
+        loaded = true
+    }
+}
+
+/// The compare-models content: the actual usage curve with **every**
+/// candidate forecaster's projection overlaid and labelled, plus each
+/// model's backtest accuracy. Chrome (title, subtitle, close) comes from
+/// the enclosing `PacerModalContent`.
 struct ProjectionDetailView: View {
-    let title: String
     let cycleStart: Date
     let resetsAt: Date
     let durationSeconds: TimeInterval
     let actual: [PaceChartView.Data.Point]
     let trajectories: [BurnTrajectory.ScoredTrajectory]
-
-    @Environment(\.dismiss) private var dismiss
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -72,20 +171,30 @@ struct ProjectionDetailView: View {
 
     // MARK: - Y domain
 
-    /// Zoomed y-domain based on filtered actuals + all trajectories.
-    private var yMax: Double {
+    /// Highest value across filtered actuals + all trajectories.
+    private var dataMax: Double {
         let actMax = filteredActuals.map(\.value).max() ?? 0
         let trajMax = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
-        let dataMax = max(actMax, trajMax)
-        return min(105, max(25, dataMax * 1.3))
+        return max(actMax, trajMax)
     }
 
+    /// Zoomed y-domain based on filtered actuals + all trajectories. The
+    /// `dataMax + 12` cap keeps the 100% line out of frame when nothing
+    /// comes near it, instead of always forcing a third of the plot empty.
+    private var yMax: Double {
+        min(105, max(25, min(dataMax * 1.3, dataMax + 12)))
+    }
+
+    /// Padding below the lowest visible value scales with the data's
+    /// vertical span — at 90% used the old fixed −10 floor left over half
+    /// the plot empty under the lines.
     private var yMin: Double {
         let actMin = filteredActuals.map(\.value).min() ?? 0
         let trajMin = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
         let minVisible = min(actMin, trajMin)
         guard minVisible > 30 else { return 0 }
-        return (floor((minVisible - 10) / 10) * 10)
+        let pad = max(2, (dataMax - minVisible) * 0.1)
+        return max(0, floor((minVisible - pad) / 5) * 5)
     }
 
     // MARK: - Envelope
@@ -161,24 +270,12 @@ struct ProjectionDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.title3.weight(.semibold))
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
             chart.frame(height: 240)
             accuracyTable
             Text(legendText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
-        .padding(24)
-        .frame(width: 620)
     }
 
     /// One-line legend; when the dashboard's pick isn't the single most
@@ -193,13 +290,6 @@ struct ProjectionDetailView: View {
             s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
         }
         return s
-    }
-
-    /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
-    private var subtitle: String {
-        let used = actual.last.map { "\(Int($0.value.rounded()))% used" } ?? ""
-        let resets = "resets \(resetsAt.formatted(.dateTime.weekday(.abbreviated).hour()))"
-        return [used, resets].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private var chart: some View {

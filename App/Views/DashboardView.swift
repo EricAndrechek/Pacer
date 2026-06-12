@@ -23,12 +23,16 @@ struct DashboardView: View {
     var body: some View {
         PageScaffold(
             "Dashboard",
-            subtitle: "Realtime view of your Claude Code usage."
+            subtitle: "Realtime view of your Claude Code usage.",
+            // Notice badges live in the header's trailing slot — they cost
+            // zero vertical pixels there, instead of owning a card row.
+            trailing: { AdvisorBadges() }
         ) {
             WelcomeCard()
             HeroStripCard(onTodayTap: openToday)
-            AdvisorCard()
-            PaceChartCard()
+            PaceChartCard(onCompare: { window in
+                modalRoot = .projection(window: window)
+            })
             LiveActivityCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
