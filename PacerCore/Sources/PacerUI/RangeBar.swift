@@ -130,30 +130,30 @@ public struct RangeBar: View {
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(Color.primary.opacity(0.08))
-                    .frame(height: 6)
+                    .frame(height: 8)
                 if let range {
                     let x0 = x(range.lowerBound, in: w)
                     let x1 = x(range.upperBound, in: w)
                     Capsule()
-                        .fill(tint.opacity(0.35))
-                        .frame(width: max(6, x1 - x0), height: 6)
+                        .fill(tint.opacity(0.45))
+                        .frame(width: max(8, x1 - x0), height: 8)
                         .offset(x: x0)
                 }
                 if let reference {
                     Rectangle()
                         .fill(Color.secondary.opacity(0.7))
-                        .frame(width: 1.5, height: 12)
+                        .frame(width: 2, height: 14)
                         .offset(x: x(reference, in: w) - 0.75)
                 }
                 Circle()
                     .fill(tint)
                     .stroke(Color(nsColor: .controlBackgroundColor), lineWidth: 1.5)
-                    .frame(width: 9, height: 9)
-                    .offset(x: x(point, in: w) - 4.5)
+                    .frame(width: 11, height: 11)
+                    .offset(x: x(point, in: w) - 5.5)
             }
-            .frame(height: 12)
+            .frame(height: 14)
         }
-        .frame(height: 12)
+        .frame(height: 14)
     }
 
     private func x(_ value: Double, in width: CGFloat) -> CGFloat {

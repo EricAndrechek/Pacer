@@ -170,33 +170,45 @@ struct HeroStripCard: View {
         }
     }
 
-    /// The Today tile's one-line outlook — the single most insightful
-    /// statistic available right now, with a number that carries a referent:
+    /// The Today tile's one-line outlook chip — the single most insightful
+    /// statistic available right now, rendered as a colored chip:
     ///   evening → "≈$650 by tonight" (anchors in the tooltip);
-    ///   midday, notably off-pace → "1.8× your usual Friday by now";
-    ///   midday, on pace → "on your usual Friday pace";
-    ///   otherwise → the percentile ladder phrase.
-    private var todayOutlook: (text: String, help: String)? {
+    ///   midday, notably off-pace → "1.8× usual Friday spend" (arrow + semantic color);
+    ///   midday, on pace → "on your usual Friday pace" (.secondary);
+    ///   otherwise → the percentile ladder phrase (.secondary).
+    private var todayOutlook: (text: String, icon: String, tint: Color, help: String)? {
         let dayName = Date().formatted(.dateTime.weekday(.wide))
         if let e = todayEOD, IntelligenceFormatting.rangeIsActionable(e, spendSoFar: cached.todayCost) {
             let help = e.interval80.map { IntelligenceFormatting.anchors($0) } ?? pacerCostExact(e.value)
-            return ("≈\(IntelligenceFormatting.approxCost(e.value)) by tonight", help)
+            return ("≈\(IntelligenceFormatting.approxCost(e.value)) by tonight",
+                    "chart.line.uptrend.xyaxis", .secondary, help)
         }
         if let r = paceVsNow {
             if r >= 1.3 || (r <= 0.7 && cached.todayCost > 1) {
                 let help = "Dollars spent so far today vs the median spent by this hour on your \(dayName)s"
-                return ("\(IntelligenceFormatting.multiple(r)) your usual \(dayName) spend by now", help)
+                let icon: String
+                let tint: Color
+                if r >= 1.3 {
+                    icon = "arrow.up.right"
+                    tint = r >= 3 ? .red : .orange
+                } else {
+                    icon = "arrow.down.right"
+                    tint = .green
+                }
+                return ("\(IntelligenceFormatting.multiple(r)) usual \(dayName) spend",
+                        icon, tint, help)
             }
             if r > 0 {
                 let help = "Spend so far vs the median spend by this hour on your \(dayName)s"
-                return ("on your usual \(dayName) spending pace", help)
+                return ("on your usual \(dayName) pace", "equal", .secondary, help)
             }
         }
         if let p = pacePercentile {
             let label = IntelligenceFormatting.paceLabel(
                 index: IntelligenceFormatting.heldIndex(p, held: heldLadder),
                 dayName: dayName)
-            return (label, "Today's projected total sits at the \(Int((p * 100).rounded()))th percentile of your days")
+            return (label, "waveform.path.ecg", .secondary,
+                    "Today's projected total sits at the \(Int((p * 100).rounded()))th percentile of your days")
         }
         return nil
     }
@@ -241,15 +253,14 @@ struct HeroStripCard: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                // One plain-language outlook line replaces the old "0.2×
-                // vs-week-average" chip — the pace phrase says the same
-                // thing against the user's own norms, in words.
-                if let outlook = todayOutlook {
-                    Text(outlook.text)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(outlook.help)
+                // Chip carries the outlook with semantic color + direction
+                // arrow so the user gets at-a-glance meaning without
+                // reading the words — same data as the old plain text
+                // line, but scannable.
+                if let o = todayOutlook {
+                    Chip(text: o.text, systemImage: o.icon, tint: o.tint, size: .compact)
+                        .fixedSize()
+                        .help(o.help)
                 }
                 HStack(spacing: 6) {
                     if let extra = cached.extraUsageUSD, extra > 0 {
@@ -399,11 +410,11 @@ struct HeroStripCard: View {
         }
     }
 
-    /// Optional burn-outlook row inside a pace tile, in plain language:
-    /// the rate framed against **cap pace** (the rate that would exhaust the
-    /// window at its reset — raw "%/hr" means nothing without that
-    /// denominator), and the projected limit hit when the engine's selected
-    /// model sees one coming. Raw numbers live in the tooltip.
+    /// Optional burn-outlook row inside a pace tile, rendered as a single
+    /// chip: semantic color (green/secondary/orange/red) + flame icon so the
+    /// user can see rate health without parsing the text. The projected limit
+    /// hit is appended inline when the engine sees one coming. Raw numbers
+    /// live in the tooltip.
     @ViewBuilder
     private func burnRow(_ projection: UsageIntelligenceEngine.BurnOutlook?, duration: TimeInterval) -> some View {
         let label = projection.flatMap {
@@ -411,24 +422,11 @@ struct HeroStripCard: View {
                 slopePercentPerHour: $0.slopePercentPerHour, windowSeconds: duration)
         }
         if let projection, let label {
-            HStack(spacing: 6) {
-                Image(systemName: "flame.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(projection.willHitLimitBeforeReset ? Color.red : Color.secondary)
-                if let projected = projection.projectedFullAt {
-                    Text("\(label) · limit \(pacerRelative(projected, style: .short))")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.red)
-                        .lineLimit(1)
-                } else {
-                    Text(label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            .help(IntelligenceFormatting.capPaceHelp(
-                slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration))
+            let chip = Self.burnChip(projection: projection, label: label, duration: duration)
+            Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
+                .fixedSize()
+                .help(IntelligenceFormatting.capPaceHelp(
+                    slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration))
         } else {
             // Empty placeholder of the same vertical footprint so the
             // tile height matches its sibling whose burn rate did
@@ -438,6 +436,22 @@ struct HeroStripCard: View {
                 .font(.system(size: 11))
                 .opacity(0)
         }
+    }
+
+    /// Chip text + tint for a burn outlook ("0.8× sustainable" green;
+    /// "1.6× sustainable · limit in 6 hr" red). Plain function because
+    /// branch-assignments don't belong in a ViewBuilder.
+    private static func burnChip(
+        projection: UsageIntelligenceEngine.BurnOutlook, label: String, duration: TimeInterval
+    ) -> (text: String, tint: Color) {
+        // Shorten "sustainable pace" → "sustainable" to fit the chip.
+        let shortLabel = label.replacingOccurrences(of: "sustainable pace", with: "sustainable")
+        if projection.willHitLimitBeforeReset, let projected = projection.projectedFullAt {
+            return ("\(shortLabel) · limit \(pacerRelative(projected, style: .short))", .red)
+        }
+        let ratio = IntelligenceFormatting.capPaceRatio(
+            slopePercentPerHour: projection.slopePercentPerHour, windowSeconds: duration)
+        return (shortLabel, ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange)
     }
 
     @ViewBuilder

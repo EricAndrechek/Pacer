@@ -83,19 +83,14 @@ struct AdvisorCard: View {
         // .onChange observer mid-tick.
         Group {
             if !cachedHints.isEmpty || !engineHints.isEmpty {
-                PacerCard("Notice") {
-                    VStack(alignment: .leading, spacing: 10) {
+                // No title — card is a slim badge strip, not a section header.
+                PacerCard {
+                    HStack(spacing: 8) {
                         ForEach(engineHints) { hint in
-                            engineHintRow(hint)
-                            if hint.id != engineHints.last?.id || !cachedHints.isEmpty {
-                                Divider().opacity(0.4)
-                            }
+                            engineBadge(hint)
                         }
                         ForEach(cachedHints.indices, id: \.self) { idx in
-                            hintRow(cachedHints[idx])
-                            if idx != cachedHints.indices.last {
-                                Divider().opacity(0.4)
-                            }
+                            hintBadge(cachedHints[idx])
                         }
                     }
                 }
@@ -121,7 +116,7 @@ struct AdvisorCard: View {
                 id: "yesterday-high",
                 icon: "chart.bar.fill",
                 tint: y.rankFromTop == 1 ? .orange : .secondary,
-                title: "Yesterday was your \(IntelligenceFormatting.ordinal(y.rankFromTop))-highest day in \(weeks) weeks",
+                title: "Yesterday: \(IntelligenceFormatting.ordinal(y.rankFromTop))-highest in \(weeks)w",
                 detail: "\(pacerCostExact(y.cost)) — higher than \(y.of - y.rankFromTop) of your \(y.of) tracked days."))
         }
         let pace = await engine.ask(.pace)
@@ -131,50 +126,22 @@ struct AdvisorCard: View {
                 id: "pace-heavy",
                 icon: "speedometer",
                 tint: .orange,
-                title: pace.value >= 0.95 ? "Your heaviest pace in weeks" : "One of your heavier days",
+                title: pace.value >= 0.95 ? "Heaviest pace in weeks" : "One of your heavier days",
                 detail: "Today's projected total sits at the \(Int((pace.value * 100).rounded()))th percentile of your \(dayName)s."))
         }
         engineHints = next
     }
 
     @ViewBuilder
-    private func engineHintRow(_ hint: EngineHint) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: hint.icon)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(hint.tint)
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(hint.title)
-                    .font(.callout)
-                    .fontWeight(.medium)
-                Text(hint.detail)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
+    private func engineBadge(_ hint: EngineHint) -> some View {
+        Chip(text: hint.title, systemImage: hint.icon, tint: hint.tint)
+            .help(hint.detail)
     }
 
     @ViewBuilder
-    private func hintRow(_ hint: UsageHints.Hint) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon(for: hint))
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(tint(for: hint))
-                .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title(for: hint))
-                    .font(.callout)
-                    .fontWeight(.medium)
-                Text(detail(for: hint))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
+    private func hintBadge(_ hint: UsageHints.Hint) -> some View {
+        Chip(text: shortTitle(for: hint), systemImage: icon(for: hint), tint: tint(for: hint))
+            .help(detail(for: hint))
     }
 
     private func icon(for hint: UsageHints.Hint) -> String {
@@ -191,12 +158,12 @@ struct AdvisorCard: View {
         }
     }
 
-    private func title(for hint: UsageHints.Hint) -> String {
+    private func shortTitle(for hint: UsageHints.Hint) -> String {
         switch hint {
-        case .heavyPremiumShare(let pct, _):
-            return "Heavy premium-model day · \(Int((pct * 100).rounded()))% of today"
-        case .lowCacheHitRate(let ratio, _):
-            return "Low cache hit rate · \(Int((ratio * 100).rounded()))%"
+        case .heavyPremiumShare:
+            return "Mostly premium models today"
+        case .lowCacheHitRate:
+            return "Low cache hit rate"
         }
     }
 
