@@ -3,59 +3,51 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// Month-to-date cost plus a simple "if you keep going at this rate"
-/// projection. Sits below the per-model card on the dashboard so a
-/// user who scans the page top-to-bottom gets: today (hero), this
-/// hour (live), today's breakdown, today's hour-of-day timeline,
-/// today's models — and then the wider trajectory.
+/// Month-to-date cost plus the engine's month-end projection. Sits below
+/// the per-model card on the dashboard so a user who scans the page
+/// top-to-bottom gets: today (hero), this hour (live), today's breakdown,
+/// today's hour-of-day timeline, today's models — and then the wider
+/// trajectory.
 ///
-/// Sources from `DailyAggregate`, the daily/per-model rollup. We
-/// fetch a scope that comfortably covers the current month (and a
-/// little of the previous, to dodge edge cases at the 1st-of-the-
-/// month boundary) and hand the resulting `(date, cost)` dictionary
-/// to `MonthlyForecast.compute`, which owns the math and the
-/// minimum-data threshold.
+/// Display facts (month so far, per-active-day average, days left) come
+/// from the current month's `DailyAggregate` rollup; the projection itself
+/// comes from the intelligence engine (`.projectedCost(.thisMonth)`), which
+/// owns the model, its eligibility gating, and the calibrated range shown
+/// in the tooltip.
 struct MonthlyForecastCard: View {
     @Query private var aggregates: [DailyAggregate]
-    /// Prior-months daily rollup (the ~60 days *before* this month) used to
-    /// learn the day-of-week spend profile. Scoped to `date < firstOfMonth`
-    /// so it's stable intra-month — today's writes never touch it, so it
-    /// doesn't re-materialize on every scan the way `aggregates` does — and
-    /// excluding the current month keeps the weights leak-free.
-    @Query private var priorMonths: [DailyAggregate]
     @Query(MonthlyForecastCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    /// Cached projection refreshed on scan-meta tick. The in-body
-    /// view code never iterates `aggregates`; it reads `cached`.
-    @State private var cached: MonthlyForecast.Projection?
+    /// The shared intelligence engine — owns the month-end projection (the
+    /// daily-series→sum model with its eligibility gate and calibrated band).
+    /// This card keeps only the display facts (month so far, per-day average,
+    /// days left), computed from the current month's rollup.
+    @Environment(\.usageEngine) private var engine
+
+    /// Display facts cached off the scan tick; the projection itself is
+    /// refreshed when the engine refits.
+    @State private var cached = MonthFacts()
+    @State private var projection: Estimate?
+
+    struct MonthFacts: Equatable {
+        var monthSoFar: Double = 0
+        var averageDailyCost: Double = 0
+        var daysWithData: Int = 0
+        var daysInMonth: Int = 30
+        var dayOfMonth: Int = 1
+        var hasAnyData: Bool = false
+    }
 
     init() {
         // Predicate is anchored at the first day of the current month —
-        // anything older isn't read by `MonthlyForecast.compute` so
-        // materializing it would just be waste. Previously we fetched
-        // 60 days (~300 rows) every time any DailyAggregate row
-        // changed; this drops materialization to ~current-month-so-far
-        // × ~5 model rows/day (≤155 max, usually <80).
+        // this card only displays current-month facts; history lives in
+        // the engine.
         let cal = Calendar.current
         let now = Date()
-        let firstOfMonth: Date
-        if let interval = cal.dateInterval(of: .month, for: now) {
-            firstOfMonth = interval.start
-        } else {
-            firstOfMonth = now
-        }
+        let firstOfMonth = cal.dateInterval(of: .month, for: now)?.start ?? now
         let lowerStr = TokenSample.formatDate(firstOfMonth)
         _aggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
-        )
-        // ~60 days before this month: two prior months, enough for every
-        // weekday to appear several times (ActivityProfile needs ≥14 days).
-        let weightsCutoff = cal.date(byAdding: .day, value: -60, to: firstOfMonth) ?? firstOfMonth
-        let weightsCutoffStr = TokenSample.formatDate(weightsCutoff)
-        _priorMonths = Query(
-            filter: #Predicate<DailyAggregate> {
-                $0.date >= weightsCutoffStr && $0.date < lowerStr
-            }
         )
     }
 
@@ -66,54 +58,49 @@ struct MonthlyForecastCard: View {
         )
     }()
 
-    private func refreshCache() {
+    private func refreshFacts() {
+        let cal = Calendar.current
+        let now = Date()
         var byDate: [String: Double] = [:]
         for row in aggregates {
             byDate[row.date, default: 0] += row.totalCostUSD
         }
-        cached = MonthlyForecast.compute(dailyCosts: byDate, weekdayWeights: weekdayWeights())
+        var next = MonthFacts()
+        next.monthSoFar = byDate.values.reduce(0, +)
+        let active = byDate.values.filter { $0 > 0 }
+        next.daysWithData = active.count
+        next.averageDailyCost = active.isEmpty ? 0 : active.reduce(0, +) / Double(active.count)
+        next.daysInMonth = cal.range(of: .day, in: .month, for: now)?.count ?? 30
+        next.dayOfMonth = cal.component(.day, from: now)
+        next.hasAnyData = !active.isEmpty
+        cached = next
     }
 
-    /// Learn the day-of-week spend profile from the prior ~60 days. Walks
-    /// the calendar so quiet days count as zeros (a dead-weekend reads light,
-    /// not as missing data). Returns nil — and the projection falls back to
-    /// the flat average — when there isn't enough prior history.
-    private func weekdayWeights() -> ActivityProfile.WeekdayWeights? {
-        let cal = Calendar.current
-        guard let firstOfMonth = cal.dateInterval(of: .month, for: Date())?.start,
-              let cutoff = cal.date(byAdding: .day, value: -60, to: firstOfMonth)
-        else { return nil }
-        var costByDate: [String: Double] = [:]
-        for row in priorMonths {
-            costByDate[row.date, default: 0] += row.totalCostUSD
-        }
-        var days: [(weekday: Int, cost: Double)] = []
-        var day = cutoff
-        while day < firstOfMonth {
-            let key = TokenSample.formatDate(day)
-            days.append((weekday: cal.component(.weekday, from: day), cost: costByDate[key] ?? 0))
-            guard let next = cal.date(byAdding: .day, value: 1, to: day) else { break }
-            day = next
-        }
-        return ActivityProfile.weekdayWeights(days: days)
+    private func refreshProjection() async {
+        guard let engine else { return }
+        projection = await engine.ask(.projectedCost(.thisMonth))
     }
 
     var body: some View {
         PacerCard("This month") {
-            if let p = cached {
-                content(p)
+            if cached.hasAnyData {
+                content
             } else {
-                Text("Not enough data yet — a projection appears once Pacer has seen at least \(MonthlyForecast.minDaysWithData) active days this month.")
+                Text("Not enough data yet — a projection appears once Pacer has seen some usage this month.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
-        .onAppear { refreshCache() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        .onAppear { refreshFacts() }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
+        .task { await refreshProjection() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            Task { await refreshProjection() }
+        }
     }
 
     @ViewBuilder
-    private func content(_ p: MonthlyForecast.Projection) -> some View {
+    private var content: some View {
         LazyVGrid(
             columns: Array(
                 repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
@@ -123,49 +110,63 @@ struct MonthlyForecastCard: View {
             spacing: 12
         ) {
             MetricTile(
-                value: pacerCost(p.monthSoFar),
+                value: pacerCost(cached.monthSoFar),
                 label: "month so far",
-                hint: monthLabel(p),
-                tooltip: pacerCostExact(p.monthSoFar)
+                hint: monthLabel,
+                tooltip: pacerCostExact(cached.monthSoFar)
             )
             MetricTile(
-                value: pacerCost(p.averageDailyCost),
+                value: pacerCost(cached.averageDailyCost),
                 label: "avg per active day",
-                hint: "\(p.daysWithData) day\(p.daysWithData == 1 ? "" : "s") with usage",
-                tooltip: pacerCostExact(p.averageDailyCost)
+                hint: "\(cached.daysWithData) day\(cached.daysWithData == 1 ? "" : "s") with usage",
+                tooltip: pacerCostExact(cached.averageDailyCost)
             )
             MetricTile(
-                value: pacerCost(p.projectedMonthTotal),
+                value: projectedValueText,
                 label: "projected month",
-                hint: trajectoryHint(p),
-                tooltip: pacerCostExact(p.projectedMonthTotal)
+                hint: trajectoryHint,
+                tooltip: projectedTooltip
             )
             MetricTile(
-                value: "\(max(0, p.daysInMonth - p.dayOfMonth))",
+                value: "\(max(0, cached.daysInMonth - cached.dayOfMonth))",
                 label: "days left",
-                hint: "of \(p.daysInMonth) in month"
+                hint: "of \(cached.daysInMonth) in month"
             )
         }
     }
 
+    private var projectedValueText: String {
+        guard let p = projection, !p.isInsufficient else { return "—" }
+        return pacerCost(p.value)
+    }
+
+    private var projectedTooltip: String? {
+        guard let p = projection, !p.isInsufficient else { return nil }
+        if let band = p.interval80 {
+            return "\(pacerCostExact(p.value)) · likely \(pacerCost(band.lowerBound))–\(pacerCost(band.upperBound))"
+        }
+        return pacerCostExact(p.value)
+    }
+
     /// "May 2026" style label so the user sees which month the figure
     /// is for at a glance.
-    private func monthLabel(_ p: MonthlyForecast.Projection) -> String {
+    private var monthLabel: String {
         let fmt = DateFormatter()
         fmt.dateFormat = "MMMM yyyy"
         return fmt.string(from: Date())
     }
 
-    /// Compare the projection against month-so-far × (daysInMonth /
+    /// Compare the engine's projection against month-so-far × (daysInMonth /
     /// dayOfMonth) — i.e. a pure linear forward-fill from the current
     /// run rate — and label the delta. "↑ 18% above pace" / "↓ 12% below
     /// pace". Only meaningful past the first few days; on day 1-2 the
     /// month-so-far rate is too noisy.
-    private func trajectoryHint(_ p: MonthlyForecast.Projection) -> String? {
-        guard p.dayOfMonth >= 3 else { return "if rate holds" }
-        let purePace = p.monthSoFar / Double(p.dayOfMonth) * Double(p.daysInMonth)
+    private var trajectoryHint: String? {
+        guard let p = projection, !p.isInsufficient else { return nil }
+        guard cached.dayOfMonth >= 3 else { return "if rate holds" }
+        let purePace = cached.monthSoFar / Double(cached.dayOfMonth) * Double(cached.daysInMonth)
         guard purePace > 0.01 else { return "if rate holds" }
-        let ratio = p.projectedMonthTotal / purePace
+        let ratio = p.value / purePace
         if ratio > 1.05 {
             return String(format: "↑ %.0f%% above pace", (ratio - 1) * 100)
         }

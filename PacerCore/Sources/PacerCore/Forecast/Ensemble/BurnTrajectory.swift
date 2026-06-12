@@ -123,37 +123,6 @@ public enum BurnTrajectory {
         }
     }
 
-    /// Backtest-select the best model for `history`, fit it to the current
-    /// cycle, and return its forward trajectory sampled `sampleCount` times
-    /// from now to reset. Falls back to the first model that can fit when the
-    /// backtest is inconclusive (too little history). `nil` if nothing fits.
-    public static func bestTrajectory(
-        current: PartialCycle,
-        history: [Cycle],
-        models: [any Model] = defaultModels,
-        priorScores: [Backtester.Score]? = nil,
-        selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
-        sampleCount: Int = 48
-    ) -> Trajectory? {
-        let pickId = selectModel(history: history, models: models,
-                                 priorScores: priorScores, policy: selectionPolicy)
-        let chosen = models.first { $0.id == pickId }
-            ?? models.first { $0.fit(current) != nil }
-        guard let model = chosen, let projection = model.fit(current) else { return nil }
-
-        let span = current.resetsAt.timeIntervalSince(current.now)
-        guard span > 0 else { return nil }
-        var points: [Sample] = []
-        var crossing: Date?
-        for i in 0...sampleCount {
-            let date = current.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
-            let raw = projection(date)
-            if crossing == nil, raw >= 100 { crossing = date }
-            points.append(Sample(at: date, usedPercentage: min(100, max(0, raw))))
-        }
-        return Trajectory(modelId: model.id, points: points, crossesFullAt: crossing)
-    }
-
     /// Segment a flat run of samples (each carrying its window's `resetsAt`)
     /// into the current partial cycle and the prior complete cycles, by
     /// grouping on the reset boundary. The group whose reset is latest is the
@@ -189,124 +158,20 @@ public enum BurnTrajectory {
         return (current, history.sorted { $0.cycleStart < $1.cycleStart })
     }
 
-    /// Choose the model id: prefer the persisted scoreboard (`priorScores`)
-    /// when it yields an eligible pick — that's the self-improving feedback
-    /// loop — otherwise fall back to the cold-start on-the-fly backtest over
-    /// `history`.
-    static func selectModel(
-        history: [Cycle],
-        models: [any Model],
-        priorScores: [Backtester.Score]?,
-        policy: ForecastSelector.Policy
-    ) -> String? {
-        if let priorScores, let learned = ForecastSelector.select(scores: priorScores, policy: policy).id {
-            return learned
-        }
-        return ForecastSelector.select(scores: score(models: models, cycles: history), policy: policy).id
-    }
-
-    /// One model's forward trajectory plus its backtest accuracy — for the
-    /// "show all models" detail view.
+    /// One model's forward trajectory plus its realized accuracy — for the
+    /// "show all models" detail view. Built by the engine
+    /// (`UsageIntelligenceEngine.rateLimitTrajectories`), which pairs each
+    /// candidate with its accuracy from the persisted per-user track record.
     public struct ScoredTrajectory: Sendable, Identifiable {
         public let modelId: String
         public let complexity: Int
         public let trajectory: Trajectory
-        /// Median absolute error (percentage points) over the remainder of
-        /// past cycles. `.infinity` when there wasn't enough history to score.
+        /// Median absolute error (percentage points) against the realized
+        /// final of completed cycles. `.infinity` when there's no record yet.
         public let medianAbsError: Double
         public let coverage: Double
         public let isSelected: Bool
         public var id: String { modelId }
-    }
-
-    /// Fit *every* model to the current cycle and pair each trajectory with
-    /// its backtest accuracy, flagging the one the selector would pick. Powers
-    /// the detail view that plots all candidates side by side.
-    public static func allTrajectories(
-        current: PartialCycle,
-        history: [Cycle],
-        models: [any Model] = defaultModels,
-        priorScores: [Backtester.Score]? = nil,
-        selectionPolicy: ForecastSelector.Policy = .init(minScoredCases: 6, minCoverage: 0.5),
-        sampleCount: Int = 48
-    ) -> [ScoredTrajectory] {
-        let scores = score(models: models, cycles: history)
-        let selectedId = selectModel(history: history, models: models,
-                                     priorScores: priorScores, policy: selectionPolicy)
-        let span = current.resetsAt.timeIntervalSince(current.now)
-        guard span > 0 else { return [] }
-
-        return models.compactMap { model -> ScoredTrajectory? in
-            guard let projection = model.fit(current) else { return nil }
-            var points: [Sample] = []
-            var crossing: Date?
-            for i in 0...sampleCount {
-                let date = current.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
-                let raw = projection(date)
-                if crossing == nil, raw >= 100 { crossing = date }
-                points.append(Sample(at: date, usedPercentage: min(100, max(0, raw))))
-            }
-            let s = scores.first { $0.id == model.id }
-            return ScoredTrajectory(
-                modelId: model.id, complexity: model.complexity,
-                trajectory: Trajectory(modelId: model.id, points: points, crossesFullAt: crossing),
-                medianAbsError: s?.medianAbsPctError ?? .infinity,
-                coverage: s?.coverage ?? 0,
-                isSelected: model.id == selectedId)
-        }
-    }
-
-    // MARK: - Completed-cycle scoring (the feedback loop)
-
-    /// A model's verdict over one completed cycle: overall accuracy and how
-    /// early it converged.
-    public struct CycleScore: Sendable, Equatable {
-        public let modelId: String
-        public let meanAbsError: Double
-        public let convergenceFraction: Double
-    }
-
-    /// Within this many percentage points of the realized final counts as
-    /// "locked in" for the convergence metric.
-    public static let convergenceTolerance: Double = 5
-
-    /// Score each model over a *completed* cycle: replay it at a grid of cut
-    /// points, projecting the final each time, and measure (a) mean absolute
-    /// error vs the realized final and (b) the earliest cut fraction from
-    /// which it stayed within `tolerance`. This is what gets persisted as
-    /// `ForecastModelOutcome` and aggregated by `ForecastScoreboard`.
-    public static func scoreCompletedCycle(
-        _ cycle: Cycle,
-        models: [any Model] = defaultModels,
-        cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        tolerance: Double = convergenceTolerance
-    ) -> [CycleScore] {
-        let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
-        guard trueFinal > 0 else { return [] }
-        let duration = cycle.resetsAt.timeIntervalSince(cycle.cycleStart)
-        guard duration > 0 else { return [] }
-
-        return models.compactMap { model -> CycleScore? in
-            var graded: [(f: Double, err: Double)] = []
-            for f in cutFractions {
-                let now = cycle.cycleStart.addingTimeInterval(duration * f)
-                let seen = cycle.samples.filter { $0.at <= now }
-                guard seen.count >= 3 else { continue }
-                let partial = PartialCycle(samples: seen, now: now,
-                                           cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
-                guard let projection = model.fit(partial) else { continue }
-                graded.append((f, abs(projection(cycle.resetsAt) - trueFinal)))
-            }
-            guard !graded.isEmpty else { return nil }
-            let mean = graded.reduce(0) { $0 + $1.err } / Double(graded.count)
-            // Convergence: earliest f from which every later cut stayed within
-            // tolerance. Walk from the latest cut backward while still in band.
-            var convergence = 1.0
-            for g in graded.sorted(by: { $0.f > $1.f }) {
-                if g.err <= tolerance { convergence = g.f } else { break }
-            }
-            return CycleScore(modelId: model.id, meanAbsError: mean, convergenceFraction: convergence)
-        }
     }
 
     /// Friendly display name for a model id.
@@ -316,6 +181,7 @@ public enum BurnTrajectory {
         case "recency-weighted": return "Recency-weighted"
         case "damped-acceleration": return "Damped acceleration"
         case "saturating": return "Saturating"
+        case "diurnal-rate": return "Your daily rhythm"
         default: return modelId
         }
     }

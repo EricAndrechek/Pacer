@@ -24,6 +24,7 @@ struct ProjectionDetailView: View {
         "recency-weighted": .green,
         "damped-acceleration": .purple,
         "saturating": .orange,
+        "diurnal-rate": .teal,
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
 
@@ -44,7 +45,7 @@ struct ProjectionDetailView: View {
             }
             chart.frame(height: 240)
             accuracyTable
-            Text("Projections are fit on this cycle so far. “Fit error” is each model’s median absolute error (percentage points) over the remainder of your past cycles — lower is better; the selected model is what the dashboard draws.")
+            Text("Projections are fit on this cycle so far. “Fit error” is each model’s median absolute error (percentage points) against the realized final of your completed cycles — lower is better; the selected model is what the dashboard draws.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

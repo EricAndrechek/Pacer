@@ -147,6 +147,83 @@ struct EngineSelfEvalTests {
         #expect(EngineSelfEval.bestMethod(from: Array(records.prefix(1)), minPeriods: 2) == nil)
     }
 
+    // MARK: - Burn outlook + trajectories (the chart / warning surface)
+
+    /// Features with one live 5h cycle ramping fast enough to cross 100%
+    /// before reset, plus a few completed cycles of history.
+    private func steepFiveHourFeatures() -> EngineFeatures {
+        let duration: TimeInterval = 5 * 3600
+        var rate: [EngineFeatures.RateRow] = []
+        // Three completed gentle cycles.
+        for c in 0..<3 {
+            let start = Self.now.addingTimeInterval(-Double(4 - c) * duration)
+            let reset = start.addingTimeInterval(duration)
+            var pct = 0.0, t = start
+            while t <= reset {
+                rate.append(.init(window: "five_hour", at: t, usedPercentage: min(60, pct), resetsAt: reset))
+                t = t.addingTimeInterval(15 * 60); pct += 2
+            }
+        }
+        // Live cycle: started 2.5h ago, at 75% and climbing ~25pp/hr → crosses
+        // 100% in ~1h, well before the reset 2.5h out.
+        let liveStart = Self.now.addingTimeInterval(-2.5 * 3600)
+        let liveReset = liveStart.addingTimeInterval(duration)
+        var pct = 0.0
+        var t = liveStart
+        while t <= Self.now {
+            rate.append(.init(window: "five_hour", at: t, usedPercentage: min(100, pct), resetsAt: liveReset))
+            t = t.addingTimeInterval(15 * 60); pct += 25.0 / 4
+        }
+        return EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                    rate: rate, lastArrivalAt: nil)
+    }
+
+    @Test func burnOutlookFlagsAPreResetCrossingOnASteepCycle() {
+        let f = steepFiveHourFeatures()
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, window: .fiveHour)
+        #expect(outlook != nil)
+        #expect(outlook!.slopePercentPerHour > 10)            // climbing hard
+        #expect(outlook!.willHitLimitBeforeReset)             // crossing flagged
+        #expect(outlook!.projectedFullAt! > f.now)
+        #expect(outlook!.projectedFullAt! < outlook!.resetsAt) // strictly before reset
+        #expect(outlook!.usedPct > 60)
+    }
+
+    @Test func burnOutlookProjectsNoCrossingOnAFlatCycle() {
+        // Live cycle dead flat at 40% → no crossing, near-zero slope.
+        let duration: TimeInterval = 5 * 3600
+        let liveStart = Self.now.addingTimeInterval(-2 * 3600)
+        let liveReset = liveStart.addingTimeInterval(duration)
+        var rate: [EngineFeatures.RateRow] = []
+        var t = liveStart
+        while t <= Self.now {
+            rate.append(.init(window: "five_hour", at: t, usedPercentage: 40, resetsAt: liveReset))
+            t = t.addingTimeInterval(15 * 60)
+        }
+        let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                     rate: rate, lastArrivalAt: nil)
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, window: .fiveHour)
+        #expect(outlook != nil)
+        #expect(!outlook!.willHitLimitBeforeReset)
+        #expect(abs(outlook!.slopePercentPerHour) < 1)
+    }
+
+    @Test func trajectoriesSpanNowToResetAndFlagSelection() {
+        let f = steepFiveHourFeatures()
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        let list = UsageIntelligenceEngine.rateLimitTrajectories(f, fit, window: .fiveHour, accuracy: nil)
+        #expect(!list.isEmpty)
+        #expect(list.filter { $0.isSelected }.count <= 1)
+        for st in list {
+            #expect(st.trajectory.points.first?.at == f.now)
+            #expect(st.trajectory.points.allSatisfy { $0.usedPercentage >= 0 && $0.usedPercentage <= 100 })
+        }
+        // At least one model should see the steep climb crossing 100%.
+        #expect(list.contains { $0.trajectory.crossesFullAt != nil })
+    }
+
     // MARK: - End-to-end actor persistence
 
     @Test func recomputePersistsScoreboardAndIsIdempotent() async throws {

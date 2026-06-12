@@ -30,17 +30,13 @@ struct LiveActivityCard: View {
     /// samples" — much more useful when the user comes back to the
     /// dashboard after a break. fetchLimit=1 keeps it cheap.
     @Query(LiveActivityCard.latestSampleProbe) private var latestSamples: [TokenSample]
-    /// Prior days' hourly rollup (~42 days, excluding today) used to learn
-    /// the hour-of-day spend shape for the end-of-day projection. Scoped to
-    /// `date < today` so it's stable intra-day — today's writes never touch
-    /// it, so it doesn't re-materialize on every scan — and today is excluded
-    /// from its own profile.
-    @Query private var priorDaysHourly: [HourlyAggregate]
-    @Query(LiveActivityCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    /// Cached hour-of-day shape, recomputed on the scan tick rather than per
-    /// render (the body evaluates `projectedEndOfDay` twice — value + tooltip).
-    @State private var cachedShape: ActivityProfile.DayShape?
+    /// The shared intelligence engine — owns the end-of-day projection (the
+    /// per-user clock↔shape router with its idle gate), so this card no longer
+    /// learns its own hour-of-day profile.
+    @Environment(\.usageEngine) private var engine
+    /// Engine's end-of-day estimate, refreshed when the engine refits.
+    @State private var eodEstimate: Estimate?
 
     init() {
         // Two-hour window covers the current hour bucket plus the
@@ -87,15 +83,6 @@ struct LiveActivityCard: View {
         _todayAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )
-        // ~42 prior days (excluding today) for the hour-of-day shape — enough
-        // for a stable rhythm, more than ActivityProfile's minimum.
-        let shapeCutoff = cal.date(byAdding: .day, value: -42, to: now) ?? now
-        let shapeCutoffStr = TokenSample.formatDate(shapeCutoff)
-        _priorDaysHourly = Query(
-            filter: #Predicate<HourlyAggregate> {
-                $0.date >= shapeCutoffStr && $0.date < today
-            }
-        )
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -105,17 +92,10 @@ struct LiveActivityCard: View {
         )
     }()
 
-    /// Rebuild the hour-of-day shape from the prior-days rollup. Cheap (a few
-    /// hundred rows of simple arithmetic) and only run on the scan tick.
-    private func refreshShape() {
-        var byDayHour: [String: [Int: Double]] = [:]
-        for row in priorDaysHourly {
-            byDayHour[row.date, default: [:]][row.hour, default: 0] += row.totalCostUSD
-        }
-        let days = byDayHour.values.map { hours in
-            (0..<24).map { hours[$0] ?? 0 }
-        }
-        cachedShape = ActivityProfile.hourOfDayShape(days: days)
+    /// Re-ask the engine for the end-of-day estimate.
+    private func refreshEOD() async {
+        guard let engine else { return }
+        eodEstimate = await engine.ask(.projectedCost(.today))
     }
 
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
@@ -166,25 +146,17 @@ struct LiveActivityCard: View {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
 
-    /// End-of-day cost projection. When enough history exists, scales
-    /// today's spend-so-far by the learned hour-of-day shape ("you've
-    /// usually done 85% by now"), which knows the evening tapers instead of
-    /// running the last hour's rate flat to midnight. Falls back to the
-    /// "(hourly rate) × (hours left)" line early in the day or before the
-    /// profile has ≥5 days of history. See `ActivityProfile`.
+    /// End-of-day cost projection — the engine's answer (its per-user
+    /// clock↔shape router, validated to never be worse than the simple pace
+    /// baseline and better in the evening). Falls back to the naive
+    /// "(last-hour rate) × (hours left)" only when the engine can't answer
+    /// yet (cold start, no spend today).
     private func projectedEndOfDay(stats: LiveStats) -> Double {
+        if let e = eodEstimate, !e.isInsufficient { return e.value }
         let now = Date()
-        let cal = Calendar.current
-        let endOfDay = cal.date(bySettingHour: 23, minute: 59, second: 59, of: now) ?? now
+        let endOfDay = Calendar.current.date(bySettingHour: 23, minute: 59, second: 59, of: now) ?? now
         let hoursLeft = max(0, endOfDay.timeIntervalSince(now) / 3600.0)
-        let naive = todayCostSoFar + stats.costLastHour * hoursLeft
-        guard let shape = cachedShape else { return naive }
-        return ActivityProfile.projectedEndOfDay(
-            soFar: todayCostSoFar,
-            throughHour: cal.component(.hour, from: now),
-            shape: shape,
-            naive: naive
-        )
+        return todayCostSoFar + stats.costLastHour * hoursLeft
     }
 
     var body: some View {
@@ -202,9 +174,11 @@ struct LiveActivityCard: View {
         .onChange(of: costModeRaw) { _, _ in
             Task { await SampleCostCache.reload() }
         }
-        // Hour-of-day shape is recomputed on the scan tick, not per render.
-        .onAppear { refreshShape() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshShape() }
+        // The EOD estimate refreshes when the engine refits — not per render.
+        .task { await refreshEOD() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
+            Task { await refreshEOD() }
+        }
     }
 
     @ViewBuilder

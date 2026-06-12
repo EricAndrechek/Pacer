@@ -258,6 +258,132 @@ public actor UsageIntelligenceEngine {
                         support: rf.historyCount, note: note)
     }
 
+    // MARK: - Burn outlook + trajectories (the chart / hero-tile / warning surface)
+
+    /// "Will I hit the cap, and when" for one rate-limit window — the answer
+    /// behind the hero tiles, the burn-rate notification, and the chart
+    /// overlay's crossing marker. Unlike the old per-view math (a 90-minute
+    /// linear slope for 5h, a recency-weighted slope for 7d), the crossing here
+    /// comes from the engine's *selected* model for the window — for 7d that's
+    /// typically the diurnal shape, which knows an overnight/weekend lull is
+    /// coming and stops projecting "limit tonight" from one busy afternoon.
+    public struct BurnOutlook: Sendable, Equatable {
+        /// Descriptive recent slope (pp/hour) — "what just happened", so the
+        /// user can sanity-check the number against their own activity.
+        /// First-to-last over a per-window lookback (90 min for 5h, 24 h for 7d).
+        public let slopePercentPerHour: Double
+        /// First instant the selected model's projection crosses 100%, strictly
+        /// before the reset. nil = the window resets first (or no signal).
+        public let projectedFullAt: Date?
+        public let etaSeconds: TimeInterval?
+        public let usedPct: Double
+        public let resetsAt: Date
+        /// Stable id of the model that produced the crossing (for affordances).
+        public let method: String
+        public var willHitLimitBeforeReset: Bool { projectedFullAt != nil }
+    }
+
+    public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
+        guard let f = features else { return nil }
+        return Self.burnOutlook(f, fit, window: window)
+    }
+
+    static func burnOutlook(_ f: EngineFeatures, _ fit: Fit, window: RateLimitWindowKind) -> BurnOutlook? {
+        let key = window.rawValue
+        guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return nil }
+        let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
+        guard let current = currentOpt, current.resetsAt > f.now else { return nil }
+
+        // Descriptive slope over the recent lookback (clamped to this cycle so
+        // a reset boundary can't produce a bogus negative).
+        let lookback: TimeInterval = window == .fiveHour ? 90 * 60 : 24 * 3600
+        let cutoff = max(current.cycleStart, f.now.addingTimeInterval(-lookback))
+        let recent = current.samples.filter { $0.at >= cutoff }
+        var slope = 0.0
+        if let first = recent.first, let last = recent.last,
+           last.at.timeIntervalSince(first.at) >= 5 * 60 {
+            slope = (last.usedPercentage - first.usedPercentage)
+                / (last.at.timeIntervalSince(first.at) / 3600)
+        }
+
+        let model = rf.roster.first { $0.id == rf.selectedId } ?? rf.roster.first
+        guard let model, let projection = model.fit(current) else {
+            return BurnOutlook(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil,
+                               usedPct: current.usedNow, resetsAt: current.resetsAt, method: "none")
+        }
+
+        // First 100% crossing before the reset, walked in 5-minute steps (the
+        // sampling cadence — finer adds nothing). Already-at-100% suppresses
+        // the ETA: the tile shows the 100% state directly.
+        var crossing: Date?
+        if current.usedNow < 100 {
+            var t = f.now.addingTimeInterval(5 * 60)
+            while t <= current.resetsAt {
+                if projection(t) >= 100 { crossing = t; break }
+                t = t.addingTimeInterval(5 * 60)
+            }
+        }
+        return BurnOutlook(
+            slopePercentPerHour: slope,
+            projectedFullAt: crossing,
+            etaSeconds: crossing.map { $0.timeIntervalSince(f.now) },
+            usedPct: current.usedNow,
+            resetsAt: current.resetsAt,
+            method: model.id)
+    }
+
+    /// Every candidate model's forward trajectory for a window's current cycle,
+    /// paired with its realized accuracy from the persisted per-user record and
+    /// flagged with the engine's selection — one source of truth for the pace
+    /// chart's overlay (take the selected one) and the compare-models sheet
+    /// (show them all).
+    public func rateLimitTrajectories(window: RateLimitWindowKind) -> [BurnTrajectory.ScoredTrajectory] {
+        guard let f = features else { return [] }
+        let accuracy = accuracyBySurface[EngineSelfEval.rlSurface(window.rawValue)]
+        return Self.rateLimitTrajectories(f, fit, window: window, accuracy: accuracy)
+    }
+
+    static func rateLimitTrajectories(
+        _ f: EngineFeatures, _ fit: Fit, window: RateLimitWindowKind,
+        accuracy: EngineSelfEval.Accuracy?, sampleCount: Int = 48
+    ) -> [BurnTrajectory.ScoredTrajectory] {
+        let key = window.rawValue
+        guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return [] }
+        let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
+        guard let current = currentOpt else { return [] }
+        let span = current.resetsAt.timeIntervalSince(f.now)
+        guard span > 0 else { return [] }
+
+        let statFor = { (id: String) -> EngineSelfEval.Accuracy.MethodStat? in
+            accuracy?.methods.first { $0.method == id }
+        }
+        return rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
+            guard let projection = model.fit(current) else { return nil }
+            var points: [BurnTrajectory.Sample] = []
+            for i in 0...sampleCount {
+                let date = f.now.addingTimeInterval(span * Double(i) / Double(sampleCount))
+                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date)))))
+            }
+            // Crossing walked at the 5-minute sampling cadence — same walk as
+            // `burnOutlook`, so the chart's marker and the tile's ETA agree.
+            var crossing: Date?
+            if current.usedNow < 100 {
+                var t = f.now.addingTimeInterval(5 * 60)
+                while t <= current.resetsAt {
+                    if projection(t) >= 100 { crossing = t; break }
+                    t = t.addingTimeInterval(5 * 60)
+                }
+            }
+            let stat = statFor(model.id)
+            return BurnTrajectory.ScoredTrajectory(
+                modelId: model.id, complexity: model.complexity,
+                trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
+                medianAbsError: stat?.medianAbsError ?? .infinity,
+                coverage: stat == nil ? 0 : 1,
+                isSelected: model.id == rf.selectedId)
+        }
+    }
+
     // MARK: - Pace vs norm
 
     static func pace(_ f: EngineFeatures, _ fit: Fit) -> Estimate {

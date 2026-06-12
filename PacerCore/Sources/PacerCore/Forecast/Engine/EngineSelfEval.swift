@@ -140,12 +140,18 @@ public enum EngineSelfEval {
 
     // MARK: - Accuracy report (transparency)
 
-    /// How each method is doing on this user's data — median absolute % error
-    /// and how many completed periods back it. Sorted best-first.
+    /// How each method is doing on this user's data — median absolute error in
+    /// both units (relative %, for cost surfaces; absolute points, for
+    /// utilisation surfaces) and how many completed periods back it. Sorted
+    /// best-first by relative error.
     public struct Accuracy: Sendable, Equatable {
         public struct MethodStat: Sendable, Equatable {
             public let method: String
             public let medianAbsPctError: Double
+            /// Median |predicted − truth| in the surface's native units
+            /// (percentage points for rate-limit surfaces) — what the
+            /// compare-models sheet displays as "fit ±N pp".
+            public let medianAbsError: Double
             public let periods: Int
         }
         public let surface: String
@@ -156,7 +162,10 @@ public enum EngineSelfEval {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let methods = byMethod.map { method, rows -> Accuracy.MethodStat in
             let periods = Set(rows.map { $0.periodKey }).count
-            return .init(method: method, medianAbsPctError: median(rows.map { $0.absPctError }), periods: periods)
+            return .init(method: method,
+                         medianAbsPctError: median(rows.map { $0.absPctError }),
+                         medianAbsError: median(rows.map { abs($0.predicted - $0.truth) }),
+                         periods: periods)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
     }

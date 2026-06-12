@@ -57,6 +57,10 @@ struct PacerApp: App {
                 // alongside ContentView keeps it scoped to the app's
                 // foreground lifetime.
                 .background(NotificationsHost())
+                // Hand the shared intelligence engine to the view tree so
+                // cards can ask it typed questions. Created in the background
+                // service's init, so it's non-nil here.
+                .environment(\.usageEngine, appDelegate.backgroundService.engine)
         }
         .modelContainer(appDelegate.container)
         // First-launch placement. These apply only when AppKit has no

@@ -39,10 +39,11 @@ final class AppBackgroundService {
     /// The on-device usage-intelligence engine. Owns its own `ModelContext`,
     /// rebuilds the per-user feature representation and refits its models on
     /// each scan tick, and answers the typed `EngineQuestion` → `Estimate`
-    /// contract views call. Lives here so it's warmed headless (a view that
-    /// opens later gets an already-fitted engine), and so it shares the one
-    /// container the rest of the process uses.
-    private var engine: UsageIntelligenceEngine?
+    /// contract views call. Created in `init` (not `start`) so it's non-nil by
+    /// the time the SwiftUI scene captures it for the environment, and warmed
+    /// headless so a view that opens later gets an already-fitted engine. It
+    /// shares the one container the rest of the process uses.
+    let engine: UsageIntelligenceEngine
     /// Observer for `.pacerScanCycleDidComplete` that drives `engine.recompute`.
     private var engineRecomputeObserver: NSObjectProtocol?
     /// Coalesce engine recomputes — the JSONL scan path posts `samplesChanged`
@@ -72,6 +73,7 @@ final class AppBackgroundService {
 
     init(container: ModelContainer) {
         self.container = container
+        self.engine = UsageIntelligenceEngine(modelContainer: container)
     }
 
     func start() {
@@ -137,7 +139,6 @@ final class AppBackgroundService {
             NotificationCenter.default.removeObserver(observer)
             engineRecomputeObserver = nil
         }
-        engine = nil
         lastEngineRecomputeAt = nil
         widgetRefreshCoordinator.stop()
         pricingRefreshTask?.cancel()
@@ -316,10 +317,11 @@ final class AppBackgroundService {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.checkForGlobalReset()
+                // Refresh the engine BEFORE the burn check so the warning
+                // never reads a stale fit; the engine's own self-eval
+                // recording happens inside recompute (idempotent).
+                await self.recomputeEngineIfDue()
                 await self.checkBurnRateWarning()
-                // Score any rate-limit cycles that finished since last scan,
-                // feeding the self-improving model scoreboard. Idempotent.
-                ForecastOutcomeRecorder.record(in: ModelContext(self.container))
             }
         }
     }
@@ -332,10 +334,10 @@ final class AppBackgroundService {
     /// (no new samples) posts no `samplesChanged`, so without it a freshly
     /// opened view would see an unwarmed engine until the next real change.
     private func startEngine() {
-        guard engine == nil else { return }
-        let engine = UsageIntelligenceEngine(modelContainer: container)
-        self.engine = engine
-        Task { await engine.recompute(now: Date()) }
+        guard engineRecomputeObserver == nil else { return }
+        Task { @MainActor [weak self] in
+            await self?.recomputeEngineIfDue(force: true)
+        }
         installEngineRecomputeObserver()
     }
 
@@ -351,14 +353,21 @@ final class AppBackgroundService {
             let relevant = (summary?.samplesChanged ?? false) || (summary?.rateLimitsChanged ?? false)
             guard relevant else { return }
             Task { @MainActor [weak self] in
-                guard let self, let engine = self.engine else { return }
-                let now = Date()
-                if let last = self.lastEngineRecomputeAt,
-                   now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
-                self.lastEngineRecomputeAt = now
-                await engine.recompute(now: now)
+                await self?.recomputeEngineIfDue()
             }
         }
+    }
+
+    /// Throttled engine refit. Posts `.pacerEngineDidRecompute` after a real
+    /// recompute so every engine-consuming card refreshes exactly when fresh
+    /// answers exist — not speculatively on raw scan ticks.
+    private func recomputeEngineIfDue(force: Bool = false) async {
+        let now = Date()
+        if !force, let last = lastEngineRecomputeAt,
+           now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
+        lastEngineRecomputeAt = now
+        await engine.recompute(now: now)
+        NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
     }
 
     /// Run `GlobalRateLimitReset.detect` over recent OAuth samples for
@@ -399,65 +408,28 @@ final class AppBackgroundService {
     // MARK: - Burn-rate (slope) warning
 
     /// Warn when the *rate* you're burning a window will blow the cap before
-    /// it resets. Both windows flow through the same coordinator path; only
-    /// the projection math differs:
-    ///
-    /// - **5-hour**: short window, so the first-to-last linear `BurnRate.project`
-    ///   over a 90-minute lookback is actionable and stays as-is (its
-    ///   displayed ETA is unchanged).
-    /// - **7-day**: a 90-minute linear slope projects alarming nonsense from
-    ///   one busy hour, so it uses the recency-weighted `TrendEstimator`
-    ///   (`projectRecencyWeighted`) over a multi-day lookback — the piece
-    ///   deferred from the 5-hour-only warning.
+    /// it resets. The crossing now comes from the intelligence engine's
+    /// selected model per window — for the 7-day window that's typically the
+    /// diurnal shape, which knows an overnight/weekend lull is coming and so
+    /// stops projecting "limit tonight" off one busy afternoon (the validated
+    /// improvement over the old linear/recency-weighted slopes). The
+    /// coordinator still owns the warning decision (`BurnRate.warrantsWarning`),
+    /// the per-cycle dedup, and the opt-in gate.
     private func checkBurnRateWarning() async {
         let context = ModelContext(container)
-        let now = Date()
-        await evaluateBurnWarning(
-            window: RateLimitWindowName.fiveHour,
-            fetchCutoff: now.addingTimeInterval(-2 * 3600),   // covers the 90-min lookback
-            context: context,
-            project: { samples, resetsAt in
-                BurnRate.project(samples: samples, resetsAt: resetsAt)
-            })
-        await evaluateBurnWarning(
-            window: RateLimitWindowName.sevenDay,
-            fetchCutoff: now.addingTimeInterval(-BurnRate.sevenDayLookbackSeconds),
-            context: context,
-            project: { samples, resetsAt in
-                BurnRate.projectRecencyWeighted(samples: samples, resetsAt: resetsAt, now: now)
-            })
-    }
-
-    /// Fetch a window's recent OAuth samples, build a projection via the
-    /// supplied strategy, and hand it to the coordinator. The coordinator
-    /// owns the warning decision (`BurnRate.warrantsWarning`), the
-    /// per-cycle dedup, and the opt-in gate — shared verbatim across windows.
-    private func evaluateBurnWarning(
-        window: String,
-        fetchCutoff: Date,
-        context: ModelContext,
-        project: ([BurnRate.Sample], Date?) -> BurnRate.Projection?
-    ) async {
-        let oauthSource = RateLimitSource.oauth
-        let descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate {
-                $0.source == oauthSource
-                    && $0.window == window
-                    && $0.sampledAt >= fetchCutoff
-            },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
-        )
-        guard let rows = try? context.fetch(descriptor), let latest = rows.last else { return }
-        let samples = rows.map {
-            BurnRate.Sample(sampledAt: $0.sampledAt, usedPercentage: $0.usedPercentage)
+        for window in RateLimitWindowKind.allCases {
+            guard let outlook = await engine.burnOutlook(window: window) else { continue }
+            let projection = BurnRate.Projection(
+                slopePercentPerHour: outlook.slopePercentPerHour,
+                projectedFullAt: outlook.projectedFullAt,
+                etaSeconds: outlook.etaSeconds)
+            await NotificationCoordinator.shared.handleBurnRateWarning(
+                window: window.rawValue,
+                projection: projection,
+                resetsAt: outlook.resetsAt,
+                usedPct: outlook.usedPct,
+                context: context
+            )
         }
-        guard let projection = project(samples, latest.resetsAt) else { return }
-        await NotificationCoordinator.shared.handleBurnRateWarning(
-            window: window,
-            projection: projection,
-            resetsAt: latest.resetsAt,
-            usedPct: latest.usedPercentage,
-            context: context
-        )
     }
 }
