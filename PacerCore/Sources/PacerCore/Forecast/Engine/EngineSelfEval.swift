@@ -225,9 +225,12 @@ public enum EngineSelfEval {
     }
 
     /// Pick the best method from an accumulated record: lowest median absolute
-    /// error, breaking near-ties (within 2pp) toward the simpler model. `nil`
-    /// until at least `minPeriods` completed periods back a method — the engine
-    /// then falls back to its cold on-the-fly backtest.
+    /// error in the surface's native units (percentage points for rate-limit
+    /// windows), breaking near-ties within 1.5 percentage points toward the
+    /// simpler model. This keeps selection consistent with the accuracy the UI
+    /// displays (`medianAbsError`) — the two can never contradict each other.
+    /// Returns `nil` until at least `minPeriods` completed periods back a
+    /// method — the engine then falls back to its cold on-the-fly backtest.
     public static func bestMethod(
         from records: [Record],
         minPeriods: Int = 2,
@@ -236,10 +239,10 @@ public enum EngineSelfEval {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
             guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
-            return (id, median(rows.map { $0.absPctError }), complexity[id] ?? 3)
+            return (id, median(rows.map { abs($0.predicted - $0.truth) }), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
-        return scored.filter { $0.err <= best.err + 2 }
+        return scored.filter { $0.err <= best.err + 1.5 }
             .min { ($0.cx, $0.err) < ($1.cx, $1.err) }?.id
     }
 

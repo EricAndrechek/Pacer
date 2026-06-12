@@ -35,12 +35,24 @@ struct ProjectionDetailView: View {
         trajectories.first?.trajectory.points.first?.at
     }
 
-    /// Chart x-axis left edge: "now" minus 25% of the remaining span,
-    /// clamped so we never show before cycleStart.
+    /// Chart x-axis right edge: the latest `at` across all trajectories' last
+    /// points, padded by 8 % of (that latest − trajectoryNow), clamped to ≤
+    /// resetsAt. Falls back to resetsAt when trajectories are empty.
+    private var xEnd: Date {
+        guard let now = trajectoryNow,
+              let rawEnd = trajectories.compactMap({ $0.trajectory.points.last?.at }).max()
+        else { return resetsAt }
+        let span = rawEnd.timeIntervalSince(now)
+        let padded = rawEnd.addingTimeInterval(span * 0.08)
+        return min(padded, resetsAt)
+    }
+
+    /// Chart x-axis left edge: "now" minus 25% of the visible window width
+    /// (now → xEnd), clamped so we never show before cycleStart.
     private var zoomStart: Date {
         guard let now = trajectoryNow else { return cycleStart }
-        let remaining = resetsAt.timeIntervalSince(now)
-        let lookback = remaining * 0.25
+        let windowSpan = xEnd.timeIntervalSince(now)
+        let lookback = windowSpan * 0.25
         return max(cycleStart, now.addingTimeInterval(-lookback))
     }
 
@@ -85,11 +97,13 @@ struct ProjectionDetailView: View {
         let hi: Double
     }
 
-    /// ~24 linearly-spaced steps from trajectoryNow → resetsAt. For each step,
+    /// ~24 linearly-spaced steps from trajectoryNow → xEnd. For each step,
     /// interpolate every trajectory's value (clamping at 100 once capped).
+    /// Values past a trajectory's last point extend at that last value, so
+    /// stepping to xEnd (which may be before resetsAt) is correct.
     private var envelopeSteps: [EnvelopeStep] {
         guard let now = trajectoryNow, !trajectories.isEmpty else { return [] }
-        let span = resetsAt.timeIntervalSince(now)
+        let span = xEnd.timeIntervalSince(now)
         guard span > 0 else { return [] }
         let steps = 24
         return (0...steps).compactMap { i in
@@ -159,12 +173,26 @@ struct ProjectionDetailView: View {
             }
             chart.frame(height: 240)
             accuracyTable
-            Text("Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard.")
+            Text(legendText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
         .padding(24)
         .frame(width: 620)
+    }
+
+    /// One-line legend; when the dashboard's pick isn't the single most
+    /// accurate model (the selector treats models within ±1.5 points as tied
+    /// and prefers the simpler one), say so — otherwise the list invites
+    /// "why isn't the best one picked?".
+    private var legendText: String {
+        var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard."
+        let best = trajectories.filter { $0.medianAbsError.isFinite }.min { $0.medianAbsError < $1.medianAbsError }
+        if let best, let selected = trajectories.first(where: { $0.isSelected }),
+           selected.modelId != best.modelId {
+            s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
+        }
+        return s
     }
 
     /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.
@@ -182,9 +210,10 @@ struct ProjectionDetailView: View {
             trajectoryMarks
             nowRuleMark
         }
-        .chartXScale(domain: zoomStart...resetsAt)
+        .chartXScale(domain: zoomStart...xEnd)
         .chartYScale(domain: yMin...yMax)
         .chartYAxis { AxisMarks(values: .automatic(desiredCount: 4)) { AxisGridLine(); AxisValueLabel() } }
+        .chartPlotStyle { $0.clipped() }
     }
 
     // MARK: - Chart marks
@@ -204,17 +233,24 @@ struct ProjectionDetailView: View {
         }
     }
 
-    /// The 0→100 ideal-burn reference. Both marks carry the style — a
-    /// modifier after the second LineMark styles only that mark, and the
-    /// first then renders in the chart's default (blue, solid) series color.
+    /// The 0→100 ideal-burn reference, drawn across the visible window.
+    ///
+    /// Both marks carry the style — a modifier after the second LineMark
+    /// styles only that mark, and the first then renders in the chart's
+    /// default (blue, solid) series color. The endpoints are the global
+    /// 0→100 line evaluated at the visible window edges (zoomStart and
+    /// xEnd), which may be well before reset when trajectories cap early.
+    /// `.chartPlotStyle { $0.clipped() }` is the backstop: even if the
+    /// left endpoint's y falls below yMin, the line cannot escape the plot
+    /// frame.
     @ChartContentBuilder private var paceMarks: some ChartContent {
         let leftVal = PaceMath.paceFraction(
             now: zoomStart, resetsAt: resetsAt, windowDuration: durationSeconds) * 100
-        // The right end is ALWAYS (reset, 100) — that's what the ideal-burn
-        // line means. When the zoomed y-domain tops out below 100 the explicit
-        // chartYScale clips the line at the frame edge with its true slope
-        // intact; pinning the endpoint to yMax instead would bend it.
-        ForEach([(zoomStart, leftVal), (resetsAt, 100.0)], id: \.0) { t, v in
+        let rightVal = PaceMath.paceFraction(
+            now: xEnd, resetsAt: resetsAt, windowDuration: durationSeconds) * 100
+        // Evaluate the SAME global burn line at both visible window edges so
+        // the slope is correct and the line never extends past xEnd.
+        ForEach([(zoomStart, leftVal), (xEnd, rightVal)], id: \.0) { t, v in
             LineMark(x: .value("t", t), y: .value("pct", v), series: .value("s", "pace"))
                 .foregroundStyle(Color.secondary.opacity(0.6))
                 .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
