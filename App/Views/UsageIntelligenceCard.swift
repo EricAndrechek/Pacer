@@ -1,22 +1,53 @@
 import SwiftUI
+import SwiftData
 import PacerCore
 import PacerUI
 
-/// Dashboard surface for the on-device intelligence engine — the first view to
-/// actually consume the typed `ask(question) → Estimate` contract. It shows the
-/// engine's calibrated answers (point + likely range + which method + an honest
-/// "lean on the range" when it's early), and a footer reporting how each method
-/// is *actually* doing on this user's own data — the self-improving loop, made
-/// visible.
+/// The intelligence engine's home on the dashboard — every number here is an
+/// engine answer, presented per the uncertainty-communication research:
 ///
-/// The engine is a background actor, not a SwiftData model, so this reads it in
-/// a `.task` and re-asks whenever a scan cycle lands new data (the engine
-/// refits on the same signal). It never blocks the main thread and degrades to
-/// a muted "not enough data yet" per row rather than a confident wrong number.
+/// - one plain-language **summary sentence** (the Weather-app pattern), built
+///   from the pace percentile ladder;
+/// - a **gated hero**: before half the day is observed (or while the
+///   calibrated range is wider than ~2.5× the point) a dollar projection is
+///   not decision-useful, so the headline is spend-so-far + pace-vs-normal;
+///   once the range is actionable, the headline becomes the projection with a
+///   Weather-style range bar and asymmetric anchors ("at least … could
+///   reach …") — never a bare symmetric interval, whose endpoints users
+///   anchor on and misread;
+/// - four supporting rows (the System Settings Battery/Storage row pattern):
+///   month projection, both rate-limit windows with natural-frequency risk
+///   copy ("topped 90% in 1 of 12 cycles — never hit the cap"), and
+///   yesterday as a counting statement ("your 3rd-highest day in 10 weeks");
+/// - a footer stating the engine's **earned evening accuracy** on this user's
+///   own days — the calibration affordance, in plain frequency terms.
+///
+/// Color is reserved for actionable risk (a projected pre-reset cap hit), not
+/// for uncertainty width — wide-but-normal is not danger.
 struct UsageIntelligenceCard: View {
     @Environment(\.usageEngine) private var engine
+
+    /// Today's rollup for the spend-so-far headline in early-read mode.
+    @Query private var todayAggregates: [DailyAggregate]
+
     @State private var answers: Answers?
     @State private var reloadToken = 0
+    /// Pace-ladder hysteresis: the label only changes once the percentile
+    /// moves ≥10 points past a boundary, so it can't flap intra-day.
+    @State private var paceLadderIndex: Int?
+
+    init() {
+        let today = TokenSample.formatDate(Date())
+        _todayAggregates = Query(filter: #Predicate<DailyAggregate> { $0.date == today })
+    }
+
+    struct Answers {
+        let today, month, pace, typical: Estimate
+        let fiveHour, sevenDay: UsageIntelligenceEngine.BurnOutlook?
+        let record: UsageIntelligenceEngine.TrackRecord?
+        let yesterday: (cost: Double, rankFromTop: Int, of: Int)?
+        let trainingDays: Int
+    }
 
     var body: some View {
         PacerCard("Usage intelligence") {
@@ -28,51 +59,150 @@ struct UsageIntelligenceCard: View {
                     .foregroundStyle(.secondary)
             }
         } footer: {
-            if let footer = answers?.footer {
-                Text(footer)
-            }
+            footerText
         }
         .task(id: reloadToken) { await load() }
-        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             reloadToken &+= 1
         }
+    }
+
+    private func load() async {
+        guard let engine else { return }
+        let today = await engine.ask(.projectedCost(.today))
+        let month = await engine.ask(.projectedCost(.thisMonth))
+        let pace = await engine.ask(.pace)
+        let typical = await engine.ask(.typicalUsage)
+        let fiveHour = await engine.burnOutlook(window: .fiveHour)
+        let sevenDay = await engine.burnOutlook(window: .sevenDay)
+        let record = await engine.eveningTrackRecord()
+        let yesterday = await engine.yesterdayRank()
+        let days = await engine.trainingDayCount()
+        answers = Answers(today: today, month: month, pace: pace, typical: typical,
+                          fiveHour: fiveHour, sevenDay: sevenDay,
+                          record: record, yesterday: yesterday, trainingDays: days)
     }
 
     // MARK: - Content
 
     @ViewBuilder private func content(_ a: Answers) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Headline: projected end-of-day cost, with its calibrated band and
-            // an honest method/confidence line underneath.
-            VStack(alignment: .leading, spacing: 2) {
-                MetricTile(value: cost(a.today),
-                           label: "projected by end of day",
-                           hint: bandHint(a.today),
-                           tooltip: exactTip(a.today))
-                Text(methodLine(a.today))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Text(summary(a))
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if rangeIsActionable(a.today) {
+                projectionHero(a)
+            } else {
+                earlyReadHero(a)
             }
 
             Divider().opacity(0.4)
 
-            VStack(spacing: 9) {
-                row("This month", value: cost(a.month), sub: bandHint(a.month))
-                row("5-hour limit", value: pct(a.fiveHour), sub: rlSub(a.fiveHour))
-                row("7-day limit", value: pct(a.sevenDay), sub: rlSub(a.sevenDay))
-                row("Pace today", value: phrase(a.pace), sub: paceSub(a.pace))
-                row("Typical for today", value: cost(a.typical), sub: bandHint(a.typical))
-                row("Yesterday", value: phrase(a.anomaly))
+            VStack(spacing: 10) {
+                monthRow(a.month)
+                limitRow(label: "5-hour limit", outlook: a.fiveHour)
+                limitRow(label: "7-day limit", outlook: a.sevenDay)
+                yesterdayRow(a)
             }
         }
     }
 
-    private func row(_ label: String, value: String, sub: String? = nil) -> some View {
+    /// Evening hero: the projection, its range bar in the context of the
+    /// user's own typical range, and asymmetric anchors.
+    @ViewBuilder private func projectionHero(_ a: Answers) -> some View {
+        let e = a.today
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(approxCost(e.value))
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .help(pacerCostExact(e.value))
+                Text("projected by end of day")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if let band = e.interval80 {
+                RangeBar(domain: heroDomain(a),
+                         range: outward(band),
+                         point: e.value,
+                         reference: a.typical.isInsufficient ? nil : a.typical.value)
+                    .help(rangeHelp(a))
+                Text(anchors(band))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Early-read hero: spend so far + pace vs the user's own days. A dollar
+    /// projection this early would be a range too wide to act on, so the
+    /// engine's rank skill (which IS supported this early) leads instead.
+    @ViewBuilder private func earlyReadHero(_ a: Answers) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(pacerCost(todayCost))
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .help(pacerCostExact(todayCost))
+                Text("so far today")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Too early to call today's total — check back this evening.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func monthRow(_ e: Estimate) -> some View {
+        row(label: "This month",
+            value: e.isInsufficient ? "—" : approxCost(e.value),
+            sub: e.interval80.map { "likely \(costRange(outward($0)))" },
+            valueHelp: e.isInsufficient ? nil : pacerCostExact(e.value))
+    }
+
+    @ViewBuilder private func limitRow(label: String, outlook: UsageIntelligenceEngine.BurnOutlook?) -> some View {
+        if let o = outlook {
+            let projected = o.willHitLimitBeforeReset ? 100 : nil as Double?
+            let tint: Color = o.willHitLimitBeforeReset ? .red : .primary
+            row(label: label,
+                value: "\(Int(o.usedPct.rounded()))%",
+                valueDetail: hitOrResetPhrase(o),
+                sub: frequencyLine(o),
+                tint: tint)
+                .help(projected != nil ? "Projected to reach the cap before this window resets" : "")
+        } else {
+            row(label: label, value: "—", sub: nil)
+        }
+    }
+
+    @ViewBuilder private func yesterdayRow(_ a: Answers) -> some View {
+        if let y = a.yesterday {
+            let weeks = max(1, Int((Double(y.of) / 7.0).rounded()))
+            let notable = y.rankFromTop <= max(3, y.of / 10)
+            row(label: "Yesterday",
+                value: pacerCost(y.cost),
+                valueDetail: nil,
+                sub: notable ? "your \(ordinal(y.rankFromTop))-highest day in \(weeks) weeks" : "a typical day for you",
+                valueHelp: pacerCostExact(y.cost))
+        }
+    }
+
+    private func row(label: String, value: String, valueDetail: String? = nil,
+                     sub: String?, tint: Color = .primary, valueHelp: String? = nil) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(label).font(.subheadline).foregroundStyle(.secondary)
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(value).font(.subheadline).monospacedDigit()
+                HStack(spacing: 5) {
+                    Text(value).font(.subheadline.weight(.medium)).monospacedDigit().foregroundStyle(tint)
+                    if let valueDetail {
+                        Text(valueDetail).font(.subheadline).foregroundStyle(tint == .primary ? .secondary : tint)
+                    }
+                }
+                .help(valueHelp ?? "")
                 if let sub, !sub.isEmpty {
                     Text(sub).font(.caption2).foregroundStyle(.secondary)
                 }
@@ -80,90 +210,182 @@ struct UsageIntelligenceCard: View {
         }
     }
 
-    // MARK: - Load (ask the engine)
+    // MARK: - Copy
 
-    private func load() async {
-        guard let engine else { return }
-        let today = await engine.ask(.projectedCost(.today))
-        let month = await engine.ask(.projectedCost(.thisMonth))
-        let fiveHour = await engine.ask(.rateLimitOutlook(.fiveHour))
-        let sevenDay = await engine.ask(.rateLimitOutlook(.sevenDay))
-        let pace = await engine.ask(.pace)
-        let typical = await engine.ask(.typicalUsage)
-        let anomaly = await engine.ask(.isAnomalous)
-        let eodAcc = await engine.selfEvalAccuracy()
-        let rlAcc = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(RateLimitWindowKind.sevenDay.rawValue))
-        answers = Answers(today: today, month: month, fiveHour: fiveHour, sevenDay: sevenDay,
-                          pace: pace, typical: typical, anomaly: anomaly,
-                          footer: Self.footer(eod: eodAcc, sevenDay: rlAcc))
+    /// "On pace for a typical Wednesday — about $650 by tonight."
+    private func summary(_ a: Answers) -> String {
+        let dayName = Date().formatted(.dateTime.weekday(.wide))
+        guard !a.pace.isInsufficient else {
+            return "Learning your rhythm — \(a.trainingDays) days observed so far."
+        }
+        if rangeIsActionable(a.today) {
+            let label = ladderLabel(percentile: a.pace.value, dayName: dayName)
+            return "\(label) — about \(approxCost(a.today.value)) by tonight."
+        }
+        // Early in the day the projection percentile is honest but a flat
+        // claim reads over-eager ("busier than usual" at 00:15 because most
+        // days are $0 at midnight) — frame it as pace, not verdict.
+        return earlyLadderLabel(percentile: a.pace.value, dayName: dayName) + "."
     }
 
-    // MARK: - Formatting
-
-    private func cost(_ e: Estimate) -> String { e.isInsufficient ? "—" : pacerCost(e.value) }
-    private func pct(_ e: Estimate) -> String { e.isInsufficient ? "—" : "\(Int(e.value.rounded()))%" }
-    private func phrase(_ e: Estimate) -> String { e.isInsufficient ? "—" : (e.note ?? "—") }
-
-    private func bandHint(_ e: Estimate) -> String? {
-        guard !e.isInsufficient, let b = e.interval80 else { return nil }
-        return "likely \(pacerCost(b.lowerBound))–\(pacerCost(b.upperBound))"
+    /// Early-day framing of the same ladder — pace, not verdict.
+    private func earlyLadderLabel(percentile: Double, dayName: String) -> String {
+        switch heldLadderIndex(percentile) {
+        case 0:  return "A quiet start to \(dayName)"
+        case 1:  return "Tracking like a typical \(dayName) so far"
+        case 2:  return "Running ahead of your usual \(dayName) so far"
+        case 3:  return "On pace for one of your heavier days"
+        default: return "On your heaviest pace in weeks"
+        }
     }
 
-    private func rlSub(_ e: Estimate) -> String? {
-        guard !e.isInsufficient else { return nil }
+    /// Five-step pace ladder with hysteresis so the label can't flap.
+    private func ladderLabel(percentile: Double, dayName: String) -> String {
+        switch heldLadderIndex(percentile) {
+        case 0:  return "A quiet \(dayName)"
+        case 1:  return "On pace for a typical \(dayName)"
+        case 2:  return "Busier than your usual \(dayName)"
+        case 3:  return "One of your heavier days"
+        default: return "Your heaviest pace in weeks"
+        }
+    }
+
+    /// Ladder index with hysteresis: near a boundary, keep the held label.
+    private func heldLadderIndex(_ percentile: Double) -> Int {
+        let bounds = [0.25, 0.60, 0.85, 0.95]
+        var idx = bounds.filter { percentile >= $0 }.count
+        if let held = paceLadderIndex, abs(percentile - nearestBoundary(percentile)) < 0.10 {
+            idx = held
+        }
+        if paceLadderIndex != idx {
+            // Defer the state write out of view evaluation.
+            let target = idx
+            Task { @MainActor in paceLadderIndex = target }
+        }
+        return idx
+    }
+
+    private func nearestBoundary(_ p: Double) -> Double {
+        [0.25, 0.60, 0.85, 0.95].min { abs($0 - p) < abs($1 - p) } ?? 0.6
+    }
+
+    /// "at least $480 · could reach $1.9k on a heavy day"
+    private func anchors(_ band: ClosedRange<Double>) -> String {
+        let b = outward(band)
+        return "at least \(approxCost(b.lowerBound)) · could reach \(approxCost(b.upperBound)) on a heavy day"
+    }
+
+    /// "→ cap around 7 PM" / "resets in 3 days" — window-scaled, color carried
+    /// by the row tint.
+    private func hitOrResetPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
+        if let hit = o.projectedFullAt {
+            if hit.timeIntervalSinceNow < 22 * 3600 {
+                return "→ cap around \(hit.formatted(.dateTime.hour()))"
+            }
+            return "→ cap \(hit.formatted(.dateTime.weekday(.abbreviated))) \(dayPart(hit))"
+        }
+        return nil
+    }
+
+    /// "topped 90% in 1 of 12 cycles — never hit the cap" (Beta-smoothed
+    /// phrasing rules: never claim 0% from a short record).
+    private func frequencyLine(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
+        guard o.cyclesObserved >= 5 else { return "still learning this window" }
         var parts: [String] = []
-        if let b = e.interval80 {
-            parts.append("\(Int(b.lowerBound.rounded()))–\(Int(b.upperBound.rounded()))% range")
+        if o.cyclesPeakOver90 == 0 {
+            parts.append("never topped 90% in \(o.cyclesObserved) cycles")
+        } else {
+            parts.append("topped 90% in \(o.cyclesPeakOver90) of \(o.cyclesObserved) cycles")
         }
-        if let note = e.note { parts.append(note) }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        parts.append(o.cyclesHit100 == 0 ? "never hit the cap"
+                     : "hit the cap \(o.cyclesHit100)×")
+        return parts.joined(separator: " — ")
     }
 
-    private func paceSub(_ e: Estimate) -> String? {
-        guard !e.isInsufficient else { return nil }
-        return "\(Int((e.value * 100).rounded()))th percentile of your days"
-    }
-
-    private func methodLine(_ e: Estimate) -> String {
-        guard !e.isInsufficient else { return e.note ?? "not enough history yet" }
-        var line = "via \(Self.displayName(e.method)) · \(e.confidence.rawValue) confidence"
-        if let note = e.note { line += " · \(note)" }
-        return line
-    }
-
-    private func exactTip(_ e: Estimate) -> String? {
-        e.isInsufficient ? nil : pacerCostExact(e.value)
-    }
-
-    static func displayName(_ method: String) -> String {
-        switch method {
-        case "eod-clock", "average-rate":          return "clock-linear"
-        case "regime-gated-eod":                   return "hour-of-day shape"
-        case "eod-done-gate":                      return "day looks done"
-        case "monthly-daily-sum":                  return "daily-sum"
-        case "monthly-flat", "monthly":            return "flat average"
-        case "rl-diurnal-rate", "diurnal-rate":    return "diurnal"
-        case "rl-saturating", "saturating":        return "saturating"
-        case "rl-linear-recent", "linear-recent":  return "linear"
-        case "rl-recency-weighted", "recency-weighted": return "recency-weighted"
-        case "rl-damped-acceleration", "damped-acceleration": return "damped"
-        default:                                   return method
+    @ViewBuilder private var footerText: some View {
+        if let a = answers {
+            if let r = a.record {
+                Text("Evening projections have landed within ~\(Int(r.medianAbsPctError.rounded()))% for you · \(r.days) days scored")
+            } else {
+                Text("Still calibrating — \(a.trainingDays) days observed")
+            }
         }
     }
 
-    /// "Learned from your data: end-of-day via X (~N% off, Md) · 7-day via Y (~N%)"
-    /// — the accumulated per-user track record that drives selection.
-    static func footer(eod: EngineSelfEval.Accuracy?, sevenDay: EngineSelfEval.Accuracy?) -> String? {
-        func part(_ label: String, _ acc: EngineSelfEval.Accuracy?) -> String? {
-            guard let m = acc?.methods.first, m.medianAbsPctError.isFinite, m.periods > 0 else { return nil }
-            return "\(label) via \(displayName(m.method)) (~\(Int(m.medianAbsPctError.rounded()))% off, \(m.periods)d)"
-        }
-        let parts = [part("end-of-day", eod), part("7-day limit", sevenDay)].compactMap { $0 }
-        return parts.isEmpty ? nil : "Learned from your data — " + parts.joined(separator: " · ")
+    // MARK: - Helpers
+
+    private var todayCost: Double { todayAggregates.reduce(0) { $0 + $1.totalCostUSD } }
+
+    /// The display gate: a range is decision-useful once at least half the
+    /// day is observed AND the 80% range is no wider than ~2.5× the point.
+    /// Screenshot mode pins the evening state so the README always shows the
+    /// full projection hero.
+    private func rangeIsActionable(_ e: Estimate) -> Bool {
+        guard !e.isInsufficient, let band = e.interval80, e.value > 0 else { return false }
+        let isScreenshot = ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MODE"] == "1"
+        let fractionOfDay = isScreenshot ? 0.8
+            : Date().timeIntervalSince(Calendar.current.startOfDay(for: Date())) / 86400
+        let widthRatio = (band.upperBound - band.lowerBound) / e.value
+        return fractionOfDay >= 0.5 && widthRatio <= 2.5
     }
 
-    struct Answers {
-        let today, month, fiveHour, sevenDay, pace, typical, anomaly: Estimate
-        let footer: String?
+    private func heroDomain(_ a: Answers) -> ClosedRange<Double> {
+        var hi = a.today.value * 1.2
+        if let band = a.today.interval80 { hi = max(hi, band.upperBound * 1.05) }
+        if !a.typical.isInsufficient, let t80 = a.typical.interval80 { hi = max(hi, t80.upperBound) }
+        return 0...max(hi, 1)
+    }
+
+    private func rangeHelp(_ a: Answers) -> String {
+        var s = "80% range: \(costRange(a.today.interval80 ?? a.today.value...a.today.value))"
+        if !a.typical.isInsufficient {
+            s += " · tick = your typical \(Date().formatted(.dateTime.weekday(.wide))) (\(pacerCost(a.typical.value)))"
+        }
+        return s
+    }
+
+    /// Round a forecast to 2 significant figures — displayed precision should
+    /// not exceed measured skill.
+    private func approxCost(_ v: Double) -> String {
+        pacerCost(roundSig(v, up: nil))
+    }
+
+    private func costRange(_ r: ClosedRange<Double>) -> String {
+        "\(pacerCost(r.lowerBound))–\(pacerCost(r.upperBound))"
+    }
+
+    /// Bands round OUTWARD so the printed range is never narrower than the
+    /// calibrated one.
+    private func outward(_ r: ClosedRange<Double>) -> ClosedRange<Double> {
+        let lo = roundSig(r.lowerBound, up: false)
+        let hi = roundSig(r.upperBound, up: true)
+        return min(lo, hi)...max(lo, hi)
+    }
+
+    /// 2-significant-figure rounding; `up` forces ceiling/floor for bands.
+    private func roundSig(_ v: Double, up: Bool?) -> Double {
+        guard v > 0 else { return v }
+        let mag = pow(10, floor(log10(v)) - 1)
+        let scaled = v / mag
+        let r: Double
+        switch up {
+        case .some(true):  r = scaled.rounded(.up)
+        case .some(false): r = scaled.rounded(.down)
+        case .none:        r = scaled.rounded()
+        }
+        return r * mag
+    }
+
+    private func dayPart(_ d: Date) -> String {
+        switch Calendar.current.component(.hour, from: d) {
+        case ..<12: return "morning"
+        case ..<17: return "afternoon"
+        default:    return "evening"
+        }
+    }
+
+    private func ordinal(_ n: Int) -> String {
+        let f = NumberFormatter(); f.numberStyle = .ordinal
+        return f.string(from: NSNumber(value: n)) ?? "\(n)th"
     }
 }

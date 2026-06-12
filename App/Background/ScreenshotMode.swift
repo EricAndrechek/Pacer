@@ -33,6 +33,10 @@ import PacerUI
 /// change so the README images don't drift from the real app.
 @MainActor
 enum ScreenshotMode {
+    /// Engine warmed over the seeded in-memory store, injected into every
+    /// captured scene so engine-powered cards render real answers.
+    @MainActor private static var screenshotEngine: UsageIntelligenceEngine?
+
     /// True when launched for a screenshot run.
     static var isActive: Bool {
         ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MODE"] == "1"
@@ -59,6 +63,13 @@ enum ScreenshotMode {
             at: outDir, withIntermediateDirectories: true
         )
         log("writing screenshots to \(outDir.path)")
+
+        // Warm an intelligence engine over the seeded in-memory store so the
+        // engine-powered cards (intelligence card, projected EOD/month tiles,
+        // burn rows) render real answers instead of their warming-up states.
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
 
         // Order out any stray scene window SwiftUI may have created so
         // nothing flashes on screen. We capture our own hosting views
@@ -181,6 +192,7 @@ enum ScreenshotMode {
         let margin: CGFloat = card ? 56 : 28
         let inner = content()
             .modelContainer(container)
+            .environment(\.usageEngine, screenshotEngine)
             .frame(width: width, height: height)
 
         // Optional macOS window chrome — a titlebar with traffic-light
@@ -297,6 +309,7 @@ extension ScreenshotMode {
         let startOfToday = cal.startOfDay(for: now)
 
         seedDailyAggregates(ctx, startOfToday: startOfToday, cal: cal)
+        seedPriorHourly(ctx, startOfToday: startOfToday, cal: cal)
         seedTodayHourly(ctx, today: TokenSample.formatDate(startOfToday), now: now, cal: cal)
         seedRateLimits(ctx, now: now)
         seedSessions(ctx, now: now)
@@ -351,6 +364,38 @@ extension ScreenshotMode {
             insertDaily(ctx, date: ds, model: opus, cost: opusCost)
             insertDaily(ctx, date: ds, model: sonnet, cost: sonnetCost)
             insertDaily(ctx, date: ds, model: haiku, cost: haikuCost)
+        }
+    }
+
+    /// Prior days' hourly rollups (~70 days) so the intelligence engine has
+    /// the day-shape history it learns from — without these it reports
+    /// "0 days observed" in the screenshots. Mirrors the daily seeder's
+    /// weekday/weekend rhythm with a midday plateau; total per day tracks
+    /// the same noise so daily and hourly stay roughly consistent.
+    private static func seedPriorHourly(
+        _ ctx: ModelContext, startOfToday: Date, cal: Calendar
+    ) {
+        for d in 1..<70 {
+            guard let day = cal.date(byAdding: .day, value: -d, to: startOfToday) else { continue }
+            if noise(d &* 7 &+ 5) < 0.12 { continue }          // same gap days as daily
+            let ds = TokenSample.formatDate(day)
+            let weekday = cal.component(.weekday, from: day)
+            let isWeekend = (weekday == 1 || weekday == 7)
+            let r = noise(d)
+            var dayCost = (isWeekend ? 30.0 : 110.0) * (0.55 + 0.9 * r)
+            if weekday == 3 || weekday == 4 { dayCost *= 1.25 }
+            // Spread over 8am–8pm with the same broad midday plateau.
+            var weights: [Double] = []
+            for h in 8...20 {
+                let dist = abs(Double(h) - 13.5)
+                weights.append(max(0.15, min(1.0, 1.15 - dist / 7.0)) * (0.7 + 0.6 * noise(h &+ d)))
+            }
+            let totalW = weights.reduce(0, +)
+            for (i, h) in (8...20).enumerated() {
+                let share = dayCost * weights[i] / totalW
+                insertHourly(ctx, date: ds, hour: h, model: opus, cost: share * 0.9)
+                insertHourly(ctx, date: ds, hour: h, model: sonnet, cost: share * 0.1)
+            }
         }
     }
 
