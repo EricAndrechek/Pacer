@@ -28,7 +28,6 @@ struct DashboardView: View {
             WelcomeCard()
             HeroStripCard(onTodayTap: openToday)
             AdvisorCard()
-            UsageIntelligenceCard()
             PaceChartCard()
             LiveActivityCard()
             TodayDetailsCard()

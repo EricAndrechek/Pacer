@@ -124,7 +124,7 @@ struct MonthlyForecastCard: View {
             MetricTile(
                 value: projectedValueText,
                 label: "projected month",
-                hint: trajectoryHint,
+                hint: bandHint ?? trajectoryHint,
                 tooltip: projectedTooltip
             )
             MetricTile(
@@ -140,12 +140,18 @@ struct MonthlyForecastCard: View {
         return pacerCost(p.value)
     }
 
+    /// "likely $8.4k–$12k" — the calibrated range, outward-rounded, as the
+    /// visible hint; pace comparison + exact value live in the tooltip.
+    private var bandHint: String? {
+        guard let p = projection, !p.isInsufficient, let band = p.interval80 else { return nil }
+        return "likely \(IntelligenceFormatting.costRange(IntelligenceFormatting.outward(band)))"
+    }
+
     private var projectedTooltip: String? {
         guard let p = projection, !p.isInsufficient else { return nil }
-        if let band = p.interval80 {
-            return "\(pacerCostExact(p.value)) · likely \(pacerCost(band.lowerBound))–\(pacerCost(band.upperBound))"
-        }
-        return pacerCostExact(p.value)
+        var parts = [pacerCostExact(p.value)]
+        if let pace = trajectoryHint { parts.append(pace) }
+        return parts.joined(separator: " · ")
     }
 
     /// "May 2026" style label so the user sees which month the figure

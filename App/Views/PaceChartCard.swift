@@ -26,6 +26,10 @@ struct PaceChartCard: View {
     /// Every candidate model's trajectory per window (selected one flagged),
     /// for the compare-models sheet. Same engine call as `projections`.
     @State private var allTrajectories: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
+    /// Per-window outlook (projected end-of-window + band, crossing range,
+    /// cycle frequency facts) for the caption line under each chart.
+    @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+    @State private var endEstimates: [String: Estimate] = [:]
 
     struct WindowProjection: Equatable {
         var points: [PaceChartView.Data.Point]
@@ -41,13 +45,18 @@ struct PaceChartCard: View {
         )
     }
 
-    /// Re-ask the engine for both windows' trajectories. One call powers both
-    /// the overlay (selected model) and the detail sheet (all models).
+    /// Re-ask the engine for both windows' answers. One pass powers the
+    /// overlay (selected model), the detail sheet (all models), and the
+    /// outlook caption (projected end + band, crossing, frequency facts).
     private func refreshProjections() async {
         guard let engine else { return }
         var nextSelected: [String: WindowProjection] = [:]
         var nextAll: [String: [BurnTrajectory.ScoredTrajectory]] = [:]
+        var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+        var nextEnds: [String: Estimate] = [:]
         for window in RateLimitWindowKind.allCases {
+            if let o = await engine.burnOutlook(window: window) { nextOutlooks[window.rawValue] = o }
+            nextEnds[window.rawValue] = await engine.ask(.rateLimitOutlook(window))
             let list = await engine.rateLimitTrajectories(window: window)
             guard !list.isEmpty else { continue }
             nextAll[window.rawValue] = list
@@ -59,6 +68,8 @@ struct PaceChartCard: View {
         }
         projections = nextSelected
         allTrajectories = nextAll
+        outlooks = nextOutlooks
+        endEstimates = nextEnds
     }
 
     private struct Bucketed {
@@ -93,7 +104,9 @@ struct PaceChartCard: View {
                         duration: 5 * 3600,
                         windowSamples: b.fiveHour,
                         projection: projections[RateLimitWindowName.fiveHour],
-                        trajectories: allTrajectories[RateLimitWindowName.fiveHour] ?? []
+                        trajectories: allTrajectories[RateLimitWindowName.fiveHour] ?? [],
+                        outlook: outlooks[RateLimitWindowName.fiveHour],
+                        endEstimate: endEstimates[RateLimitWindowName.fiveHour]
                     )
                     Divider()
                         .frame(height: 110)
@@ -102,7 +115,9 @@ struct PaceChartCard: View {
                         duration: 7 * 86400,
                         windowSamples: b.sevenDay,
                         projection: projections[RateLimitWindowName.sevenDay],
-                        trajectories: allTrajectories[RateLimitWindowName.sevenDay] ?? []
+                        trajectories: allTrajectories[RateLimitWindowName.sevenDay] ?? [],
+                        outlook: outlooks[RateLimitWindowName.sevenDay],
+                        endEstimate: endEstimates[RateLimitWindowName.sevenDay]
                     )
                 }
             }
@@ -174,6 +189,10 @@ private struct PaceChartColumn: View {
     /// Every candidate model's trajectory + realized accuracy (engine-sourced),
     /// for the compare-models detail sheet.
     var trajectories: [BurnTrajectory.ScoredTrajectory] = []
+    /// Engine burn outlook (crossing range + cycle frequency facts) and the
+    /// projected end-of-window estimate, for the outlook caption.
+    var outlook: UsageIntelligenceEngine.BurnOutlook?
+    var endEstimate: Estimate?
 
     /// Share affordance state. `hovering` reveals the share button only
     /// while the cursor is over the column (Linear/Things idiom, keeps
@@ -241,11 +260,48 @@ private struct PaceChartColumn: View {
             header
             heroLine
             chartSlot
+            outlookLines
             compareButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onHover { hovering = $0 }
         .sheet(isPresented: $showingDetail) { detailSheet }
+    }
+
+    /// The window's forecast, integrated where the chart already is: one line
+    /// for "where this window is heading" (projected end-of-window with its
+    /// calibrated range — or, when a pre-reset cap hit is projected, the
+    /// crossing window in red), and one muted line of the user's own history
+    /// with this window ("topped 90% in 3 of 73 cycles · capped 1×").
+    @ViewBuilder
+    private var outlookLines: some View {
+        if cycle?.isAwaiting == false {
+            VStack(alignment: .leading, spacing: 2) {
+                if let o = outlook, o.willHitLimitBeforeReset,
+                   let crossing = IntelligenceFormatting.crossingPhrase(o) {
+                    Text(crossing)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                        .help("Projected to reach the cap before this window resets, at your typical rhythm")
+                } else if let e = endEstimate, !e.isInsufficient {
+                    let band = e.interval80.map {
+                        " · \(Int($0.lowerBound.rounded()))–\(Int($0.upperBound.rounded()))% range"
+                    } ?? ""
+                    Text("on pace to end ~\(Int(e.value.rounded()))%\(band)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help("Projected utilization when this window resets, with its calibrated 80% range")
+                }
+                if let o = outlook, let freq = IntelligenceFormatting.frequencyLine(o) {
+                    Text(freq)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+        }
     }
 
     /// "Compare models" — opens the all-models projection detail. Shown only
