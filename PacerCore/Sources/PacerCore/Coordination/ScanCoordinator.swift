@@ -751,7 +751,7 @@ public final class ScanCoordinator {
         }
         // Same recovery path for HourlyAggregate. Bootstraps the hourly
         // rollup for users upgrading from a build that didn't have it
-        // (`TodayTimelineCard` and `LiveActivityCard` migrated off raw
+        // (`TodayTimelineCard` and `NowStrip` migrated off raw
         // TokenSample walks onto this rollup). Empty after the first
         // post-upgrade cycle.
         let recoveryHourBuckets = activePersister.consumeMissingHourBuckets()
@@ -901,7 +901,7 @@ public final class ScanCoordinator {
         phase.dailyRecomputeMs = tickMs()
 
         // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
-        // chart) and LiveActivityCard (last-hour burn rate). Order
+        // chart) and NowStrip (last-hour burn rate). Order
         // doesn't matter relative to the daily/project/session
         // recomputers — they all read from the same TokenSample
         // snapshot, the dirty sets don't overlap, and the cycle's

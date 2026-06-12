@@ -28,7 +28,7 @@ public final class TokenSample {
     //   range filter that lands on TokenSample directly.
     // - `projectPath`: alias-migration walks filter by exact match;
     //   also helps any future view that queries samples by project.
-    // - `sampledAt`: LiveActivityCard's `latestSampleProbe`
+    // - `sampledAt`: NowStrip's `latestSampleProbe`
     //   (fetchLimit=1, sortBy sampledAt desc) was doing a full-table
     //   sort on every render to find the most-recent sample for the
     //   freshness chip. With ~500K rows on a power user's DB that's

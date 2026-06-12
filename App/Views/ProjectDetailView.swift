@@ -71,7 +71,7 @@ struct ProjectDetailView: View {
     @State private var cachedSubprojects: [SubprojectRow] = []
     /// Cost mode. Reactive @AppStorage so the Subprojects card
     /// re-buckets immediately when the user toggles modes in
-    /// Settings (same pattern LiveActivityCard uses).
+    /// Settings (same pattern NowStrip uses).
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
