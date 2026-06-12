@@ -139,6 +139,22 @@ public actor UsageIntelligenceEngine {
             pools[ci] = EngineSelfEval.poolMembers(forCut: cf, records: eodRecords)
         }
 
+        // Evening track record: per evening cut, the best pool member's
+        // realized errors — the "earned skill" number the UI footer shows.
+        var eveningErrors: [Double] = []
+        var eveningDays = Set<String>()
+        for cf in EngineSelfEval.cutFractions where cf >= 0.75 {
+            let bucket = "cut=\(String(format: "%.2f", cf))|all"
+            guard let bestId = EngineSelfEval.poolMembers(forCut: cf, records: eodRecords).first else { continue }
+            for r in eodRecords where r.bucket == bucket && r.method == bestId && r.truth > 0 {
+                eveningErrors.append(r.absPctError)
+                eveningDays.insert(r.periodKey)
+            }
+        }
+        eveningRecord = eveningErrors.count >= 8
+            ? TrackRecord(medianAbsPctError: EngineSelfEval.median(eveningErrors), days: eveningDays.count)
+            : nil
+
         // Pick each rate-limit window's outlook model from its accumulated
         // record (the diurnal model now competes here on realized accuracy).
         var rlSelection: [String: String] = [:]
@@ -157,6 +173,28 @@ public actor UsageIntelligenceEngine {
     /// Number of historical days the fit was trained on — for a future
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
+
+    /// The evening track record — how close the engine's end-of-day answer has
+    /// landed once most of the day is observed (cuts ≥ 0.75), as a
+    /// median |error| % over the scored days. This is the honest number for a
+    /// "how accurate has this been for you" affordance: the morning APE is a
+    /// property of the data, the evening APE is the engine's earned skill.
+    public struct TrackRecord: Sendable, Equatable {
+        public let medianAbsPctError: Double
+        public let days: Int
+    }
+
+    public func eveningTrackRecord() -> TrackRecord? { eveningRecord }
+    private var eveningRecord: TrackRecord?
+
+    /// Yesterday's realized cost and its rank among all complete days — for
+    /// counting-statement copy ("your 3rd-highest day in 10 weeks") instead of
+    /// indefensible smooth tail probabilities from ~50 points.
+    public func yesterdayRank() -> (cost: Double, rankFromTop: Int, of: Int)? {
+        guard let yesterday = fit.dailyBaseline.last, fit.dailyBaseline.count >= 7 else { return nil }
+        let higher = fit.dailyBaseline.filter { $0 > yesterday }.count
+        return (yesterday, higher + 1, fit.dailyBaseline.count)
+    }
 
     /// How each prediction method is doing on this user's own data for a surface
     /// (`EngineSelfEval.surfaceEOD`, or `EngineSelfEval.rlSurface(window)`):

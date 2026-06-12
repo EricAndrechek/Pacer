@@ -98,6 +98,17 @@ struct LiveActivityCard: View {
         eodEstimate = await engine.ask(.projectedCost(.today))
     }
 
+    /// Hint under the projected-EOD tile: the calibrated range when it's
+    /// decision-useful, an honest "early read" while it's still too wide,
+    /// the naive fallback's caveat otherwise.
+    private var eodHint: String? {
+        guard let e = eodEstimate, !e.isInsufficient else { return "if rate holds" }
+        guard let band = e.interval80, e.value > 0 else { return nil }
+        let widthRatio = (band.upperBound - band.lowerBound) / e.value
+        guard widthRatio <= 2.5 else { return "early read — wide range" }
+        return "likely \(pacerCost(band.lowerBound))–\(pacerCost(band.upperBound))"
+    }
+
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
@@ -240,7 +251,7 @@ struct LiveActivityCard: View {
             MetricTile(
                 value: pacerCost(projectedEndOfDay(stats: stats)),
                 label: "projected EOD",
-                hint: "if rate holds",
+                hint: eodHint,
                 tooltip: pacerCostExact(projectedEndOfDay(stats: stats))
             )
         }
