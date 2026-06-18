@@ -59,7 +59,13 @@ public enum KeychainOAuthError: Error, Sendable, Equatable {
     case unexpectedStatus(OSStatus)
 }
 
-/// Reads Claude Code's OAuth credential out of the macOS Keychain.
+/// Reads Claude Code's OAuth credential — from the macOS Keychain when
+/// available, falling back to the on-disk `~/.claude/.credentials.json`
+/// (the primary store on Linux/Windows, and the only readable source over
+/// SSH on macOS, where the Keychain throws `errSecInteractionNotAllowed`).
+/// Both carry the interactive `user:profile`-scoped token that
+/// `/api/oauth/usage` requires; a `claude setup-token` value is
+/// `user:inference`-only and would 401, so it is deliberately NOT a source.
 ///
 /// ## Why we shell out to `/usr/bin/security` instead of `SecItemCopyMatching`
 ///
@@ -144,23 +150,53 @@ public struct KeychainOAuth: Sendable {
     ///   - 36 → `errSecAuthFailed` (-25293, masked) — user cancelled
     ///   - 51 → `errSecInteractionNotAllowed` (-25308, masked) — non-UI context
     /// Anything else is surfaced raw via `.unexpectedStatus`.
+    ///
+    /// ## File fallback (step 3)
+    ///
+    /// After both keychain reads, we fall back to the on-disk
+    /// `.credentials.json` (see `credentialsFileURLs`). That's the primary
+    /// store on Linux/Windows and the only readable source over SSH on
+    /// macOS, where the keychain returns `.accessDenied`. Claude Code
+    /// writes the same `{"claudeAiOauth": …}` blob there, so decode is
+    /// shared.
     public static let defaultRawReader: RawReader = {
-        let userScopedResult = runSecurityCLI(args: [
+        var lastKeychainError: KeychainOAuthError = .notFound
+        // 1. Per-user keychain item (Claude Code 2.x).
+        switch runSecurityCLI(args: [
             "find-generic-password",
             "-s", KeychainOAuth.serviceName,
             "-a", NSUserName(),
             "-w",
-        ])
-        if case .failure(.notFound) = userScopedResult {
-            // Fall back to the legacy no-acct read for older Claude
-            // Code installs that never wrote the per-user item.
-            return runSecurityCLI(args: [
+        ]) {
+        case .success(let data):
+            return .success(data)
+        case .failure(let error):
+            lastKeychainError = error
+        }
+        // 2. Legacy no-acct keychain item (older installs). Only worth a
+        //    second subprocess when the per-user item was simply absent;
+        //    an accessDenied/other error would just repeat.
+        if case .notFound = lastKeychainError {
+            switch runSecurityCLI(args: [
                 "find-generic-password",
                 "-s", KeychainOAuth.serviceName,
                 "-w",
-            ])
+            ]) {
+            case .success(let data):
+                return .success(data)
+            case .failure(let error):
+                lastKeychainError = error
+            }
         }
-        return userScopedResult
+        // 3. On-disk `.credentials.json` fallback (Linux/Windows store,
+        //    macOS-over-SSH escape hatch).
+        if let data = readCredentialsFileData(urls: credentialsFileURLs()) {
+            return .success(data)
+        }
+        // Nothing readable anywhere — surface the most informative keychain
+        // error (`.notFound` on a clean machine, `.accessDenied` over SSH
+        // with no file present).
+        return .failure(lastKeychainError)
     }
 
     /// One-shot subprocess invocation with the 5-second timeout the
@@ -217,6 +253,68 @@ public struct KeychainOAuth: Sendable {
         default:
             return .failure(.unexpectedStatus(OSStatus(status)))
         }
+    }
+
+    // MARK: - On-disk credentials file fallback
+
+    /// Candidate `.credentials.json` locations, in priority order. Mirrors
+    /// `ClaudePathResolver`'s config-dir precedence but WITHOUT its
+    /// `projects/` gate — a config dir can hold credentials before any
+    /// session JSONL exists (a fresh login, or a chat-only / headless box
+    /// that never ran the CLI's project loop):
+    ///
+    ///   1. `$CLAUDE_CONFIG_DIR` (comma-separated; each entry's file)
+    ///   2. `${XDG_CONFIG_HOME:-$HOME/.config}/claude/.credentials.json`
+    ///   3. `$HOME/.claude/.credentials.json`
+    ///
+    /// `internal` (not `private`) so `KeychainOAuthTests` can exercise the
+    /// precedence with injected `environment` / `homeDirectory`.
+    static func credentialsFileURLs(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [URL] {
+        var dirs: [URL] = []
+        if let raw = environment["CLAUDE_CONFIG_DIR"], !raw.isEmpty {
+            for piece in raw.split(separator: ",", omittingEmptySubsequences: true) {
+                let trimmed = piece.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    dirs.append(URL(fileURLWithPath: trimmed))
+                }
+            }
+        } else {
+            let xdgBase: URL
+            if let raw = environment["XDG_CONFIG_HOME"], !raw.isEmpty {
+                xdgBase = URL(fileURLWithPath: raw)
+            } else {
+                xdgBase = homeDirectory.appendingPathComponent(".config")
+            }
+            dirs.append(xdgBase.appendingPathComponent("claude"))
+            dirs.append(homeDirectory.appendingPathComponent(".claude"))
+        }
+
+        var seen = Set<URL>()
+        var urls: [URL] = []
+        for dir in dirs {
+            let url = dir.appendingPathComponent(".credentials.json").standardizedFileURL
+            if seen.insert(url).inserted {
+                urls.append(url)
+            }
+        }
+        return urls
+    }
+
+    /// First readable, non-empty file from `urls`, as raw bytes. `nil`
+    /// when none exist or are readable — the caller maps that back to the
+    /// keychain error so a clean machine still reports `.notFound`.
+    /// Deliberately tolerant: a missing candidate is normal (not every box
+    /// has every layout), so we just try the next one.
+    static func readCredentialsFileData(urls: [URL]) -> Data? {
+        for url in urls {
+            if let data = try? Data(contentsOf: url), !data.isEmpty {
+                return data
+            }
+        }
+        return nil
     }
 
     /// Read and decode the credential. Returns the typed value on
@@ -297,68 +395,6 @@ public struct KeychainOAuth: Sendable {
             refreshToken: refreshToken,
             subscriptionType: subscriptionType
         ))
-    }
-
-    /// Update the on-disk credential after a successful OAuth refresh.
-    /// Reads the current blob, mutates the access token / refresh token
-    /// / expiry, and writes the modified blob back via
-    /// `security add-generic-password -U`. Other fields (scopes,
-    /// subscriptionType, anything Claude Code adds we don't model)
-    /// round-trip unchanged so we can't accidentally strip a field
-    /// Claude Code relies on later.
-    ///
-    /// Writes are scoped to `acct=NSUserName()`, mirroring the read
-    /// path. If the existing entry was a legacy `acct=""` item, we
-    /// still write the per-user item — the next read picks it up
-    /// thanks to the `-a $USER` first / fallback strategy.
-    public func update(
-        accessToken: String,
-        refreshToken: String,
-        expiresAt: Date
-    ) -> Result<Void, KeychainOAuthError> {
-        // 1. Pull the current blob so we preserve any fields we don't model.
-        let raw: Data
-        switch rawReader() {
-        case .success(let data):
-            raw = data
-        case .failure(let err):
-            return .failure(err)
-        }
-        let trimmed = raw.trimmedASCIIWhitespace()
-        guard var top = (try? JSONSerialization.jsonObject(with: trimmed)) as? [String: Any],
-              var oauth = top["claudeAiOauth"] as? [String: Any]
-        else {
-            return .failure(.malformedJSON(underlying: "couldn't decode existing blob for round-trip"))
-        }
-
-        // 2. Mutate just the three fields the refresh response gives us.
-        // expiresAt is stored as Unix milliseconds — matches Claude Code's
-        // own format (verified live).
-        oauth["accessToken"] = accessToken
-        oauth["refreshToken"] = refreshToken
-        oauth["expiresAt"] = Int64(expiresAt.timeIntervalSince1970 * 1000)
-        top["claudeAiOauth"] = oauth
-
-        let updatedJSON: Data
-        do {
-            updatedJSON = try JSONSerialization.data(withJSONObject: top)
-        } catch {
-            return .failure(.malformedJSON(underlying: "re-serialize: \(error.localizedDescription)"))
-        }
-
-        // 3. Write back. `-U` updates an existing item or creates a new
-        // one. We scope by `-a NSUserName()` so we match Claude Code 2.x's
-        // per-user item rather than touching the legacy `acct=""` item.
-        guard let jsonString = String(data: updatedJSON, encoding: .utf8) else {
-            return .failure(.malformedJSON(underlying: "non-UTF8 serialized blob"))
-        }
-        return Self.runSecurityCLI(args: [
-            "add-generic-password",
-            "-U",                       // update if exists
-            "-s", Self.serviceName,
-            "-a", NSUserName(),
-            "-w", jsonString,
-        ]).map { _ in () }
     }
 }
 

@@ -38,7 +38,6 @@ struct SettingsView: View {
                     NotificationTestCard()
                 }
                 SettingsSection("Authentication") {
-                    OAuthRefreshCard()
                     OAuthTokenOverrideCard()
                 }
                 SettingsSection("Data") {
@@ -966,122 +965,14 @@ private struct ProjectAliasesPointerCard: View {
 
 // MARK: - Authentication
 
-/// On-demand refresh of Pacer's view of the OAuth credential. POSTs
-/// the keychain's `refreshToken` to Anthropic's OAuth endpoint, then
-/// writes the rotated credential back to the keychain. Workaround
-/// for Claude Code 2.x refreshing only in memory — see #6 and the
-/// `OAuthClient.refresh` doc comment for the race-with-Claude-Code
-/// caveat. Refresh is user-triggered (not background) so the race
-/// window is bounded to button clicks.
-private struct OAuthRefreshCard: View {
-    @State private var inProgress: Bool = false
-    @State private var lastResult: RefreshOutcome?
-
-    private enum RefreshOutcome: Equatable {
-        case success(expiresAt: Date)
-        case failure(message: String)
-    }
-
-    var body: some View {
-        PacerCard("Refresh OAuth keychain entry", content: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    statusLabel
-                    Spacer(minLength: 8)
-                    Button("Refresh now") { runRefresh() }
-                        .controlSize(.small)
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(inProgress)
-                }
-            }
-        }, footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Forces a fresh access token using the refresh token already in the keychain, then writes the rotated credential back. Pacer's next poll will use the new token; no re-login needed.")
-                Text("Caveat: Anthropic rotates the refresh token on every call, which invalidates the in-memory copy your other Claude Code sessions hold. Those sessions will need `claude logout && claude login` the next time they would have auto-refreshed (~8 hours after their last refresh).")
-                    .padding(.top, 2)
-            }
-        })
-    }
-
-    @ViewBuilder
-    private var statusLabel: some View {
-        if inProgress {
-            ProgressView().controlSize(.small)
-            Text("Refreshing…")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if let result = lastResult {
-            switch result {
-            case .success(let expiresAt):
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 12))
-                Text("Refreshed — expires \(pacerRelative(expiresAt))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            case .failure(let msg):
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.system(size: 12))
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-            }
-        } else {
-            Image(systemName: "arrow.clockwise")
-                .foregroundStyle(.tertiary)
-                .font(.system(size: 12))
-            Text("Click Refresh now to rotate Pacer's OAuth token via the keychain.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(2)
-        }
-    }
-
-    private func runRefresh() {
-        inProgress = true
-        lastResult = nil
-        Task { @MainActor in
-            let client = OAuthClient(tokenOverride: { nil })
-            let result = await client.refresh()
-            inProgress = false
-            lastResult = Self.classify(result)
-        }
-    }
-
-    private static func classify(
-        _ result: Result<OAuthCredential, OAuthRefreshError>
-    ) -> RefreshOutcome {
-        switch result {
-        case .success(let credential):
-            return .success(expiresAt: credential.expiresAt ?? Date().addingTimeInterval(8 * 3600))
-        case .failure(.noRefreshToken):
-            return .failure(message: "No refresh token in the keychain. Run `claude logout && claude login` to seed one.")
-        case .failure(.keychainRead(.notFound)):
-            return .failure(message: "No `Claude Code-credentials` entry found. Sign into Claude Code first.")
-        case .failure(.keychainRead(.accessDenied)):
-            return .failure(message: "Keychain access denied. Approve the prompt in the foreground app and retry.")
-        case .failure(.keychainRead),
-             .failure(.keychainWrite):
-            return .failure(message: "Couldn't read or write the keychain. Check ~/Library/Logs/Pacer/Pacer.err.log.")
-        case .failure(.http(let status, _)) where status == 400 || status == 401:
-            return .failure(message: "Refresh token rejected (\(status)). Likely rotated by another client — run `claude logout && claude login` to re-seed.")
-        case .failure(.http(let status, _)):
-            return .failure(message: "Anthropic returned HTTP \(status) from the refresh endpoint.")
-        case .failure(.transport):
-            return .failure(message: "Network error talking to the refresh endpoint.")
-        case .failure(.responseSchemaMismatch):
-            return .failure(message: "Refresh response didn't match the expected shape. Anthropic may have changed the API.")
-        }
-    }
-}
-
 /// Manual OAuth access-token override. When non-empty, the OAuth poller
-/// uses this token instead of the one in the `Claude Code-credentials`
-/// keychain entry — workaround for Claude Code 2.x not persisting
-/// refreshed tokens back to the keychain (see #6).
+/// uses this token instead of the keychain / `.credentials.json` copy.
+/// Escape hatch for environments where neither source is readable (a
+/// sandboxed/SSH context), or while a fresh token propagates.
+///
+/// Must be a `user:profile`-scoped interactive access token (the
+/// `accessToken` from the keychain blob). A `claude setup-token` value is
+/// `user:inference`-only and `/api/oauth/usage` rejects it with 401.
 ///
 /// UX shape: draft state local to the card, committed to `@AppStorage`
 /// only on Save. Test runs a one-off `OAuthClient.fetchUsage()` with the
@@ -1151,8 +1042,8 @@ private struct OAuthTokenOverrideCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Claude Code 2.x doesn't persist refreshed access tokens back to its keychain entry, so the copy Pacer reads goes stale after ~8 hours and the rate-limit panel freezes. As a workaround, paste a fresh access token here — Pacer will use it instead.")
-                Text("To fetch a fresh token after re-signing into Claude Code, run in Terminal:")
+                Text("Normally Pacer reads the token itself — from the Claude Code keychain entry, or from `~/.claude/.credentials.json` when the keychain isn't readable (Linux, or macOS over SSH). Only paste here if neither works for you.")
+                Text("Paste the interactive `user:profile` access token (NOT a `claude setup-token`, which lacks the scope the usage endpoint needs). Fetch it after signing into Claude Code:")
                     .padding(.top, 2)
                 Text("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
                     .font(.system(size: 11, design: .monospaced))
