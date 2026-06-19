@@ -179,17 +179,21 @@ import Testing
 
         let missing = dir.appendingPathComponent("missing.json")
         let empty = dir.appendingPathComponent("empty.json")
+        let mcp = dir.appendingPathComponent("mcp.json")
         let real = dir.appendingPathComponent("real.json")
         try Data().write(to: empty)
+        // A real macOS `~/.claude/.credentials.json`: MCP plugin tokens, NOT
+        // the OAuth credential. Must be skipped, not returned-then-rejected.
+        try Data(#"{"mcpOAuth":{"plugin:x|abc":{"accessToken":"nope"}}}"#.utf8).write(to: mcp)
         let blob = #"{"claudeAiOauth":{"accessToken":"tok"}}"#
         try Data(blob.utf8).write(to: real)
 
-        // First candidate missing, second empty (skipped), third is real.
-        let data = KeychainOAuth.readCredentialsFileData(urls: [missing, empty, real])
+        // Missing → skip, empty → skip, mcpOAuth → skip (no marker), real → hit.
+        let data = KeychainOAuth.readCredentialsFileData(urls: [missing, empty, mcp, real])
         #expect(data == Data(blob.utf8))
 
-        // None readable → nil.
-        #expect(KeychainOAuth.readCredentialsFileData(urls: [missing]) == nil)
+        // Only foreign/absent candidates → nil (so the caller reports .notFound).
+        #expect(KeychainOAuth.readCredentialsFileData(urls: [missing, mcp]) == nil)
     }
 
     @Test func fileFallbackBlobDecodesLikeKeychain() {
