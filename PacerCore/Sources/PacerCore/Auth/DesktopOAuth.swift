@@ -77,6 +77,14 @@ public struct DesktopOAuth: Sendable {
         self.cacheReader = cacheReader
     }
 
+    /// Whether Claude Desktop is installed with a token cache worth reading —
+    /// a cheap file-only check (`config.json` present with an `oauth:tokenCache*`
+    /// field). Does NOT touch the keychain, so it never triggers a prompt;
+    /// used to decide whether to surface the enablement nudge.
+    public static var isClaudeDesktopAvailable: Bool {
+        defaultCacheReader()?.isEmpty == false
+    }
+
     // MARK: - Read
 
     /// Resolve the freshest `user:profile` credential from Claude Desktop.

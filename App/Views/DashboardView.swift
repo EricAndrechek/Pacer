@@ -32,6 +32,7 @@ struct DashboardView: View {
             }
         ) {
             WelcomeCard()
+            DesktopCredentialPrompt()
             NowStrip(
                 onTodayTap: openToday,
                 onSessionTap: { sessionId, displayName in
