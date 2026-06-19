@@ -11,21 +11,22 @@ import PacerUI
 ///     background to surface the one-time "Claude Safe Storage" keychain
 ///     approval in context (the system dialog is the approval UI; Settings →
 ///     Authentication is the recovery path if denied).
-///   - **Not now** hides it for *this session only* — it reappears on the
-///     next launch, so someone who isn't ready gets reminded rather than
-///     losing the option silently.
+///   - **Not now** dismisses it permanently (the nudge never reappears). The
+///     feature stays reachable in Settings → Authentication, which the copy
+///     points to — so nothing is lost silently.
 ///
 /// Suppressed in screenshot mode so it never leaks into README shots.
 struct DesktopCredentialPrompt: View {
     @AppStorage(PacerSettings.Key.desktopCredentialsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
-    @State private var dismissedThisSession = false
+    @AppStorage(PacerSettings.Key.desktopOnboardingDismissed, store: PacerSettings.store)
+    private var dismissed: Bool = false
 
     // Cheap, file-only check (no keychain prompt); snapshot once per view.
     private let desktopAvailable = DesktopOAuth.isClaudeDesktopAvailable
 
     var body: some View {
-        if enabled || dismissedThisSession || !desktopAvailable || ScreenshotMode.isActive {
+        if enabled || dismissed || !desktopAvailable || ScreenshotMode.isActive {
             EmptyView()
         } else {
             banner
@@ -42,14 +43,14 @@ struct DesktopCredentialPrompt: View {
                 Text("Also track Claude Desktop")
                     .font(.title3)
                     .fontWeight(.semibold)
-                Text("Read its credential (read-only) so Pacer keeps updating outside the Claude Code CLI. One-time keychain approval.")
+                Text("Read its credential (read-only) so Pacer keeps updating outside the Claude Code CLI. One-time keychain approval — turn it on or off anytime in Settings → Authentication.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Button("Enable") { enable() }
                         .buttonStyle(.borderedProminent)
-                    Button("Not now") { dismissedThisSession = true }
+                    Button("Not now") { dismissed = true }
                         .buttonStyle(.bordered)
                 }
                 .padding(.top, 2)
