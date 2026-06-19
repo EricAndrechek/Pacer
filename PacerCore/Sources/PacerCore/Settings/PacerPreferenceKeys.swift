@@ -86,6 +86,10 @@ public enum PacerPreferenceKeys {
     /// app's credential store and triggers a one-time keychain approval, so
     /// the user turns it on deliberately. Read-only; never refreshes.
     public static let desktopCredentialsEnabled = "pacer.desktop.credentialsEnabled"
+    /// Set when the user dismisses the first-run "Also track Claude Desktop"
+    /// nudge with "Not now" — so it never reappears. The feature itself stays
+    /// reachable in Settings → Authentication; this only silences the banner.
+    public static let desktopOnboardingDismissed = "pacer.desktop.onboardingDismissed"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls
