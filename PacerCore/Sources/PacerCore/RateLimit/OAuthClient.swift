@@ -91,6 +91,18 @@ public struct OAuthClient: Sendable {
     /// `desktopEnabled()` is true (the user opted in). Read-only.
     private let desktop: DesktopOAuth
     private let desktopEnabled: @Sendable () -> Bool
+    /// Pacer's own persisted copy of a working token. Defaults to an
+    /// in-memory store so tests and Settings probes never touch the real
+    /// keychain; production passes `KeychainCredentialStore()` to persist.
+    private let heldStore: HeldCredentialStoring
+    /// Tokens the server has 401'd this process, so resolution won't re-pick
+    /// a revoked one and instead falls through to the next-freshest.
+    private let rejected: RejectedTokens
+
+    /// How long before a held token's expiry we go back to the sources for a
+    /// fresher one. Until then we serve the held copy without touching
+    /// Claude's keychain / Desktop store at all.
+    private static let refreshLeadTime: TimeInterval = 10 * 60
 
     public init(
         keychain: KeychainOAuth = KeychainOAuth(),
@@ -98,7 +110,9 @@ public struct OAuthClient: Sendable {
         now: @escaping @Sendable () -> Date = { Date() },
         tokenOverride: @escaping @Sendable () -> String? = { PacerPreferences.oauthTokenOverride() },
         desktop: DesktopOAuth = DesktopOAuth(),
-        desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() }
+        desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() },
+        heldStore: HeldCredentialStoring = EphemeralCredentialStore(),
+        rejected: RejectedTokens = RejectedTokens()
     ) {
         self.keychain = keychain
         self.transport = transport
@@ -106,6 +120,8 @@ public struct OAuthClient: Sendable {
         self.tokenOverride = tokenOverride
         self.desktop = desktop
         self.desktopEnabled = desktopEnabled
+        self.heldStore = heldStore
+        self.rejected = rejected
     }
 
     /// Production transport: `URLSession.shared.data(for:)` plus the
@@ -131,57 +147,13 @@ public struct OAuthClient: Sendable {
         // mapping its errors to ours so the caller switches on one
         // error type.
         let credential: OAuthCredential
-        if let override = tokenOverride() {
-            // Skip the expiresAt gate too — we have no local expiry
-            // for an override, so the server is the only authority.
-            // A stale override surfaces as `.unauthorized` on the next
-            // poll, which the transition logger reports clearly.
-            credential = OAuthCredential(
-                accessToken: override,
-                expiresAt: nil,
-                subscriptionType: nil
-            )
-        } else {
-            // Gather candidates from every enabled source and use the
-            // freshest valid token. Claude Code (keychain / .credentials.json)
-            // and Claude Desktop are roughly equal — whichever has the later
-            // expiry wins, so an idle gap in one (its 8h token lapsed) is
-            // covered by the other. Desktop is read-only and consulted only
-            // when the user opted in.
-            var candidates: [OAuthCredential] = []
-            var keychainError: OAuthClientError?
-            switch keychain.read() {
-            case .success(let c):
-                candidates.append(c)
-            case .failure(.notFound):
-                keychainError = .credentialsNotFound
-            case .failure(.accessDenied):
-                keychainError = .keychainAccessDenied
-            case .failure(.malformedJSON(let underlying)):
-                keychainError = .keychainMalformed(underlying)
-            case .failure(.unexpectedStatus(let status)):
-                keychainError = .keychainStatus(status)
-            }
-            if desktopEnabled(), case .success(let c) = desktop.read() {
-                candidates.append(c)
-            }
-
-            // Step 2: prefer a non-expired token; among those, the freshest.
-            // A nil expiry (override-shaped) counts as never-expiring. The
-            // expiry gate avoids a guaranteed 401; the server stays
-            // authoritative for borderline clock skew.
-            let referenceNow = now()
-            let valid = candidates.filter { $0.expiresAt == nil || $0.expiresAt! >= referenceNow }
-            if let best = valid.max(by: { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }) {
-                credential = best
-            } else if let newestExpiry = candidates.compactMap({ $0.expiresAt }).max() {
-                // Every source we could read is expired — report the latest
-                // expiry (Claude Code refreshes it on next use).
-                return .failure(.tokenExpired(at: newestExpiry))
-            } else {
-                // Nothing readable anywhere — surface the keychain error.
-                return .failure(keychainError ?? .credentialsNotFound)
-            }
+        let fromHeldStore: Bool
+        switch resolveCredential() {
+        case .success(let resolution):
+            credential = resolution.credential
+            fromHeldStore = resolution.fromHeldStore
+        case .failure(let error):
+            return .failure(error)
         }
 
         // Step 3: build request.
@@ -210,6 +182,14 @@ public struct OAuthClient: Sendable {
         case 200..<300:
             break // fall through to decode
         case 401:
+            // This token is bad. Blocklist it so resolution falls through to
+            // the next-freshest candidate, and drop our held copy so the next
+            // poll re-derives from the sources. (`fromHeldStore` is logged
+            // intent; we clear regardless since the held copy may equal the
+            // rejected token.)
+            _ = fromHeldStore
+            rejected.reject(credential.accessToken)
+            heldStore.clear()
             return .failure(.unauthorized(body: truncate(body, max: 200)))
         case 429:
             return .failure(.rateLimited(
@@ -229,6 +209,73 @@ public struct OAuthClient: Sendable {
             return .failure(.responseSchemaMismatch(error.localizedDescription))
         }
         return .success(snapshot)
+    }
+
+    // MARK: - Credential resolution
+
+    /// Resolve which token to send, and whether it came from our held store.
+    ///
+    /// Fast path: a comfortably-valid, non-rejected held token is used
+    /// directly — no read of Claude's keychain / Desktop store. Slow path
+    /// (no held token, near expiry, or rejected): gather candidates from the
+    /// sources (Claude Code keychain + opted-in Desktop) plus the held token
+    /// as a fallback, use the freshest non-expired non-rejected one, and
+    /// cache it. So we touch Claude's stores about once per token lifetime,
+    /// and a still-valid held token keeps us alive even if the user logged
+    /// out of Claude Code / removed Desktop.
+    private func resolveCredential() -> Result<(credential: OAuthCredential, fromHeldStore: Bool), OAuthClientError> {
+        // Manual override wins outright and is never cached.
+        if let override = tokenOverride() {
+            return .success((OAuthCredential(accessToken: override, expiresAt: nil, subscriptionType: nil), false))
+        }
+
+        let referenceNow = now()
+        let held = heldStore.load()
+
+        // Fast path.
+        if let held, !rejected.isRejected(held.accessToken),
+           let expiresAt = held.expiresAt,
+           expiresAt >= referenceNow.addingTimeInterval(Self.refreshLeadTime) {
+            return .success((held, true))
+        }
+
+        // Slow path: read the sources.
+        var candidates: [OAuthCredential] = []
+        var keychainError: OAuthClientError?
+        switch keychain.read() {
+        case .success(let c):                    candidates.append(c)
+        case .failure(.notFound):                keychainError = .credentialsNotFound
+        case .failure(.accessDenied):            keychainError = .keychainAccessDenied
+        case .failure(.malformedJSON(let u)):    keychainError = .keychainMalformed(u)
+        case .failure(.unexpectedStatus(let s)): keychainError = .keychainStatus(s)
+        }
+        if desktopEnabled(), case .success(let creds) = desktop.readAll() {
+            candidates.append(contentsOf: creds)
+        }
+        // The held token competes too — it serves as the fallback when the
+        // sources are unreadable (logged out / Desktop removed).
+        if let held { candidates.append(held) }
+
+        let usable = candidates.filter {
+            !rejected.isRejected($0.accessToken) && ($0.expiresAt == nil || $0.expiresAt! >= referenceNow)
+        }
+        // Deterministic freshest-wins: latest expiry, ties broken by token.
+        let best = usable.sorted {
+            let a = $0.expiresAt ?? .distantFuture
+            let b = $1.expiresAt ?? .distantFuture
+            return a != b ? a > b : $0.accessToken < $1.accessToken
+        }.first
+
+        if let best {
+            if best.accessToken != held?.accessToken { heldStore.save(best) }
+            return .success((best, best.accessToken == held?.accessToken))
+        }
+        if let newestExpiry = candidates.compactMap({ $0.expiresAt }).max() {
+            // Everything readable is expired — report the latest expiry
+            // (Claude Code refreshes its token on next use).
+            return .failure(.tokenExpired(at: newestExpiry))
+        }
+        return .failure(keychainError ?? .credentialsNotFound)
     }
 
     // MARK: - Decode
