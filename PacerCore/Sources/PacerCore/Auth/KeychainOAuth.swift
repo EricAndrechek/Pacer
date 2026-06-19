@@ -199,59 +199,17 @@ public struct KeychainOAuth: Sendable {
         return .failure(lastKeychainError)
     }
 
-    /// One-shot subprocess invocation with the 5-second timeout the
-    /// production keychain workflow needs. Extracted so the per-user
-    /// and legacy reads share identical error-handling.
+    /// Thin wrapper over the shared `SecurityCLI` runner, mapping its
+    /// neutral failures onto `KeychainOAuthError`. Kept so the two read
+    /// call sites above read cleanly; the subprocess + timeout logic lives
+    /// in `SecurityCLI` (shared with `DesktopOAuth`).
     private static func runSecurityCLI(args: [String]) -> Result<Data, KeychainOAuthError> {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = args
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-
-        do {
-            try process.run()
-        } catch {
-            // Couldn't even spawn — bad PATH, missing binary, sandbox
-            // refusal. Carry the underlying CocoaError code so a log
-            // reader can route it.
-            let nsError = error as NSError
-            return .failure(.unexpectedStatus(OSStatus(nsError.code)))
-        }
-
-        // The keychain is normally unlocked at login, so the subprocess
-        // returns in well under a second. The timeout below is a safety
-        // net for the pathological "locked keychain prompts modally"
-        // case; without it, a single bad keychain state could wedge the
-        // poller actor forever.
-        let timeoutSeconds: TimeInterval = 5
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            process.waitUntilExit()
-            group.leave()
-        }
-        if group.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            process.terminate()
-            // Drain so the kernel doesn't hold the pipes open.
-            _ = try? stdout.fileHandleForReading.readToEnd()
-            _ = try? stderr.fileHandleForReading.readToEnd()
-            return .failure(.accessDenied)
-        }
-
-        let status = process.terminationStatus
-        switch status {
-        case 0:
-            let data = (try? stdout.fileHandleForReading.readToEnd()) ?? Data()
-            return .success(data)
-        case 44:
-            return .failure(.notFound)
-        case 36, 51, 128:
-            return .failure(.accessDenied)
-        default:
-            return .failure(.unexpectedStatus(OSStatus(status)))
+        SecurityCLI.run(args).mapError { failure in
+            switch failure {
+            case .notFound:                 return .notFound
+            case .accessDenied:             return .accessDenied
+            case .spawn(let s), .status(let s): return .unexpectedStatus(s)
+            }
         }
     }
 

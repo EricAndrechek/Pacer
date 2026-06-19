@@ -80,6 +80,12 @@ public enum PacerPreferenceKeys {
     /// keychain (see #6). Stored as a plain string; lives in the App
     /// Group UserDefaults suite alongside the rest of Pacer's prefs.
     public static let oauthTokenOverride     = "pacer.oauth.tokenOverride"
+    /// Opt-in: also read Claude Desktop's credential (decrypting its
+    /// `safeStorage` token cache) and use whichever of it / the Claude Code
+    /// keychain token is freshest. Off by default — it decrypts another
+    /// app's credential store and triggers a one-time keychain approval, so
+    /// the user turns it on deliberately. Read-only; never refreshes.
+    public static let desktopCredentialsEnabled = "pacer.desktop.credentialsEnabled"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls
@@ -115,5 +121,12 @@ public enum PacerPreferences {
         let raw = store.string(forKey: PacerPreferenceKeys.oauthTokenOverride) ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Whether the user opted in to reading Claude Desktop's credential.
+    /// Defaults to `false` (key absent → off) so a fresh daemon never
+    /// touches the Desktop keychain item without explicit consent.
+    public static func desktopCredentialsEnabled(from store: UserDefaults = store) -> Bool {
+        store.bool(forKey: PacerPreferenceKeys.desktopCredentialsEnabled)
     }
 }

@@ -38,6 +38,7 @@ struct SettingsView: View {
                     NotificationTestCard()
                 }
                 SettingsSection("Authentication") {
+                    DesktopCredentialsCard()
                     OAuthTokenOverrideCard()
                 }
                 SettingsSection("Data") {
@@ -964,6 +965,134 @@ private struct ProjectAliasesPointerCard: View {
 }
 
 // MARK: - Authentication
+
+/// Opt-in: also read Claude Desktop's credential. When on, Pacer decrypts
+/// Claude Desktop's `safeStorage` token cache (read-only) and the poller
+/// uses whichever of it or the Claude Code token is freshest — so Pacer
+/// keeps working for Desktop/chat-only users and across Claude Code's idle
+/// token gaps. Off by default; turning it on triggers the one-time
+/// "Claude Safe Storage" keychain approval, which the Test run surfaces.
+private struct DesktopCredentialsCard: View {
+    @AppStorage(PacerSettings.Key.desktopCredentialsEnabled, store: PacerSettings.store)
+    private var enabled: Bool = false
+
+    @State private var testResult: TestResult?
+    @State private var testInProgress = false
+
+    private enum TestResult: Equatable {
+        case success(fiveHourPct: Double?, sevenDayPct: Double?)
+        case failure(message: String)
+    }
+
+    var body: some View {
+        PacerCard("Claude Desktop credentials", content: {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Use Claude Desktop credentials", isOn: $enabled)
+                    .onChange(of: enabled) { _, on in
+                        testResult = nil
+                        // Surface the one-time keychain approval right away,
+                        // and confirm the token actually works.
+                        if on { runTest() }
+                    }
+                HStack(spacing: 8) {
+                    statusLabel
+                    Spacer(minLength: 8)
+                    Button("Test") { runTest() }
+                        .controlSize(.small)
+                        .disabled(testInProgress || !enabled)
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Lets Pacer keep working when you use Claude Desktop / general chat rather than the Claude Code CLI. Pacer decrypts Desktop's stored token (read-only — it never refreshes or writes it) and uses whichever of Desktop or Claude Code is freshest.")
+                Text("Turning this on triggers a one-time macOS keychain approval for “Claude Safe Storage” — click Always Allow so Pacer can read it silently afterward.")
+                    .padding(.top, 2)
+            }
+        })
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if testInProgress {
+            ProgressView().controlSize(.small)
+            Text("Reading Claude Desktop…")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if let result = testResult {
+            switch result {
+            case .success(let fh, let sd):
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green).font(.system(size: 12))
+                Text("Working · \(formatSuccess(fiveHour: fh, sevenDay: sd))")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            case .failure(let msg):
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.red).font(.system(size: 12))
+                Text(msg).font(.caption).foregroundStyle(.red).lineLimit(3)
+            }
+        } else if enabled {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.system(size: 12))
+            Text("On · Pacer uses Desktop when it's freshest")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        } else {
+            Image(systemName: "desktopcomputer")
+                .foregroundStyle(.tertiary).font(.system(size: 12))
+            Text("Off · Pacer reads only Claude Code's token")
+                .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+        }
+    }
+
+    private func formatSuccess(fiveHour: Double?, sevenDay: Double?) -> String {
+        let f = fiveHour.map { "5h=\(Int($0.rounded()))%" } ?? "5h=—"
+        let s = sevenDay.map { "7d=\(Int($0.rounded()))%" } ?? "7d=—"
+        return "\(f), \(s)"
+    }
+
+    /// Read Desktop's credential and run one usage call with it — proves it
+    /// works and triggers the keychain approval. Forces a broken keychain +
+    /// no override so the result reflects the Desktop token alone.
+    private func runTest() {
+        testInProgress = true
+        testResult = nil
+        Task { @MainActor in
+            let brokenKeychain = KeychainOAuth(rawReader: { .failure(.notFound) })
+            let client = OAuthClient(
+                keychain: brokenKeychain,
+                tokenOverride: { nil },
+                desktopEnabled: { true }
+            )
+            let result = await client.fetchUsage()
+            testInProgress = false
+            testResult = Self.classify(result)
+        }
+    }
+
+    private static func classify(
+        _ result: Result<RateLimitSnapshot, OAuthClientError>
+    ) -> TestResult {
+        switch result {
+        case .success(let snapshot):
+            return .success(
+                fiveHourPct: snapshot.fiveHour?.usedPercentage,
+                sevenDayPct: snapshot.sevenDay?.usedPercentage
+            )
+        case .failure(.credentialsNotFound):
+            return .failure(message: "No Claude Desktop credential found. Is Claude Desktop installed and signed in?")
+        case .failure(.keychainAccessDenied):
+            return .failure(message: "Keychain access denied. Approve the “Claude Safe Storage” prompt and retry.")
+        case .failure(.tokenExpired):
+            return .failure(message: "Desktop's token is expired right now — open Claude Desktop briefly to refresh it.")
+        case .failure(.unauthorized):
+            return .failure(message: "Anthropic rejected Desktop's token (401).")
+        case .failure(.rateLimited):
+            return .failure(message: "Rate-limited (429). Try again in a moment.")
+        case .failure(.transport):
+            return .failure(message: "Network error. Check your connection and retry.")
+        default:
+            return .failure(message: "Couldn't read Claude Desktop's credential. Check ~/Library/Logs/Pacer/Pacer.err.log.")
+        }
+    }
+}
 
 /// Manual OAuth access-token override. When non-empty, the OAuth poller
 /// uses this token instead of the keychain / `.credentials.json` copy.

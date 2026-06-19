@@ -87,17 +87,25 @@ public struct OAuthClient: Sendable {
     /// directly — workaround for Claude Code 2.x not persisting
     /// refreshed tokens to the keychain (#6).
     private let tokenOverride: @Sendable () -> String?
+    /// Claude Desktop credential source, consulted only when
+    /// `desktopEnabled()` is true (the user opted in). Read-only.
+    private let desktop: DesktopOAuth
+    private let desktopEnabled: @Sendable () -> Bool
 
     public init(
         keychain: KeychainOAuth = KeychainOAuth(),
         transport: @escaping Transport = OAuthClient.defaultTransport,
         now: @escaping @Sendable () -> Date = { Date() },
-        tokenOverride: @escaping @Sendable () -> String? = { PacerPreferences.oauthTokenOverride() }
+        tokenOverride: @escaping @Sendable () -> String? = { PacerPreferences.oauthTokenOverride() },
+        desktop: DesktopOAuth = DesktopOAuth(),
+        desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() }
     ) {
         self.keychain = keychain
         self.transport = transport
         self.now = now
         self.tokenOverride = tokenOverride
+        self.desktop = desktop
+        self.desktopEnabled = desktopEnabled
     }
 
     /// Production transport: `URLSession.shared.data(for:)` plus the
@@ -134,25 +142,45 @@ public struct OAuthClient: Sendable {
                 subscriptionType: nil
             )
         } else {
+            // Gather candidates from every enabled source and use the
+            // freshest valid token. Claude Code (keychain / .credentials.json)
+            // and Claude Desktop are roughly equal — whichever has the later
+            // expiry wins, so an idle gap in one (its 8h token lapsed) is
+            // covered by the other. Desktop is read-only and consulted only
+            // when the user opted in.
+            var candidates: [OAuthCredential] = []
+            var keychainError: OAuthClientError?
             switch keychain.read() {
             case .success(let c):
-                credential = c
+                candidates.append(c)
             case .failure(.notFound):
-                return .failure(.credentialsNotFound)
+                keychainError = .credentialsNotFound
             case .failure(.accessDenied):
-                return .failure(.keychainAccessDenied)
+                keychainError = .keychainAccessDenied
             case .failure(.malformedJSON(let underlying)):
-                return .failure(.keychainMalformed(underlying))
+                keychainError = .keychainMalformed(underlying)
             case .failure(.unexpectedStatus(let status)):
-                return .failure(.keychainStatus(status))
+                keychainError = .keychainStatus(status)
+            }
+            if desktopEnabled(), case .success(let c) = desktop.read() {
+                candidates.append(c)
             }
 
-            // Step 2: skip-if-expired. Local clock gate to avoid a
-            // guaranteed 401. Server is authoritative for borderline
-            // cases (clock skew under a few minutes), so we check
-            // strict expiry only.
-            if let expiresAt = credential.expiresAt, expiresAt < now() {
-                return .failure(.tokenExpired(at: expiresAt))
+            // Step 2: prefer a non-expired token; among those, the freshest.
+            // A nil expiry (override-shaped) counts as never-expiring. The
+            // expiry gate avoids a guaranteed 401; the server stays
+            // authoritative for borderline clock skew.
+            let referenceNow = now()
+            let valid = candidates.filter { $0.expiresAt == nil || $0.expiresAt! >= referenceNow }
+            if let best = valid.max(by: { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }) {
+                credential = best
+            } else if let newestExpiry = candidates.compactMap({ $0.expiresAt }).max() {
+                // Every source we could read is expired — report the latest
+                // expiry (Claude Code refreshes it on next use).
+                return .failure(.tokenExpired(at: newestExpiry))
+            } else {
+                // Nothing readable anywhere — surface the keychain error.
+                return .failure(keychainError ?? .credentialsNotFound)
             }
         }
 
