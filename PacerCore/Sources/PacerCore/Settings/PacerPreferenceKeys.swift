@@ -86,11 +86,6 @@ public enum PacerPreferenceKeys {
     /// app's credential store and triggers a one-time keychain approval, so
     /// the user turns it on deliberately. Read-only; never refreshes.
     public static let desktopCredentialsEnabled = "pacer.desktop.credentialsEnabled"
-    /// Whether we've already offered Desktop-credential enablement via the
-    /// first-run / post-upgrade dashboard prompt. Set once either action is
-    /// taken so the nudge never repeats. Absent (false) on a fresh install
-    /// AND for existing users upgrading into this build → they see it once.
-    public static let desktopOnboardingOffered = "pacer.desktop.onboardingOffered"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls

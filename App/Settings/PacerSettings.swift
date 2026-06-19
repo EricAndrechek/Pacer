@@ -137,7 +137,6 @@ public enum PacerSettings {
         public static let projectsSort           = PacerPreferenceKeys.projectsSort
         public static let oauthTokenOverride     = PacerPreferenceKeys.oauthTokenOverride
         public static let desktopCredentialsEnabled = PacerPreferenceKeys.desktopCredentialsEnabled
-        public static let desktopOnboardingOffered = PacerPreferenceKeys.desktopOnboardingOffered
     }
 
     // MARK: - Defaults
@@ -173,7 +172,6 @@ public enum PacerSettings {
         Key.projectsSort:          "cost",
         Key.oauthTokenOverride:    "",
         Key.desktopCredentialsEnabled: false,
-        Key.desktopOnboardingOffered:  false,
     ]
 
     /// Register the defaults dict on first launch — `@AppStorage`'s

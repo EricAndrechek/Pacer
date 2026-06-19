@@ -83,11 +83,6 @@ enum ScreenshotMode {
             forKey: PacerSettings.Key.menuBarChips
         )
 
-        // Suppress the first-run "Also track Claude Desktop" nudge — it keys
-        // off whether Claude Desktop is installed on the *real* machine, which
-        // would otherwise leak the banner into README screenshots.
-        PacerSettings.store.set(true, forKey: PacerSettings.Key.desktopOnboardingOffered)
-
         // Window scenes — framed like a real macOS window screenshot:
         // traffic-light titlebar, rounded corners, a soft drop shadow on
         // a transparent margin.

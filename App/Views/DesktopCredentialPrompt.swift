@@ -4,31 +4,28 @@ import PacerUI
 
 /// First-run / post-upgrade nudge to turn on Claude Desktop credentials.
 ///
-/// Renders a tinted banner at the top of the dashboard (mirroring
-/// `WelcomeCard`) when ALL of:
-///   - we haven't offered it yet (`desktopOnboardingOffered` is false — so
-///     fresh installs AND existing users upgrading into this build see it
-///     exactly once),
-///   - Claude Desktop is installed with a token cache, and
-///   - the toggle isn't already on.
+/// A tinted dashboard banner (like `WelcomeCard`) shown when Claude Desktop
+/// is installed with a token cache but the toggle is off.
 ///
-/// Either action marks it offered so it never nags again. "Enable" flips the
-/// toggle and reads Desktop once in the background to surface the one-time
-/// "Claude Safe Storage" keychain approval in context; if the user denies it,
-/// the toggle is still on and they can re-approve via the Settings → Authentication
-/// "Test" button (the system dialog, not this banner, is the approval UI).
+///   - **Enable** turns it on for good and reads Desktop once in the
+///     background to surface the one-time "Claude Safe Storage" keychain
+///     approval in context (the system dialog is the approval UI; Settings →
+///     Authentication is the recovery path if denied).
+///   - **Not now** hides it for *this session only* — it reappears on the
+///     next launch, so someone who isn't ready gets reminded rather than
+///     losing the option silently.
+///
+/// Suppressed in screenshot mode so it never leaks into README shots.
 struct DesktopCredentialPrompt: View {
     @AppStorage(PacerSettings.Key.desktopCredentialsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
-    @AppStorage(PacerSettings.Key.desktopOnboardingOffered, store: PacerSettings.store)
-    private var offered: Bool = false
+    @State private var dismissedThisSession = false
 
-    // Snapshot the (cheap, file-only) availability check once per view so
-    // body re-evaluations don't re-stat the config file.
+    // Cheap, file-only check (no keychain prompt); snapshot once per view.
     private let desktopAvailable = DesktopOAuth.isClaudeDesktopAvailable
 
     var body: some View {
-        if offered || enabled || !desktopAvailable {
+        if enabled || dismissedThisSession || !desktopAvailable || ScreenshotMode.isActive {
             EmptyView()
         } else {
             banner
@@ -45,14 +42,14 @@ struct DesktopCredentialPrompt: View {
                 Text("Also track Claude Desktop")
                     .font(.title3)
                     .fontWeight(.semibold)
-                Text("You have Claude Desktop installed. Let Pacer read its credential (read-only) so your usage keeps updating even when you're not using the Claude Code CLI — and stays live through Claude Code's token gaps. It triggers a one-time keychain approval; you can change this any time in Settings → Authentication.")
+                Text("Read its credential (read-only) so Pacer keeps updating outside the Claude Code CLI. One-time keychain approval.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Button("Enable") { enable() }
                         .buttonStyle(.borderedProminent)
-                    Button("Not now") { offered = true }
+                    Button("Not now") { dismissedThisSession = true }
                         .buttonStyle(.bordered)
                 }
                 .padding(.top, 2)
@@ -73,12 +70,10 @@ struct DesktopCredentialPrompt: View {
 
     private func enable() {
         enabled = true
-        offered = true
-        // Surface the one-time keychain approval now, in context. The read's
-        // result is immaterial here — the toggle is already on; the poller
-        // will use Desktop once approved, and Settings → Authentication is the
-        // recovery path if the user denies. Run off-main so the (briefly
-        // blocking) `security` subprocess doesn't stall the UI.
+        // Surface the one-time keychain approval now, in context. Result is
+        // immaterial — the toggle is on; the poller uses Desktop once approved
+        // and Settings → Authentication is the recovery path. Off-main so the
+        // briefly-blocking `security` subprocess doesn't stall the UI.
         DispatchQueue.global(qos: .userInitiated).async {
             _ = DesktopOAuth().read()
         }
