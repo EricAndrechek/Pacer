@@ -6,7 +6,7 @@ import Security
 /// Claude Code itself writes the entry on interactive login; Pacer
 /// reads it on every poll and (optionally, on the user's request) does
 /// its own refresh via `OAuthClient.refresh` — see #6.
-public struct OAuthCredential: Sendable, Equatable {
+public struct OAuthCredential: Sendable, Equatable, Codable {
     public let accessToken: String
     /// Server-side expiry. The endpoint will return 401 if we send an
     /// expired token, so we treat this as advisory — useful for skipping

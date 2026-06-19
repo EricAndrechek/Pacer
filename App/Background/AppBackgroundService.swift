@@ -90,7 +90,11 @@ final class AppBackgroundService {
         // by `apple-tool:` partition membership), so reads complete
         // silently from the very first launch. See the type doc in
         // `KeychainOAuth.swift` for the partition-list rationale.
-        let oauthClient = OAuthClient()
+        // Persist the resolved token in Pacer's own keychain item so we read
+        // Claude's stores only ~once per token lifetime and keep working if
+        // the user logs out of Claude Code / removes Desktop. Tests and
+        // Settings probes use the default in-memory store (no real keychain).
+        let oauthClient = OAuthClient(heldStore: KeychainCredentialStore())
         let scanCoordinator = ScanCoordinator(
             container: container,
             configuration: ScanCoordinator.Configuration(costMode: costMode),

@@ -81,6 +81,25 @@ public struct DesktopOAuth: Sendable {
 
     /// Resolve the freshest `user:profile` credential from Claude Desktop.
     public func read() -> Result<OAuthCredential, DesktopOAuthError> {
+        readAll().map { $0[0] }   // readAll guarantees a non-empty array on success
+    }
+
+    /// All `user:profile` credentials in the cache, freshest first. Lets the
+    /// resolver fall through to the next-freshest if its first pick is
+    /// rejected (the cache can hold several tokens at different expiries).
+    public func readAll() -> Result<[OAuthCredential], DesktopOAuthError> {
+        switch decryptedCache() {
+        case .failure(let e):
+            return .failure(e)
+        case .success(let cache):
+            let creds = Self.profileCredentials(cache: cache)
+            return creds.isEmpty ? .failure(.noProfileToken) : .success(creds)
+        }
+    }
+
+    /// Read + decrypt + merge every cache blob into one dict. Shared by
+    /// `read()` / `readAll()`.
+    private func decryptedCache() -> Result<[String: Any], DesktopOAuthError> {
         guard let blobs = cacheReader() else { return .failure(.configNotFound) }
         if blobs.isEmpty { return .failure(.noProfileToken) }
 
@@ -102,21 +121,18 @@ public struct DesktopOAuth: Sendable {
         guard decryptedAny else {
             return .failure(.decryptFailed("no cache blob decrypted to JSON"))
         }
-        guard let credential = Self.freshestProfileCredential(cache: merged) else {
-            return .failure(.noProfileToken)
-        }
-        return .success(credential)
+        return .success(merged)
     }
 
     // MARK: - Selection (pure, unit-tested)
 
-    /// Pick the `user:profile`-scoped entry with the latest `expiresAt`.
-    /// Expiry isn't filtered here — `OAuthClient` is the single expiry
-    /// authority and compares Desktop against the keychain token. `nil`
-    /// when no entry carries `user:profile`.
-    static func freshestProfileCredential(cache: [String: Any]) -> OAuthCredential? {
-        var best: OAuthCredential?
-        var bestKey = Date.distantPast
+    /// All `user:profile`-scoped credentials, freshest first. Expiry isn't
+    /// filtered here — `OAuthClient` is the single expiry authority and
+    /// compares Desktop against the keychain token. Deterministic: sorted by
+    /// expiry descending, ties broken by the (stable) cache key, so the same
+    /// cache always yields the same order.
+    static func profileCredentials(cache: [String: Any]) -> [OAuthCredential] {
+        var rows: [(key: String, expiry: Date, cred: OAuthCredential)] = []
         for (key, value) in cache {
             guard key.contains("user:profile"),
                   let entry = value as? [String: Any],
@@ -130,14 +146,17 @@ public struct DesktopOAuth: Sendable {
                 refreshToken: entry["refreshToken"] as? String,
                 subscriptionType: entry["subscriptionType"] as? String
             )
-            // A missing expiry sorts as "never expires" so it wins.
-            let rank = expiresAt ?? .distantFuture
-            if best == nil || rank > bestKey {
-                best = cred
-                bestKey = rank
-            }
+            // A missing expiry sorts as "never expires" so it leads.
+            rows.append((key, expiresAt ?? .distantFuture, cred))
         }
-        return best
+        rows.sort { $0.expiry != $1.expiry ? $0.expiry > $1.expiry : $0.key < $1.key }
+        return rows.map(\.cred)
+    }
+
+    /// Convenience: the single freshest `user:profile` credential. `nil` when
+    /// no entry carries `user:profile`.
+    static func freshestProfileCredential(cache: [String: Any]) -> OAuthCredential? {
+        profileCredentials(cache: cache).first
     }
 
     // MARK: - Decryption (pure, unit-tested via round-trip)

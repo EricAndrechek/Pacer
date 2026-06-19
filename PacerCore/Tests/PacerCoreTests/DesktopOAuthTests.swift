@@ -254,6 +254,139 @@ import Testing
         }
     }
 
+    // MARK: - Held-store resolution
+
+    final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    /// Keychain whose reads are counted, so a test can assert the fast path
+    /// did NOT touch the source.
+    private func countingKeychain(token: String?, expiry: Date?, counter: CallCounter) -> KeychainOAuth {
+        if let token {
+            let blob: [String: Any] = ["claudeAiOauth": [
+                "accessToken": token,
+                "expiresAt": Int64((expiry?.timeIntervalSince1970 ?? 0) * 1000),
+                "subscriptionType": "max",
+            ]]
+            let data = try! JSONSerialization.data(withJSONObject: blob)
+            return KeychainOAuth(rawReader: { counter.bump(); return .success(data) })
+        }
+        return KeychainOAuth(rawReader: { counter.bump(); return .failure(.notFound) })
+    }
+
+    /// OAuthClient wired with an injectable held store and a transport that
+    /// maps each bearer token to a (status, utilization) so the test can tell
+    /// which token was used and simulate 401s.
+    private func resolvingClient(
+        keychain: KeychainOAuth,
+        desktop dt: DesktopOAuth? = nil,
+        desktopEnabled: Bool = false,
+        held: OAuthCredential? = nil,
+        rejected: RejectedTokens = RejectedTokens(),
+        now: Date,
+        respond: @escaping @Sendable (String) -> (status: Int, util: Double)
+    ) -> (OAuthClient, EphemeralCredentialStore) {
+        let store = EphemeralCredentialStore(held)
+        let desktopSource = dt ?? DesktopOAuth(keyReader: { .failure(.configNotFound) }, cacheReader: { nil })
+        let client = OAuthClient(
+            keychain: keychain,
+            transport: { req in
+                let bearer = (req.value(forHTTPHeaderField: "Authorization") ?? "")
+                    .replacingOccurrences(of: "Bearer ", with: "")
+                let (status, util) = respond(bearer)
+                let body = "{\"five_hour\":{\"utilization\":\(util)}}"
+                let resp = HTTPURLResponse(url: OAuthClient.endpoint, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!
+                return (Data(body.utf8), resp)
+            },
+            now: { now },
+            tokenOverride: { nil },
+            desktop: desktopSource,
+            desktopEnabled: { desktopEnabled },
+            heldStore: store,
+            rejected: rejected
+        )
+        return (client, store)
+    }
+
+    @Test func heldTokenFastPathSkipsSources() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        let held = OAuthCredential(accessToken: "held-tok", expiresAt: now.addingTimeInterval(3600), subscriptionType: "max")
+        // Keychain has an even-fresher token, but the fast path must not look.
+        let kc = countingKeychain(token: "cc-tok", expiry: now.addingTimeInterval(7200), counter: counter)
+        let (client, _) = resolvingClient(keychain: kc, held: held, now: now) { tok in (200, tok == "held-tok" ? 11 : 99) }
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(snap.fiveHour?.usedPercentage == 11)  // held token used
+        #expect(counter.count == 0)                   // sources never read
+    }
+
+    @Test func slowPathPersistsResolvedToken() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        let kc = countingKeychain(token: "cc-tok", expiry: now.addingTimeInterval(7200), counter: counter)
+        let (client, store) = resolvingClient(keychain: kc, now: now) { _ in (200, 5) }  // no held token
+        _ = await client.fetchUsage()
+        #expect(counter.count == 1)                          // read sources
+        #expect(store.load()?.accessToken == "cc-tok")       // cached the winner
+    }
+
+    @Test func nearExpiryRefreshesFromSource() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        // Held expires in 2 min (< lead time) → must go back to the source.
+        let held = OAuthCredential(accessToken: "old-held", expiresAt: now.addingTimeInterval(120), subscriptionType: "max")
+        let kc = countingKeychain(token: "fresh-cc", expiry: now.addingTimeInterval(7200), counter: counter)
+        let (client, store) = resolvingClient(keychain: kc, held: held, now: now) { tok in (200, tok == "fresh-cc" ? 7 : 99) }
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(counter.count == 1)                          // re-read sources
+        #expect(snap.fiveHour?.usedPercentage == 7)          // fresher source used
+        #expect(store.load()?.accessToken == "fresh-cc")     // held replaced
+    }
+
+    @Test func heldTokenServesAsFallbackWhenSourcesLost() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        // Held near-expiry (forces slow path), but sources are gone (logged
+        // out). The still-valid held token must carry us.
+        let held = OAuthCredential(accessToken: "held-tok", expiresAt: now.addingTimeInterval(120), subscriptionType: "max")
+        let kc = countingKeychain(token: nil, expiry: nil, counter: counter)  // notFound
+        let (client, _) = resolvingClient(keychain: kc, held: held, now: now) { tok in (200, tok == "held-tok" ? 22 : 0) }
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(counter.count == 1)                          // tried sources, none
+        #expect(snap.fiveHour?.usedPercentage == 22)         // fell back to held
+    }
+
+    @Test func rejectedTokenFallsThroughToNextCandidate() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let rejected = RejectedTokens()
+        // Desktop holds the freshest token (bad) plus an older valid one.
+        let dt = desktop(cache: [
+            (client: "a", scopes: "user:inference user:profile", token: "bad-tok",
+             expiresMs: Int64(now.addingTimeInterval(99_999).timeIntervalSince1970 * 1000)),
+            (client: "b", scopes: "user:inference user:profile", token: "good-tok",
+             expiresMs: Int64(now.addingTimeInterval(50_000).timeIntervalSince1970 * 1000)),
+        ])
+        let held = OAuthCredential(accessToken: "bad-tok", expiresAt: now.addingTimeInterval(99_999), subscriptionType: "max")
+        let kc = countingKeychain(token: nil, expiry: nil, counter: CallCounter())
+        let (client, store) = resolvingClient(
+            keychain: kc, desktop: dt, desktopEnabled: true, held: held, rejected: rejected, now: now
+        ) { tok in tok == "bad-tok" ? (401, 0) : (200, 13) }
+
+        // Poll 1: uses the freshest (bad) held token → 401 → reject + clear.
+        guard case .failure(.unauthorized) = await client.fetchUsage() else { Issue.record("expected 401"); return }
+        #expect(rejected.isRejected("bad-tok"))
+        #expect(store.load() == nil)
+
+        // Poll 2: bad-tok excluded → falls through to good-tok → 200.
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(snap.fiveHour?.usedPercentage == 13)
+        #expect(store.load()?.accessToken == "good-tok")
+    }
+
     // MARK: - Live integration (gated)
     //
     // Set PACER_RUN_LIVE_DESKTOP_TEST=1 to decrypt the REAL Claude Desktop
