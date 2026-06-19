@@ -303,14 +303,21 @@ public struct KeychainOAuth: Sendable {
         return urls
     }
 
-    /// First readable, non-empty file from `urls`, as raw bytes. `nil`
-    /// when none exist or are readable — the caller maps that back to the
-    /// keychain error so a clean machine still reports `.notFound`.
-    /// Deliberately tolerant: a missing candidate is normal (not every box
-    /// has every layout), so we just try the next one.
+    /// First file from `urls` that actually holds a Claude Code OAuth
+    /// credential, as raw bytes. We require the `claudeAiOauth` marker so we
+    /// SKIP an unrelated `.credentials.json`: on macOS that filename is the
+    /// per-plugin MCP token store (top-level `mcpOAuth`), while the OAuth
+    /// credential lives only in the keychain — the `claudeAiOauth` file form
+    /// is the Linux/headless layout. `nil` when no candidate qualifies, which
+    /// the caller maps back to the keychain error (so a clean machine still
+    /// reports `.notFound` rather than a misleading malformed error).
+    /// Deliberately tolerant: a missing/foreign candidate is normal, so we
+    /// just try the next one.
     static func readCredentialsFileData(urls: [URL]) -> Data? {
+        let marker = Data("claudeAiOauth".utf8)
         for url in urls {
-            if let data = try? Data(contentsOf: url), !data.isEmpty {
+            guard let data = try? Data(contentsOf: url), !data.isEmpty else { continue }
+            if data.range(of: marker) != nil {
                 return data
             }
         }
