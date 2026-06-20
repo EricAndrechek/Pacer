@@ -123,11 +123,44 @@ public enum BurnTrajectory {
         }
     }
 
+    /// A drop of at least this many utilisation points, landing at or below
+    /// `resetLowMax`, marks an *off-schedule reset* inside one anchor's samples.
+    /// Within a real cycle utilisation is monotone non-decreasing, so only a
+    /// reset produces that. (The companion to `GlobalRateLimitReset.detect`,
+    /// reading the value drop the dropped null-anchor samples leave behind.)
+    static let resetDropPoints: Double = 15
+    static let resetLowMax: Double = 5
+
+    /// First index *after* the last in-cycle reset, or 0 when the run never
+    /// resets. Used to keep only the post-reset tail of a contaminated cycle.
+    static func postResetStartIndex(
+        _ rows: [(at: Date, usedPercentage: Double, resetsAt: Date)]
+    ) -> Int {
+        guard rows.count > 1 else { return 0 }
+        var split = 0
+        for i in 1..<rows.count where
+            rows[i - 1].usedPercentage - rows[i].usedPercentage >= resetDropPoints
+            && rows[i].usedPercentage <= resetLowMax {
+            split = i
+        }
+        return split
+    }
+
     /// Segment a flat run of samples (each carrying its window's `resetsAt`)
     /// into the current partial cycle and the prior complete cycles, by
     /// grouping on the reset boundary. The group whose reset is latest is the
     /// current cycle; the rest are history for the backtest. `duration` is the
     /// window length (5h or 7d). Order-agnostic.
+    ///
+    /// Reset-aware: an off-schedule global reset can zero a window mid-cycle
+    /// while leaving its `resetsAt` anchor unchanged (Anthropic restored the
+    /// same 7-day anchor on 2026-06-20), which would otherwise fuse the pre-
+    /// and post-reset readings into one NON-MONOTONE cycle — distorting the live
+    /// fit (a bogus negative slope, an under-scaled level, the wrong band
+    /// stratum) and poisoning the completed-cycle backtest the engine learns
+    /// from. We keep only the post-reset tail of such a group and re-anchor its
+    /// start to the reset, so every cycle handed downstream is monotone from
+    /// its own start.
     public static func segment(
         samples: [(at: Date, usedPercentage: Double, resetsAt: Date)],
         duration: TimeInterval,
@@ -144,15 +177,23 @@ public enum BurnTrajectory {
 
         var history: [Cycle] = []
         var current: PartialCycle?
-        for (key, rows) in groups {
+        for (key, rowsRaw) in groups {
+            let rows = rowsRaw.sorted { $0.at < $1.at }
+            // Drop the pre-reset prefix of a contaminated cycle.
+            let split = postResetStartIndex(rows)
+            let kept = Array(rows[split...])
+            guard !kept.isEmpty else { continue }
             // Use the real reset from the readings, not the rounded group key.
-            let reset = rows.map { $0.resetsAt }.max() ?? key
-            let cycleStart = reset.addingTimeInterval(-duration)
-            let samples = rows.map { Sample(at: $0.at, usedPercentage: $0.usedPercentage) }
+            let reset = kept.map { $0.resetsAt }.max() ?? key
+            // A reset restarts the budget at the drop edge (the last reading
+            // before the collapse ≈ the reset instant, and a safe lower bound
+            // on it); an unbroken cycle begins one window-length before reset.
+            let cycleStart = split > 0 ? rows[split - 1].at : reset.addingTimeInterval(-duration)
+            let cycleSamples = kept.map { Sample(at: $0.at, usedPercentage: $0.usedPercentage) }
             if key == currentReset {
-                current = PartialCycle(samples: samples, now: now, cycleStart: cycleStart, resetsAt: reset)
+                current = PartialCycle(samples: cycleSamples, now: now, cycleStart: cycleStart, resetsAt: reset)
             } else {
-                history.append(Cycle(samples: samples, cycleStart: cycleStart, resetsAt: reset))
+                history.append(Cycle(samples: cycleSamples, cycleStart: cycleStart, resetsAt: reset))
             }
         }
         return (current, history.sorted { $0.cycleStart < $1.cycleStart })
