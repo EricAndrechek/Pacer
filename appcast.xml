@@ -222,5 +222,24 @@
             type="application/octet-stream"
             sparkle:edSignature="HtZbeVaCziMenaT4v75Y8N44J+8wVyuIrGUCCPHOQObVFSJNMU6ze2+Rp4AQCPZV6VQTDBpwpkbfPKHE7o/OAw==" />
     </item>
+            <item>
+        <title>Version 0.3.5</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(notify): detect early resets that null the reset anchor by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706345455" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/89" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/89/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/89">EricAndrechek/Pacer#89</a></li>
+<li>fix(engine): reset-aware cycle segmentation so a global reset can't corrupt forecasts by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706426788" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/90" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/90/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/90">EricAndrechek/Pacer#90</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.4...v0.3.5">EricAndrechek/Pacer@<tt>v0.3.4...v0.3.5</tt></a></p>]]></description>
+        <pubDate>Sat, 20 Jun 2026 12:02:14 +0000</pubDate>
+        <sparkle:version>1781956725</sparkle:version>
+        <sparkle:shortVersionString>0.3.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.5/Pacer-0.3.5.dmg"
+            length="6408583"
+            type="application/octet-stream"
+            sparkle:edSignature="fP0sIRm1wfx3FFc1fq7o1HjUv2J6wLVBiE4LAEV6Jy4n13EcehsdxhB7PGDGPqEOk3exBdWzcNd+7I+2+HiyCA==" />
+    </item>
         </channel>
 </rss>
