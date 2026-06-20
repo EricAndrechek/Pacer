@@ -241,5 +241,24 @@
             type="application/octet-stream"
             sparkle:edSignature="fP0sIRm1wfx3FFc1fq7o1HjUv2J6wLVBiE4LAEV6Jy4n13EcehsdxhB7PGDGPqEOk3exBdWzcNd+7I+2+HiyCA==" />
     </item>
+            <item>
+        <title>Version 0.3.6</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(engine): scope alias-driven re-canonicalization so it can't freeze the UI by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706858552" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/91" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/91/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/91">EricAndrechek/Pacer#91</a></li>
+<li>perf(engine): run the scan loop off the main thread (@ScanActor) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4706995352" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/92" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/92/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/92">EricAndrechek/Pacer#92</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.5...v0.3.6">EricAndrechek/Pacer@<tt>v0.3.5...v0.3.6</tt></a></p>]]></description>
+        <pubDate>Sat, 20 Jun 2026 15:00:56 +0000</pubDate>
+        <sparkle:version>1781967467</sparkle:version>
+        <sparkle:shortVersionString>0.3.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.6/Pacer-0.3.6.dmg"
+            length="6411438"
+            type="application/octet-stream"
+            sparkle:edSignature="nWN5uISduOlqPymPrsrTsnJoo6jsA3I1ft/uLUJrgLI8Aae2gc7yZt1jOfWkvO2rpANNnDeFBkwsKRgfpF45Aw==" />
+    </item>
         </channel>
 </rss>
