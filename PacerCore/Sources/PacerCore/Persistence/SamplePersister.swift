@@ -581,28 +581,6 @@ public final class SamplePersister {
         return changedCount
     }
 
-    /// Mirror of `canonicalizeProjectPaths` for SessionInfo rows.
-    /// SessionInfo carries its own `projectPath` column (denormalized
-    /// for fast queries) and the recomputer can rebuild it from
-    /// underlying samples — but only if the session ids are dirty.
-    /// When an alias mutates only `TokenSample.projectPath`, the
-    /// SessionInfo recomputer will pick up the new path automatically
-    /// once we mark the affected session ids dirty. This helper does
-    /// the marking; the recomputer handles the actual rewrite.
-    public func markSessionsDirtyForAliasChange() throws {
-        var descriptor = FetchDescriptor<TokenSample>()
-        descriptor.propertiesToFetch = [\.sessionId]
-        let samples = try context.fetch(descriptor)
-        for sample in samples {
-            if let sid = sample.sessionId, !sid.isEmpty {
-                dirtySessionIds.insert(sid)
-                // Alias change can shift `SessionInfo.projectPath` —
-                // pollute so the recomputer takes the full path.
-                pollutedSessionIds.insert(sid)
-            }
-        }
-    }
-
     /// User-local 0–23 hour-of-day for a `sampledAt` instant. Matches
     /// the local-zone semantics of `TokenSample.date` so a (date,
     /// hour) pair always agrees with the row it came from.
