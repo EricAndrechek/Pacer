@@ -10,7 +10,7 @@ import SwiftData
 /// but keyed by project rather than model. Together they keep the
 /// view-side rollups instant — Projects view reads
 /// `ProjectDailyAggregate` directly, no per-sample iteration.
-@MainActor
+@ScanActor
 public final class ProjectAggregateRecomputer {
 
     private let container: ModelContainer

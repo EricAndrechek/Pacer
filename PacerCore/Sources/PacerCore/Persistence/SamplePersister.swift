@@ -59,7 +59,7 @@ public struct DateHourModelTriple: Hashable, Sendable {
 /// duplicate counting on the small fraction of pre-`requestId` lines; we
 /// accept it because the alternative (matching on timestamp + token
 /// counts) creates false-positive collisions.
-@MainActor
+@ScanActor
 public final class SamplePersister {
 
     private let context: ModelContext

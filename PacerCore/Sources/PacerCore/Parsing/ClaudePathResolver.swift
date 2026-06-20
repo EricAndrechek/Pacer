@@ -17,7 +17,11 @@ import Foundation
 ///      the default location undocumentedly, and 2.1.x still writes to
 ///      `~/.claude` on macOS in practice — the union is the only way to
 ///      stay correct across both layouts.
-public struct ClaudePathResolver {
+public struct ClaudePathResolver: @unchecked Sendable {
+    // @unchecked: immutable value type; the only non-Sendable stored
+    // member is `FileManager`, and `FileManager.default` is documented
+    // thread-safe. Lets `ScanCoordinator`'s nonisolated init store it.
+
 
     public enum ResolutionError: Error, Sendable, Equatable {
         /// `CLAUDE_CONFIG_DIR` was set, but every comma-separated path was

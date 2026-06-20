@@ -82,6 +82,14 @@ public struct ScanCycleSummary: Sendable {
 /// No-op when `summary.hasAnyChanges == false`. The save-skip path in
 /// `ScanCoordinator` already filters out idle cycles, but this is a
 /// belt-and-suspenders guard against future call sites that don't.
+///
+/// `@MainActor` is load-bearing now that `ScanCoordinator` runs on
+/// `ScanActor` (a background executor): posting from that background
+/// thread delivered the `queue: .main` observer blocks cross-thread,
+/// which measured at multi-second `notif` phases (and would run any
+/// no-queue observer on the scan thread). The coordinator `await`s this
+/// so the post — a sub-ms call — hops to main exactly as it did when the
+/// whole loop was `@MainActor`.
 @MainActor
 public func postScanCycleSummary(_ summary: ScanCycleSummary) {
     guard summary.hasAnyChanges else { return }

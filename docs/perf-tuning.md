@@ -122,30 +122,40 @@ persistent-history toggle directly. Approaches:
   from a maintenance pass. Same Core Data FFI requirement. Safer than
   disabling outright.
 
-**Queue #6 — Move scan loop off MainActor.** The biggest remaining win
-and the deferred refactor. `ScanCoordinator` is `@MainActor`-bound
-because the scan-loop ModelContext is the same one views observe.
-Moving off would:
-- Drop the p90 cycle latency variance (currently ~1100 ms tail caused
-  by MainActor-resume queueing behind `@Query` refresh fanout).
-- Let scan cycles run during heavy UI work without blocking the UI.
+**Queue #6 — Move scan loop off MainActor. ✅ DONE (2026-06-20).** The
+whole scan pipeline now runs on a custom serial global actor,
+`@ScanActor` (`Coordination/ScanActor.swift`), instead of `@MainActor`:
+`ScanCoordinator`, `SamplePersister`, all four per-pair recomputers,
+`ProjectGitRootAutoAliaser`, and `StatsCacheProbe.probeAndStore`. The
+main thread is now free during every cycle, so no scan cycle — however
+slow — can stall scrolling. Measured: steady-state cycle dropped from
+the ~300 ms–1.4 s MainActor-resume tail to ~21 ms wall-clock on the
+background actor; the one-time ~7 s persister preload at launch also
+moved off-main (it used to freeze the dashboard on open).
 
-The refactor:
-1. Give `ScanCoordinator` its own non-MainActor `ModelContext` (one
-   per coordinator).
-2. The recomputers' per-pair (≤64 dirty pairs) path is currently
-   `@MainActor` — move it to the same background context.
-3. SwiftData fans cross-context changes to MainActor `@Query`
-   subscribers via `NSManagedObjectContextDidSave` notifications;
-   verify those reach `@Query` correctly. The bulk-recomputer
-   `@ModelActor` path already works this way, so the wiring is
-   proven.
-4. The `cursorsCache` field is currently bare; with the coordinator
-   off MainActor it needs Sendable handling (likely an actor or
-   lock-protected box, same pattern as `JSONLWatcher.changedPaths`).
+How it landed (vs. the original plan above):
+- `ScanCoordinator`'s `ModelContext` was *already* a separate context
+  from the views' `@Query` mainContext (it constructs
+  `ModelContext(container)`), so cross-context propagation to `@Query`
+  was already the live mechanism — the refactor only moved that
+  context's executor to the background. `@Query` refresh topology is
+  unchanged.
+- The context is created lazily on first `@ScanActor` access (not in
+  the now-`nonisolated` init) so it's born on the actor that uses it —
+  `ModelContext` is thread-affine.
+- `cursorsCache` and the other bare fields became `@ScanActor`-isolated
+  actor state for free (no separate lock needed) since the whole class
+  is on one serial executor.
+- **Gotcha worth remembering:** `postScanCycleSummary` MUST run on
+  `@MainActor` (its `queue: .main` observers, and any future no-queue
+  observer, otherwise deliver on the scan thread). Posting it from the
+  background actor measured `notif` phases up to ~16 s. It's now
+  fire-and-forget onto main (`Task { @MainActor in … }`) so the cycle
+  never blocks on main-thread availability for a refresh hint.
 
-This is a careful refactor (~few hours), better done while the user
-is awake to verify the dashboard updates correctly post-change.
+Remaining nit: the launch-time `prep` preload (~7 s: build the
+dedup Set from every TokenSample + prune stale cursors) is one-time and
+off-main, but could be chunked/yielded if it ever matters.
 
 ## Known correctness items
 

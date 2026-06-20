@@ -101,7 +101,7 @@ public struct StatsCacheProbe: Sendable {
     /// Run the probe and write its result into `ClaudeCodeMeta`. Used
     /// by the daemon at scan time. Returns the result so callers can
     /// log without re-reading the meta table.
-    @MainActor
+    @ScanActor
     public func probeAndStore(in context: ModelContext) throws -> ProbeResult {
         let result = try probe()
         try writeMeta(context: context, key: ClaudeCodeMetaKey.statsCacheVersion,
@@ -115,7 +115,7 @@ public struct StatsCacheProbe: Sendable {
         return result
     }
 
-    @MainActor
+    @ScanActor
     private func writeMeta(context: ModelContext, key: String, value: String) throws {
         // Upsert via @Attribute(.unique) on key. We fetch-existing-first
         // and mutate rather than insert-and-let-uniqueness-overwrite —

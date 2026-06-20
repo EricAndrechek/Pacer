@@ -10,7 +10,7 @@ import SwiftData
 /// dimension. Same cost-mode semantics (per-entry decision, ccusage
 /// parity on tier boundaries — see that file for the why), same
 /// per-pair / bulk-actor split keyed off `bulkRecomputeThreshold`.
-@MainActor
+@ScanActor
 public final class HourlyAggregateRecomputer {
 
     private let container: ModelContainer

@@ -18,7 +18,7 @@ import SwiftData
 ///    `tieredCost` would mis-attribute the boundary — e.g. ten 100k
 ///    calls would look like one 1M call. ccusage iterates entries the
 ///    same way (`data-loader.ts:638-678`).
-@MainActor
+@ScanActor
 public final class AggregateRecomputer {
 
     private let container: ModelContainer

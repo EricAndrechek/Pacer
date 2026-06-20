@@ -54,7 +54,7 @@ private func makeEntry(
 
 // MARK: - SamplePersister
 
-@MainActor
+@ScanActor
 @Test func samplePersisterInsertsNewEntries() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -69,7 +69,7 @@ private func makeEntry(
     #expect(persister.stats.skippedAsDuplicate == 0)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterDedupesByKey() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -86,7 +86,7 @@ private func makeEntry(
     #expect(persister.stats.skippedAsDuplicate == 2)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterAcceptsAllNilDedupEntries() throws {
     // The "no dedup key, accept everything" path. We deliberately
     // accept duplicates here rather than guess at heuristic dedup —
@@ -104,7 +104,7 @@ private func makeEntry(
     #expect(persister.stats.skippedAsDuplicate == 0)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterPreloadsExistingDedupKeys() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -122,7 +122,7 @@ private func makeEntry(
     #expect(try context.fetchCount(FetchDescriptor<TokenSample>()) == 2)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterRecoversMissingAggregatePairs() async throws {
     // Reproduces the bug where a re-scan after a DailyAggregate-loss
     // event (clean wipe of just the aggregate table, partial recompute
@@ -172,7 +172,7 @@ private func makeEntry(
     #expect(try context.fetchCount(FetchDescriptor<DailyAggregate>()) == 3)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterRecoveryEmptyOnHealthyStore() throws {
     // Healthy store: every (date, model) pair already has an aggregate.
     // Recovery set should be empty so the first scan cycle is a no-op.
@@ -189,7 +189,7 @@ private func makeEntry(
     #expect(persister.consumeMissingAggregatePairs().isEmpty)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterTracksDirtyPairs() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -206,7 +206,7 @@ private func makeEntry(
     #expect(persister.dirtyPairs.count == 3)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterSavesEveryBatch() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -229,7 +229,7 @@ private func makeEntry(
 // time because SwiftData can't put a TERNARY on the left side of IN.
 // Mix matching, non-matching, and nil-projectPath rows so the
 // per-source iteration has to filter all three.
-@MainActor
+@ScanActor
 @Test func samplePersisterCanonicalizesAffectedSamplesWithManySources() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -262,7 +262,7 @@ private func makeEntry(
 
 // MARK: - AggregateRecomputer
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerRollsUpDailySums() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -286,7 +286,7 @@ private func makeEntry(
     #expect(aggs[0].outputTokens == 130)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerSplitsByModel() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -309,7 +309,7 @@ private func makeEntry(
     #expect(aggs[1].inputTokens == 50)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerUpsertsOnSecondPass() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -331,7 +331,7 @@ private func makeEntry(
     #expect(aggs[0].inputTokens == 150)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerSumsAllFiveCacheCategories() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -355,7 +355,7 @@ private func makeEntry(
     #expect(agg.cacheCreation1hTokens == 55)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerDisplayModeSumsStoredCosts() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -375,7 +375,7 @@ private func makeEntry(
     #expect(abs(agg.totalCostUSD - 0.40) < 0.0001)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerDeletesEmptyBucket() async throws {
     // Edge case: a (date, model) pair gets passed in with no underlying
     // samples. Shouldn't happen in normal flow but defensive: the
@@ -397,7 +397,7 @@ private func makeEntry(
 
 // MARK: - AggregateRecomputer incremental fast path
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerFastPathAddsDeltaToExistingRow() async throws {
     // Verifies the incremental fast path is engaged AND produces a
     // numerically identical result to the legacy full-recompute path
@@ -442,7 +442,7 @@ private func makeEntry(
     #expect(abs(agg.totalCostUSD - 0.70) < 1e-9)
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerFastPathRespectsPollutedPair() async throws {
     // When ScanCoordinator folds a recovery pair into the dirty set
     // (via `addDirtyPairs`), the pair is polluted and must NOT take
@@ -498,13 +498,13 @@ private struct AggregateSnapshot: Sendable {
     let totalCostUSD: Double
 }
 
-@MainActor
+@ScanActor
 @Test func aggregateRecomputerFastPathProducesSameResultAsFullPath() async throws {
     // Property: the fast path and the full-recompute path agree on
     // the resulting `DailyAggregate` for the same input. Run both
     // against equivalent contexts and compare token totals.
     let dayInstant = Date(timeIntervalSince1970: 1_756_800_000)
-    let runScenario = { @MainActor (forceFullPath: Bool) async throws -> AggregateSnapshot in
+    let runScenario = { @ScanActor (forceFullPath: Bool) async throws -> AggregateSnapshot in
         let container = try makeInMemoryContainer()
         let context = ModelContext(container)
         let persister = try SamplePersister(context: context)
@@ -557,7 +557,7 @@ private struct AggregateSnapshot: Sendable {
 
 // MARK: - ProjectAggregateRecomputer
 
-@MainActor
+@ScanActor
 @Test func projectAggregateRecomputerUpsertsBucket() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -599,7 +599,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(abs(repoB.totalCostUSD - 0.20) < 0.0001)
 }
 
-@MainActor
+@ScanActor
 @Test func projectAggregateRecomputerHandlesMissingProjectPath() async throws {
     // Samples with `projectPath == nil` land in the "(unknown)" bucket
     // so they still show up in the Projects list.
@@ -620,7 +620,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(aggregates.first?.projectPath == ProjectDailyAggregate.unknownProjectPath)
 }
 
-@MainActor
+@ScanActor
 @Test func projectAggregateRecomputerBulkPathBackfill() async throws {
     // 64+ dirty pairs should take the bulk path: one fetch + group
     // instead of N small fetches. Verify it produces the same rows
@@ -651,7 +651,7 @@ private struct AggregateSnapshot: Sendable {
 
 // MARK: - SessionInfoRecomputer
 
-@MainActor
+@ScanActor
 @Test func sessionRecomputerRollsUpPerSession() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -705,7 +705,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(b.topModel == "claude-opus-4-7")
 }
 
-@MainActor
+@ScanActor
 @Test func sessionRecomputerSkipsEntriesWithoutSessionId() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -724,7 +724,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 0)
 }
 
-@MainActor
+@ScanActor
 @Test func sessionRecomputerUpsertsOnSecondPass() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -752,7 +752,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(sessions[0].lastSeenAt == later)
 }
 
-@MainActor
+@ScanActor
 @Test func sessionRecomputerBulkPathBackfill() async throws {
     // 64+ dirty session ids should take the bulk path: one fetch +
     // group instead of N small fetches. Verify we still get all
@@ -779,7 +779,7 @@ private struct AggregateSnapshot: Sendable {
     #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 70)
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterRecoversMissingSessionIds() throws {
     // Backfill case: TokenSamples already exist with sessionIds but
     // there are no SessionInfo rows. The persister should surface
@@ -810,7 +810,7 @@ private struct AggregateSnapshot: Sendable {
 
 // MARK: - missing-project-aggregate recovery (existing test below)
 
-@MainActor
+@ScanActor
 @Test func samplePersisterRecoversMissingProjectAggregatePairs() throws {
     // Backfill check: when ProjectDailyAggregate is empty but
     // TokenSamples already exist (the upgrade case), the persister

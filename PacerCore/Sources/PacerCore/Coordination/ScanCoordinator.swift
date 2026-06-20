@@ -16,7 +16,7 @@ import SwiftData
 /// when the on-disk version doesn't match this binary's
 /// `currentScanVersion`, we wipe cursors so every JSONL gets re-read
 /// (the persister still rejects existing rows by dedupKey).
-@MainActor
+@ScanActor
 public final class ScanCoordinator {
 
     /// Bump this constant when a parser/aggregation change requires
@@ -234,7 +234,18 @@ public final class ScanCoordinator {
     }
 
     private let container: ModelContainer
-    private let context: ModelContext
+    /// Scan-loop context, lazily created on first `@ScanActor` access.
+    /// `ModelContext` is thread-affine, so it must be born on the same
+    /// executor that uses it — deferring creation past the (nonisolated)
+    /// init guarantees it's created on `ScanActor`, not on whatever
+    /// thread happened to call the initializer.
+    private var _context: ModelContext?
+    private var context: ModelContext {
+        if let _context { return _context }
+        let c = ModelContext(container)
+        _context = c
+        return c
+    }
     private let configuration: Configuration
     private let scanner: JSONLScanner
     private let watcher: JSONLWatcher
@@ -306,7 +317,11 @@ public final class ScanCoordinator {
     /// backstop scan interval.
     private static let autoAliasInterval: TimeInterval = 60
 
-    public init(
+    /// Nonisolated so the driver (`AppBackgroundService`, on MainActor)
+    /// can construct the coordinator without an `await` hop. The
+    /// `ModelContext` is intentionally NOT created here — it's lazily
+    /// born on `ScanActor` on first use (see `context`).
+    public nonisolated init(
         container: ModelContainer,
         configuration: Configuration = Configuration(),
         statsCacheURL: URL? = nil,
@@ -314,7 +329,6 @@ public final class ScanCoordinator {
         oauthClient: OAuthClient? = nil
     ) {
         self.container = container
-        self.context = ModelContext(container)
         self.configuration = configuration
         self.scanner = JSONLScanner()
         self.watcher = JSONLWatcher(mode: configuration.watcherMode)
@@ -414,9 +428,12 @@ public final class ScanCoordinator {
         // so `samplesChanged` stays false; widgets that key off totals
         // / sessions still re-pull via `projectAttributionChanged`.
         if changed > 0 {
-            postScanCycleSummary(ScanCycleSummary(
-                projectAttributionChanged: true
-            ))
+            // Fire-and-forget onto main: the post must run on the main
+            // thread (observers register on `.main`), but the scan cycle
+            // shouldn't block waiting for a free main-thread moment just
+            // to hand off a UI-refresh hint.
+            let summary = ScanCycleSummary(projectAttributionChanged: true)
+            Task { @MainActor in postScanCycleSummary(summary) }
         }
         let report = AliasMigrationReport(
             aliasesChanged: true,
@@ -466,7 +483,8 @@ public final class ScanCoordinator {
         // a login-at-launch invocation has no window, so this widens
         // the watcher's FSEvent latency immediately and saves wakeups
         // until the user actually opens the dashboard.
-        applyVisibilityCadence(visible: PacerWindowVisibility.shared.isMainWindowVisible)
+        let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
+        applyVisibilityCadence(visible: initialVisible)
         installVisibilityObserver()
 
         // OAuth poller runs independently from the JSONL watcher loop.
@@ -566,7 +584,7 @@ public final class ScanCoordinator {
                 } onChange: {
                     // No body — the loop re-enters and re-reads.
                 }
-                self?.applyVisibilityCadence(visible: visible)
+                await self?.applyVisibilityCadence(visible: visible)
                 // Suspend until the next change. We use a small
                 // continuation-style park by awaiting a one-shot Task
                 // that completes when the observation onChange fires.
@@ -1062,10 +1080,14 @@ public final class ScanCoordinator {
         // alias-driven re-attribution refreshes the project columns
         // even when no new TokenSamples landed.
         if cycleDidWork {
-            postScanCycleSummary(ScanCycleSummary(
+            // Fire-and-forget onto main (see `runAliasMigrationOnly`):
+            // the post must run on main, but the cycle shouldn't wait on
+            // main-thread availability to deliver a refresh hint.
+            let summary = ScanCycleSummary(
                 samplesChanged: true,
                 projectAttributionChanged: needsPathMigration
-            ))
+            )
+            Task { @MainActor in postScanCycleSummary(summary) }
         }
         phase.notifMs = tickMs()
 
@@ -1211,7 +1233,7 @@ public final class ScanCoordinator {
     /// process restarts; changes whenever any key/value differs. Used
     /// to detect "user changed an alias" between scans without
     /// requiring the UI to flip a meta flag.
-    static func fingerprint(aliases: [String: String]) -> String {
+    nonisolated static func fingerprint(aliases: [String: String]) -> String {
         if aliases.isEmpty { return "empty" }
         // Sort the pairs so insertion order doesn't matter.
         let sorted = aliases.sorted { $0.key < $1.key }
@@ -1226,7 +1248,7 @@ public final class ScanCoordinator {
 
     /// FNV-1a 64-bit hash of the joined string, rendered as hex. Tiny,
     /// stable across processes, no external dependency.
-    private static func fnv1aHex(_ s: String) -> String {
+    nonisolated private static func fnv1aHex(_ s: String) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in s.utf8 {
             hash ^= UInt64(byte)
@@ -1354,7 +1376,7 @@ private final class InsertSink: @unchecked Sendable {
     /// persister and surfaces the first error. Called by ScanCoordinator
     /// once after `scanner.scan` returns. One MainActor pass instead of
     /// one-hop-per-entry is the entire point of this design.
-    @MainActor
+    @ScanActor
     func flush() throws {
         lock.lock()
         let toInsert = collected
