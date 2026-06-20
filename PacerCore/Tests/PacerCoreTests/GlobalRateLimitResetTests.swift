@@ -146,11 +146,67 @@ struct GlobalRateLimitResetTests {
         #expect(GlobalRateLimitReset.detect(series) == nil)
     }
 
-    @Test func rejectsWhenAnchorMissing() {
-        // No cycle anchor on the low samples — can't prove "anchor
-        // didn't move", so we don't claim an early reset.
+    @Test func detectsWhenAnchorClearedAcrossReset() {
+        // The real 2026-06-20 signature: high on a far-future anchor, then
+        // a sustained collapse to 0% with the anchor CLEARED to null.
+        // Anthropic nulls `resets_at` on a global reset; the drop-edge
+        // anchor (still in the future) proves the cycle was cut short, so
+        // we detect and report that pre-reset anchor as the stable key.
         let series = [
             obs(minutesAgo: 15, pct: 60, anchor: anchor),
+            obs(minutesAgo: 10, pct: 0, anchor: nil),
+            obs(minutesAgo: 5, pct: 0, anchor: nil),
+            obs(minutesAgo: 0, pct: 0, anchor: nil),
+        ]
+        let d = GlobalRateLimitReset.detect(series)
+        #expect(d != nil)
+        #expect(d?.droppedFrom == 60)
+        #expect(d?.resetsAt == anchor)
+    }
+
+    @Test func rejectsWhenDropEdgeAnchorMissing() {
+        // The drop edge ALSO has no anchor — with no pre-reset reset day to
+        // anchor on, we can't tell an early reset from a rollover, so bail.
+        let series = [
+            obs(minutesAgo: 15, pct: 60, anchor: nil),
+            obs(minutesAgo: 10, pct: 0, anchor: nil),
+            obs(minutesAgo: 5, pct: 0, anchor: nil),
+            obs(minutesAgo: 0, pct: 0, anchor: nil),
+        ]
+        #expect(GlobalRateLimitReset.detect(series) == nil)
+    }
+
+    @Test func detectsSevenDayModestDropWithClearedAnchor() {
+        // Exactly what shipped overnight on the 7-day window: a drop from a
+        // *modest* 17% (below the default 25% bar) to a sustained 0% with a
+        // far-future anchor cleared to null. The caller lowers the bar to
+        // 15% for the 7-day window, which is rare to ever hit 0%.
+        let series = [
+            obs(minutesAgo: 15, pct: 17, anchor: anchor),
+            obs(minutesAgo: 10, pct: 0, anchor: nil),
+            obs(minutesAgo: 5, pct: 0, anchor: nil),
+            obs(minutesAgo: 0, pct: 0, anchor: nil),
+        ]
+        // With the default 25% bar it's (correctly) below threshold…
+        #expect(GlobalRateLimitReset.detect(series) == nil)
+        // …but with the 7-day window's lower bar it fires.
+        let d = GlobalRateLimitReset.detect(series, highWatermark: 15)
+        #expect(d?.droppedFrom == 17)
+        #expect(d?.droppedTo == 0)
+        #expect(d?.resetsAt == anchor)
+    }
+
+    @Test func rejectsBriefNullAnchorAfterOrdinaryRollover() {
+        // A normal rollover lands *at* its anchor, then briefly reads 0%
+        // with a null anchor before the next anchor appears (observed live
+        // on the 5-hour window). The drop-edge anchor is only ~2 min ahead
+        // of its sample — the cycle wasn't cut short — so this must NOT read
+        // as an early reset.
+        let base = Date(timeIntervalSince1970: 1_749_000_000)
+        // Drop edge sampled 15 min before base; its anchor sits 2 min later.
+        let nearAnchor = base.addingTimeInterval(-15 * 60 + 2 * 60)
+        let series = [
+            obs(minutesAgo: 15, pct: 60, anchor: nearAnchor),
             obs(minutesAgo: 10, pct: 0, anchor: nil),
             obs(minutesAgo: 5, pct: 0, anchor: nil),
             obs(minutesAgo: 0, pct: 0, anchor: nil),

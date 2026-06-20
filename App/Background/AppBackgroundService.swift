@@ -424,7 +424,21 @@ final class AppBackgroundService {
                     resetsAt: $0.resetsAt
                 )
             }
-            guard let detection = GlobalRateLimitReset.detect(observations) else { continue }
+            // Window-aware gates. The 5-hour window rolls over constantly and
+            // naturally touches 0%, so keep its high bar (25%) and a short
+            // cut-short lead. The 7-day window hitting 0% is rare and almost
+            // always a real reset, so a lower bar (15%) catches a modest-but-
+            // genuine early reset (Anthropic's 2026-06-20 reset dropped 7-day
+            // from ~17% and nulled the anchor), and a larger lead (10% of the
+            // window) keeps a sleep-gap rollover from masquerading as one.
+            let windowDuration = PaceMath.windowDuration(for: window) ?? (7 * 24 * 3600)
+            let highWatermark: Double = window == RateLimitWindowName.sevenDay ? 15 : 25
+            let minAnchorLead = max(GlobalRateLimitReset.defaultMinAnchorLead, windowDuration * 0.1)
+            guard let detection = GlobalRateLimitReset.detect(
+                observations,
+                highWatermark: highWatermark,
+                minAnchorLead: minAnchorLead
+            ) else { continue }
             await NotificationCoordinator.shared.handleGlobalRateLimitReset(
                 window: window,
                 detection: detection,
