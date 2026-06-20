@@ -380,6 +380,60 @@ private func makeAssistantLine(
 }
 
 @MainActor
+@Test func coordinatorAliasFingerprintMigrationRecomputesOnlyAffectedSessions() async throws {
+    // Regression: adding/auto-detecting an alias used to trigger a
+    // full-table re-canonicalization (`canonicalizeProjectPaths`) plus
+    // an all-sessions SessionInfo rebuild on the MainActor — measured at
+    // ~19 s on the live store (mig=12.2s + sessR=5.9s for ~450 sessions),
+    // which froze scrolling into a beachball. The alias-fingerprint path
+    // now scopes the canonicalization to samples under the alias source
+    // and recomputes only the sessions those samples belong to.
+    let lineA = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        messageId: "msg-a", requestId: "req-a",
+        cwd: "/Users/test/proj-a", sessionId: "sess-a"
+    )
+    let lineB = makeAssistantLine(
+        timestamp: "2026-04-30T13:00:00.000Z",
+        messageId: "msg-b", requestId: "req-b",
+        cwd: "/Users/test/proj-b", sessionId: "sess-b"
+    )
+    let root = try makeFixtureRoot(withLines: [lineA, lineB])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+
+    // First scan ingests both sessions.
+    _ = try await coordinator.runOnce()
+    let context = ModelContext(container)
+    #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 2)
+
+    // Add an alias that only affects proj-a.
+    let manager = ProjectPathAliasManager(context: context)
+    try manager.upsert(
+        sourcePath: "/Users/test/proj-a",
+        canonicalPath: "/Users/test/proj-a-renamed"
+    )
+
+    // The alias-fingerprint cycle must recompute ONLY sess-a (the moved
+    // session), not both. Pre-fix this was `== 2` (every session).
+    let report = try await coordinator.runOnce()
+    #expect(report.sessionRecomputeStats.sessionsUpserted == 1)
+
+    // sess-a follows the rename; sess-b stays put.
+    let sessions = try ModelContext(container).fetch(FetchDescriptor<SessionInfo>())
+    #expect(sessions.count == 2)
+    #expect(sessions.first { $0.sessionId == "sess-a" }?.projectPath == "/Users/test/proj-a-renamed")
+    #expect(sessions.first { $0.sessionId == "sess-b" }?.projectPath == "/Users/test/proj-b")
+}
+
+@MainActor
 @Test func coordinatorWithoutOAuthClientDoesNotPoll() async throws {
     // Without an oauthClient the poller is never constructed — verify
     // by running a simple manual cycle and checking no

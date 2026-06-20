@@ -389,11 +389,13 @@ public final class ScanCoordinator {
         if persister == nil { persister = activePersister }
         activePersister.clearDirtyPairs()
         let changed = try activePersister.canonicalizeAffectedSamples(aliases: aliases)
-        // Mark sessions tied to any altered sample as dirty so the
-        // SessionInfo rollup catches up.
-        if changed > 0 {
-            try activePersister.markSessionsDirtyForAliasChange()
-        }
+        // `canonicalizeAffectedSamples` already folds every re-mapped
+        // sample's session id into `dirtySessionIds`, so the SessionInfo
+        // rollup below recomputes exactly the sessions that moved. The
+        // previous `markSessionsDirtyForAliasChange()` marked *every*
+        // session dirty — an O(all-sessions) rebuild (~6 s for ~450
+        // sessions on a live store) to "catch" sessions whose samples
+        // never changed, which by definition don't need rebuilding.
         let projectRecomputer = ProjectAggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
         let projectStats = try await projectRecomputer.recompute(
@@ -812,19 +814,37 @@ public final class ScanCoordinator {
         phase.metaPrepMs = tickMs()
 
         if needsPathMigration {
-            let changed = try activePersister.canonicalizeProjectPaths(aliases: aliases)
+            let changed: Int
+            if storedPathVersion != Self.currentPathCanonicalizationVersion {
+                // Code-level canonicalization rule changed: every
+                // TokenSample must be re-evaluated, and the full walk
+                // also backfills `originalProjectPath`. This fires once
+                // per version bump, so the all-rows cost is acceptable.
+                changed = try activePersister.canonicalizeProjectPaths(aliases: aliases)
+            } else {
+                // Alias-fingerprint-only change — the steady-state case,
+                // fired every time the auto-aliaser adds a row (and on
+                // any alias edit that didn't route through
+                // `runAliasMigrationOnly`). Only samples currently under
+                // an alias *source* can re-map, so fetch those by the
+                // indexed `projectPath` column instead of materializing
+                // every TokenSample. This is what turns the recurring
+                // "auto-alias added 1 row" cycle from a ~12 s full-table
+                // walk — a multi-second MainActor freeze the user sees as
+                // a scroll beachball — into a handful of indexed lookups.
+                changed = try activePersister.canonicalizeAffectedSamples(aliases: aliases)
+            }
             if changed > 0 {
                 log("integrity: canonicalized \(changed) sample(s) — worktree+alias mapping updated")
             }
-            // Even when no TokenSample.projectPath changed, the alias
-            // graph may have changed in a way that requires SessionInfo
-            // re-rollup (e.g., the source path had no samples yet, but
-            // future ones will). Mark all sessions dirty as a cheap
-            // belt-and-braces; the recomputer is idempotent and this
-            // path only fires when the user touches the alias table.
-            if storedAliasFingerprint != aliasesFingerprint {
-                try activePersister.markSessionsDirtyForAliasChange()
-            }
+            // Both canonicalize passes fold every re-mapped sample's
+            // session id into `dirtySessionIds`, so the SessionInfo
+            // rollup catches up for exactly the sessions that moved. The
+            // previous belt-and-braces `markSessionsDirtyForAliasChange()`
+            // marked *every* session dirty — an O(all-sessions) rebuild
+            // (~6 s for ~450 sessions on MainActor) to catch sessions
+            // whose samples never changed, which by definition don't need
+            // rebuilding.
         }
         phase.migrationMs = tickMs()
         let beforeStats = activePersister.stats
