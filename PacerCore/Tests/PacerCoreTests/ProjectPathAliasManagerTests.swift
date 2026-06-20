@@ -19,7 +19,7 @@ private func makeInMemoryContainer() throws -> ModelContainer {
     )
 }
 
-@MainActor
+@ScanActor
 @Suite struct ProjectPathAliasManagerTests {
 
     @Test func upsertInsertsNewAlias() throws {

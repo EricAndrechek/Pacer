@@ -3,7 +3,7 @@ import SwiftData
 import Testing
 @testable import PacerCore
 
-@MainActor
+@ScanActor
 @Suite struct ProjectGitRootAutoAliaserTests {
 
     // MARK: - sibling-merge canonical selection

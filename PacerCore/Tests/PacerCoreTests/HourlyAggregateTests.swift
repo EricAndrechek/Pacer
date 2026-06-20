@@ -65,7 +65,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
 
 // MARK: - Dirty-set tracking
 
-@MainActor
+@ScanActor
 @Test func samplePersisterMarksHourBucketDirtyOnInsert() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -86,7 +86,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
     #expect(buckets.contains(where: { $0.hour == 15 }))
 }
 
-@MainActor
+@ScanActor
 @Test func samplePersisterClearDirtyAlsoClearsHourBuckets() throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -103,7 +103,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
 
 // MARK: - Recomputer
 
-@MainActor
+@ScanActor
 @Test func recomputerWritesOneRowPerHourBucket() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -143,7 +143,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
     #expect(h15?.sampleCount == 1)
 }
 
-@MainActor
+@ScanActor
 @Test func recomputerSplitsByModelWithinSameHour() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -169,7 +169,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
     #expect(Set(rows.map(\.model)) == ["claude-opus-4-7", "claude-sonnet-4-6"])
 }
 
-@MainActor
+@ScanActor
 @Test func recomputerUpsertsExistingRowOnSecondPass() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
@@ -206,7 +206,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
 
 // MARK: - Missing-bucket recovery (bootstrap path)
 
-@MainActor
+@ScanActor
 @Test func missingHourBucketsDetectedAtPreload() throws {
     // Seed the container with samples but no HourlyAggregate rows,
     // then construct a fresh persister and verify it surfaces every
@@ -233,7 +233,7 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
     #expect(second.consumeMissingHourBuckets().isEmpty)
 }
 
-@MainActor
+@ScanActor
 @Test func recomputerEmptyBucketSetIsNoop() async throws {
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)

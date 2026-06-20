@@ -18,7 +18,6 @@ import SwiftData
 /// after the user clicks "Merge") can call
 /// `scanCoordinator.runOnce()` themselves; otherwise the next scan
 /// cycle picks it up on its own.
-@MainActor
 public final class ProjectPathAliasManager {
 
     public enum AliasError: Error, Equatable, Sendable {

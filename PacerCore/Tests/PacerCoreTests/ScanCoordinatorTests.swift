@@ -75,7 +75,7 @@ private func makeAssistantLine(
     return String(data: try! JSONSerialization.data(withJSONObject: cleaned), encoding: .utf8)!
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorRunOnceFullScanInsertsAndAggregates() async throws {
     let line1 = makeAssistantLine(
         timestamp: "2026-04-30T12:00:00.000Z",
@@ -120,7 +120,7 @@ private func makeAssistantLine(
     #expect(abs(aggs[0].totalCostUSD - 0.30) < 0.0001)
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorSecondRunIsIncremental() async throws {
     let line = makeAssistantLine(
         timestamp: "2026-04-30T12:00:00.000Z",
@@ -145,7 +145,7 @@ private func makeAssistantLine(
     #expect(second.wasFullScan == false)
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorDedupesAcrossRuns() async throws {
     // The full scan inserts one row; a second full scan (which would
     // happen after a parser version bump) should NOT duplicate it
@@ -190,7 +190,7 @@ private func makeAssistantLine(
     #expect(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()) == 1)
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorWritesScanMetaFields() async throws {
     let line = makeAssistantLine(
         timestamp: "2026-04-30T12:00:00.000Z",
@@ -216,7 +216,7 @@ private func makeAssistantLine(
     #expect(byKey[ClaudeCodeMetaKey.lastIncrementalScanAt] != nil)
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorSkipsSyntheticAndUnparseable() async throws {
     let assistant = makeAssistantLine(
         timestamp: "2026-04-30T12:00:00.000Z",
@@ -242,7 +242,7 @@ private func makeAssistantLine(
     #expect(report.persisterStats.inserted == 1)
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorRunForeverStartsAndStopsOAuthPoller() async throws {
     // Wire-in test: when an OAuthClient is provided, runForever() should
     // start the poller alongside the watcher and writes will accumulate
@@ -309,7 +309,7 @@ private func makeAssistantLine(
     #expect(count >= 2, "expected the poller to insert at least one snapshot's worth of rows")
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorAliasMigrationMovesSamplesAndAggregates() async throws {
     // End-to-end: persist samples under /old/path, add an alias
     // /old/path → /new/path, run another cycle, verify samples and
@@ -379,7 +379,7 @@ private func makeAssistantLine(
     #expect(samplesFinal[0].projectPath == "/Users/test/new-name")
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorAliasFingerprintMigrationRecomputesOnlyAffectedSessions() async throws {
     // Regression: adding/auto-detecting an alias used to trigger a
     // full-table re-canonicalization (`canonicalizeProjectPaths`) plus
@@ -433,7 +433,7 @@ private func makeAssistantLine(
     #expect(sessions.first { $0.sessionId == "sess-b" }?.projectPath == "/Users/test/proj-b")
 }
 
-@MainActor
+@ScanActor
 @Test func coordinatorWithoutOAuthClientDoesNotPoll() async throws {
     // Without an oauthClient the poller is never constructed — verify
     // by running a simple manual cycle and checking no

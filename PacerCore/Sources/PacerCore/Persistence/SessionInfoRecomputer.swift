@@ -11,7 +11,7 @@ import SwiftData
 /// the sessions list instantly. Without it, the detail view had to
 /// drop into a `RollupWorker` and iterate every TokenSample for the
 /// project on each scan tick — measurable lag on a populated install.
-@MainActor
+@ScanActor
 public final class SessionInfoRecomputer {
 
     private let container: ModelContainer

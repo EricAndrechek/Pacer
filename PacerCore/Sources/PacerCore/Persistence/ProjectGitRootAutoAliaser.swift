@@ -29,7 +29,7 @@ import SwiftData
 /// (pure heuristics) and `ProjectPathAliasManager` (the alias
 /// writer). Lives in the persistence layer because it writes to
 /// multiple tables and needs the `ModelContext`.
-@MainActor
+@ScanActor
 public final class ProjectGitRootAutoAliaser {
     private let context: ModelContext
 

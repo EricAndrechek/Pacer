@@ -93,7 +93,7 @@ private func writeFixture(_ json: String) throws -> URL {
     #expect(result.totalMessages == nil)
 }
 
-@MainActor
+@ScanActor
 @Test func probeAndStoreWritesMetaKeys() throws {
     let url = try writeFixture("""
     {
@@ -117,7 +117,7 @@ private func writeFixture(_ json: String) throws -> URL {
     #expect(byKey[ClaudeCodeMetaKey.statsCacheTotalMessages] == "1000")
 }
 
-@MainActor
+@ScanActor
 @Test func probeAndStoreUpsertsOnRepeat() throws {
     // First probe writes "3", second probe with different value
     // overwrites the row (no duplicate row).
