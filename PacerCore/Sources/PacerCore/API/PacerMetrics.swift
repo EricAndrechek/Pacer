@@ -44,7 +44,9 @@ public struct PacerMetric: Sendable, Equatable {
 public struct PacerMetrics: Sendable {
     public let points: [PacerMetric]
 
-    public init(snapshot s: PacerSnapshotPayload, version: String, build: String) {
+    public init(snapshot s: PacerSnapshotPayload,
+                todayModels: [PacerDailyUsage.Row] = [],
+                version: String, build: String) {
         var m: [PacerMetric] = []
 
         func windowMetrics(_ key: String, _ w: PacerSnapshotPayload.Limits.Window?) {
@@ -107,6 +109,20 @@ public struct PacerMetrics: Sendable {
         }
         m.append(PacerMetric("pacer_forecast_fresh", s.dataSource.forecastFresh ? 1 : 0,
                              help: "1 if a fresh engine projection backs the forecast metrics, else 0."))
+
+        // Per-model breakdown for today (omitted when no usage yet).
+        let modelCostHelp = "Today's spend per model in USD."
+        let modelTokHelp = "Today's token counts per model by kind."
+        for row in todayModels {
+            m.append(PacerMetric("pacer_model_cost_usd", row.costUSD, help: modelCostHelp,
+                                 labels: [("model", row.model)]))
+            m.append(PacerMetric("pacer_model_tokens", Double(row.input), help: modelTokHelp,
+                                 labels: [("model", row.model), ("kind", "input")]))
+            m.append(PacerMetric("pacer_model_tokens", Double(row.output), help: modelTokHelp,
+                                 labels: [("model", row.model), ("kind", "output")]))
+            m.append(PacerMetric("pacer_model_tokens", Double(row.cacheRead), help: modelTokHelp,
+                                 labels: [("model", row.model), ("kind", "cache_read")]))
+        }
 
         m.append(PacerMetric("pacer_up", 1, help: "Always 1 while the Pacer API is responding."))
         m.append(PacerMetric("pacer_build_info", 1,
