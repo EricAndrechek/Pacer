@@ -73,6 +73,13 @@ final class AppBackgroundService {
     /// Deliberately infrequent (weekly) with a generous 30-day retention
     /// — the data is small, so this is housekeeping, not management.
     private var historyPruneTask: Task<Void, Never>?
+    /// Opt-in local HTTP server (JSON snapshot + Prometheus + SSE) for
+    /// third-party integrations. Created here, owned for the process lifetime;
+    /// `applyAPIServerConfig()` starts/stops it per the user's preference.
+    private let httpServer = PacerHTTPServer()
+    /// Observer for `.pacerAPIServerSettingsChanged` — re-applies the server
+    /// config when the Settings UI toggles it or edits port/host/token.
+    private var apiSettingsObserver: NSObjectProtocol?
 
     init(container: ModelContainer) {
         self.container = container
@@ -123,6 +130,8 @@ final class AppBackgroundService {
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
         startHistoryPruneTask()
+        installAPISettingsObserver()
+        applyAPIServerConfig()
     }
 
     func stop() async {
@@ -152,6 +161,33 @@ final class AppBackgroundService {
         pricingRefreshTask = nil
         historyPruneTask?.cancel()
         historyPruneTask = nil
+        httpServer.stop()
+        if let observer = apiSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+            apiSettingsObserver = nil
+        }
+    }
+
+    // MARK: - Local API server
+
+    /// Start or stop the HTTP server to match the current preference. Called on
+    /// launch and whenever `.pacerAPIServerSettingsChanged` fires. The server
+    /// itself is idempotent — `start` tears down any prior listener first.
+    private func applyAPIServerConfig() {
+        let cfg = PacerPreferences.apiServerConfig()
+        guard cfg.enabled, let port = UInt16(exactly: cfg.port) else {
+            httpServer.stop()
+            return
+        }
+        httpServer.start(config: .init(host: cfg.bindHost, port: port, token: cfg.token))
+    }
+
+    private func installAPISettingsObserver() {
+        apiSettingsObserver = NotificationCenter.default.addObserver(
+            forName: .pacerAPIServerSettingsChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.applyAPIServerConfig() }
+        }
     }
 
     // MARK: - Pricing refresh
