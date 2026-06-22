@@ -297,5 +297,23 @@
             type="application/octet-stream"
             sparkle:edSignature="XuZpJ/RmjXrPi1Vr7z7SfE2SIEfovqEIlsI77B3XF8QfLa8/InzRmcG3d94QJV79yOvi2H2TClumpLMXhBlrCg==" />
     </item>
+            <item>
+        <title>Version 0.3.9</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(auth): read Claude Desktop's keychain only when its tokens change by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4719377028" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/96" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/96/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/96">EricAndrechek/Pacer#96</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.8...v0.3.9">EricAndrechek/Pacer@<tt>v0.3.8...v0.3.9</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 22:40:01 +0000</pubDate>
+        <sparkle:version>1782167676</sparkle:version>
+        <sparkle:shortVersionString>0.3.9</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.9/Pacer-0.3.9.dmg"
+            length="6686663"
+            type="application/octet-stream"
+            sparkle:edSignature="koh6pmGEp5BI0Gm05+KIUIk3EkVRWwEBFS3KvvGyKmXHC2V/VXPz4ovCC35Bk33EUgW4jfZFNJY0kdTV7mdXBA==" />
+    </item>
         </channel>
 </rss>
