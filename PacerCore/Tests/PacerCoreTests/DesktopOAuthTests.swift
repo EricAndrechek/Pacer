@@ -387,6 +387,157 @@ import Testing
         #expect(store.load()?.accessToken == "good-tok")
     }
 
+    // MARK: - Desktop read frequency (the "keeps asking for my password" bug)
+    //
+    // The Desktop `Claude Safe Storage` keychain read can pop a macOS prompt
+    // that "Always Allow" won't reliably persist, so resolution must touch it
+    // rarely. These pin the read count — counted via the keyReader, which is
+    // exactly what triggers the prompt.
+
+    /// Desktop source whose keychain key read is counted (each call is one
+    /// approval-prompt opportunity), so a test can assert it was NOT touched.
+    private func countingDesktop(
+        cache: [(client: String, scopes: String, token: String, expiresMs: Int64)],
+        counter: CallCounter
+    ) -> DesktopOAuth {
+        let blobs: [String]? = [encryptV10(cacheData(cache))]
+        return DesktopOAuth(
+            keyReader: { counter.bump(); return .success(Self.testKey) },
+            cacheReader: { blobs }
+        )
+    }
+
+    /// Like `countingDesktop`, but the cache entry carries NO `expiresAt`, so
+    /// the resolved credential has `expiresAt == nil` — the case that never
+    /// satisfies the held-token fast path and used to re-read every poll.
+    private func countingDesktopNoExpiry(token: String, counter: CallCounter) -> DesktopOAuth {
+        let dict: [String: Any] = [
+            key(client: "a", scopes: "user:inference user:profile"): ["token": token, "refreshToken": "r"],
+        ]
+        let blob = encryptV10(try! JSONSerialization.data(withJSONObject: dict))
+        return DesktopOAuth(
+            keyReader: { counter.bump(); return .success(Self.testKey) },
+            cacheReader: { [blob] }
+        )
+    }
+
+    /// A still-valid held token (even one with no expiry) must be served
+    /// without consulting Desktop — Desktop's keychain stays untouched.
+    @Test func usableHeldTokenSkipsDesktopRead() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        let held = OAuthCredential(accessToken: "desk-held", expiresAt: nil, subscriptionType: "max")
+        let dt = countingDesktop(cache: [
+            (client: "a", scopes: "user:inference user:profile", token: "desk-fresh",
+             expiresMs: Int64(now.addingTimeInterval(9999).timeIntervalSince1970 * 1000)),
+        ], counter: counter)
+        let kc = countingKeychain(token: nil, expiry: nil, counter: CallCounter())  // notFound
+        let (client, _) = resolvingClient(
+            keychain: kc, desktop: dt, desktopEnabled: true, held: held, now: now
+        ) { tok in (200, tok == "desk-held" ? 11 : 99) }
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(snap.fiveHour?.usedPercentage == 11)  // held token used
+        #expect(counter.count == 0)                   // Desktop keychain NOT read
+    }
+
+    /// The regression for "asks every few minutes": a Desktop token with no
+    /// `expiresAt` is read once, cached, then served from the held store on
+    /// subsequent polls — NOT re-read (re-prompted) every cycle.
+    @Test func noExpiryDesktopTokenReadOnceNotEveryPoll() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let counter = CallCounter()
+        let dt = countingDesktopNoExpiry(token: "desk-tok", counter: counter)
+        let kc = countingKeychain(token: nil, expiry: nil, counter: CallCounter())  // Desktop-only user
+        let (client, store) = resolvingClient(
+            keychain: kc, desktop: dt, desktopEnabled: true, now: now
+        ) { _ in (200, 5) }
+        for _ in 0..<3 { _ = await client.fetchUsage() }  // three back-to-back polls
+        #expect(counter.count == 1)                       // read once, then held serves
+        #expect(store.load()?.accessToken == "desk-tok")  // cached
+    }
+
+    /// Even when nothing usable can be served — a Desktop token that 401s and
+    /// is cleared from the held store each poll — we don't re-read (re-prompt
+    /// on) Desktop's keychain while its token file is unchanged. We re-read
+    /// only once the file changes (Desktop wrote a new token), and recover.
+    @Test func revokedDesktopTokenDoesNotRePromptUntilCacheChanges() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let keyReads = CallCounter()
+        let expiry = Int64(now.addingTimeInterval(9999).timeIntervalSince1970 * 1000)
+        // A mutable encrypted-cache source: starts with a token the server 401s.
+        let blobs = Box<[String]?>([encryptV10(cacheData([
+            (client: "a", scopes: "user:inference user:profile", token: "bad-tok", expiresMs: expiry),
+        ]))])
+        let dt = DesktopOAuth(
+            keyReader: { keyReads.bump(); return .success(Self.testKey) },
+            cacheReader: { blobs.value }
+        )
+        let kc = countingKeychain(token: nil, expiry: nil, counter: CallCounter())  // notFound
+        let store = EphemeralCredentialStore(nil)
+        let client = OAuthClient(
+            keychain: kc,
+            transport: { req in
+                let bearer = (req.value(forHTTPHeaderField: "Authorization") ?? "")
+                    .replacingOccurrences(of: "Bearer ", with: "")
+                let status = bearer == "bad-tok" ? 401 : 200
+                let resp = HTTPURLResponse(url: OAuthClient.endpoint, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!
+                return (Data("{\"five_hour\":{\"utilization\":7}}".utf8), resp)
+            },
+            now: { now },
+            tokenOverride: { nil },
+            desktop: dt,
+            desktopEnabled: { true },
+            heldStore: store,
+            rejected: RejectedTokens()
+        )
+        // Poll 1: reads Desktop → token 401s → rejected + held cleared.
+        _ = await client.fetchUsage()
+        #expect(keyReads.count == 1)
+        // Polls 2–3: cache unchanged → no re-read, no re-prompt, even though
+        // nothing usable can be served.
+        _ = await client.fetchUsage()
+        _ = await client.fetchUsage()
+        #expect(keyReads.count == 1)
+        // Desktop refreshes its token (the cache file changes) → we read again
+        // and recover on the next poll.
+        blobs.value = [encryptV10(cacheData([
+            (client: "a", scopes: "user:inference user:profile", token: "good-tok", expiresMs: expiry),
+        ]))]
+        guard case .success(let snap) = await client.fetchUsage() else { Issue.record("expected success"); return }
+        #expect(keyReads.count == 2)
+        #expect(snap.fiveHour?.usedPercentage == 7)
+        #expect(store.load()?.accessToken == "good-tok")
+    }
+
+    /// The reported bug, modelled directly: Claude Code's token is expired and
+    /// never refreshed (issue #6), so resolution drops to the slow path every
+    /// poll, and the Desktop read keeps failing (declined / 5s timeout) so no
+    /// valid token is ever cached. The Desktop keychain must still be read only
+    /// ONCE while its file is unchanged — not re-prompted on every poll.
+    @Test func expiredKeychainTokenDoesNotRePromptDesktopEveryPoll() async {
+        let now = Date(timeIntervalSince1970: 1_750_000_000)
+        let keyReads = CallCounter()
+        let kc = countingKeychain(token: "cc-expired", expiry: now.addingTimeInterval(-3600), counter: CallCounter())
+        let dt = DesktopOAuth(
+            keyReader: { keyReads.bump(); return .failure(.keychainAccessDenied) },  // declined / timed out
+            cacheReader: { ["unchanging-blob"] }
+        )
+        let (client, _) = resolvingClient(keychain: kc, desktop: dt, desktopEnabled: true, now: now) { _ in (200, 5) }
+        for _ in 0..<4 { _ = await client.fetchUsage() }
+        #expect(keyReads.count == 1)  // read once; not once per poll
+    }
+
+    /// A minimal thread-safe mutable holder for tests.
+    final class Box<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var v: T
+        init(_ v: T) { self.v = v }
+        var value: T {
+            get { lock.lock(); defer { lock.unlock() }; return v }
+            set { lock.lock(); v = newValue; lock.unlock() }
+        }
+    }
+
     // MARK: - Live integration (gated)
     //
     // Set PACER_RUN_LIVE_DESKTOP_TEST=1 to decrypt the REAL Claude Desktop

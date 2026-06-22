@@ -261,4 +261,53 @@ public struct DesktopOAuth: Sendable {
         else { return nil }
         return ["oauth:tokenCache", "oauth:tokenCacheV2"].compactMap { obj[$0] as? String }
     }
+
+    /// A cheap, prompt-free fingerprint of the on-disk token cache — a hash of
+    /// the encrypted blobs from `config.json`, which change only when Desktop
+    /// rotates its tokens. `nil` when the config is absent. Reads no keychain,
+    /// so it never prompts; `OAuthClient` uses it to avoid re-reading (and
+    /// re-prompting on) the keychain when Desktop's tokens haven't changed.
+    public func cacheFingerprint() -> String? {
+        guard let blobs = cacheReader() else { return nil }
+        // hashValue is per-process-stable, which is all the gate needs (it
+        // only ever compares fingerprints within one run), and it avoids
+        // retaining the ciphertext.
+        return String(blobs.joined(separator: "\u{0}").hashValue)
+    }
+}
+
+/// Tracks the fingerprint of Claude Desktop's token cache at our last read of
+/// its keychain item, so `OAuthClient` re-reads it — and risks re-popping the
+/// macOS approval prompt — only when Desktop's tokens have actually changed.
+///
+/// Why this exists: the `Claude Safe Storage` item is owned by Claude Desktop,
+/// and macOS does not reliably persist "Always Allow" for a foreign app's
+/// item, so every read can re-prompt. Re-reading an unchanged token file would
+/// just re-derive the same credential — so we read it once, then stay quiet
+/// until the file changes (a token refresh) or the app restarts. This is the
+/// backstop for the cases the held-token fast path can't cover (a Desktop
+/// token that's been revoked and cleared from our held store).
+public final class DesktopReadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastFingerprint: String?
+
+    public init() {}
+
+    /// Whether to read Desktop's keychain, given the current cache
+    /// fingerprint. Reads when we've never read or the cache changed since. A
+    /// `nil` fingerprint (config unreadable) lets the attempt proceed — it
+    /// short-circuits on `configNotFound` before touching the keychain, so it
+    /// can't prompt anyway.
+    func shouldRead(fingerprint: String?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let fingerprint else { return true }
+        return fingerprint != lastFingerprint
+    }
+
+    /// Record the fingerprint we just read at. Success and a declined prompt
+    /// both count — a decline shouldn't re-prompt every poll either; we wait
+    /// for the cache to change (or an app restart) before asking again.
+    func record(fingerprint: String?) {
+        lock.lock(); lastFingerprint = fingerprint; lock.unlock()
+    }
 }
