@@ -98,6 +98,11 @@ public struct OAuthClient: Sendable {
     /// Tokens the server has 401'd this process, so resolution won't re-pick
     /// a revoked one and instead falls through to the next-freshest.
     private let rejected: RejectedTokens
+    /// Tracks Claude Desktop's token-file fingerprint so we re-read its
+    /// keychain item — which can pop a macOS prompt "Always Allow" won't
+    /// reliably silence — only when its tokens actually changed. See
+    /// `DesktopReadGate`.
+    private let desktopGate: DesktopReadGate
 
     /// How long before a held token's expiry we go back to the sources for a
     /// fresher one. Until then we serve the held copy without touching
@@ -112,7 +117,8 @@ public struct OAuthClient: Sendable {
         desktop: DesktopOAuth = DesktopOAuth(),
         desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() },
         heldStore: HeldCredentialStoring = EphemeralCredentialStore(),
-        rejected: RejectedTokens = RejectedTokens()
+        rejected: RejectedTokens = RejectedTokens(),
+        desktopGate: DesktopReadGate = DesktopReadGate()
     ) {
         self.keychain = keychain
         self.transport = transport
@@ -122,6 +128,7 @@ public struct OAuthClient: Sendable {
         self.desktopEnabled = desktopEnabled
         self.heldStore = heldStore
         self.rejected = rejected
+        self.desktopGate = desktopGate
     }
 
     /// Production transport: `URLSession.shared.data(for:)` plus the
@@ -232,14 +239,18 @@ public struct OAuthClient: Sendable {
         let referenceNow = now()
         let held = heldStore.load()
 
-        // Fast path.
+        // Fast path: a comfortably-valid held token is served directly,
+        // without touching Claude's stores.
         if let held, !rejected.isRejected(held.accessToken),
            let expiresAt = held.expiresAt,
            expiresAt >= referenceNow.addingTimeInterval(Self.refreshLeadTime) {
             return .success((held, true))
         }
 
-        // Slow path: read the sources.
+        // Slow path: read the sources. The Claude Code keychain read is
+        // silent (apple-tool: partition), so we always do it; the held token
+        // competes too, serving as the fallback when the sources are
+        // unreadable (logged out / Desktop removed).
         var candidates: [OAuthCredential] = []
         var keychainError: OAuthClientError?
         switch keychain.read() {
@@ -249,18 +260,38 @@ public struct OAuthClient: Sendable {
         case .failure(.malformedJSON(let u)):    keychainError = .keychainMalformed(u)
         case .failure(.unexpectedStatus(let s)): keychainError = .keychainStatus(s)
         }
-        if desktopEnabled(), case .success(let creds) = desktop.readAll() {
-            candidates.append(contentsOf: creds)
-        }
-        // The held token competes too — it serves as the fallback when the
-        // sources are unreadable (logged out / Desktop removed).
         if let held { candidates.append(held) }
 
-        let usable = candidates.filter {
-            !rejected.isRejected($0.accessToken) && ($0.expiresAt == nil || $0.expiresAt! >= referenceNow)
+        // Claude Desktop's `Claude Safe Storage` item is NOT in the
+        // `apple-tool:` partition the `security` CLI reads silently, so each
+        // read can pop a macOS approval prompt that "Always Allow" won't
+        // reliably persist for a foreign app's item. The failure mode this
+        // guards against: when Claude Code's token goes stale and isn't
+        // refreshed into the keychain, resolution drops to this slow path on
+        // EVERY poll — and reading Desktop here unconditionally re-prompts
+        // every few minutes. Two conditions keep the read rare: (1) skip it
+        // when we already hold a usable token, and (2) read only when
+        // Desktop's token file has actually changed since we last read it —
+        // re-reading an unchanged file just re-derives the same credential (or
+        // re-fails the same way) and re-prompts for nothing. So we read once,
+        // then stay quiet until Desktop writes a new token.
+        let usable: (OAuthCredential) -> Bool = { [rejected] cred in
+            !rejected.isRejected(cred.accessToken)
+                && (cred.expiresAt == nil || cred.expiresAt! >= referenceNow)
         }
+        if desktopEnabled(), !candidates.contains(where: usable) {
+            let fingerprint = desktop.cacheFingerprint()
+            if desktopGate.shouldRead(fingerprint: fingerprint) {
+                desktopGate.record(fingerprint: fingerprint)
+                if case .success(let creds) = desktop.readAll() {
+                    candidates.append(contentsOf: creds)
+                }
+            }
+        }
+
+        let usableCandidates = candidates.filter(usable)
         // Deterministic freshest-wins: latest expiry, ties broken by token.
-        let best = usable.sorted {
+        let best = usableCandidates.sorted {
             let a = $0.expiresAt ?? .distantFuture
             let b = $1.expiresAt ?? .distantFuture
             return a != b ? a > b : $0.accessToken < $1.accessToken
