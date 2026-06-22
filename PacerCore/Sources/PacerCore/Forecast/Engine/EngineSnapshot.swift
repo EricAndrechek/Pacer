@@ -46,14 +46,54 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
         public var resetsDate: Date { Date(timeIntervalSince1970: resetsUnix) }
     }
 
+    /// The engine's cost projection + pace read, exported so out-of-process
+    /// readers (widgets, the Shortcuts intents) can surface the same
+    /// projected-spend and "running hot / quieter than usual" the dashboard
+    /// shows without reaching the in-app engine actor. All fields are optional
+    /// — `nil` means the engine hasn't enough history to answer that question.
+    public struct CostOutlook: Codable, Sendable, Equatable {
+        /// Projected end-of-day spend (USD) with its calibrated 80% band.
+        public let projectedTodayUSD: Double?
+        public let projectedTodayLoUSD: Double?
+        public let projectedTodayHiUSD: Double?
+        /// Projected end-of-month spend (USD) with its 80% band.
+        public let projectedMonthUSD: Double?
+        public let projectedMonthLoUSD: Double?
+        public let projectedMonthHiUSD: Double?
+        /// Today's projected spend as a percentile of the user's own daily
+        /// norm (0…1). 0.82 = "heavier than 82% of your days".
+        public let pacePercentile: Double?
+        /// Human descriptor for `pacePercentile`:
+        /// "quieter than usual" / "about normal" / "running hot".
+        public let paceNote: String?
+
+        public init(projectedTodayUSD: Double?, projectedTodayLoUSD: Double?, projectedTodayHiUSD: Double?,
+                    projectedMonthUSD: Double?, projectedMonthLoUSD: Double?, projectedMonthHiUSD: Double?,
+                    pacePercentile: Double?, paceNote: String?) {
+            self.projectedTodayUSD = projectedTodayUSD
+            self.projectedTodayLoUSD = projectedTodayLoUSD
+            self.projectedTodayHiUSD = projectedTodayHiUSD
+            self.projectedMonthUSD = projectedMonthUSD
+            self.projectedMonthLoUSD = projectedMonthLoUSD
+            self.projectedMonthHiUSD = projectedMonthHiUSD
+            self.pacePercentile = pacePercentile
+            self.paceNote = paceNote
+        }
+    }
+
     public let generatedUnix: Double
     public let fiveHour: WindowOutlook?
     public let sevenDay: WindowOutlook?
+    /// Optional so snapshots written before this field existed still decode
+    /// (a missing key → `nil` via the synthesized `decodeIfPresent`).
+    public let cost: CostOutlook?
 
-    public init(generatedUnix: Double, fiveHour: WindowOutlook?, sevenDay: WindowOutlook?) {
+    public init(generatedUnix: Double, fiveHour: WindowOutlook?, sevenDay: WindowOutlook?,
+                cost: CostOutlook? = nil) {
         self.generatedUnix = generatedUnix
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.cost = cost
     }
 
     /// `ClaudeCodeMeta` key the snapshot is stored under.
