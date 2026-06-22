@@ -260,5 +260,24 @@
             type="application/octet-stream"
             sparkle:edSignature="nWN5uISduOlqPymPrsrTsnJoo6jsA3I1ft/uLUJrgLI8Aae2gc7yZt1jOfWkvO2rpANNnDeFBkwsKRgfpF45Aw==" />
     </item>
+            <item>
+        <title>Version 0.3.7</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(intents): comprehensive Shortcuts data surface for third-party apps by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4716755954" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/93" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/93/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/93">EricAndrechek/Pacer#93</a></li>
+<li>feat(api): opt-in local HTTP server — JSON, Prometheus, and SSE by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4717033038" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/94" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/94/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/94">EricAndrechek/Pacer#94</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.6...v0.3.7">EricAndrechek/Pacer@<tt>v0.3.6...v0.3.7</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 13:30:50 +0000</pubDate>
+        <sparkle:version>1782134777</sparkle:version>
+        <sparkle:shortVersionString>0.3.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.7/Pacer-0.3.7.dmg"
+            length="6620317"
+            type="application/octet-stream"
+            sparkle:edSignature="hxmY7qeYxk5QOg7INATkLhcD6sUohpnmyiNF8uWimqJYrd4NaJ7OXeVHIByAqZnvvs1lAE80HqUVABID+JwYAQ==" />
+    </item>
         </channel>
 </rss>
