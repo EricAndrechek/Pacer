@@ -48,6 +48,9 @@ struct SettingsView: View {
                     DatabaseCard()
                     LogsCard()
                 }
+                SettingsSection("Integrations") {
+                    APIServerCard()
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 18)
@@ -1479,6 +1482,156 @@ private struct LabeledControlRow<Control: View>: View {
             Spacer(minLength: 16)
             control()
         }
+    }
+}
+
+// MARK: - Local API & metrics server
+
+/// Opt-in HTTP server for third-party integrations + observability scraping.
+/// Off by default, loopback-bound; the user can widen the address, set a port,
+/// and require a bearer token. Editing port/host/token is staged in `@State`
+/// drafts and committed via "Save & restart" (so a half-typed port doesn't
+/// thrash the listener); the enable toggle applies immediately.
+private struct APIServerCard: View {
+    @AppStorage(PacerSettings.Key.apiEnabled, store: PacerSettings.store)
+    private var enabled: Bool = false
+    @AppStorage(PacerSettings.Key.apiPort, store: PacerSettings.store)
+    private var savedPort: Int = 7223
+    @AppStorage(PacerSettings.Key.apiBindHost, store: PacerSettings.store)
+    private var savedHost: String = "127.0.0.1"
+    @AppStorage(PacerSettings.Key.apiToken, store: PacerSettings.store)
+    private var savedToken: String = ""
+
+    @ObservedObject private var status = PacerAPIServerStatus.shared
+
+    @State private var draftPort: String = "7223"
+    @State private var draftHost: String = "127.0.0.1"
+    @State private var draftToken: String = ""
+
+    private var isDirty: Bool {
+        draftPort != String(savedPort) || draftHost != savedHost || draftToken != savedToken
+    }
+    private var portIsValid: Bool {
+        if let port = Int(draftPort) { return (1...65535).contains(port) }
+        return false
+    }
+    private func isLoopback(_ host: String) -> Bool {
+        ["127.0.0.1", "::1", "localhost"].contains(host.trimmingCharacters(in: .whitespaces))
+    }
+    private var exposedWithoutToken: Bool {
+        !isLoopback(draftHost) && draftToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        PacerCard("Local API & metrics server", content: {
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle("Enable local API & metrics server", isOn: $enabled)
+                    .onChange(of: enabled) { _, _ in notifyServer() }
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(status.isError ? Color.red : (enabled ? Color.green : Color.secondary))
+                        .frame(width: 8, height: 8)
+                    Text(status.text)
+                        .font(.caption)
+                        .foregroundStyle(status.isError ? Color.red : Color.secondary)
+                }
+
+                Divider().opacity(0.4)
+
+                LabeledControlRow(label: "Port") {
+                    TextField("7223", text: $draftPort)
+                        .frame(width: 90)
+                        .multilineTextAlignment(.trailing)
+                        .onSubmit { saveAndApply() }
+                }
+                LabeledControlRow(label: "Bind address") {
+                    TextField("127.0.0.1", text: $draftHost)
+                        .frame(width: 160)
+                        .multilineTextAlignment(.trailing)
+                        .onSubmit { saveAndApply() }
+                }
+                LabeledControlRow(label: "Token (optional)") {
+                    HStack(spacing: 6) {
+                        TextField("none", text: $draftToken)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(width: 200)
+                        Button("Generate") { draftToken = Self.randomToken() }
+                            .controlSize(.small)
+                    }
+                }
+
+                if exposedWithoutToken {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text("This address is reachable from other devices and no token is set — anyone on your network could read your usage data. Set a token, or use 127.0.0.1.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    if isDirty {
+                        Text("Unsaved changes").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("Save & restart") { saveAndApply() }
+                        .controlSize(.small)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!isDirty || !portIsValid)
+                }
+
+                if enabled {
+                    Divider().opacity(0.4)
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(["/v1/snapshot", "/metrics", "/v1/stream"], id: \.self) { path in
+                            Text("http://\(savedHost):\(savedPort)\(path)")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Exposes the same data the dashboard shows over local HTTP, so third-party apps (Stream Deck, scripts) and observability scrapers can read it without parsing Claude's logs themselves. Off by default; bound to loopback unless you widen the address.")
+                Text("`GET /v1/snapshot` full JSON · `GET /metrics` Prometheus (point Grafana Alloy here) · `GET /v1/stream` Server-Sent Events · `GET /healthz` liveness")
+                    .padding(.top, 2)
+                Text("curl -s http://127.0.0.1:\(savedPort)/v1/snapshot\(savedToken.isEmpty ? "" : " -H 'Authorization: Bearer \(savedToken)'")")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+            }
+        })
+        .onAppear { syncDrafts() }
+    }
+
+    private func syncDrafts() {
+        draftPort = String(savedPort)
+        draftHost = savedHost
+        draftToken = savedToken
+    }
+
+    private func saveAndApply() {
+        guard let port = Int(draftPort), (1...65535).contains(port) else { return }
+        let host = draftHost.trimmingCharacters(in: .whitespaces)
+        savedPort = port
+        savedHost = host.isEmpty ? "127.0.0.1" : host
+        savedToken = draftToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        syncDrafts()
+        notifyServer()
+    }
+
+    private func notifyServer() {
+        NotificationCenter.default.post(name: .pacerAPIServerSettingsChanged, object: nil)
+    }
+
+    private static func randomToken() -> String {
+        let chars = Array("abcdefghijklmnopqrstuvwxyz0123456789")
+        return String((0..<32).map { _ in chars.randomElement()! })
     }
 }
 

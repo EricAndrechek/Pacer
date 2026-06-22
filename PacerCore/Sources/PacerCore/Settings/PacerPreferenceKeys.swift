@@ -90,6 +90,24 @@ public enum PacerPreferenceKeys {
     /// nudge with "Not now" — so it never reappears. The feature itself stays
     /// reachable in Settings → Authentication; this only silences the banner.
     public static let desktopOnboardingDismissed = "pacer.desktop.onboardingDismissed"
+
+    // MARK: - Local API / metrics server
+    //
+    // Opt-in HTTP server that exposes the same `PacerSnapshotPayload` over
+    // `GET /v1/snapshot` (JSON), `GET /metrics` (Prometheus), and `GET
+    // /v1/stream` (SSE). Off by default; bound to loopback unless the user
+    // widens `apiBindHost`. See `PacerHTTPServer` in the App target.
+
+    /// Whether the local API/metrics server runs. Default false.
+    public static let apiEnabled  = "pacer.api.enabled"
+    /// TCP port to listen on. Default `apiDefaultPort`.
+    public static let apiPort     = "pacer.api.port"
+    /// Bind address. Default `"127.0.0.1"` (loopback only). Set to `"0.0.0.0"`
+    /// to accept connections from other devices on the network.
+    public static let apiBindHost = "pacer.api.bindHost"
+    /// Optional bearer token. When non-empty, every data endpoint requires
+    /// `Authorization: Bearer <token>`. Empty = no auth (fine for loopback).
+    public static let apiToken    = "pacer.api.token"
 }
 
 /// Convenience accessor for the App Group-suite UserDefaults. Falls
@@ -132,5 +150,39 @@ public enum PacerPreferences {
     /// touches the Desktop keychain item without explicit consent.
     public static func desktopCredentialsEnabled(from store: UserDefaults = store) -> Bool {
         store.bool(forKey: PacerPreferenceKeys.desktopCredentialsEnabled)
+    }
+
+    /// Default port for the local API/metrics server. 7223 = "PACE" on a
+    /// phone keypad — memorable and clear of common dev/observability ports
+    /// (3000, 5000/AirPlay, 8080, 8888, 9090/Prometheus, 9100/node_exporter,
+    /// 4317-4318/OTLP).
+    public static let apiDefaultPort = 7223
+
+    /// Resolved configuration for the local API/metrics server. Read by the
+    /// App target's `PacerHTTPServer` on launch and whenever settings change.
+    public struct APIServerConfig: Sendable, Equatable {
+        public let enabled: Bool
+        public let port: Int
+        public let bindHost: String
+        /// Trimmed; `nil` when the user left it blank (no auth required).
+        public let token: String?
+
+        public var isLoopback: Bool {
+            bindHost == "127.0.0.1" || bindHost == "::1" || bindHost == "localhost"
+        }
+    }
+
+    public static func apiServerConfig(from store: UserDefaults = store) -> APIServerConfig {
+        let port = store.object(forKey: PacerPreferenceKeys.apiPort) != nil
+            ? store.integer(forKey: PacerPreferenceKeys.apiPort) : apiDefaultPort
+        let host = (store.string(forKey: PacerPreferenceKeys.apiBindHost) ?? "127.0.0.1")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = (store.string(forKey: PacerPreferenceKeys.apiToken) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return APIServerConfig(
+            enabled: store.bool(forKey: PacerPreferenceKeys.apiEnabled),
+            port: (1...65535).contains(port) ? port : apiDefaultPort,
+            bindHost: host.isEmpty ? "127.0.0.1" : host,
+            token: token.isEmpty ? nil : token)
     }
 }

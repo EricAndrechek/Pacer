@@ -138,6 +138,10 @@ public enum PacerSettings {
         public static let oauthTokenOverride     = PacerPreferenceKeys.oauthTokenOverride
         public static let desktopCredentialsEnabled = PacerPreferenceKeys.desktopCredentialsEnabled
         public static let desktopOnboardingDismissed = PacerPreferenceKeys.desktopOnboardingDismissed
+        public static let apiEnabled             = PacerPreferenceKeys.apiEnabled
+        public static let apiPort                = PacerPreferenceKeys.apiPort
+        public static let apiBindHost            = PacerPreferenceKeys.apiBindHost
+        public static let apiToken               = PacerPreferenceKeys.apiToken
     }
 
     // MARK: - Defaults
@@ -174,6 +178,10 @@ public enum PacerSettings {
         Key.oauthTokenOverride:    "",
         Key.desktopCredentialsEnabled: false,
         Key.desktopOnboardingDismissed: false,
+        Key.apiEnabled:            false,
+        Key.apiPort:               PacerPreferences.apiDefaultPort,
+        Key.apiBindHost:           "127.0.0.1",
+        Key.apiToken:              "",
     ]
 
     /// Register the defaults dict on first launch — `@AppStorage`'s
