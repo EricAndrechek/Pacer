@@ -221,7 +221,9 @@ final class PacerHTTPServer: @unchecked Sendable {
         }
         let method = String(parts[0])
         let rawPath = String(parts[1])
-        let path = rawPath.split(separator: "?").first.map(String.init) ?? rawPath
+        let pathQuery = rawPath.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let path = pathQuery.first.map(String.init) ?? rawPath
+        let query = Self.parseQuery(pathQuery.count > 1 ? String(pathQuery[1]) : "")
 
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
@@ -235,10 +237,10 @@ final class PacerHTTPServer: @unchecked Sendable {
             respond(client, status: 405, contentType: "text/plain", body: Data("Method Not Allowed\n".utf8))
             return
         }
-        route(path: path, headers: headers, client: client)
+        route(path: path, query: query, headers: headers, client: client)
     }
 
-    private func route(path: String, headers: [String: String], client: ClientConnection) {
+    private func route(path: String, query: [String: String], headers: [String: String], client: ClientConnection) {
         switch path {
         case "/healthz":
             respond(client, status: 200, contentType: "text/plain", body: Data("ok\n".utf8))
@@ -250,12 +252,27 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/usage/daily":
+            guard authorized(headers) else { return unauthorized(client) }
+            let days = query["days"].flatMap { Int($0) } ?? 30
+            guard let usage = try? PacerUsageBuilder.daily(days: days), let json = try? usage.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/usage/models":
+            guard authorized(headers) else { return unauthorized(client) }
+            guard let usage = try? PacerUsageBuilder.models(), let json = try? usage.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/metrics":
             guard authorized(headers) else { return unauthorized(client) }
             guard let payload = currentPayload() else {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("# no data yet\n".utf8))
             }
-            let text = PacerMetrics(snapshot: payload, version: appVersion, build: appBuild).prometheusText()
+            let todayModels = (try? PacerUsageBuilder.todayByModel()) ?? []
+            let text = PacerMetrics(snapshot: payload, todayModels: todayModels,
+                                    version: appVersion, build: appBuild).prometheusText()
             respond(client, status: 200, contentType: "text/plain; version=0.0.4; charset=utf-8", body: Data(text.utf8))
         case "/v1/stream":
             guard authorized(headers) else { return unauthorized(client) }
@@ -263,6 +280,19 @@ final class PacerHTTPServer: @unchecked Sendable {
         default:
             respond(client, status: 404, contentType: "text/plain", body: Data("Not Found\n".utf8))
         }
+    }
+
+    /// Parse a URL query string (`a=1&b=2`) into a dict, percent-decoding values.
+    private static func parseQuery(_ raw: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for pair in raw.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let key = String(kv[0])
+            guard !key.isEmpty else { continue }
+            let value = kv.count > 1 ? String(kv[1]) : ""
+            out[key] = value.removingPercentEncoding ?? value
+        }
+        return out
     }
 
     // MARK: - Auth
@@ -390,7 +420,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/usage/daily", "/v1/usage/models", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)
