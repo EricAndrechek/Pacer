@@ -495,10 +495,26 @@ public actor UsageIntelligenceEngine {
                     .init(t: $0.at.timeIntervalSince1970, v: $0.usedPercentage)
                 })
         }
+        func costOutlook() -> EngineSnapshot.CostOutlook? {
+            guard let f = features else { return nil }
+            let today = Self.projectedCostToday(f, fit)
+            let month = MonthlyProjector.project(dailyCosts: f.dailyCosts, now: f.now, calendar: f.calendar)
+            let pace = Self.pace(f, fit)
+            return EngineSnapshot.CostOutlook(
+                projectedTodayUSD: today.isInsufficient ? nil : today.value,
+                projectedTodayLoUSD: today.interval80?.lowerBound,
+                projectedTodayHiUSD: today.interval80?.upperBound,
+                projectedMonthUSD: month.isInsufficient ? nil : month.value,
+                projectedMonthLoUSD: month.interval80?.lowerBound,
+                projectedMonthHiUSD: month.interval80?.upperBound,
+                pacePercentile: pace.isInsufficient ? nil : pace.value,
+                paceNote: pace.isInsufficient ? nil : pace.note)
+        }
         return EngineSnapshot(
             generatedUnix: Date().timeIntervalSince1970,
             fiveHour: windowOutlook(.fiveHour),
-            sevenDay: windowOutlook(.sevenDay))
+            sevenDay: windowOutlook(.sevenDay),
+            cost: costOutlook())
     }
 
     /// Every candidate model's forward trajectory for a window's current cycle,
