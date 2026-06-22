@@ -279,5 +279,23 @@
             type="application/octet-stream"
             sparkle:edSignature="hxmY7qeYxk5QOg7INATkLhcD6sUohpnmyiNF8uWimqJYrd4NaJ7OXeVHIByAqZnvvs1lAE80HqUVABID+JwYAQ==" />
     </item>
+            <item>
+        <title>Version 0.3.8</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat(api): per-model + per-day usage history endpoints by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4718848657" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/95" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/95/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/95">EricAndrechek/Pacer#95</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.7...v0.3.8">EricAndrechek/Pacer@<tt>v0.3.7...v0.3.8</tt></a></p>]]></description>
+        <pubDate>Mon, 22 Jun 2026 17:06:12 +0000</pubDate>
+        <sparkle:version>1782147744</sparkle:version>
+        <sparkle:shortVersionString>0.3.8</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.8/Pacer-0.3.8.dmg"
+            length="6683368"
+            type="application/octet-stream"
+            sparkle:edSignature="XuZpJ/RmjXrPi1Vr7z7SfE2SIEfovqEIlsI77B3XF8QfLa8/InzRmcG3d94QJV79yOvi2H2TClumpLMXhBlrCg==" />
+    </item>
         </channel>
 </rss>
