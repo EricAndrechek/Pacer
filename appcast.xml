@@ -315,5 +315,24 @@
             type="application/octet-stream"
             sparkle:edSignature="koh6pmGEp5BI0Gm05+KIUIk3EkVRWwEBFS3KvvGyKmXHC2V/VXPz4ovCC35Bk33EUgW4jfZFNJY0kdTV7mdXBA==" />
     </item>
+            <item>
+        <title>Version 0.3.10</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(install): bounce widget extension on reinstall so widgets don't freeze by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4725376141" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/97" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/97/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/97">EricAndrechek/Pacer#97</a></li>
+<li>fix(widgets): relaunch stale widget extension after an app update by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4725672789" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/98" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/98/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/98">EricAndrechek/Pacer#98</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.9...v0.3.10">EricAndrechek/Pacer@<tt>v0.3.9...v0.3.10</tt></a></p>]]></description>
+        <pubDate>Tue, 23 Jun 2026 12:45:40 +0000</pubDate>
+        <sparkle:version>1782218462</sparkle:version>
+        <sparkle:shortVersionString>0.3.10</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.10/Pacer-0.3.10.dmg"
+            length="6689352"
+            type="application/octet-stream"
+            sparkle:edSignature="je0vrZQubJjqJTKy9XIwywLtAP0ag4Wsg4bz+OjgmVL7v62Mo2FpQTXakB7RzHzpAIMoZJdcIEBB46VS2oN0Aw==" />
+    </item>
         </channel>
 </rss>
