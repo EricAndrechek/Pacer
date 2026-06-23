@@ -48,17 +48,20 @@ enum WidgetExtensionRelauncher {
     /// reads it.
     private static let lastLaunchBuildKey = "pacer.widget.lastLaunchBuild"
 
-    /// Suffix of the extension executable's path. Anchored enough to
-    /// match only our appex — never the host (`…/MacOS/Pacer`) or an
-    /// unrelated process that merely mentions the bundle.
-    private static let extExecutableSuffix =
-        "/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
-
-    /// `<sys/proc_info.h>` defines `PROC_PIDPATHINFO_MAXSIZE` as
-    /// `4 * MAXPATHLEN` (4096) — the documented maximum `proc_pidpath`
-    /// can write. The macro isn't surfaced into Swift's Darwin overlay,
-    /// so inline the value.
-    private static let maxPidPathSize = 4 * Int(MAXPATHLEN)
+    /// The extension's kernel-resident process name (`p_comm`).
+    ///
+    /// We match on the process NAME, not the executable path, and that
+    /// distinction is load-bearing — it's the whole reason the first cut
+    /// of this guard shipped broken (v0.3.10). After a bundle swap the
+    /// orphaned extension's executable file is unlinked, so
+    /// `proc_pidpath` returns 0 and any path-based match silently misses
+    /// the exact process this guard exists to kill. `p_comm` lives in the
+    /// kernel proc struct and survives the unlink. (Verified 2026-06-23
+    /// against a real post-Sparkle orphan: `proc_pidpath` → 0, `proc_name`
+    /// → "PacerWidgets".) "PacerWidgets" is 12 chars — within the 15-char
+    /// `MAXCOMLEN` limit — and unique to the extension (the host is
+    /// "Pacer"), so there's no collision risk.
+    private static let extProcessName = "PacerWidgets"
 
     /// Call once, early in `applicationDidFinishLaunching`.
     static func bounceIfBundleReplaced(
@@ -114,11 +117,15 @@ enum WidgetExtensionRelauncher {
         guard written > 0 else { return [] }
 
         var matched: [pid_t] = []
-        var pathBuffer = [CChar](repeating: 0, count: maxPidPathSize)
+        // 256 is ample for a `p_comm` (capped at MAXCOMLEN, 16).
+        var nameBuffer = [CChar](repeating: 0, count: 256)
         for pid in pids where pid > 0 {
-            let length = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
-            guard length > 0 else { continue }
-            if String(cString: pathBuffer).hasSuffix(extExecutableSuffix) {
+            // `proc_name` reads `p_comm` from the kernel — it does NOT
+            // touch the on-disk executable, so it still resolves for an
+            // orphan whose bundle was replaced (where `proc_pidpath`
+            // fails). That's exactly the case that matters here.
+            guard proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 else { continue }
+            if String(cString: nameBuffer) == extProcessName {
                 matched.append(pid)
             }
         }
