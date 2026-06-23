@@ -334,5 +334,23 @@
             type="application/octet-stream"
             sparkle:edSignature="je0vrZQubJjqJTKy9XIwywLtAP0ag4Wsg4bz+OjgmVL7v62Mo2FpQTXakB7RzHzpAIMoZJdcIEBB46VS2oN0Aw==" />
     </item>
+            <item>
+        <title>Version 0.3.11</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(widgets): match orphaned extension by process name, not path by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4726087027" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/99" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/99/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/99">EricAndrechek/Pacer#99</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.10...v0.3.11">EricAndrechek/Pacer@<tt>v0.3.10...v0.3.11</tt></a></p>]]></description>
+        <pubDate>Tue, 23 Jun 2026 13:09:15 +0000</pubDate>
+        <sparkle:version>1782219862</sparkle:version>
+        <sparkle:shortVersionString>0.3.11</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.11/Pacer-0.3.11.dmg"
+            length="6689448"
+            type="application/octet-stream"
+            sparkle:edSignature="fqtOjDOymbMg6L/CU7RvJKfQzYvpZ3rE2KLQWi5mR31DhjvE0wBouB7onhsGYfP4gDlNNEzxL1M9sSI/K6fNBQ==" />
+    </item>
         </channel>
 </rss>
