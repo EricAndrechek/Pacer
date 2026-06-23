@@ -284,6 +284,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         // the prior process scheduled but couldn't fully deliver
         // before SIGKILL during a dev-cycle quit→relaunch.
         NotificationCoordinator.shared.clearCollectionPausedNotification()
+        // If the bundle was just replaced under us (Sparkle auto-update
+        // or `make install`), the old widget extension is still running
+        // its now-stale binary and chronod won't relaunch it on its own.
+        // Bounce it here so widgets pick up the new build's code + data.
+        WidgetExtensionRelauncher.bounceIfBundleReplaced()
         backgroundService.start()
         installWindowObservers()
         installMenuBar()
