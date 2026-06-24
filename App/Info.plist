@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Eric Andrechek</string>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
@@ -33,6 +35,6 @@
 	<key>SUPublicEDKey</key>
 	<string>iCjiSrk4yhkum2eWbamefoJ9vxQh2oDhGIQwo+pEHLY=</string>
 	<key>SUScheduledCheckInterval</key>
-	<integer>86400</integer>
+	<integer>21600</integer>
 </dict>
 </plist>

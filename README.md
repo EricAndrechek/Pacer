@@ -104,30 +104,35 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
 
 You've got options for keeping an eye on Claude Code usage — Claude Code's own
 `/usage`, the popular [`ccusage`](https://github.com/ryoppippi/ccusage) CLI, and
-several menu-bar apps, the closest being [Claude God](https://claudegod.app) and
+several menu-bar apps — the closest being [Token Pacer](https://tokenpacer.app),
+a paid, closed-source namesake, plus [Claude God](https://claudegod.app) and
 [ccseva](https://github.com/Iamshankhadeep/ccseva). They're good tools; here's
 the honest lay of the land.
 
-| | **Pacer** | **[Claude God](https://claudegod.app)** | **[ccseva](https://github.com/Iamshankhadeep/ccseva)** | **[ccusage](https://github.com/ryoppippi/ccusage)** | **CC `/usage`** |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Form factor | Menu-bar app | Menu-bar app | Menu-bar app | CLI | In-terminal |
-| Native macOS (not Electron) | ✓ | ✓ | – (Electron) | – | – |
-| Always-on, glanceable | ✓ | ✓ | ✓ | – | – |
-| Live limit % from Anthropic's API | ✓ | ✓ | ✦ | ✦ | ✓ |
-| Pace vs. ideal-burn line | ✓ | – | – | – | – |
-| End-of-day spend projection | ✓ | ✓ | ✓ | – | – |
-| Activity heatmap (6 months) | ✓ | – | – | – | – |
-| Per-project & per-model breakdown | ✓ | ✓ | ✓ | ✓ | – |
-| Home-screen / Notification Center widgets | ✓ | ✓ | – | – | – |
-| Threshold / budget notifications | ✓ | ✓ | ✓ | – | – |
-| CSV export | ✓ | ✓ | – | ✓ | – |
-| ROI: cost vs. git commits | – | ✓ | – | – | – |
-| Claude Code plugin marketplace | – | ✓ | – | – | – |
-| Free & open source | ✓ | ✓ | ✓ | ✓ | – |
+| | **Pacer** | **[Token Pacer](https://tokenpacer.app)** | **[Claude God](https://claudegod.app)** | **[ccseva](https://github.com/Iamshankhadeep/ccseva)** | **[ccusage](https://github.com/ryoppippi/ccusage)** | **CC `/usage`** |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Form factor | Menu-bar app | Menu-bar app | Menu-bar app | Menu-bar app | CLI | In-terminal |
+| Native macOS (not Electron) | ✓ | ✓ | ✓ | – (Electron) | – | – |
+| Always-on, glanceable | ✓ | ✓ | ✓ | ✓ | – | – |
+| Live limit % from Anthropic's API | ✓ | ✦ | ✓ | ✦ | ✦ | ✓ |
+| Pace vs. ideal-burn line | ✓ | – | – | – | – | – |
+| End-of-day spend projection | ✓ | ✓ | ✓ | ✓ | – | – |
+| Activity heatmap (6 months) | ✓ | – | – | – | – | – |
+| Per-project & per-model breakdown | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| Beyond Claude Code (Codex, opencode, …) | – | ✓ | – | – | – | – |
+| Home-screen / Notification Center widgets | ✓ | – | ✓ | – | – | – |
+| Threshold / budget notifications | ✓ | ✓ | ✓ | ✓ | – | – |
+| CSV export | ✓ | ✓ | ✓ | – | ✓ | – |
+| ROI: cost vs. git commits | – | – | ✓ | – | – | – |
+| Claude Code plugin marketplace | – | – | ✓ | – | – | – |
+| Price | Free | $29 one-time | Free | Free | Free | Included |
+| Free & open source | ✓ | – | ✓ | ✓ | ✓ | – |
 
 <sub>✦ estimates the windows from your local JSONL logs rather than reading
-Anthropic's usage API. Best-effort as of June 2026 — these tools all move fast,
-so corrections are welcome via an issue or PR.</sub>
+Anthropic's usage API. Token Pacer is a paid, closed-source app, so its column is
+read from its public site rather than its source — and some of its features (CSV
+export, custom model pricing) are Pro-tier. Best-effort as of June 2026 — these
+tools all move fast, so corrections are welcome via an issue or PR.</sub>
 
 **The gist:**
 
@@ -144,6 +149,13 @@ so corrections are welcome via an issue or PR.</sub>
   self-update; Claude God goes further on ROI/git correlation and a plugin
   marketplace, and ccseva on its glassy UI. Pick the one that thinks about your
   usage the way you do — they coexist happily.
+- **vs. Token Pacer** — the close namesake, and the nearest thing to a direct
+  rival: also a native, local-first macOS menu-bar tracker, and it reaches
+  *wider* — covering Codex and opencode alongside Claude Code, with "next action"
+  nudges. The trade-offs: it's **$29 and closed-source**, where Pacer is free and
+  open; Pacer reads your *real* limit % from Anthropic and adds the ideal-burn
+  pacing line, the 6-month heatmap, and widgets. Multi-agent and willing to pay?
+  Fair pick. Claude Code-first and value open source? Pacer.
 
 ## Privacy
 
@@ -158,7 +170,9 @@ The **only** network connections Pacer makes are:
 
 - `api.anthropic.com` — to check your rate-limit windows (~12 small requests an
   hour while it's running).
-- `github.com` — to check for app updates (once at launch, then every 24 hours).
+- `github.com` — to check for, download, and install app updates (at launch,
+  then every 6 hours; installs happen in the background when automatic updates
+  are on).
 
 **No analytics, no telemetry, no third parties.** Your data stays on your Mac in
 `~/Library/Group Containers/…/pacer.sqlite`, and it persists across app updates.

@@ -61,7 +61,7 @@ packages:
   Sparkle:
     # Sparkle 2.x auto-update framework. Released DMGs ship a signed
     # appcast (EdDSA / Ed25519) hosted on GitHub Pages; the app polls
-    # it on launch and every 24h via SPUStandardUpdaterController.
+    # it on launch and every 6h via SPUStandardUpdaterController.
     # See docs/releasing.md for the keypair + secrets setup.
     url: https://github.com/sparkle-project/Sparkle
     from: 2.6.0
@@ -119,11 +119,15 @@ targets:
         # maintainer's Keychain under `ed25519`. See docs/releasing.md
         # if you need to rotate.
         SUPublicEDKey: iCjiSrk4yhkum2eWbamefoJ9vxQh2oDhGIQwo+pEHLY=
-        # Check on launch and every 24h thereafter. The user can override
+        # Check on launch and every 6h thereafter. The user can override
         # both in the in-app updater prefs (rendered by Sparkle's standard
         # UI) and via `defaults write com.ericandrechek.pacer SUEnableAutomaticChecks 0`.
         SUEnableAutomaticChecks: true
-        SUScheduledCheckInterval: 86400
+        SUScheduledCheckInterval: 21600
+        # Download + install updates silently in the background by default
+        # (Sparkle applies them on the agent's next relaunch). Users who turn
+        # off automatic updates in the updater prefs keep the prompt-first flow.
+        SUAutomaticallyUpdate: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer
