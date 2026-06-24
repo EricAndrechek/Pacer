@@ -352,5 +352,23 @@
             type="application/octet-stream"
             sparkle:edSignature="fqtOjDOymbMg6L/CU7RvJKfQzYvpZ3rE2KLQWi5mR31DhjvE0wBouB7onhsGYfP4gDlNNEzxL1M9sSI/K6fNBQ==" />
     </item>
+            <item>
+        <title>Version 0.3.12</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(pace): honest 0% idle state instead of "collecting…" by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4730660421" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/100" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/100/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/100">EricAndrechek/Pacer#100</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.11...v0.3.12">EricAndrechek/Pacer@<tt>v0.3.11...v0.3.12</tt></a></p>]]></description>
+        <pubDate>Wed, 24 Jun 2026 00:52:53 +0000</pubDate>
+        <sparkle:version>1782262159</sparkle:version>
+        <sparkle:shortVersionString>0.3.12</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.12/Pacer-0.3.12.dmg"
+            length="6698932"
+            type="application/octet-stream"
+            sparkle:edSignature="aEo45XThYVsTOTEXStMbUXrtHJwrBJA6DPA4eWtngq3xBCd1g6MXRwml6ExuVUs+aH2BgS2n0aWI4XeWzH+uCg==" />
+    </item>
         </channel>
 </rss>
