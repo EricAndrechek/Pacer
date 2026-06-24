@@ -370,5 +370,23 @@
             type="application/octet-stream"
             sparkle:edSignature="aEo45XThYVsTOTEXStMbUXrtHJwrBJA6DPA4eWtngq3xBCd1g6MXRwml6ExuVUs+aH2BgS2n0aWI4XeWzH+uCg==" />
     </item>
+            <item>
+        <title>Version 0.3.13</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>6h silent auto-updates; add Token Pacer to README comparison by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4730941469" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/101" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/101/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/101">EricAndrechek/Pacer#101</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.12...v0.3.13">EricAndrechek/Pacer@<tt>v0.3.12...v0.3.13</tt></a></p>]]></description>
+        <pubDate>Wed, 24 Jun 2026 02:08:58 +0000</pubDate>
+        <sparkle:version>1782266644</sparkle:version>
+        <sparkle:shortVersionString>0.3.13</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.13/Pacer-0.3.13.dmg"
+            length="6698904"
+            type="application/octet-stream"
+            sparkle:edSignature="ck7BkTTe3VZOuHqeRbZIU8JtFSarKpUT9WiZoUCo3XBq/KHrpPfTYkkHREIWIMuTMZhMZzBFT02jCsq1laB1AA==" />
+    </item>
         </channel>
 </rss>
