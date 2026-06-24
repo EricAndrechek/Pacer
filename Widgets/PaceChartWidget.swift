@@ -23,6 +23,15 @@ struct PaceChartEntry: TimelineEntry {
     let date: Date
     let fiveHour: WindowState?
     let sevenDay: WindowState?
+    /// Used % for a window whose latest reading carries no reset time —
+    /// the window is idle (0% used; the server returns `resets_at: null`
+    /// until your first message of a window anchors the clock). Set only
+    /// when the matching `WindowState` is nil for that reason; stays nil
+    /// when there's genuinely no sample yet, so the view can tell an idle
+    /// window ("No usage yet") apart from a cold start ("collecting…").
+    /// See #100.
+    var fiveHourIdle: Double? = nil
+    var sevenDayIdle: Double? = nil
     /// User's chosen window from the widget's intent config. Drives the
     /// view's branching (full-canvas single window vs side-by-side both).
     let window: PaceWindowOption
@@ -102,10 +111,23 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                                    outlook: snapshot?.fiveHour)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
                                     outlook: snapshot?.sevenDay)
-            return PaceChartEntry(date: Date(), fiveHour: five, sevenDay: seven, window: window)
+            return PaceChartEntry(
+                date: Date(), fiveHour: five, sevenDay: seven,
+                fiveHourIdle: five == nil ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
+                sevenDayIdle: seven == nil ? Self.idleUsedPct(rows: rows, key: "seven_day") : nil,
+                window: window)
         } catch {
             return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
         }
+    }
+
+    /// Used % for a window whose most-recent sample has no reset time —
+    /// an idle window the server hasn't anchored yet. `nil` when there's
+    /// no sample for the window at all (a genuine cold start), so the
+    /// view can show "No usage yet" rather than "collecting…". See #100.
+    private static func idleUsedPct(rows: [RateLimitSample], key: String) -> Double? {
+        guard let latest = rows.first(where: { $0.window == key }) else { return nil }
+        return latest.resetsAt == nil ? latest.usedPercentage : nil
     }
 
     /// Read + decode the engine's outlook export. `nil` when absent or stale
@@ -222,15 +244,33 @@ struct PaceChartWidgetView: View {
     /// where the title bar IS the only header.
     private var dualTitle: String { "RATE-LIMIT PACE" }
 
+    /// No window has anything to show — neither a chart nor an idle
+    /// reading. Drives the single cold-start empty state in medium/large.
+    private var hasNoReadings: Bool {
+        entry.fiveHour == nil && entry.sevenDay == nil
+            && entry.fiveHourIdle == nil && entry.sevenDayIdle == nil
+    }
+
+    /// The bare used % shown for an idle window — a reading exists but no
+    /// pace target to divide against (no anchored cycle), so just the
+    /// number, in `paceFraction`'s numeral styling. See #100.
+    @ViewBuilder
+    private func idleNumber(_ used: Double, large: Bool = false) -> some View {
+        Text("\(Int(used.rounded()))%")
+            .font(.system(size: large ? 22 : 16, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+    }
+
     /// Resolve the small canvas's single window. Small physically can't
     /// fit two charts, so when the user picks `.both` we fall through
     /// to 5-hour — that's the cycle people hit first and watch most.
-    private func smallTarget() -> (state: PaceChartEntry.WindowState?, title: String, duration: TimeInterval) {
+    private func smallTarget() -> (state: PaceChartEntry.WindowState?, idle: Double?, title: String, duration: TimeInterval) {
         switch entry.window {
         case .sevenDay:
-            return (entry.sevenDay, "7-DAY PACE", K.sevenDaySeconds)
+            return (entry.sevenDay, entry.sevenDayIdle, "7-DAY PACE", K.sevenDaySeconds)
         case .fiveHour, .both:
-            return (entry.fiveHour, "5-HOUR PACE", K.fiveHourSeconds)
+            return (entry.fiveHour, entry.fiveHourIdle, "5-HOUR PACE", K.fiveHourSeconds)
         }
     }
 
@@ -245,6 +285,8 @@ struct PaceChartWidgetView: View {
             ) {
                 if let s = target.state, !s.isAwaiting {
                     paceFraction(used: s.chart.usedPct, pace: s.paceEndPct, compact: true)
+                } else if let idle = target.idle {
+                    idleNumber(idle)
                 }
             }
             if let s = target.state, !s.isAwaiting {
@@ -266,6 +308,8 @@ struct PaceChartWidgetView: View {
                     .frame(maxHeight: .infinity)
             } else if awaiting {
                 WidgetEmptyState(message: "Cycle reset. Awaiting fresh sample.")
+            } else if target.idle != nil {
+                WidgetEmptyState(message: "No usage yet. The window starts when you next use Claude.")
             } else {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             }
@@ -279,24 +323,24 @@ struct PaceChartWidgetView: View {
     private var medium: some View {
         VStack(alignment: .leading, spacing: 6) {
             WidgetTitleBar(title: dualTitle)
-            if entry.fiveHour == nil && entry.sevenDay == nil {
+            if hasNoReadings {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
                 switch entry.window {
                 case .both:
                     HStack(alignment: .top, spacing: 12) {
-                        column(label: "5-hour", state: entry.fiveHour, style: .compact)
+                        column(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle, style: .compact)
                         Divider()
-                        column(label: "7-day", state: entry.sevenDay, style: .compact)
+                        column(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle, style: .compact)
                     }
                 case .fiveHour:
                     // One window, full width — chart gets ~290pt instead
                     // of ~148pt, so we promote to `.detailed` (axis ticks
                     // + 0/50/100% labels) for a layout that mirrors the
                     // dashboard pace card.
-                    column(label: "5-hour", state: entry.fiveHour, style: .detailed)
+                    column(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle, style: .detailed)
                 case .sevenDay:
-                    column(label: "7-day", state: entry.sevenDay, style: .detailed)
+                    column(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle, style: .detailed)
                 }
             }
         }
@@ -309,18 +353,18 @@ struct PaceChartWidgetView: View {
     private var large: some View {
         VStack(alignment: .leading, spacing: 10) {
             WidgetTitleBar(title: dualTitle)
-            if entry.fiveHour == nil && entry.sevenDay == nil {
+            if hasNoReadings {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
                 switch entry.window {
                 case .both:
-                    largeRow(label: "5-hour", state: entry.fiveHour)
+                    largeRow(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle)
                     Divider()
-                    largeRow(label: "7-day", state: entry.sevenDay)
+                    largeRow(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle)
                 case .fiveHour:
-                    largeRow(label: "5-hour", state: entry.fiveHour)
+                    largeRow(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle)
                 case .sevenDay:
-                    largeRow(label: "7-day", state: entry.sevenDay)
+                    largeRow(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle)
                 }
             }
         }
@@ -333,6 +377,7 @@ struct PaceChartWidgetView: View {
     private func column(
         label: String,
         state: PaceChartEntry.WindowState?,
+        idle: Double? = nil,
         style: PaceChartView.Style
     ) -> some View {
         let awaiting = state?.isAwaiting == true
@@ -369,6 +414,13 @@ struct PaceChartWidgetView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                 Spacer(minLength: 0)
+            } else if let idle {
+                idleNumber(idle)
+                Text("idle · no usage yet")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             } else {
                 Text("collecting…")
                     .font(.caption2)
@@ -380,7 +432,7 @@ struct PaceChartWidgetView: View {
     }
 
     @ViewBuilder
-    private func largeRow(label: String, state: PaceChartEntry.WindowState?) -> some View {
+    private func largeRow(label: String, state: PaceChartEntry.WindowState?, idle: Double? = nil) -> some View {
         let awaiting = state?.isAwaiting == true
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -393,6 +445,8 @@ struct PaceChartWidgetView: View {
                 Spacer()
                 if let state, !state.isAwaiting {
                     paceFraction(used: state.chart.usedPct, pace: state.paceEndPct, compact: false)
+                } else if let idle {
+                    idleNumber(idle, large: true)
                 }
             }
             if let state, !state.isAwaiting {
@@ -410,6 +464,12 @@ struct PaceChartWidgetView: View {
                     .lineLimit(1)
             } else if awaiting {
                 Text("Cycle reset · awaiting first sample")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            } else if idle != nil {
+                Text("No usage yet — the window starts when you next use Claude.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
