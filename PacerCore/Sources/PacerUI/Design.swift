@@ -281,7 +281,7 @@ public struct Chip: View {
 /// Tiny live-state indicator: a colored dot with a subtle pulsing
 /// halo when "fresh." Used in the sidebar header and dashboard hero.
 public struct FreshnessPulse: View {
-    public enum Freshness {
+    public enum Freshness: Equatable, Sendable {
         case live      // <2 min
         case recent    // <10 min
         case stale     // older or unknown
