@@ -10,7 +10,7 @@ struct PacerApp: App {
     /// just project the container into their own environments.
     @NSApplicationDelegateAdaptor(PacerAppDelegate.self) private var appDelegate
 
-    /// Sparkle 2.x updater. `init()` starts the on-launch check + 24h
+    /// Sparkle 2.x updater. `init()` starts the on-launch check + 6h
     /// recurrence using the SUFeedURL declared in Info.plist. Owned
     /// here so its lifetime matches the app's, and so the "Check for
     /// Updates…" menu item can bind to its KVO-observable

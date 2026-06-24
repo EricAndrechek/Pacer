@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Sparkle 2.x wrapper. `SPUStandardUpdaterController` owns an
 /// `SPUUpdater` and a `SPUStandardUserDriver` and handles the on-launch
-/// check + 24-hour scheduled checks automatically when `startingUpdater`
+/// check + 6-hour scheduled checks automatically when `startingUpdater`
 /// is true. The wrapper exists so SwiftUI can `@StateObject` it and so
 /// the Check-for-Updates menu item can disable while a check is in
 /// flight (`canCheckForUpdates` is KVO-observable, which the
@@ -27,7 +27,7 @@ final class PacerUpdater: ObservableObject {
     #endif
 
     init() {
-        // `startingUpdater: true` schedules the on-launch check + 24h
+        // `startingUpdater: true` schedules the on-launch check + 6h
         // recurrence using the feed URL and interval declared in
         // Info.plist (SUFeedURL, SUScheduledCheckInterval). No extra
         // wiring needed here.
