@@ -194,6 +194,19 @@ private struct PaceChartColumn: View {
         return DisplayCycle.resolve(resetsAt: resets, duration: duration)
     }
 
+    /// Used % when we have a fresh reading but the server anchored no
+    /// reset to it — the window is idle (0% used; Anthropic's usage
+    /// endpoint returns `resets_at: null` until your first message of a
+    /// window starts the clock). This is `nil` only when there's no
+    /// sample at all, which is the genuine "still collecting the first
+    /// reading" state. We branch on it so the column shows the real
+    /// number + a calm idle note instead of the "--" / "resets unknown"
+    /// / "collecting…" trio, which reads as broken (see #100).
+    private var idleUsedPct: Double? {
+        guard let latest, latest.resetsAt == nil else { return nil }
+        return latest.usedPercentage
+    }
+
     /// Build the `PaceChartView.Data` snapshot — same shape the widget
     /// will pass in. Synthesizes a "now" tail point so the line tracks
     /// to current time even if the most-recent sample is older.
@@ -431,6 +444,22 @@ private struct PaceChartColumn: View {
         } else if let liveChartData {
             PaceChartView(data: liveChartData, style: .detailed)
                 .frame(height: 96)
+        } else if idleUsedPct != nil {
+            // A reading exists but no window is anchored yet — nothing to
+            // plot. Say so plainly instead of "collecting…", which implies
+            // Pacer is still fetching.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("No usage in this window yet")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text("The window starts when you next use Claude.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(height: 96, alignment: .topLeading)
         } else {
             Text("collecting…")
                 .font(.system(size: 11))
@@ -459,6 +488,10 @@ private struct PaceChartColumn: View {
             Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+        } else if idleUsedPct != nil {
+            Text("idle · no active window")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         } else {
             Text("resets unknown")
                 .font(.system(size: 10))
@@ -484,6 +517,13 @@ private struct PaceChartColumn: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
+        } else if let idle = idleUsedPct {
+            // Idle window: show the real reading on its own. There's no
+            // pace target to divide against (no cycle), so no "/ NN%".
+            Text("\(Int(idle.rounded()))%")
+                .font(.system(size: 26, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
         } else {
             Text("--")
                 .font(.system(size: 26, weight: .semibold, design: .rounded))
