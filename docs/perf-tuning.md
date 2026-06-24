@@ -87,6 +87,16 @@ mechanisms are subtle enough that grep won't catch them in review.
    → AutoLayout pass on the whole toolbar item chain. If you must
    animate in a toolbar item, drive it from a `CALayer` directly so
    it bypasses SwiftUI's per-frame re-eval.
+   **Same cost, different trigger (2026-06-23):** a toolbar-hosted view
+   bound to `@Query` (the `ToolbarFreshness` "● live / 3m ago" pill) pays
+   the identical recursive `NSToolbarView` → `NSToolbarItemViewer` relayout
+   on *every store save*, even when the displayed value is unchanged —
+   `@Query` refreshes on each save and re-renders the hosted `NSView`.
+   Remedy: funnel the render through a small `Equatable` snapshot struct
+   and wrap the pill in `.equatable()` (`EquatableView`). The outer view
+   still re-evaluates (cheap: fetchLimit-1 probes), but the AppKit relayout
+   only fires when the snapshot actually changes. Measured: across 3 saves,
+   pill re-renders 10→0, `NSToolbarItemViewer` relayouts ~14/90s→~5/150s.
 3. **Per-cycle `FetchDescriptor<X>()` with no predicate.** Even with
    `propertiesToFetch` slimming, materializing a 1000-row table per
    cycle costs 70-150 ms under MainActor contention. Cache the dict

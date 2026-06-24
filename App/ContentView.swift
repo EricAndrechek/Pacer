@@ -477,31 +477,76 @@ private struct ToolbarFreshness: View {
         return "No activity yet."
     }
 
+    /// The minimal value the pill actually draws. Computing this on every
+    /// `@Query` refresh is cheap (four `fetchLimit`-1 probes + a few string
+    /// builds); rendering it is not, because the pill is hosted inside an
+    /// `NSToolbarItem` and any re-render kicks off a deeply recursive
+    /// `NSToolbarView` → `NSToolbarItemViewer` AutoLayout pass (the same
+    /// AppKit hot path documented in docs/perf-tuning.md anti-pattern #2).
+    /// Funnelling the render through this `Equatable` snapshot lets
+    /// `EquatableView` skip the relayout on the ~once-a-minute store saves
+    /// that don't actually change what the pill shows.
+    private var display: Display {
+        Display(state: freshness, label: label, tooltip: tooltip)
+    }
+
     var body: some View {
-        HStack(spacing: 5) {
-            FreshnessPulse(state: freshness)
-            Text(label)
-                .font(.subheadline)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .monospacedDigit()
+        // `.equatable()` gates the expensive toolbar relayout: SwiftUI
+        // re-evaluates this outer body on every save (that's how `@Query`
+        // works) but only re-renders `PillBody` — and thus only triggers
+        // the NSToolbar AutoLayout pass — when `display` actually changes.
+        PillBody(display: display).equatable()
+    }
+
+    /// Equatable render payload for the freshness pill. See `display`.
+    /// `Sendable` so `PillBody` can hold it as a `nonisolated let` and
+    /// compare it off the main actor (see below).
+    struct Display: Equatable, Sendable {
+        let state: FreshnessPulse.Freshness
+        let label: String
+        let tooltip: String
+    }
+
+    /// The actual pill chrome, isolated behind `Equatable` so a no-op
+    /// refresh is a true no-op all the way down to AppKit layout.
+    private struct PillBody: View, Equatable {
+        // `nonisolated` so the synthesized `==` can read it off the main
+        // actor: SwiftUI Views are `@MainActor`, so a plain stored property
+        // would be main-actor-isolated and unreadable from the `nonisolated`
+        // comparison `EquatableView` performs. `Display` is `Sendable`, so
+        // an immutable `nonisolated let` is safe.
+        nonisolated let display: Display
+
+        nonisolated static func == (lhs: PillBody, rhs: PillBody) -> Bool {
+            lhs.display == rhs.display
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(
-            Capsule().fill(Color.primary.opacity(0.06))
-        )
-        // Without this the NSToolbar host compresses the pill below its
-        // ideal height when the window mounts from the menu-bar "Open
-        // Pacer" path, clipping the Capsule's top edge (issue #1). Pin
-        // both axes to the intrinsic size so the toolbar centers the
-        // pill at full height instead of squashing it.
-        .fixedSize()
-        .help(tooltip)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Activity status: \(label)")
-        .accessibilityHint(tooltip)
+
+        var body: some View {
+            HStack(spacing: 5) {
+                FreshnessPulse(state: display.state)
+                Text(display.label)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule().fill(Color.primary.opacity(0.06))
+            )
+            // Without this the NSToolbar host compresses the pill below its
+            // ideal height when the window mounts from the menu-bar "Open
+            // Pacer" path, clipping the Capsule's top edge (issue #1). Pin
+            // both axes to the intrinsic size so the toolbar centers the
+            // pill at full height instead of squashing it.
+            .fixedSize()
+            .help(display.tooltip)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Activity status: \(display.label)")
+            .accessibilityHint(display.tooltip)
+        }
     }
 }
 
