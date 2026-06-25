@@ -58,17 +58,32 @@ public final class ProjectPathProbe {
     /// the column additively (existing rows get `false`).
     public var autoMergeRejected: Bool = false
 
+    /// We attempted the `.git/config` origin read for this probe at least
+    /// once. Set after the backfill pass tries a row — regardless of
+    /// result — so origin-less repos (local-only, no `remote.origin.url`)
+    /// stop getting their `.git/config` re-read on every cycle forever.
+    /// Without this, a probe with `gitRoot != nil && originURL == nil`
+    /// re-qualifies for backfill on every run and never converges. If a
+    /// remote is later added, "Reset auto-merge" (which clears the probe
+    /// table) re-probes it.
+    ///
+    /// Declared with a default so SwiftData's lightweight migration adds
+    /// the column additively (existing rows get `false`).
+    public var originBackfillAttempted: Bool = false
+
     public init(
         path: String,
         gitRoot: String?,
         originURL: String? = nil,
         probedAt: Date = Date(),
-        autoMergeRejected: Bool = false
+        autoMergeRejected: Bool = false,
+        originBackfillAttempted: Bool = false
     ) {
         self.path = path
         self.gitRoot = gitRoot
         self.originURL = originURL
         self.probedAt = probedAt
         self.autoMergeRejected = autoMergeRejected
+        self.originBackfillAttempted = originBackfillAttempted
     }
 }
