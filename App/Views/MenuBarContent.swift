@@ -62,17 +62,6 @@ struct MenuBarLabel: View {
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
-    /// Last band we rendered. When this jumps to a warmer band (yellow
-    /// → orange → red) we kick a one-shot scale pulse so the icon
-    /// visibly reacts to the threshold crossing. Without it the only
-    /// signal of "we just went over 75%" was the banner notification —
-    /// which the user might have dismissed on a different screen.
-    @State private var lastBand: UsageBand?
-    @State private var pulse: Bool = false
-    /// Reduce-motion suppression: the icon color escalation alone
-    /// already communicates warming; the scale pulse is decorative.
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     // MARK: - Derived state
 
     private var chips: [PacerSettings.MenuBarChip] {
@@ -107,21 +96,6 @@ struct MenuBarLabel: View {
         fiveHour.map { UsageBand(percentage: $0.usedPercentage) }
     }
 
-    /// Color the SF Symbol picks up via `.palette` rendering. Critical
-    /// difference vs the prior version: at green / nil, we now use
-    /// `.primary` instead of `.secondary` so Pacer reads as a healthy,
-    /// active item next to battery / Wi-Fi / time. The previous muted
-    /// look made it look broken or inactive when usage was low —
-    /// which is the *common* state, not the exception.
-    private var bandColor: Color {
-        switch band {
-        case .green, nil: return .primary
-        case .yellow:     return .yellow
-        case .orange:     return .orange
-        case .red:        return .red
-        }
-    }
-
     private var symbolName: String {
         switch iconStyle {
         case .gaugeNeedle:
@@ -151,25 +125,6 @@ struct MenuBarLabel: View {
     }
 
     // MARK: - Chip data
-
-    /// Activity-ring data for the menu-bar icon when `MenuBarIconStyle
-    /// == .activityRings`. Outer = 5h, inner = 7d. nil samples render
-    /// as empty tracks (still distinguishable as rings) rather than
-    /// vanishing entirely.
-    private var ringsForMenuBar: [ActivityRings.Ring] {
-        let fiveHourPct = fiveHour?.usedPercentage ?? 0
-        let sevenDayPct = sevenDay?.usedPercentage ?? 0
-        return [
-            ActivityRings.Ring(
-                progress: fiveHourPct / 100,
-                color: UsageBand(percentage: fiveHourPct).color
-            ),
-            ActivityRings.Ring(
-                progress: sevenDayPct / 100,
-                color: UsageBand(percentage: sevenDayPct).color
-            )
-        ]
-    }
 
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
@@ -222,141 +177,140 @@ struct MenuBarLabel: View {
 
     // MARK: - Layout
 
-    var body: some View {
-        // No outer padding — the NSStatusBarButton already adds the
-        // menu-bar's standard side margins, and any SwiftUI padding
-        // here just ate into the content area without enlarging the
-        // button (NSStatusItem's `variableLength` measures the
-        // button's native intrinsic content size, not a custom
-        // subview's). Spacing between chips comes from `HStack`'s
-        // own `spacing:`.
-        HStack(spacing: 6) {
-            ForEach(chips) { chip in
-                chipView(chip)
-            }
-        }
-        .help(tooltip)
-        .onChange(of: band) { oldValue, newValue in
-            // Pulse only on warming (green→yellow, yellow→orange, etc.).
-            // Cooling (band drops at cycle reset) shouldn't draw the eye.
-            guard let newValue, isWarming(from: oldValue, to: newValue) else {
-                lastBand = newValue
-                return
-            }
-            lastBand = newValue
-            // Skip the scale pulse under Reduce Motion — color escalation
-            // is enough.
-            guard !reduceMotion else { return }
-            pulse = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                pulse = false
-            }
-        }
+    /// The fully-resolved render payload — exactly what the status item
+    /// draws. Recomputed on every @Query refresh (cheap: capped fetches
+    /// + small derivations), but the NSStatusItem only re-rasterizes when
+    /// this value changes, because the chrome below is wrapped in an
+    /// EquatableView. SwiftData @Query invalidation is entity-agnostic,
+    /// so without this gate the always-visible menu-bar item re-rendered
+    /// (and re-rasterized via `cacheDisplayInRect`) on every store save
+    /// all day — including token-only saves that touch no displayed
+    /// value, and changes to values that aren't even on screen. Same
+    /// remedy as the PR #102 toolbar pill.
+    private var rendered: Render {
+        Render(items: chips.map(resolve), tooltip: tooltip)
     }
 
-    @ViewBuilder
-    private func chipView(_ chip: PacerSettings.MenuBarChip) -> some View {
+    private func resolve(_ chip: PacerSettings.MenuBarChip) -> Render.Item {
         switch chip {
         case .icon:
-            if iconStyle == .activityRings {
-                // Apple Watch-style dual-ring icon. Outer = 5h, inner
-                // = 7d. 14pt fits the menu-bar height comfortably
-                // alongside chip text without crowding adjacent
-                // items. Each ring's color is band-driven so the
-                // icon escalates the same way the gauge/dot styles
-                // would.
-                ActivityRings(rings: ringsForMenuBar)
-                    .frame(width: 14, height: 14)
-                    .scaleEffect(pulse ? 1.15 : 1.0)
-                    .animation(
-                        .spring(response: 0.35, dampingFraction: 0.55),
-                        value: pulse
-                    )
-            } else {
-                // `.monochrome` (not `.palette`) so the SF Symbol
-                // renders in one solid tint — the gauge needle
-                // family has a body layer that `.palette` was
-                // painting with `.secondary.opacity(0.5)`, which read
-                // as "greyed out" even at full health. Monochrome
-                // with `bandColor` makes the whole icon read at full
-                // strength like Battery / Wi-Fi when the band is
-                // green.
-                Image(systemName: symbolName)
-                    .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(bandColor)
-                    .scaleEffect(pulse ? 1.15 : 1.0)
-                    .animation(
-                        .spring(response: 0.35, dampingFraction: 0.55),
-                        value: pulse
-                    )
-            }
-
+            return iconStyle == .activityRings
+                ? .rings(five: fiveHour?.usedPercentage ?? 0,
+                         seven: sevenDay?.usedPercentage ?? 0)
+                : .symbol(name: symbolName, band: band)
         case .fiveHourPct:
-            percentChip(
-                prefix: fiveHourNeedsPrefix ? "5h " : nil,
-                sample: fiveHour
-            )
-
+            return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
+                            pct: fiveHour?.usedPercentage)
         case .sevenDayPct:
-            percentChip(prefix: "7d ", sample: sevenDay)
-
+            return .percent(prefix: "7d ", pct: sevenDay?.usedPercentage)
         case .todayCost:
-            textChip(pacerCost(todayCost))
-
+            return .text(pacerCost(todayCost))
         case .todayTokens:
-            textChip(pacerTokens(todayTokens))
-
+            return .text(pacerTokens(todayTokens))
         case .activeModel:
-            if let model = activeModel {
-                textChip(model)
-            } else {
-                textChip("—")
-            }
+            return .text(activeModel ?? "—")
         }
     }
 
-    /// Percent chip with an optional window prefix ("5h " / "7d "). The
-    /// percent text warms to red at the red band — yellow / orange
-    /// stay primary because colored text in the menu bar reads poorly
-    /// (especially at the high-contrast accessibility setting). The
-    /// icon chip carries the band coloring; this one only escalates at
-    /// the red/critical threshold.
-    @ViewBuilder
-    private func percentChip(prefix: String?, sample: RateLimitSample?) -> some View {
-        if let s = sample {
-            let band = UsageBand(percentage: s.usedPercentage)
-            let pct = "\(Int(s.usedPercentage.rounded()))%"
-            Text((prefix ?? "") + pct)
-                .monospacedDigit()
-                .foregroundStyle(band == .red ? Color.red : Color.primary)
-        } else {
-            Text((prefix ?? "") + "—")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+    var body: some View {
+        // `.equatable()` gates AppKit's re-rasterization: the outer view
+        // still re-evaluates on every save (cheap), but the hosted status
+        // item only redraws when `rendered` actually differs.
+        MenuBarLabelContent(rendered: rendered).equatable()
+    }
+
+    /// Equatable render payload — captures exactly what the status item
+    /// draws (resolved per-chip items + tooltip) so the chrome only
+    /// re-renders on a real change.
+    struct Render: Equatable {
+        enum Item: Equatable {
+            /// SF Symbol icon (gauge / ring-fill / dot styles); `band` tints it.
+            case symbol(name: String, band: UsageBand?)
+            /// Dual activity-ring icon (outer 5h, inner 7d). Raw percentages
+            /// drive both ring fill and per-ring band color.
+            case rings(five: Double, seven: Double)
+            /// Window utilization chip; nil pct renders "—". `prefix` is the
+            /// "5h " / "7d " disambiguator.
+            case percent(prefix: String?, pct: Double?)
+            /// Plain text chip (cost / tokens / model).
+            case text(String)
         }
-    }
-
-    private func textChip(_ text: String) -> some View {
-        Text(text)
-            .monospacedDigit()
-            .foregroundStyle(.primary)
-    }
-
-    private func isWarming(from old: UsageBand?, to new: UsageBand) -> Bool {
-        guard let old else { return new != .green }
-        return new.severity > old.severity
+        var items: [Item]
+        var tooltip: String
     }
 }
 
-private extension UsageBand {
-    /// Higher = warmer / more urgent. Used to detect upward crossings
-    /// for the pulse animation.
-    var severity: Int {
-        switch self {
-        case .green:  return 0
-        case .yellow: return 1
-        case .orange: return 2
-        case .red:    return 3
+/// The status-item chrome, isolated behind `Equatable` so a no-op @Query
+/// refresh is a true no-op down to AppKit's `cacheDisplayInRect`. There
+/// is deliberately NO animation — the colored icon and numbers carry the
+/// signal; the old one-shot scale pulse was removed as wasted per-frame
+/// work in an always-on status item.
+private struct MenuBarLabelContent: View, Equatable {
+    let rendered: MenuBarLabel.Render
+
+    nonisolated static func == (lhs: MenuBarLabelContent, rhs: MenuBarLabelContent) -> Bool {
+        lhs.rendered == rhs.rendered
+    }
+
+    var body: some View {
+        // No outer padding — the NSStatusBarButton already adds the
+        // menu-bar's standard side margins. Spacing between chips comes
+        // from the HStack's own `spacing:`.
+        HStack(spacing: 6) {
+            ForEach(Array(rendered.items.enumerated()), id: \.offset) { _, item in
+                itemView(item)
+            }
+        }
+        .help(rendered.tooltip)
+    }
+
+    @ViewBuilder
+    private func itemView(_ item: MenuBarLabel.Render.Item) -> some View {
+        switch item {
+        case let .symbol(name, band):
+            // `.monochrome` (not `.palette`) so the symbol renders in one
+            // solid tint at full strength like Battery / Wi-Fi.
+            Image(systemName: name)
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(Self.bandColor(band))
+        case let .rings(five, seven):
+            // Apple Watch-style dual-ring icon. Outer = 5h, inner = 7d.
+            ActivityRings(rings: [
+                ActivityRings.Ring(progress: five / 100,
+                                   color: UsageBand(percentage: five).color),
+                ActivityRings.Ring(progress: seven / 100,
+                                   color: UsageBand(percentage: seven).color)
+            ])
+            .frame(width: 14, height: 14)
+        case let .percent(prefix, pct):
+            // Percent text warms to red only at the red band — yellow /
+            // orange stay primary (colored text reads poorly in the menu
+            // bar); the icon carries the band coloring.
+            if let pct {
+                Text((prefix ?? "") + "\(Int(pct.rounded()))%")
+                    .monospacedDigit()
+                    .foregroundStyle(UsageBand(percentage: pct) == .red ? Color.red : Color.primary)
+            } else {
+                Text((prefix ?? "") + "—")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        case let .text(text):
+            Text(text)
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+        }
+    }
+
+    /// Icon tint by band. `.primary` at green/nil so Pacer reads as a
+    /// healthy, active item next to Battery / Wi-Fi rather than greyed
+    /// out at the common low-usage state.
+    private static func bandColor(_ band: UsageBand?) -> Color {
+        switch band {
+        case .green, nil: return .primary
+        case .yellow:     return .yellow
+        case .orange:     return .orange
+        case .red:        return .red
         }
     }
 }
