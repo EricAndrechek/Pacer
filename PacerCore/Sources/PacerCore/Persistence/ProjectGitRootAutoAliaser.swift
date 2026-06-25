@@ -80,7 +80,7 @@ public final class ProjectGitRootAutoAliaser {
         // URL recorded. Plug them in here — single .git/config
         // read per row, capped to the rows that actually need it.
         let probesNeedingOriginBackfill = existingProbes.values.filter {
-            $0.gitRoot != nil && $0.originURL == nil
+            $0.gitRoot != nil && $0.originURL == nil && !$0.originBackfillAttempted
         }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
 
@@ -131,6 +131,11 @@ public final class ProjectGitRootAutoAliaser {
             for r in backfillResults {
                 if let row = existingProbes[r.probePath] {
                     row.originURL = r.originURL
+                    // Mark attempted regardless of result so an origin-less
+                    // repo (local-only, no remote.origin.url) isn't re-read
+                    // on every future cycle forever — see
+                    // ProjectPathProbe.originBackfillAttempted.
+                    row.originBackfillAttempted = true
                 }
             }
         }
@@ -145,7 +150,11 @@ public final class ProjectGitRootAutoAliaser {
                 path: probe.path,
                 gitRoot: probe.gitRoot,
                 originURL: probe.originURL,
-                probedAt: now
+                probedAt: now,
+                // The walk already attempted the origin read when a git
+                // root was found, so record that — an origin-less new probe
+                // shouldn't re-qualify for backfill next cycle.
+                originBackfillAttempted: probe.gitRoot != nil
             ))
             guard let gitRoot = probe.gitRoot, gitRoot != probe.path else { continue }
             do {
