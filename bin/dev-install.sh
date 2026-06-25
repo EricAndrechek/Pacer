@@ -267,6 +267,33 @@ echo
 echo "==> Notarizing with Apple (profile: ${NOTARY_PROFILE})"
 
 if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+    # Self-heal. The notarization profile is a login-Keychain item, NOT a
+    # file in keys/ — so it goes missing on a fresh machine or after a
+    # Keychain reset even when keys/ already holds every credential (the
+    # exact "I thought I had everything in keys/" trap). If the raw creds
+    # are present locally, recreate the profile non-interactively instead
+    # of erroring out. keys/ is gitignored; nothing here is committed.
+    KEYS_DIR="${REPO_ROOT}/keys"
+    KEYS_P8="$(ls "${KEYS_DIR}"/AuthKey_*.p8 2>/dev/null | head -1)"
+    if [ -f "${KEYS_DIR}/.env" ] && [ -n "${KEYS_P8}" ]; then
+        echo "    profile '${NOTARY_PROFILE}' not in Keychain — recreating from keys/ …"
+        # Subshell so the sourced secrets (incl. CERTIFICATE_PASSWORD) stay
+        # out of this script's environment. KEY_ID/ISSUER_ID come from
+        # keys/.env, the same file refresh-secrets.sh reads.
+        (
+            # shellcheck disable=SC1091
+            . "${KEYS_DIR}/.env"
+            xcrun notarytool store-credentials "${NOTARY_PROFILE}" \
+                --key "${KEYS_P8}" \
+                --key-id "${KEY_ID:?KEY_ID missing in keys/.env}" \
+                --issuer "${ISSUER_ID:?ISSUER_ID missing in keys/.env}"
+        ) || echo "    auto-setup failed — see manual steps below"
+    fi
+fi
+
+# Re-check: covers both the just-healed case and a genuinely-absent
+# profile (keys/ not present, or auto-setup failed above).
+if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
     echo "ERROR: notarytool credential profile '${NOTARY_PROFILE}' not found."
     echo "Set it up once with:"
     echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
@@ -274,6 +301,8 @@ if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 
     echo "      --key-id <KEY_ID> --issuer <ISSUER_UUID>"
     echo "Get the .p8 + Key ID + Issuer ID from App Store Connect →"
     echo "Users and Access → Integrations → Team Keys."
+    echo "(With keys/.env + keys/AuthKey_*.p8 present, this install"
+    echo " recreates the profile automatically — check those files.)"
     echo
     echo "For rapid local-only iteration without notarization:"
     echo "  PACER_DEV_SKIP_NOTARIZE=1 make install"

@@ -62,6 +62,16 @@ You already have a Developer ID Application certificate (Team ID
 
 ### 2. App Store Connect API key (for notarization)
 
+> **Local `make install` note.** Notarizing locally needs a `notarytool`
+> keychain profile named `pacer-notarization` in your login Keychain —
+> a *different* thing from the CI secrets below, and not a file in
+> `keys/`. It goes missing on a fresh machine or after a Keychain reset
+> even when `keys/` is complete. `bin/dev-install.sh` self-heals it: when
+> the profile is absent but `keys/.env` + `keys/AuthKey_*.p8` are present,
+> it recreates it via `xcrun notarytool store-credentials` on the next
+> install. (Or skip notarization for fast iteration:
+> `PACER_DEV_SKIP_NOTARIZE=1 make install`.)
+
 The local `pacer-notarization` keychain profile won't work in CI.
 Use an API key instead:
 
