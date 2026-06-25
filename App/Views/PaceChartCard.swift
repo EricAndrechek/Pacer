@@ -34,7 +34,7 @@ struct PaceChartCard: View {
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
     @State private var endEstimates: [String: Estimate] = [:]
 
-    struct WindowProjection: Equatable {
+    struct WindowProjection: Equatable, Sendable {
         var points: [PaceChartView.Data.Point]
         var crossesFullAt: Date?
     }
@@ -65,23 +65,34 @@ struct PaceChartCard: View {
     /// band, crossing, frequency facts).
     private func refreshProjections() async {
         guard let engine else { return }
-        var nextSelected: [String: WindowProjection] = [:]
-        var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-        var nextEnds: [String: Estimate] = [:]
-        for window in RateLimitWindowKind.allCases {
-            if let o = await engine.burnOutlook(window: window) { nextOutlooks[window.rawValue] = o }
-            nextEnds[window.rawValue] = await engine.ask(.rateLimitOutlook(window))
-            let list = await engine.rateLimitTrajectories(window: window)
-            guard !list.isEmpty else { continue }
-            if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
-                nextSelected[window.rawValue] = WindowProjection(
-                    points: chosen.trajectory.points.map { .init(time: $0.at, value: $0.usedPercentage) },
-                    crossesFullAt: chosen.trajectory.crossesFullAt)
+        // Compute OFF the main actor. Awaiting the `@ModelActor` engine from
+        // `@MainActor` here resumes its heavy forecast-model fit INLINE on
+        // the main thread — the Swift "uncontended actor runs on the
+        // caller's executor" optimization. A `sample(1)` taken while
+        // scrolling caught `DiurnalBurnModel.fit` running on Main (~3k
+        // samples), the dominant scroll-stutter source. A detached task
+        // forces the fit onto the engine's own executor so it can never
+        // block the UI; only the cheap `@State` assignment lands on main.
+        let computed = await Task.detached(priority: .userInitiated) { [engine] in
+            var nextSelected: [String: WindowProjection] = [:]
+            var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+            var nextEnds: [String: Estimate] = [:]
+            for window in RateLimitWindowKind.allCases {
+                if let o = await engine.burnOutlook(window: window) { nextOutlooks[window.rawValue] = o }
+                nextEnds[window.rawValue] = await engine.ask(.rateLimitOutlook(window))
+                let list = await engine.rateLimitTrajectories(window: window)
+                guard !list.isEmpty else { continue }
+                if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
+                    nextSelected[window.rawValue] = WindowProjection(
+                        points: chosen.trajectory.points.map { .init(time: $0.at, value: $0.usedPercentage) },
+                        crossesFullAt: chosen.trajectory.crossesFullAt)
+                }
             }
-        }
-        projections = nextSelected
-        outlooks = nextOutlooks
-        endEstimates = nextEnds
+            return (nextSelected, nextOutlooks, nextEnds)
+        }.value
+        projections = computed.0
+        outlooks = computed.1
+        endEstimates = computed.2
     }
 
     private struct Bucketed {

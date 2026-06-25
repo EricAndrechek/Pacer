@@ -116,6 +116,33 @@ mechanisms are subtle enough that grep won't catch them in review.
    reliable enough that 5-min safety-net cadence is sufficient. The
    600 ms cost of a 900-file walk per minute, times 24/7, is exactly
    the kind of always-on CPU that puts a menu-bar app in the top-10.
+8. **`LazyVStack` of heavy chart cards in a `ScrollView` (2026-06-25).**
+   The lazy stack defers each card's body + `@Query` until it scrolls
+   on-screen — good for the notification budget, but it realizes the
+   card *mid-scroll*, so scrolling past a chart card builds its whole
+   Swift Charts body right then. A `sample(1)` taken WHILE scrolling
+   (the only way to catch this — an idle sample shows nothing) had the
+   main thread 74→99 % idle yet still dropped frames: the cost was
+   `ViewRendererHost`/`GraphHost` on the render thread, near-zero
+   `CA::Transaction::commit`, i.e. SwiftUI re-rendering cards as they
+   appeared, not compositing. Fix: eager `VStack` for pages with a
+   small fixed card set (a `lazy: Bool` flag on `PageScaffold`;
+   dashboard passes `lazy: false`). Re-incurs the `@Query` fanout, but
+   measured ~98 % main-thread idle during active use after the #102/#104/
+   #105 mitigations, so affordable. Lesson: **scroll jank with an idle
+   main thread is render/realize cost — profile WHILE scrolling.**
+9. **`await`ing an uncontended `@ModelActor` from `@MainActor` runs its
+   work INLINE on main (2026-06-25).** Swift skips the executor hop for
+   an idle actor and resumes the job on the caller's thread — so the
+   forecast engine's `DiurnalBurnModel.fit` ran on the main thread
+   (confirmed: no `swift_task_switch` frame between caller and fit; all
+   133 fit frames in the Main-Thread block). `@ModelActor` is not
+   enough; its default executor permits inline-on-main. Fix: wrap the
+   engine call sites (`PaceChartCard.refreshProjections`,
+   `AppBackgroundService.recomputeEngineIfDue`/`exportEngineSnapshot`)
+   in `Task.detached { [engine] in await engine.… }.value` so the await
+   genuinely hops off the main actor. (A dedicated `unownedExecutor` on
+   the engine would fix every call site at once — deferred.)
 
 ## Open work (deferred from the autonomous loop)
 
