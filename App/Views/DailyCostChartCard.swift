@@ -46,7 +46,17 @@ struct DailyCostChartCard: View {
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
+    /// Debounced selection that the chart RuleMark + trailing slot read.
+    /// Updated from `rawSelection` only once the pointer settles, so a
+    /// scroll that sweeps the cursor across the bars doesn't re-lay-out
+    /// the whole chart on every pointer event — the scroll-stutter cause.
+    /// See docs/perf-tuning.md.
     @State private var selectedDate: String?
+    /// Raw `chartXSelection` binding — updates on every pointer move.
+    /// Nothing reads it for rendering; it feeds the debounce below and the
+    /// tap handler (which needs the immediate, un-debounced value).
+    @State private var rawSelection: String?
+    @State private var selectionDebounce: Task<Void, Never>?
     @State private var cachedDerived = Derived(dailyTotals: [], annotateDates: [], totalCost: 0)
 
     private struct Derived {
@@ -159,7 +169,20 @@ struct DailyCostChartCard: View {
                 }
             }
         }
-        .chartXSelection(value: $selectedDate)
+        .chartXSelection(value: $rawSelection)
+        // Coalesce the rapid hover stream a scroll produces into a single
+        // commit once the pointer settles, so the chart's marks re-lay-out
+        // at most once per hover instead of once per pointer event. 40ms is
+        // imperceptible on a deliberate hover but collapses a fast
+        // scroll-sweep across the bars to zero chart re-layouts.
+        .onChange(of: rawSelection) { _, newValue in
+            selectionDebounce?.cancel()
+            selectionDebounce = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(40))
+                guard !Task.isCancelled else { return }
+                selectedDate = newValue
+            }
+        }
         // Tap-to-drill pattern: chartXSelection already tracks the
         // hovered/clicked bar via the binding, so on tap we just
         // open that day. The whole chart surface becomes the hit
@@ -169,7 +192,9 @@ struct DailyCostChartCard: View {
         // link cursor per macOS HIG.
         .contentShape(Rectangle())
         .onTapGesture {
-            if let date = selectedDate, let onDayTap {
+            // Use the immediate selection, not the debounced one — on tap
+            // the 40ms debounce may not have committed `selectedDate` yet.
+            if let date = rawSelection, let onDayTap {
                 onDayTap(date)
             }
         }
