@@ -356,17 +356,29 @@ public struct FreshnessPulse: View {
 public struct PageScaffold<Trailing: View, Content: View>: View {
     public let title: String
     public let subtitle: String?
+    /// Lazy (`LazyVStack`) defers each card's body + `@Query` until it
+    /// scrolls into view — lighter during active use, but the per-card
+    /// realize-on-appear cost lands *during* the scroll (visible jank when
+    /// scrolling past heavy chart cards). Eager (`VStack`) renders every
+    /// card once up front, so scrolling only translates already-rendered
+    /// content — buttery, at the cost of every card's `@Query` being live.
+    /// Pages with a small, fixed card set (the dashboard) prefer eager now
+    /// that the `@Query` fanout is mitigated; long/unbounded lists keep
+    /// lazy. See docs/perf-tuning.md.
+    public let lazy: Bool
     public let trailing: () -> Trailing
     public let content: () -> Content
 
     public init(
         _ title: String,
         subtitle: String? = nil,
+        lazy: Bool = true,
         @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() },
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.subtitle = subtitle
+        self.lazy = lazy
         self.trailing = trailing
         self.content = content
     }
@@ -390,9 +402,22 @@ public struct PageScaffold<Trailing: View, Content: View>: View {
             // is minor and only happens on demand. The header stays
             // outside the lazy stack so the page title doesn't
             // disappear on scroll.
-            LazyVStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                header
-                content()
+            Group {
+                if lazy {
+                    LazyVStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+                        header
+                        content()
+                    }
+                } else {
+                    // Eager: every card realized once on appear, so scrolling
+                    // never re-runs a card's body/render mid-flight (the
+                    // scroll-jank cause when heavy chart cards crossed the
+                    // viewport in the lazy stack).
+                    VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+                        header
+                        content()
+                    }
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 18)

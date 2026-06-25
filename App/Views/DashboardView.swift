@@ -21,6 +21,13 @@ struct DashboardView: View {
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage.",
+            // Eager stack: the dashboard is a small, fixed set of cards the
+            // user scrolls through anyway, so realizing them all up front
+            // (rather than lazily as each crosses the viewport) removes the
+            // per-card render-on-appear that made scrolling past the chart
+            // cards stutter. The @Query fanout this re-incurs is mitigated
+            // by the cards' gated caches + the EquatableView work (#102/#105).
+            lazy: false,
             // Notice badges + the data-source freshness chip live in the
             // header's trailing slot — zero vertical pixels, and both
             // describe the page as a whole rather than any one card.

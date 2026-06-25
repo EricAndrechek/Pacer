@@ -411,7 +411,14 @@ final class AppBackgroundService {
         if !force, let last = lastEngineRecomputeAt,
            now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
         lastEngineRecomputeAt = now
-        await engine.recompute(now: now)
+        // Recompute OFF the main actor. `recomputeEngineIfDue` runs on
+        // `@MainActor`, so `await engine.recompute(...)` would resume the
+        // heavy forecast fit INLINE on the main thread (uncontended-actor
+        // optimization — confirmed on Main via sample(1) during a scroll).
+        // A detached task forces it onto the engine's executor.
+        await Task.detached(priority: .utility) { [engine] in
+            await engine.recompute(now: now)
+        }.value
         await exportEngineSnapshot()
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
     }
@@ -420,7 +427,13 @@ final class AppBackgroundService {
     /// widget process can draw the same trajectory + outlook the dashboard
     /// shows.
     private func exportEngineSnapshot() async {
-        guard let json = await engine.snapshot().encodedJSON() else { return }
+        // `engine.snapshot()` fits the forecast models; run it off the main
+        // actor (same inline-on-main hazard as recomputeEngineIfDue) so it
+        // can't block the UI. The small SwiftData write stays on main.
+        let snapshotJSON = await Task.detached(priority: .utility) { [engine] in
+            await engine.snapshot().encodedJSON()
+        }.value
+        guard let json = snapshotJSON else { return }
         let context = ModelContext(container)
         let key = EngineSnapshot.metaKey
         let descriptor = FetchDescriptor<ClaudeCodeMeta>(

@@ -38,7 +38,7 @@ public struct PaceChartView: View {
         /// any — marked on the chart as the forecast limit-hit.
         public let projectionCrossesFullAt: Date?
 
-        public struct Point: Equatable, Identifiable {
+        public struct Point: Equatable, Identifiable, Sendable {
             public let time: Date
             public let value: Double
             public var id: TimeInterval { time.timeIntervalSince1970 }
