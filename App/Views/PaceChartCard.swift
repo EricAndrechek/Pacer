@@ -42,11 +42,22 @@ struct PaceChartCard: View {
     init(onCompare: ((String) -> Void)? = nil) {
         self.onCompare = onCompare
         let cutoff = Date().addingTimeInterval(-8 * 86400)
-        _samples = Query(
-            filter: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
-            sort: \.sampledAt,
-            order: .reverse
+        var descriptor = FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
+        // Columnar projection. SwiftData @Query invalidation is
+        // entity-agnostic, so this 8-day window (~2.8k rows) re-runs on
+        // EVERY store save — including the token-only saves that fire
+        // while the user types in Claude Code, even though no rate-limit
+        // row changed. The card only ever reads these four scalar
+        // attributes, so fetching just them avoids materializing ~2.8k
+        // full RateLimitSample objects per refresh (the dominant remaining
+        // open-window MainActor cost after the PR #102 toolbar fix; the
+        // rows are warm in the page cache, so the cost is CPU object
+        // instantiation, not disk). See docs/perf-tuning.md.
+        descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
+        _samples = Query(descriptor)
     }
 
     /// Re-ask the engine for both windows' answers. One pass powers the
