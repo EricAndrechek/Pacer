@@ -82,7 +82,16 @@ struct TodayTimelineCard: View {
         )
     }
 
+    /// Debounced hover that the chart RuleMark + trailing slot read.
+    /// Updated from `rawHoveredHour` only once the pointer settles, so a
+    /// scroll that sweeps the cursor across the bars doesn't re-lay-out the
+    /// whole chart on every pointer event — the scroll-stutter cause. See
+    /// docs/perf-tuning.md.
     @State private var hoveredHour: Int?
+    /// Raw `chartXSelection` binding — updates on every pointer move; only
+    /// feeds the debounce below.
+    @State private var rawHoveredHour: Int?
+    @State private var hoverDebounce: Task<Void, Never>?
 
     var body: some View {
         PacerCard("Today by hour", trailing: {
@@ -153,7 +162,20 @@ struct TodayTimelineCard: View {
             }
         }
         .frame(height: 130)
-        .chartXSelection(value: $hoveredHour)
+        .chartXSelection(value: $rawHoveredHour)
+        // Coalesce the rapid hover stream a scroll produces into a single
+        // commit once the pointer settles, so the chart's marks re-lay-out
+        // at most once per hover instead of once per pointer event. 40ms is
+        // imperceptible on a deliberate hover but collapses a fast
+        // scroll-sweep across the bars to zero chart re-layouts.
+        .onChange(of: rawHoveredHour) { _, newValue in
+            hoverDebounce?.cancel()
+            hoverDebounce = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(40))
+                guard !Task.isCancelled else { return }
+                hoveredHour = newValue
+            }
+        }
         .chartYAxis(.hidden)
         .chartXAxis {
             // Locale-aware ticks. 24h: 0/6/12/18/23. 12h: 12a/6a/12p/6p/11p.

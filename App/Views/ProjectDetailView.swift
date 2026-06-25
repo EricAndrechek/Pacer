@@ -674,7 +674,14 @@ struct ProjectDetailView: View {
         .padding(.horizontal, 4)
     }
 
+    /// Debounced hover (chart RuleMark + reads). Updated from
+    /// `rawHoveredDate` only once the pointer settles, so a scroll sweeping
+    /// the bars doesn't re-lay-out the chart per pointer event. See
+    /// docs/perf-tuning.md.
     @State private var hoveredDate: String?
+    /// Raw `chartXSelection` binding (immediate); feeds the debounce + tap.
+    @State private var rawHoveredDate: String?
+    @State private var hoveredDateDebounce: Task<Void, Never>?
 
     private var dailyChartCard: some View {
         PacerCard("Daily activity", trailing: {
@@ -736,12 +743,22 @@ struct ProjectDetailView: View {
                     }
                 }
             }
-            .chartXSelection(value: $hoveredDate)
+            .chartXSelection(value: $rawHoveredDate)
+            .onChange(of: rawHoveredDate) { _, newValue in
+                hoveredDateDebounce?.cancel()
+                hoveredDateDebounce = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(40))
+                    guard !Task.isCancelled else { return }
+                    hoveredDate = newValue
+                }
+            }
             // Arrow cursor (default) per macOS HIG — clickable charts
             // don't warrant the link cursor.
             .contentShape(Rectangle())
             .onTapGesture {
-                if let d = hoveredDate {
+                // Immediate selection, not the debounced one — the 40ms
+                // debounce may not have committed `hoveredDate` yet on tap.
+                if let d = rawHoveredDate {
                     push(.day(date: d))
                 }
             }

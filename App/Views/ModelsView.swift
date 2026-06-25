@@ -414,7 +414,14 @@ private struct ModelsContent: View {
         }
     }
 
+    /// Debounced hover (chart RuleMark + per-day breakdown reads). Updated
+    /// from `rawTrendHoverDate` only once the pointer settles, so a scroll
+    /// sweeping the bars doesn't re-lay-out the chart per pointer event.
+    /// See docs/perf-tuning.md.
     @State private var trendHoverDate: String?
+    /// Raw `chartXSelection` binding (immediate); feeds the debounce + tap.
+    @State private var rawTrendHoverDate: String?
+    @State private var trendHoverDebounce: Task<Void, Never>?
 
     /// Per-day, per-model totals for the hovered date. O(1) lookup
     /// into the pre-bucketed `trendBuckets` — the previous version
@@ -476,13 +483,22 @@ private struct ModelsContent: View {
                     }
                 }
                 .chartXAxis(.hidden)
-                .chartXSelection(value: $trendHoverDate)
+                .chartXSelection(value: $rawTrendHoverDate)
+                .onChange(of: rawTrendHoverDate) { _, newValue in
+                    trendHoverDebounce?.cancel()
+                    trendHoverDebounce = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(40))
+                        guard !Task.isCancelled else { return }
+                        trendHoverDate = newValue
+                    }
+                }
                 // Tap-to-drill — uses the chartXSelection binding,
                 // same minimal pattern as DailyCostChartCard. Arrow
                 // cursor (default) per macOS HIG.
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if let date = trendHoverDate {
+                    // Immediate selection, not the debounced one.
+                    if let date = rawTrendHoverDate {
                         onSelectDay(date)
                     }
                 }
