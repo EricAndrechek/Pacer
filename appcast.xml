@@ -412,5 +412,23 @@
             type="application/octet-stream"
             sparkle:edSignature="UerA/T3K/vrhFXzR1yVN2DgJbiTsf6YW8HLaCajSTPBFLxPXaJ+zoiCzJJIrPDDP1ej40x0XQlnO36gY0J1fDw==" />
     </item>
+            <item>
+        <title>Version 0.3.15</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): drop cross-cycle straggler that drew a red vertical line in pace charts by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4769126129" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/109" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/109/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/109">EricAndrechek/Pacer#109</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.14...v0.3.15">EricAndrechek/Pacer@<tt>v0.3.14...v0.3.15</tt></a></p>]]></description>
+        <pubDate>Mon, 29 Jun 2026 14:54:09 +0000</pubDate>
+        <sparkle:version>1782744562</sparkle:version>
+        <sparkle:shortVersionString>0.3.15</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.15/Pacer-0.3.15.dmg"
+            length="6727197"
+            type="application/octet-stream"
+            sparkle:edSignature="ddl2FHUVUR1fAVrnq3FZm/DJFPx1Ap4PU+VYJU0IiBleXf8Ft/11x9oYdxj9AJaqKDfFLyBWX3sgSPCxQk0yCg==" />
+    </item>
         </channel>
 </rss>
