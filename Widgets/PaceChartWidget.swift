@@ -156,6 +156,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         let cycleStart = resetsAt.addingTimeInterval(-duration)
         let now = Date()
         var points = windowRows
+            .inCycle(resetting: resetsAt, duration: duration)
             .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
             .sorted { $0.sampledAt < $1.sampledAt }
             .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }

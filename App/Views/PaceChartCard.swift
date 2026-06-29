@@ -237,6 +237,7 @@ private struct PaceChartColumn: View {
         let cycleStart = resets.addingTimeInterval(-duration)
         let now = Date()
         var points = windowSamples
+            .inCycle(resetting: resets, duration: duration)
             .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
             .sorted { $0.sampledAt < $1.sampledAt }
             .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
