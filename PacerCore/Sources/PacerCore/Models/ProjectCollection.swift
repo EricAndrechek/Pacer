@@ -58,12 +58,17 @@ public final class ProjectCollection {
     /// Display name ("Acme Corp", "Side Projects"). Free-form; not a key.
     public var name: String
 
-    /// Seed for the stable identity hue. Defaults to the name at
-    /// creation; kept separate so a rename doesn't recolor the
-    /// collection. The UI hashes this with the same sum-of-scalars
+    /// Seed for the stable identity hue when `colorHex` is unset. Defaults
+    /// to the name at creation; kept separate so a rename doesn't recolor
+    /// the collection. The UI hashes this with the same sum-of-scalars
     /// recipe used for per-model swatches (`Hasher` is per-process
     /// randomized, so we can't use it for a stable color).
     public var colorSeed: String
+
+    /// User-chosen color as `#RRGGBB`. `nil` → fall back to the
+    /// `colorSeed` hash. Declared with a default so SwiftData adds the
+    /// column additively (existing rows get `nil`) with no store reset.
+    public var colorHex: String? = nil
 
     public var createdAt: Date
 
@@ -96,6 +101,7 @@ public final class ProjectCollection {
         id: String = UUID().uuidString,
         name: String,
         colorSeed: String? = nil,
+        colorHex: String? = nil,
         createdAt: Date = Date(),
         sortOrder: Int = 0,
         includePaths: [String] = [],
@@ -106,6 +112,7 @@ public final class ProjectCollection {
         self.id = id
         self.name = name
         self.colorSeed = colorSeed ?? name
+        self.colorHex = colorHex
         self.createdAt = createdAt
         self.sortOrder = sortOrder
         self.includePathsJSON = Self.encodeStrings(includePaths)

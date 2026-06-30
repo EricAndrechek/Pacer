@@ -1,7 +1,9 @@
 import Foundation
 import SwiftData
+import SwiftUI
 import Testing
 @testable import PacerCore
+import PacerUI
 
 /// Behaviour tests for the project-collections spine: the cycle-safe
 /// resolver, the rollup fold, rule matching, and the overlap/exclude
@@ -169,6 +171,110 @@ private extension CollectionRollupResult {
 }
 
 // MARK: Schema round-trip
+
+// MARK: Glob rules
+
+@Test func globMatchesSingleSegmentStar() {
+    #expect(CollectionRuleMatcher.matches(path: "/a/web-app", rule: "/a/*-app"))
+    #expect(CollectionRuleMatcher.matches(path: "/a/api-app", rule: "/a/*-app"))
+    // * does not cross a path separator.
+    #expect(!CollectionRuleMatcher.matches(path: "/a/x/y-app", rule: "/a/*-app"))
+}
+
+@Test func globDoubleStarCrossesDirectories() {
+    #expect(CollectionRuleMatcher.matches(path: "/Code/x/y/web", rule: "/Code/**/web"))
+    #expect(CollectionRuleMatcher.matches(path: "/Code/web", rule: "/Code/**/web"))  // **/ allows zero dirs
+    #expect(CollectionRuleMatcher.matches(path: "/Code/anything/at/all", rule: "/Code/**"))
+    #expect(!CollectionRuleMatcher.matches(path: "/Other/web", rule: "/Code/**/web"))
+}
+
+@Test func globQuestionMarkMatchesOneChar() {
+    #expect(CollectionRuleMatcher.matches(path: "/a/v1", rule: "/a/v?"))
+    #expect(!CollectionRuleMatcher.matches(path: "/a/v12", rule: "/a/v?"))
+}
+
+@Test func plainFolderRuleStillPrefixMatches() {
+    // No glob metachars → folder-prefix semantics, boundary-aware.
+    #expect(CollectionRuleMatcher.matches(path: "/a/work/api", rule: "/a/work"))
+    #expect(!CollectionRuleMatcher.matches(path: "/a/workspace", rule: "/a/work"))
+    #expect(CollectionRuleMatcher.isGlob("/a/*-app"))
+    #expect(!CollectionRuleMatcher.isGlob("/a/work"))
+}
+
+@Test func globMetacharsAreEscaped() {
+    // A literal dot must not act as a regex wildcard.
+    #expect(CollectionRuleMatcher.matches(path: "/a/v1.app", rule: "/a/v1.app*"))
+    #expect(!CollectionRuleMatcher.matches(path: "/a/v1Xapp", rule: "/a/v1.app"))
+}
+
+// MARK: Reverse membership index
+
+@Test func membershipIndexInvertsResolution() {
+    let acme = ProjectCollection(id: "acme", name: "Acme", rules: ["/work/acme"])
+    let side = ProjectCollection(id: "side", name: "Side", includePaths: ["/work/acme/firmware", "/p/notes"])
+    let paths = ["/work/acme/api", "/work/acme/firmware", "/p/notes", "/p/lonely"]
+    let index = CollectionResolver.membership(of: paths, collections: [acme, side], knownPaths: paths)
+    #expect(index["/work/acme/api"] == ["acme"])
+    #expect(Set(index["/work/acme/firmware"] ?? []) == ["acme", "side"])  // overlap
+    #expect(index["/p/notes"] == ["side"])
+    #expect(index["/p/lonely"] == nil)  // in nothing
+}
+
+// MARK: Disambiguation
+
+@Test func disambiguationLeavesUniqueLeavesBare() {
+    let names = pacerDisambiguatedNames(["/Code/acme/api", "/Code/personal/blog"])
+    #expect(names["/Code/acme/api"] == "api")
+    #expect(names["/Code/personal/blog"] == "blog")
+}
+
+@Test func disambiguationExtendsCollidingLeaves() {
+    let names = pacerDisambiguatedNames(["/Code/acme/website", "/Code/personal/website"])
+    #expect(names["/Code/acme/website"] == "acme / website")
+    #expect(names["/Code/personal/website"] == "personal / website")
+}
+
+@Test func disambiguationGrowsUntilUnique() {
+    // Same parent AND leaf — must reach the grandparent to separate.
+    let names = pacerDisambiguatedNames(["/a/x/web", "/b/x/web"])
+    #expect(names["/a/x/web"] == "a / x / web")
+    #expect(names["/b/x/web"] == "b / x / web")
+}
+
+// MARK: Color round-trip
+
+@Test func colorHexParsesAndSerializes() {
+    #expect(Color(pacerHex: "#FF8800") != nil)
+    #expect(Color(pacerHex: "zzz") == nil)
+    // Custom hex on a collection beats the seed hash.
+    let custom = pacerCollectionColor(seed: "Acme", hex: "#112233")
+    let seeded = pacerCollectionColor(seed: "Acme", hex: nil)
+    #expect(custom != seeded)
+}
+
+// MARK: Mutator
+
+@Test func mutatorAddIsIdempotentAndClearsExclusion() {
+    let c = ProjectCollection(name: "C", excludePaths: ["/p/a"])
+    CollectionsMutator.addProject("/p/a", to: c)
+    CollectionsMutator.addProject("/p/a", to: c) // again
+    #expect(c.includePaths == ["/p/a"])
+    #expect(c.excludePaths.isEmpty)  // re-adding undid the exclusion
+}
+
+// MARK: Schema round-trips
+
+@MainActor
+@Test func projectMetaRoundTrips() throws {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try ModelContainer(for: ProjectMeta.self, configurations: config)
+    let context = ModelContext(container)
+    context.insert(ProjectMeta(projectPath: "/p/a", colorHex: "#445566"))
+    try context.save()
+    let fetched = try context.fetch(FetchDescriptor<ProjectMeta>())
+    #expect(fetched.count == 1)
+    #expect(fetched[0].colorHex == "#445566")
+}
 
 @MainActor
 @Test func projectCollectionRoundTrips() throws {

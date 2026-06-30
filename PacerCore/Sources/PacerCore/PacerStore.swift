@@ -113,6 +113,7 @@ public enum PacerStore {
         ProjectPathProbe.self,
         ProjectBudget.self,
         ProjectCollection.self,
+        ProjectMeta.self,
         AlertRule.self,
         ForecastModelOutcome.self,
         EngineEvalOutcome.self,

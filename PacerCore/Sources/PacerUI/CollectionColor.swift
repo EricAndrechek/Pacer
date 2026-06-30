@@ -1,18 +1,58 @@
 import SwiftUI
+import AppKit
 
-/// Stable identity hue for a project collection.
-///
-/// Mirrors the per-model swatch recipe (sum of unicode scalars modulo a
-/// fixed palette) rather than `Color(hash)` because Swift's `Hasher` is
-/// per-process randomized — it would recolor every collection on each
-/// launch. Seeded by the collection's `colorSeed` (its name at creation
-/// time), so a later rename keeps the color stable. There is no
-/// per-project color in Pacer for this to collide with.
-public func pacerCollectionColor(seed: String) -> Color {
-    let palette: [Color] = [
-        .blue, .green, .orange, .purple, .pink, .teal, .indigo, .red, .mint, .cyan,
-    ]
-    guard !seed.isEmpty else { return palette[0] }
-    let scalarSum = seed.unicodeScalars.reduce(UInt32(0)) { $0 &+ UInt32($1.value) }
-    return palette[Int(scalarSum % UInt32(palette.count))]
+/// The curated swatch palette offered in color pickers and used as the
+/// auto-assigned fallback. Order is stable, so a hash-derived index gives
+/// a stable color across launches.
+public let pacerColorPalette: [Color] = [
+    .blue, .green, .orange, .purple, .pink, .teal, .indigo, .red, .mint, .cyan,
+]
+
+/// Stable identity hue for a collection. Uses the explicit `hex` when the
+/// user picked one, else hashes `seed` (the collection's name at creation)
+/// into the palette — `Hasher` is per-process randomized, so we can't use
+/// it for a color that must survive relaunch.
+public func pacerCollectionColor(seed: String, hex: String? = nil) -> Color {
+    if let hex, let c = Color(pacerHex: hex) { return c }
+    return pacerHashedColor(seed)
+}
+
+/// Stable color for a project. Explicit `hex` (from `ProjectMeta`) wins,
+/// else a stable hash of the canonical path — so a project keeps its color
+/// regardless of its rank in any list.
+public func pacerProjectColor(path: String, hex: String? = nil) -> Color {
+    if let hex, let c = Color(pacerHex: hex) { return c }
+    return pacerHashedColor(path)
+}
+
+/// Sum-of-unicode-scalars → palette index. The same recipe as the
+/// per-model swatches; deterministic across processes.
+func pacerHashedColor(_ seed: String) -> Color {
+    guard !seed.isEmpty else { return pacerColorPalette[0] }
+    let sum = seed.unicodeScalars.reduce(UInt32(0)) { $0 &+ UInt32($1.value) }
+    return pacerColorPalette[Int(sum % UInt32(pacerColorPalette.count))]
+}
+
+public extension Color {
+    /// Parse `#RRGGBB` (or `RRGGBB`). Returns nil on malformed input.
+    init?(pacerHex hex: String) {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self = Color(
+            .sRGB,
+            red: Double((v >> 16) & 0xFF) / 255,
+            green: Double((v >> 8) & 0xFF) / 255,
+            blue: Double(v & 0xFF) / 255
+        )
+    }
+}
+
+/// Serialize a SwiftUI `Color` to `#RRGGBB` (sRGB) for persistence.
+public func pacerHexString(from color: Color) -> String? {
+    guard let rgb = NSColor(color).usingColorSpace(.sRGB) else { return nil }
+    let r = Int((rgb.redComponent * 255).rounded())
+    let g = Int((rgb.greenComponent * 255).rounded())
+    let b = Int((rgb.blueComponent * 255).rounded())
+    return String(format: "#%02X%02X%02X", r, g, b)
 }
