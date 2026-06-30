@@ -105,6 +105,26 @@ enum ScreenshotMode {
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
+        // Projects ▸ Collections — the lane, the tree bake-off, the
+        // scope-drill detail, and the manager. Synthetic collections over
+        // synthetic project rollups (see `seedCollections`).
+        await capture("collections-lane", width: 960, height: 720, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            CollectionsShowcase(mode: .lane)
+        }
+        await capture("collections-tree", width: 960, height: 720, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            CollectionsShowcase(mode: .tree)
+        }
+        await capture("collections-detail", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            CollectionDetailView(collectionID: "client")
+        }
+        await capture("collections-manager", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            CollectionsManager()
+        }
+
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
         captureShareCard(container: container)
@@ -314,6 +334,7 @@ extension ScreenshotMode {
         seedRateLimits(ctx, now: now)
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
+        seedCollections(ctx, startOfToday: startOfToday, cal: cal)
 
         ctx.insert(ClaudeCodeMeta(
             key: ClaudeCodeMetaKey.lastIncrementalScanAt,
@@ -365,6 +386,78 @@ extension ScreenshotMode {
             insertDaily(ctx, date: ds, model: sonnet, cost: sonnetCost)
             insertDaily(ctx, date: ds, model: haiku, cost: haikuCost)
         }
+    }
+
+    /// Fake project rollups + a few collections so the Projects ▸
+    /// Collections lane, tree, detail, and manager render populated. The
+    /// leaf paths are absolute (tilde-expanded) so the folder rule matches
+    /// them. Fictional placeholder names only. Demonstrates all three
+    /// membership kinds plus overlap (firmware is in Acme Corp via rule
+    /// AND Side Projects by hand) and nesting (the Globex client
+    /// collection contains Acme Corp).
+    private static func seedCollections(
+        _ ctx: ModelContext, startOfToday: Date, cal: Calendar
+    ) {
+        let home = NSHomeDirectory()
+        let workRoot = "\(home)/Code/work/acme-corp"
+        // (path, per-day cost base)
+        let leaves: [(String, Double)] = [
+            ("\(workRoot)/api", 16),
+            ("\(workRoot)/firmware", 9),
+            ("\(workRoot)/web-dashboard", 7),
+            ("\(workRoot)/cloud-infra", 5),
+            ("\(home)/Code/personal/notes-app", 8),
+            ("\(home)/Projects/home-sensors", 4),
+            ("\(home)/Code/oss/pacer", 12),
+            ("\(home)/Code/personal/dotfiles", 2),
+        ]
+        for (li, leaf) in leaves.enumerated() {
+            let (path, base) = leaf
+            for d in 0..<42 {
+                guard let day = cal.date(byAdding: .day, value: -d, to: startOfToday) else { continue }
+                if d != 0 && noise(d &* 11 &+ li &* 3) < 0.18 { continue }   // gap days
+                let ds = TokenSample.formatDate(day)
+                let cost = base * (0.45 + 1.1 * noise(d &* 7 &+ li))
+                let input = Int64(cost * 9_000)
+                let output = Int64(cost * 2_400)
+                ctx.insert(ProjectDailyAggregate(
+                    projectPath: path,
+                    date: ds,
+                    inputTokens: input,
+                    outputTokens: output,
+                    cacheReadTokens: input * 6,
+                    totalCostUSD: cost,
+                    sessionCount: 1 + Int(noise(d &+ li) * 3),
+                    modelCount: 2,
+                    lastActive: day
+                ))
+            }
+        }
+
+        let collections = [
+            ProjectCollection(
+                id: "acme", name: "Acme Corp", sortOrder: 40,
+                rules: [workRoot]
+            ),
+            ProjectCollection(
+                id: "side", name: "Side Projects", sortOrder: 30,
+                includePaths: [
+                    "\(home)/Code/personal/notes-app",
+                    "\(home)/Projects/home-sensors",
+                    "\(workRoot)/firmware",   // overlaps Acme Corp on purpose
+                ]
+            ),
+            ProjectCollection(
+                id: "oss", name: "Open Source", sortOrder: 20,
+                includePaths: ["\(home)/Code/oss/pacer"]
+            ),
+            ProjectCollection(
+                id: "client", name: "Client: Globex", sortOrder: 50,
+                includePaths: ["\(home)/Code/oss/pacer"],
+                childCollectionIDs: ["acme"]   // nesting
+            ),
+        ]
+        collections.forEach { ctx.insert($0) }
     }
 
     /// Prior days' hourly rollups (~70 days) so the intelligence engine has
@@ -630,6 +723,29 @@ extension ScreenshotMode {
 /// A macOS window titlebar — traffic-light buttons at the left, a faint
 /// centered window title — prepended to window scenes so they read like a
 /// real app-window screenshot.
+/// Hosts the real `CollectionsContent` inside a page scaffold for the
+/// screenshot, in either presentation mode. Bindings are constant and
+/// callbacks are no-ops — capture renders a static frame.
+private struct CollectionsShowcase: View {
+    let mode: CollectionsViewMode
+    var body: some View {
+        PageScaffold(
+            "Projects",
+            subtitle: "Roll up related projects into overlapping collections."
+        ) {
+            CollectionsContent(
+                range: .ninetyDays,
+                searchText: "",
+                viewMode: mode,
+                viewModeBinding: .constant(mode),
+                onSelectCollection: { _ in },
+                onSelectProject: { _, _ in },
+                onManage: {}
+            )
+        }
+    }
+}
+
 private struct MacWindowChrome: View {
     let title: String
 
