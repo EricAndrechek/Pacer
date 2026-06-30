@@ -19,7 +19,12 @@ struct CollectionsManager: View {
     private var collections: [ProjectCollection]
     @Query private var aggregates: [ProjectDailyAggregate]
 
+    /// When opened from a "New collection" button, jump straight into the
+    /// editor instead of the list.
+    var startNew: Bool = false
+
     @State private var editor: CollectionEditorDraft?
+    @State private var didAutoStart = false
 
     private var knownProjectPaths: [String] {
         var set: Set<String> = []
@@ -46,6 +51,12 @@ struct CollectionsManager: View {
             }
         }
         .frame(width: 640, height: 600)
+        .onAppear {
+            if startNew && !didAutoStart {
+                didAutoStart = true
+                editor = CollectionEditorDraft()
+            }
+        }
         .sheet(item: $editor) { draft in
             CollectionEditorSheet(
                 draft: draft,

@@ -740,6 +740,7 @@ private struct CollectionsShowcase: View {
                 viewModeBinding: .constant(mode),
                 onSelectCollection: { _ in },
                 onSelectProject: { _, _ in },
+                onNew: {},
                 onManage: {}
             )
         }

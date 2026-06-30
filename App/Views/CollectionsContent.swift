@@ -34,6 +34,9 @@ struct CollectionsContent: View {
     let viewModeBinding: Binding<CollectionsViewMode>
     let onSelectCollection: (_ id: String) -> Void
     let onSelectProject: (_ path: String, _ displayName: String) -> Void
+    /// Open the manager with the new-collection editor already showing.
+    let onNew: () -> Void
+    /// Open the manager to edit / delete existing collections.
     let onManage: () -> Void
 
     private let viewMode: CollectionsViewMode
@@ -45,6 +48,7 @@ struct CollectionsContent: View {
         viewModeBinding: Binding<CollectionsViewMode>,
         onSelectCollection: @escaping (_ id: String) -> Void,
         onSelectProject: @escaping (_ path: String, _ displayName: String) -> Void,
+        onNew: @escaping () -> Void,
         onManage: @escaping () -> Void
     ) {
         self.searchText = searchText
@@ -52,6 +56,7 @@ struct CollectionsContent: View {
         self.viewModeBinding = viewModeBinding
         self.onSelectCollection = onSelectCollection
         self.onSelectProject = onSelectProject
+        self.onNew = onNew
         self.onManage = onManage
         if let days = range.days,
            let cutoffDate = Calendar.current.date(byAdding: .day, value: -days, to: Date()) {
@@ -99,9 +104,7 @@ struct CollectionsContent: View {
             if collections.isEmpty {
                 emptyCard
             } else {
-                PacerCard {
-                    cardHeader
-                } content: {
+                PacerCard("Collections", trailing: { laneControls }, content: {
                     if entries.isEmpty {
                         Text("No collections match \u{201C}\(searchText)\u{201D}.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -111,17 +114,17 @@ struct CollectionsContent: View {
                         case .tree: treeList(entries, perPath: perPath)
                         }
                     }
-                } footer: {
+                }, footer: {
                     Text("Collections can overlap — a project in two collections counts in both, so the totals here don't add up to your overall usage. Each collection is its own lens.")
-                }
+                })
             }
         }
     }
 
-    private var cardHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Collections").font(.title3).fontWeight(.semibold)
-            Spacer(minLength: 8)
+    /// Controls in the card's title row (rendered by PacerCard's trailing
+    /// slot): the lane/tree toggle, a prominent New, and Manage.
+    private var laneControls: some View {
+        HStack(spacing: 8) {
             Picker("View", selection: viewModeBinding) {
                 ForEach(CollectionsViewMode.allCases) { mode in
                     Image(systemName: mode.systemImage).tag(mode)
@@ -132,8 +135,15 @@ struct CollectionsContent: View {
             .controlSize(.small)
             .labelsHidden()
             .help("Switch between the ranked lane and the collapsible tree.")
+            Button(action: onNew) {
+                Label("New collection", systemImage: "plus.circle.fill")
+                    .labelStyle(.titleAndIcon)
+            }
+            .controlSize(.small)
+            .help("Create another collection.")
             Button("Manage…", action: onManage)
                 .controlSize(.small)
+                .help("Edit or delete existing collections.")
         }
     }
 
@@ -144,7 +154,7 @@ struct CollectionsContent: View {
                 Text("Group related projects into a collection — by hand (a scattered set of repos), by folder rule (everything under a work directory), or by nesting one collection inside another. Collections never change your projects; they're an overlay you can rank, scope into, and budget.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button {
-                    onManage()
+                    onNew()
                 } label: {
                     Label("New collection", systemImage: "plus.circle.fill").labelStyle(.titleAndIcon)
                 }

@@ -42,6 +42,10 @@ struct ProjectsView: View {
     /// Drives the collections-manager sheet, opened from the lane's
     /// "Manage…" button.
     @State private var showingCollectionsManager = false
+    /// When true, the collections manager opens straight into the
+    /// new-collection editor (from a "New collection" button) rather than
+    /// the plain list (from "Manage…").
+    @State private var collectionsManagerStartNew = false
     /// Drives the project-alias manager sheet, opened from the toolbar.
     /// Lives here (alongside `.searchable`) so the sheet attaches at the
     /// same level as the toolbar item that opens it, outside the
@@ -90,7 +94,14 @@ struct ProjectsView: View {
                         onSelectProject: { path, displayName in
                             modalRoot = .project(path: path, displayName: displayName, since: nil)
                         },
-                        onManage: { showingCollectionsManager = true }
+                        onNew: {
+                            collectionsManagerStartNew = true
+                            showingCollectionsManager = true
+                        },
+                        onManage: {
+                            collectionsManagerStartNew = false
+                            showingCollectionsManager = true
+                        }
                     )
                     .id("collections-\(range.rawValue)-\(collectionsViewMode.rawValue)")
                 } else {
@@ -132,7 +143,7 @@ struct ProjectsView: View {
             ProjectAliasManager()
         }
         .sheet(isPresented: $showingCollectionsManager) {
-            CollectionsManager()
+            CollectionsManager(startNew: collectionsManagerStartNew)
         }
         .pacerModalNavigation(root: $modalRoot)
     }
