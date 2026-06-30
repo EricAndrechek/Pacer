@@ -124,6 +124,10 @@ enum ScreenshotMode {
                       card: true, container: container) {
             CollectionsManager()
         }
+        await capture("collections-editor", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            CollectionEditorShowcase()
+        }
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
@@ -744,6 +748,33 @@ private struct CollectionsShowcase: View {
                 onManage: {}
             )
         }
+    }
+}
+
+/// Renders the redesigned collection editor with representative data so
+/// `make screenshots` shows the rule live-preview, the disambiguated
+/// member rows, and the color picker.
+private struct CollectionEditorShowcase: View {
+    var body: some View {
+        let home = NSHomeDirectory()
+        let known = [
+            "\(home)/Code/work/acme-corp/api",
+            "\(home)/Code/work/acme-corp/firmware",
+            "\(home)/Code/work/acme-corp/web-dashboard",
+            "\(home)/Code/work/acme-corp/cloud-infra",
+            "\(home)/Code/personal/notes-app",
+            "\(home)/Code/oss/pacer",
+        ]
+        var draft = CollectionEditorDraft()
+        draft.name = "Acme Corp"
+        draft.rules = ["\(home)/Code/work/acme-corp"]
+        draft.includePaths = ["\(home)/Code/oss/pacer"]
+        return CollectionEditorSheet(
+            draft: draft,
+            knownPaths: known,
+            otherCollections: [("side", "Side Projects")],
+            onSave: { _ in }
+        )
     }
 }
 

@@ -42,7 +42,7 @@ struct CollectionDetailView: View {
         let ranked = members
             .map { (path: $0, totals: perPath[$0] ?? .zero) }
             .sorted { $0.totals.cost > $1.totals.cost }
-        let hue = pacerCollectionColor(seed: collection.colorSeed)
+        let hue = pacerCollectionColor(seed: collection.colorSeed, hex: collection.colorHex)
 
         PacerModalContent(
             title: collection.name,
@@ -182,7 +182,7 @@ struct CollectionDetailView: View {
                     HoverRow(action: { push(.collection(id: entry.child.id)) }) {
                         HStack(spacing: 8) {
                             Circle()
-                                .fill(pacerCollectionColor(seed: entry.child.colorSeed))
+                                .fill(pacerCollectionColor(seed: entry.child.colorSeed, hex: entry.child.colorHex))
                                 .frame(width: 8, height: 8)
                             Text(entry.child.name).font(.callout)
                             Spacer(minLength: 8)

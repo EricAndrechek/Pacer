@@ -131,21 +131,26 @@ struct CollectionsManager: View {
     private func save(_ draft: CollectionEditorDraft) {
         let trimmedName = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
-        let ruleList = draft.rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? [] : [draft.rule.trimmingCharacters(in: .whitespacesAndNewlines)]
+        let rules = draft.rules
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         if let id = draft.editingID, let existing = collections.first(where: { $0.id == id }) {
             existing.name = trimmedName
-            existing.includePaths = draft.includePaths.sorted()
+            existing.colorHex = draft.colorHex
+            existing.includePaths = draft.includePaths
             existing.childCollectionIDs = Array(draft.childCollectionIDs)
-            existing.rules = ruleList
+            existing.rules = rules
+            existing.excludePaths = draft.excludePaths
         } else {
             let collection = ProjectCollection(
                 name: trimmedName,
+                colorHex: draft.colorHex,
                 sortOrder: (collections.map(\.sortOrder).max() ?? 0) + 1,
-                includePaths: draft.includePaths.sorted(),
+                includePaths: draft.includePaths,
                 childCollectionIDs: Array(draft.childCollectionIDs),
-                rules: ruleList
+                rules: rules,
+                excludePaths: draft.excludePaths
             )
             modelContext.insert(collection)
         }
@@ -178,7 +183,7 @@ private struct CollectionManagerRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(pacerCollectionColor(seed: collection.colorSeed))
+                .fill(pacerCollectionColor(seed: collection.colorSeed, hex: collection.colorHex))
                 .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -233,180 +238,22 @@ struct CollectionEditorDraft: Identifiable {
     let id = UUID()
     var editingID: String?
     var name: String = ""
-    var includePaths: Set<String> = []
+    var colorHex: String? = nil
+    /// Ordered so hand-added (incl. staged, data-less) projects stay put.
+    var includePaths: [String] = []
     var childCollectionIDs: Set<String> = []
-    var rule: String = ""
+    var rules: [String] = []
+    var excludePaths: [String] = []
 
     init() {}
 
     init(from collection: ProjectCollection) {
         self.editingID = collection.id
         self.name = collection.name
-        self.includePaths = Set(collection.includePaths)
+        self.colorHex = collection.colorHex
+        self.includePaths = collection.includePaths
         self.childCollectionIDs = Set(collection.childCollectionIDs)
-        self.rule = collection.rules.first ?? ""
-    }
-}
-
-// MARK: - Editor sheet
-
-struct CollectionEditorSheet: View {
-    let draft: CollectionEditorDraft
-    let knownPaths: [String]
-    /// (id, name) of every other collection — candidates for nesting.
-    let otherCollections: [(id: String, name: String)]
-    let onSave: (CollectionEditorDraft) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var name: String = ""
-    @State private var includePaths: Set<String> = []
-    @State private var childCollectionIDs: Set<String> = []
-    @State private var rule: String = ""
-    @State private var projectFilter: String = ""
-
-    private var isValid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var filteredPaths: [String] {
-        let needle = projectFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return knownPaths }
-        return knownPaths.filter { $0.lowercased().contains(needle) }
-    }
-
-    private var ruleMatchCount: Int {
-        let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return 0 }
-        return knownPaths.filter { CollectionRuleMatcher.matches(path: $0, rule: trimmed) }.count
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(pacerCollectionColor(seed: name.isEmpty ? "?" : name))
-                    .frame(width: 12, height: 12)
-                Text(draft.editingID == nil ? "New collection" : "Edit collection")
-                    .font(.headline)
-            }
-
-            TextField("Name (e.g. Frontend, Client work)", text: $name)
-                .textFieldStyle(.roundedBorder)
-
-            projectsSection
-
-            if !otherCollections.isEmpty {
-                subCollectionsSection
-            }
-
-            ruleSection
-
-            HStack {
-                if includePaths.isEmpty && childCollectionIDs.isEmpty && rule.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text("Empty for now — add projects, nest a collection, or set a rule.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                Button("Save") { commit() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isValid)
-            }
-        }
-        .padding(20)
-        .frame(width: 560)
-        .onAppear {
-            name = draft.name
-            includePaths = draft.includePaths
-            childCollectionIDs = draft.childCollectionIDs
-            rule = draft.rule
-        }
-    }
-
-    private var projectsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Projects").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Text("\(includePaths.count) selected").font(.caption2).foregroundStyle(.tertiary)
-            }
-            TextField("Filter projects", text: $projectFilter)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if filteredPaths.isEmpty {
-                        Text("No projects match.").font(.caption).foregroundStyle(.tertiary).padding(6)
-                    }
-                    ForEach(filteredPaths, id: \.self) { path in
-                        Button {
-                            if includePaths.contains(path) { includePaths.remove(path) }
-                            else { includePaths.insert(path) }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: includePaths.contains(path) ? "checkmark.square.fill" : "square")
-                                    .foregroundStyle(includePaths.contains(path) ? Color.accentColor : Color.secondary)
-                                Text(pacerShortPath(path)).font(.callout).lineLimit(1).truncationMode(.middle)
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
-                            .padding(.vertical, 3)
-                            .padding(.horizontal, 6)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .frame(height: 160)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
-        }
-    }
-
-    private var subCollectionsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Nest collections (optional)").font(.caption).foregroundStyle(.secondary)
-            ForEach(otherCollections, id: \.id) { other in
-                Button {
-                    if childCollectionIDs.contains(other.id) { childCollectionIDs.remove(other.id) }
-                    else { childCollectionIDs.insert(other.id) }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: childCollectionIDs.contains(other.id) ? "checkmark.square.fill" : "square")
-                            .foregroundStyle(childCollectionIDs.contains(other.id) ? Color.accentColor : Color.secondary)
-                        Text(other.name).font(.callout)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                    .padding(.vertical, 2)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private var ruleSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Auto-include rule (optional)").font(.caption).foregroundStyle(.secondary)
-            TextField("Folder prefix, e.g. ~/Code/work/acme", text: $rule)
-                .textFieldStyle(.roundedBorder)
-            if rule.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text("Leave blank for a purely hand-picked collection. A rule auto-includes every current and future project under that folder.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            } else {
-                Text("Matches \(ruleMatchCount) current project\(ruleMatchCount == 1 ? "" : "s") (plus any added later).")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func commit() {
-        var out = draft
-        out.name = name
-        out.includePaths = includePaths
-        out.childCollectionIDs = childCollectionIDs
-        out.rule = rule
-        onSave(out)
+        self.rules = collection.rules
+        self.excludePaths = collection.excludePaths
     }
 }

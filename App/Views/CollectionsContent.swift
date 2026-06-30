@@ -178,7 +178,7 @@ struct CollectionsContent: View {
     }
 
     private func laneRow(_ entry: LaneEntry, maxCost: Double) -> some View {
-        let hue = pacerCollectionColor(seed: entry.collection.colorSeed)
+        let hue = pacerCollectionColor(seed: entry.collection.colorSeed, hex: entry.collection.colorHex)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Circle().fill(hue).frame(width: 9, height: 9)
@@ -245,7 +245,7 @@ private struct CollectionTreeRow: View {
     }
 
     var body: some View {
-        let hue = pacerCollectionColor(seed: entry.collection.colorSeed)
+        let hue = pacerCollectionColor(seed: entry.collection.colorSeed, hex: entry.collection.colorHex)
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Button {
