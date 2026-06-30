@@ -28,7 +28,20 @@ struct ProjectsView: View {
     @AppStorage("pacer.projects.overviewMetric", store: PacerSettings.store)
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
+    /// Which lane the tab shows — the per-project leaderboard or the
+    /// collections overlay. Persisted so the tab reopens where you left it.
+    @AppStorage("pacer.projects.segment", store: PacerSettings.store)
+    private var segmentRaw: String = ProjectsSegment.projects.rawValue
+
+    /// Lane vs tree presentation for the Collections lane (the in-product
+    /// bake-off between roll-up layouts).
+    @AppStorage("pacer.collections.viewMode", store: PacerSettings.store)
+    private var collectionsViewModeRaw: String = CollectionsViewMode.lane.rawValue
+
     @State private var searchText: String = ""
+    /// Drives the collections-manager sheet, opened from the lane's
+    /// "Manage…" button.
+    @State private var showingCollectionsManager = false
     /// Drives the project-alias manager sheet, opened from the toolbar.
     /// Lives here (alongside `.searchable`) so the sheet attaches at the
     /// same level as the toolbar item that opens it, outside the
@@ -51,32 +64,57 @@ struct ProjectsView: View {
     private var overviewMetric: ProjectMetric {
         ProjectMetric(rawValue: overviewMetricRaw) ?? .cost
     }
+    private var segment: ProjectsSegment {
+        ProjectsSegment(rawValue: segmentRaw) ?? .projects
+    }
+    private var collectionsViewMode: CollectionsViewMode {
+        CollectionsViewMode(rawValue: collectionsViewModeRaw) ?? .lane
+    }
 
     var body: some View {
         PageScaffold(
             "Projects",
-            subtitle: "Per-project rollup of cost and tokens.",
+            subtitle: segment == .collections
+                ? "Roll up related projects into overlapping collections."
+                : "Per-project rollup of cost and tokens.",
             trailing: { headerControls }
         ) {
-            ProjectsContent(
-                range: range,
-                sort: sort,
-                descending: sortDescending,
-                overviewMetric: overviewMetric,
-                searchText: searchText,
-                rangeBinding: rangeBinding,
-                sortFieldBinding: sortFieldBinding,
-                sortDescendingBinding: $sortDescending,
-                overviewMetricBinding: overviewMetricBinding,
-                onSelectProject: { path, displayName, since in
-                    modalRoot = .project(
-                        path: path,
-                        displayName: displayName,
-                        since: since
+            Group {
+                if segment == .collections {
+                    CollectionsContent(
+                        range: range,
+                        searchText: searchText,
+                        viewMode: collectionsViewMode,
+                        viewModeBinding: collectionsViewModeBinding,
+                        onSelectCollection: { id in modalRoot = .collection(id: id) },
+                        onSelectProject: { path, displayName in
+                            modalRoot = .project(path: path, displayName: displayName, since: nil)
+                        },
+                        onManage: { showingCollectionsManager = true }
                     )
+                    .id("collections-\(range.rawValue)-\(collectionsViewMode.rawValue)")
+                } else {
+                    ProjectsContent(
+                        range: range,
+                        sort: sort,
+                        descending: sortDescending,
+                        overviewMetric: overviewMetric,
+                        searchText: searchText,
+                        rangeBinding: rangeBinding,
+                        sortFieldBinding: sortFieldBinding,
+                        sortDescendingBinding: $sortDescending,
+                        overviewMetricBinding: overviewMetricBinding,
+                        onSelectProject: { path, displayName, since in
+                            modalRoot = .project(
+                                path: path,
+                                displayName: displayName,
+                                since: since
+                            )
+                        }
+                    )
+                    .id("\(range.rawValue)")
                 }
-            )
-            .id("\(range.rawValue)")
+            }
         }
         // Native macOS search field lives in the window toolbar — frees
         // the card header from the custom magnifying-glass + xmark
@@ -93,6 +131,9 @@ struct ProjectsView: View {
         .sheet(isPresented: $showingAliasManager) {
             ProjectAliasManager()
         }
+        .sheet(isPresented: $showingCollectionsManager) {
+            CollectionsManager()
+        }
         .pacerModalNavigation(root: $modalRoot)
     }
 
@@ -106,23 +147,43 @@ struct ProjectsView: View {
     @ViewBuilder
     private var headerControls: some View {
         HStack(spacing: 10) {
-            Button {
-                showingAliasManager = true
-            } label: {
-                Label("Aliases…", systemImage: "arrow.triangle.merge")
+            Picker("Section", selection: segmentBinding) {
+                ForEach(ProjectsSegment.allCases) { seg in
+                    Text(seg.label).tag(seg)
+                }
             }
+            .pickerStyle(.segmented)
+            .frame(width: 200)
             .controlSize(.small)
-            .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
+            .labelsHidden()
+            .help("Switch between the per-project leaderboard and your collections.")
+
+            if segment == .projects {
+                Button {
+                    showingAliasManager = true
+                } label: {
+                    Label("Aliases…", systemImage: "arrow.triangle.merge")
+                }
+                .controlSize(.small)
+                .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
+            }
             Picker("Time range", selection: rangeBinding) {
                 ForEach(TimeRange.allCases) { r in
                     Text(r.shortLabel).tag(r)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 280)
+            .frame(width: 260)
             .controlSize(.small)
             .labelsHidden()
         }
+    }
+
+    private var segmentBinding: Binding<ProjectsSegment> {
+        Binding(get: { segment }, set: { segmentRaw = $0.rawValue })
+    }
+    private var collectionsViewModeBinding: Binding<CollectionsViewMode> {
+        Binding(get: { collectionsViewMode }, set: { collectionsViewModeRaw = $0.rawValue })
     }
 
     private var rangeBinding: Binding<TimeRange> {
