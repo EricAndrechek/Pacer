@@ -34,6 +34,10 @@ struct ProjectsView: View {
     /// on "All" is the least surprising default.
     @State private var collectionFilter: String = ""
 
+    /// Optional starting scope (used by the screenshot harness to render a
+    /// scoped collection; nil in normal use).
+    var initialScope: String? = nil
+
     @State private var searchText: String = ""
     /// Drives the collections-manager sheet, opened from the lane's
     /// "Manage…" button.
@@ -126,6 +130,9 @@ struct ProjectsView: View {
             CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
         }
         .pacerModalNavigation(root: $modalRoot)
+        .onAppear {
+            if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
+        }
     }
 
     /// Tab-level controls in the page header: the alias-manager entry
@@ -550,6 +557,7 @@ private struct ProjectsContent: View {
         VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
             collectionFilterBar
             if !collectionFilter.isEmpty { scopeHeader }
+            if let comp = scopeComposition() { compositionCard(comp) }
             if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState
             } else if rows.isEmpty {
@@ -1091,30 +1099,114 @@ private struct ProjectsContent: View {
         }
     }
 
-    /// Membership chips for a project row — which collection(s) it's in
-    /// (excluding the one currently scoped, which would be redundant).
-    /// Display-only provenance; scoping is done from the filter bar.
-    @ViewBuilder
-    private func membershipChips(for path: String) -> some View {
-        let ids = (cachedMembership[path] ?? []).filter { $0 != collectionFilter }
-        if !ids.isEmpty {
-            HStack(spacing: 4) {
-                ForEach(ids.prefix(3), id: \.self) { id in
-                    if let c = collectionsByID[id] {
-                        let hue = pacerCollectionColor(seed: c.colorSeed, hex: c.colorHex)
-                        HStack(spacing: 3) {
-                            Circle().fill(hue).frame(width: 6, height: 6)
-                            Text(c.name).font(.system(size: 10, weight: .medium))
+    private struct CompositionRow: Identifiable {
+        let id: String
+        let name: String
+        let hue: Color
+        let cost: Double
+        let share: Double     // fraction of the parent's total
+        let isDirect: Bool
+    }
+
+    /// When the scoped collection nests others, break its total down by
+    /// sub-collection (+ a "directly added" bucket) so nesting carries
+    /// proportional meaning, not just bulk-add convenience. Returns nil
+    /// when there's nothing to break down.
+    private func scopeComposition() -> (rows: [CompositionRow], overlaps: Bool)? {
+        guard !collectionFilter.isEmpty,
+              let parent = collections.first(where: { $0.id == collectionFilter }),
+              !parent.childCollectionIDs.isEmpty else { return nil }
+        let byID = collectionsByID
+        let perPath = CollectionUsageRollup.perPathTotals(from: aggregates)
+        let known = Array(perPath.keys)
+        let parentMembers = CollectionResolver.resolve(parent.id, collections: byID, knownPaths: known)
+        let parentCost = CollectionUsageRollup.totals(for: parentMembers, perPath: perPath).cost
+        guard parentCost > 0 else { return nil }
+
+        var rows: [CompositionRow] = []
+        var childUnion: Set<String> = []
+        var shareSum = 0.0
+        for cid in parent.childCollectionIDs {
+            guard let child = byID[cid] else { continue }
+            let m = CollectionResolver.resolve(cid, collections: byID, knownPaths: known)
+            childUnion.formUnion(m)
+            let cost = CollectionUsageRollup.totals(for: m, perPath: perPath).cost
+            let share = cost / parentCost
+            shareSum += share
+            rows.append(CompositionRow(
+                id: cid, name: child.name,
+                hue: pacerCollectionColor(seed: child.colorSeed, hex: child.colorHex),
+                cost: cost, share: share, isDirect: false
+            ))
+        }
+        // Projects that belong to the parent directly (not via any child).
+        let directOnly = parentMembers.subtracting(childUnion)
+        let directCost = CollectionUsageRollup.totals(for: directOnly, perPath: perPath).cost
+        if directCost > 0 {
+            rows.append(CompositionRow(
+                id: "__direct__", name: "Directly in \(parent.name)",
+                hue: .secondary, cost: directCost, share: directCost / parentCost, isDirect: true
+            ))
+        }
+        // Children overlap if their shares plus the direct share exceed 1
+        // (a project counted in more than one sub-collection).
+        let overlaps = (shareSum + directCost / parentCost) > 1.001
+        return (rows.sorted { $0.cost > $1.cost }, overlaps)
+    }
+
+    private func compositionCard(_ comp: (rows: [CompositionRow], overlaps: Bool)) -> some View {
+        let maxShare = comp.rows.map(\.share).max() ?? 1
+        return PacerCard("Made up of") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(comp.rows) { r in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 8) {
+                            Circle().fill(r.hue).frame(width: 8, height: 8)
+                            Text(r.name)
+                                .font(.callout)
+                                .foregroundStyle(r.isDirect ? .secondary : .primary)
+                            Spacer(minLength: 8)
+                            Text("\(Int((r.share * 100).rounded()))%")
+                                .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                            Text(pacerCost(r.cost))
+                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
                         }
-                        .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(Capsule().fill(hue.opacity(0.12)))
-                        .foregroundStyle(hue)
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(r.hue.opacity(0.55))
+                                .frame(width: maxShare > 0 ? geo.size.width * (r.share / maxShare) : 0, height: 5)
+                        }
+                        .frame(height: 5)
                     }
                 }
-                if ids.count > 3 {
-                    Text("+\(ids.count - 3)").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+        } footer: {
+            if comp.overlaps {
+                Text("Sub-collections share some projects, so their percentages add up to more than 100%.")
+            }
+        }
+    }
+
+    /// Membership provenance for a project row — a small cluster of
+    /// collection-colored dots (names on hover), excluding the one
+    /// currently scoped. Dots instead of name-pills keep the leaderboard
+    /// from getting busy. Scoping is done from the filter bar.
+    @ViewBuilder
+    private func membershipDots(for path: String) -> some View {
+        let ids = (cachedMembership[path] ?? []).filter { $0 != collectionFilter }
+        if !ids.isEmpty {
+            let names = ids.compactMap { collectionsByID[$0]?.name }
+            HStack(spacing: 3) {
+                ForEach(ids.prefix(5), id: \.self) { id in
+                    if let c = collectionsByID[id] {
+                        Circle()
+                            .fill(pacerCollectionColor(seed: c.colorSeed, hex: c.colorHex))
+                            .frame(width: 6, height: 6)
+                    }
                 }
             }
+            .help(names.count == 1 ? "In \(names[0])" : "In \(names.joined(separator: ", "))")
         }
     }
 
@@ -1170,13 +1262,13 @@ private struct ProjectsContent: View {
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                     ProjectStatusBadge(state: row.status)
+                    membershipDots(for: row.path)
                 }
                 Text(row.path)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                membershipChips(for: row.path)
             }
             Spacer(minLength: 8)
             Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))

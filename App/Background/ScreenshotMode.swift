@@ -122,6 +122,11 @@ enum ScreenshotMode {
                       card: true, chrome: true, title: "Projects", container: container) {
             ProjectsView()
         }
+        // Scoped into a nested collection — shows the composition breakdown.
+        await capture("projects-collections-scoped", width: 1060, height: 940, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            ProjectsView(initialScope: "client")
+        }
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
