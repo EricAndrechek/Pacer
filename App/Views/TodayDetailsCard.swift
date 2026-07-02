@@ -21,7 +21,11 @@ struct TodayDetailsCard: View {
     private var totals: Totals { Totals(rows: aggregates) }
 
     var body: some View {
-        PacerCard("Today's traffic", trailing: {
+        // Fold the day's rows once per render, not once per tile — `totals`
+        // is a computed property read ~a dozen times across the grid and
+        // cache line below.
+        let totals = totals
+        return PacerCard("Today's traffic", trailing: {
             Text(TokenSample.formatDate(Date()))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -32,9 +36,9 @@ struct TodayDetailsCard: View {
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 18) {
-                    metricGrid
+                    metricGrid(totals)
                     if totals.cacheReadTokens > 0 {
-                        cacheRatio
+                        cacheRatio(totals)
                     }
                 }
             }
@@ -43,7 +47,7 @@ struct TodayDetailsCard: View {
 
     /// Four-up tile row: input, output, cache read, models. Wraps to
     /// 2x2 on narrow widths via `LazyVGrid`.
-    private var metricGrid: some View {
+    private func metricGrid(_ totals: Totals) -> some View {
         LazyVGrid(
             columns: Array(
                 repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
@@ -79,7 +83,7 @@ struct TodayDetailsCard: View {
     /// times each written token paid off), and the dollar value the
     /// cache saved vs a hypothetical no-cache day.
     @ViewBuilder
-    private var cacheRatio: some View {
+    private func cacheRatio(_ totals: Totals) -> some View {
         let r = totals.cacheHitRate
         let pctText = String(format: "%.1f%%", r * 100)
         let savings = totals.cacheSavingsUSD(snapshot: SampleCostCache.current())
