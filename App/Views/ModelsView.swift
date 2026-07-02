@@ -29,33 +29,59 @@ struct ModelsView: View {
         Binding(get: { sort }, set: { sortRaw = $0.rawValue })
     }
 
+    @AppStorage("pacer.models.metric", store: PacerSettings.store)
+    private var metricRaw: String = ModelMetric.tokens.rawValue
+    @AppStorage("pacer.models.grouping", store: PacerSettings.store)
+    private var groupingRaw: String = ModelGrouping.none.rawValue
+
+    private var metric: ModelMetric { ModelMetric(rawValue: metricRaw) ?? .tokens }
+    private var grouping: ModelGrouping { ModelGrouping(rawValue: groupingRaw) ?? .none }
+    private var metricBinding: Binding<ModelMetric> {
+        Binding(get: { metric }, set: { metricRaw = $0.rawValue })
+    }
+    private var groupingBinding: Binding<ModelGrouping> {
+        Binding(get: { grouping }, set: { groupingRaw = $0.rawValue })
+    }
+
     var body: some View {
         PageScaffold(
             "Models",
             subtitle: "How traffic splits across Claude models.",
             trailing: {
-                // Page-header range picker — scopes every card on the tab
-                // (Token share, Trend, and the list), so it lives here
-                // rather than in one card's header. Matches History and
-                // Projects.
-                Picker("Time range", selection: rangeBinding) {
-                    ForEach(TimeRange.allCases) { r in
-                        Text(r.shortLabel).tag(r)
+                // Page-header controls scope every card on the tab (Token
+                // share, Trend, the list): group-by folds versions together,
+                // the range picker windows the data. The donut's metric
+                // (tokens/cost) lives on its own card header, like Projects.
+                HStack(spacing: 10) {
+                    Picker("Group by", selection: groupingBinding) {
+                        ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
                     }
+                    .pickerStyle(.segmented)
+                    .frame(width: 132)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    Picker("Time range", selection: rangeBinding) {
+                        ForEach(TimeRange.allCases) { r in
+                            Text(r.shortLabel).tag(r)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                    .controlSize(.small)
+                    .labelsHidden()
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 280)
-                .controlSize(.small)
-                .labelsHidden()
             }
         ) {
             ModelsContent(
                 range: range,
                 sort: sort,
                 descending: sortDescending,
+                metric: metric,
+                grouping: grouping,
                 rangeBinding: rangeBinding,
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
+                metricBinding: metricBinding,
                 onSelectDay: { date in
                     modalRoot = .day(date: date)
                 }
@@ -85,6 +111,49 @@ enum ModelsSort: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which metric sizes the share donut (mirrors ProjectsView's overview
+/// metric). Sessions-per-model isn't offered: unlike projects, our per-model
+/// rollup carries no session count, and the only proxy (a session's single
+/// dominant model) would misattribute mixed-model sessions.
+enum ModelMetric: String, CaseIterable, Identifiable {
+    case tokens
+    case cost
+
+    var id: String { rawValue }
+    var label: String { self == .cost ? "Cost" : "Tokens" }
+}
+
+/// How the Models tab buckets rows. `.none` is one row per model, colored by
+/// the blend palette. Grouping folds versions together and switches to
+/// well-separated *hashed* colors — a few groups don't need (and read better
+/// without) the within-family spectrum, which is what makes 4.7 vs 4.8 pop
+/// once collapsed into "Opus" or "Opus 4".
+enum ModelGrouping: String, CaseIterable, Identifiable {
+    case none
+    case family
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .none:   return "Model"
+        case .family: return "Class"
+        }
+    }
+
+    /// Bucket key + display label for a raw model id under this grouping.
+    /// Unparseable ids fall back to the per-model form.
+    func bucket(_ model: String) -> (key: String, label: String) {
+        let id = PacerModelIdentity(model)
+        switch self {
+        case .none:
+            return (model, pacerModelDisplayName(model))
+        case .family:
+            if let f = id.family { return (f.rawValue, f.label) }
+        }
+        return (model, pacerModelDisplayName(model))
+    }
+}
+
 private struct ModelsContent: View {
     @Query private var aggregates: [DailyAggregate]
     /// Singleton-row probe that fires exactly once per completed scan
@@ -97,9 +166,12 @@ private struct ModelsContent: View {
 
     let sort: ModelsSort
     let descending: Bool
+    let metric: ModelMetric
+    let grouping: ModelGrouping
     let rangeBinding: Binding<TimeRange>
     let sortFieldBinding: Binding<ModelsSort>
     let sortDescendingBinding: Binding<Bool>
+    let metricBinding: Binding<ModelMetric>
     /// Callback to the page-level modal navigator when a chart bar
     /// is tapped — opens that day's day-detail modal.
     let onSelectDay: (String) -> Void
@@ -117,16 +189,22 @@ private struct ModelsContent: View {
         range: TimeRange,
         sort: ModelsSort,
         descending: Bool,
+        metric: ModelMetric,
+        grouping: ModelGrouping,
         rangeBinding: Binding<TimeRange>,
         sortFieldBinding: Binding<ModelsSort>,
         sortDescendingBinding: Binding<Bool>,
+        metricBinding: Binding<ModelMetric>,
         onSelectDay: @escaping (String) -> Void
     ) {
         self.sort = sort
         self.descending = descending
+        self.metric = metric
+        self.grouping = grouping
         self.rangeBinding = rangeBinding
         self.sortFieldBinding = sortFieldBinding
         self.sortDescendingBinding = sortDescendingBinding
+        self.metricBinding = metricBinding
         self.onSelectDay = onSelectDay
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
@@ -142,8 +220,11 @@ private struct ModelsContent: View {
     }
 
     private struct ModelRow: Identifiable {
-        let model: String
-        let displayName: String
+        let key: String          // bucket identity (raw model id when ungrouped)
+        let model: String        // raw id for copy; empty when this row is a group
+        let displayName: String  // "Opus 4.7" / "Opus" / "Opus 4"
+        let subtitle: String?    // raw id (ungrouped) or "N versions" (grouped)
+        let color: Color
         let cost: Double
         let inputTokens: Int64
         let outputTokens: Int64
@@ -152,7 +233,7 @@ private struct ModelsContent: View {
         let activeDays: Int
         let firstSeen: String
         let lastSeen: String
-        var id: String { model }
+        var id: String { key }
     }
 
     private struct DailyMix: Identifiable {
@@ -193,6 +274,8 @@ private struct ModelsContent: View {
     /// only walks `aggregates` once per body fire.
     private func computeDerived() -> DerivedData {
         struct Acc {
+            var label: String = ""
+            var members: Set<String> = []
             var cost: Double = 0
             var input: Int64 = 0
             var output: Int64 = 0
@@ -201,9 +284,14 @@ private struct ModelsContent: View {
             var firstSeen: String = "9999-99-99"
             var lastSeen: String = "0000-00-00"
         }
-        var byModel: [String: Acc] = [:]
+        // Fold rows into buckets — one per model when ungrouped, else per
+        // class / per major version.
+        var byKey: [String: Acc] = [:]
         for r in aggregates {
-            var a = byModel[r.model] ?? Acc()
+            let b = grouping.bucket(r.model)
+            var a = byKey[b.key] ?? Acc()
+            a.label = b.label
+            a.members.insert(r.model)
             a.cost += r.totalCostUSD
             a.input += r.inputTokens
             a.output += r.outputTokens
@@ -211,12 +299,18 @@ private struct ModelsContent: View {
             a.dates.insert(r.date)
             if r.date < a.firstSeen { a.firstSeen = r.date }
             if r.date > a.lastSeen { a.lastSeen = r.date }
-            byModel[r.model] = a
+            byKey[b.key] = a
         }
-        let unsorted = byModel.map { (model, a) in
+        let ungrouped = grouping == .none
+        let unsorted = byKey.map { (key, a) -> ModelRow in
             ModelRow(
-                model: model,
-                displayName: pacerShortModel(model),
+                key: key,
+                model: ungrouped ? key : "",
+                displayName: a.label,
+                subtitle: ungrouped
+                    ? key
+                    : "\(a.members.count) version\(a.members.count == 1 ? "" : "s")",
+                color: colorFor(a.label),
                 cost: a.cost,
                 inputTokens: a.input,
                 outputTokens: a.output,
@@ -240,37 +334,39 @@ private struct ModelsContent: View {
         case .cost:
             primary = { $0.cost < $1.cost }
         }
-        // Stable tiebreaker on the model identifier so rows with equal
-        // primary values don't reshuffle each refresh.
+        // Stable tiebreaker on the bucket key so equal-value rows don't
+        // reshuffle each refresh.
         let sorted = unsorted.sorted { lhs, rhs in
             if primary(lhs, rhs) { return true }
             if primary(rhs, lhs) { return false }
-            return lhs.model < rhs.model
+            return lhs.key < rhs.key
         }
         let rows: [ModelRow] = descending ? sorted.reversed() : sorted
 
-        // Pre-build the share donut's cumulative-angle table so the
-        // per-hover `body` doesn't have to.
+        // Share-donut cumulative-angle table, sized by the chosen metric so a
+        // per-hover `body` doesn't have to walk it.
         var running = 0.0
         var cumulative: [(row: ModelRow, max: Double)] = []
         cumulative.reserveCapacity(rows.count)
         for r in rows {
-            running += Double(r.totalTokens)
+            running += metricValue(r)
             cumulative.append((r, running))
         }
 
-        let dailyMix: [DailyMix] = aggregates.map {
-            DailyMix(
-                date: $0.date,
-                model: $0.model,
-                displayName: pacerShortModel($0.model),
-                tokens: $0.inputTokens + $0.outputTokens
-            )
+        // Daily token mix, folded by the grouping so each (day, group) is one
+        // stacked segment rather than one-per-model.
+        struct DayKey: Hashable { let date: String; let key: String }
+        var mix: [DayKey: (label: String, tokens: Int64)] = [:]
+        for r in aggregates {
+            let b = grouping.bucket(r.model)
+            let dk = DayKey(date: r.date, key: b.key)
+            var e = mix[dk] ?? (label: b.label, tokens: Int64(0))
+            e.tokens += r.inputTokens + r.outputTokens
+            mix[dk] = e
         }
-        // Bucket dailyMix by date once so the trend-chart hover
-        // tooltip is an O(1) lookup. Per-date entries are pre-sorted
-        // by tokens descending — same order the previous computed
-        // property produced.
+        let dailyMix: [DailyMix] = mix.map { (dk, v) in
+            DailyMix(date: dk.date, model: dk.key, displayName: v.label, tokens: v.tokens)
+        }
         var buckets: [String: [(model: String, tokens: Int64)]] = [:]
         for entry in dailyMix {
             buckets[entry.date, default: []].append(
@@ -287,6 +383,33 @@ private struct ModelsContent: View {
             trendBuckets: buckets,
             shareCumulative: cumulative
         )
+    }
+
+    /// The metric that sizes the donut for a row.
+    private func metricValue(_ row: ModelRow) -> Double {
+        metric == .cost ? row.cost : Double(row.totalTokens)
+    }
+    /// Compact metric label / exact tooltip for legends + hover readouts.
+    private func metricLabel(_ row: ModelRow) -> String {
+        metric == .cost ? pacerCost(row.cost) : pacerTokens(row.totalTokens)
+    }
+    private func metricHelp(_ row: ModelRow) -> String {
+        metric == .cost ? pacerCostExact(row.cost) : pacerTokensExact(row.totalTokens)
+    }
+    /// Color for a slice/label. Ungrouped uses the curated blend palette; a
+    /// class-grouped view uses each family's class-center color, so a class
+    /// reads the same color it does in the per-model view (and stays on the
+    /// well-separated ~90°-apart class anchors).
+    private func colorFor(_ label: String) -> Color {
+        switch grouping {
+        case .none:
+            return pacerModelColor(label)
+        case .family:
+            if let f = PacerModelIdentity(label).family {
+                return PacerModelPalette.classColor(f)
+            }
+            return pacerGeneratedColor(label)
+        }
     }
 
     var body: some View {
@@ -308,6 +431,8 @@ private struct ModelsContent: View {
         .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
         .onChange(of: sort) { _, _ in refreshDerived() }
         .onChange(of: descending) { _, _ in refreshDerived() }
+        .onChange(of: metric) { _, _ in refreshDerived() }
+        .onChange(of: grouping) { _, _ in refreshDerived() }
     }
 
     private var emptyState: some View {
@@ -326,18 +451,18 @@ private struct ModelsContent: View {
         derived.shareCumulative
     }
 
-    private var shareTotalTokens: Int64 {
-        rows.reduce(0) { $0 + $1.totalTokens }
+    private var shareTotal: Double {
+        rows.reduce(0) { $0 + metricValue($1) }
     }
 
     /// VoiceOver summary read in place of the donut. Lists the top 5
-    /// models with their token-share percentage so screen-reader users
-    /// get the same info sighted users get from wedges + legend.
+    /// rows with their share percentage so screen-reader users get the
+    /// same info sighted users get from wedges + legend.
     private var shareSummary: String {
-        let total = shareTotalTokens
+        let total = shareTotal
         guard total > 0 else { return "no data yet" }
         return rows.prefix(5).map { r in
-            let pct = Int(Double(r.totalTokens) / Double(total) * 100)
+            let pct = Int(metricValue(r) / total * 100)
             return "\(r.displayName) \(pct) percent"
         }.joined(separator: ", ")
     }
@@ -355,48 +480,57 @@ private struct ModelsContent: View {
     }
 
     private var shareCard: some View {
-        let total = shareTotalTokens
-        return PacerCard("Token share", trailing: {
-            if let r = hoveredShareRow {
-                let pct = total > 0 ? Int(Double(r.totalTokens) / Double(total) * 100) : 0
-                HStack(spacing: 6) {
-                    Text(r.displayName)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerTokens(r.totalTokens)).help(pacerTokensExact(r.totalTokens))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("(\(pct)%)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+        let total = shareTotal
+        let title = metric == .cost ? "Cost share" : "Token share"
+        return PacerCard(title, trailing: {
+            HStack(spacing: 10) {
+                if let r = hoveredShareRow {
+                    let pct = total > 0 ? Int(metricValue(r) / total * 100) : 0
+                    HStack(spacing: 6) {
+                        Text(r.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text(metricLabel(r)).help(metricHelp(r))
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        Text("(\(pct)%)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
                 }
+                Picker("Metric", selection: metricBinding) {
+                    ForEach(ModelMetric.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 132)
+                .controlSize(.small)
+                .labelsHidden()
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
                 PacerDonut(
                     slices: rows.map {
-                        PacerDonutSlice(id: $0.displayName, value: Double($0.totalTokens),
-                                        color: pacerModelColor($0.displayName))
+                        PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
                     },
                     size: 180,
-                    hoveredID: hoveredShareRow?.displayName,
+                    hoveredID: hoveredShareRow?.key,
                     hoveredAngle: $hoveredShareAngle,
-                    accessibilityLabel: "Token share across models",
+                    accessibilityLabel: "\(title) across models",
                     accessibilityValue: shareSummary
                 )
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(rows.prefix(8)) { row in
                         PacerDonutLegendRow(
-                            color: pacerModelColor(row.displayName),
+                            color: row.color,
                             label: row.displayName
                         ) {
-                            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
+                            Text(metricLabel(row)).help(metricHelp(row))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                                 .frame(width: 90, alignment: .trailing)
                             if total > 0 {
-                                Text("\(Int(Double(row.totalTokens) / Double(total) * 100))%")
+                                Text("\(Int(metricValue(row) / total * 100))%")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                                     .monospacedDigit()
@@ -437,7 +571,8 @@ private struct ModelsContent: View {
     }
 
     private var trendCard: some View {
-        PacerCard("Trend", trailing: {
+        let trendAxis = pacerDateAxis(dailyMix.map(\.date))
+        return PacerCard("Trend", trailing: {
             // Hover swaps the trailing slot for the date + total tokens.
             // Detail per-model breakdown shows below the chart on hover
             // — same overlay-text pattern keeps the chart geometry
@@ -474,7 +609,7 @@ private struct ModelsContent: View {
                 .frame(height: 200)
                 .chartForegroundStyleScale(
                     domain: trendModelDomain,
-                    range: trendModelDomain.map { pacerModelColor($0) }
+                    range: trendModelDomain.map { colorFor($0) }
                 )
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
@@ -488,7 +623,17 @@ private struct ModelsContent: View {
                         }
                     }
                 }
-                .chartXAxis(.hidden)
+                .chartXAxis {
+                    AxisMarks(values: trendAxis.values) { value in
+                        AxisValueLabel {
+                            if let date = value.as(String.self) {
+                                Text(trendAxis.label(date))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
                 .chartXSelection(value: $rawTrendHoverDate)
                 .onChange(of: rawTrendHoverDate) { _, newValue in
                     trendHoverDebounce?.cancel()
@@ -544,7 +689,9 @@ private struct ModelsContent: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                         .contextMenu {
-                            Button("Copy model name") { pacerCopyToPasteboard(row.model) }
+                            if !row.model.isEmpty {
+                                Button("Copy model name") { pacerCopyToPasteboard(row.model) }
+                            }
                             Button("Copy display name") { pacerCopyToPasteboard(row.displayName) }
                             Divider()
                             // Copy precise dollars so a paste into a
@@ -556,7 +703,7 @@ private struct ModelsContent: View {
                         }
                 }
                 HStack {
-                    Text("\(rows.count) model\(rows.count == 1 ? "" : "s")")
+                    Text("\(rows.count) \(grouping == .none ? "model" : "group")\(rows.count == 1 ? "" : "s")")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -617,10 +764,12 @@ private struct ModelsContent: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.displayName)
                     .font(.system(size: 13, weight: .medium))
-                Text(row.model)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                if let subtitle = row.subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))

@@ -137,7 +137,7 @@ struct MenuBarLabel: View {
     }
 
     private var activeModel: String? {
-        recentSamples.first.map { pacerShortModel($0.model) }
+        recentSamples.first.map { pacerModelDisplayName($0.model) }
     }
 
     /// Whether the 5h-percent chip should prefix itself with "5h ". When

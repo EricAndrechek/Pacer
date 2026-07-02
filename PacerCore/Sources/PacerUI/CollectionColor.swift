@@ -31,9 +31,10 @@ public func pacerCollectionColor(seed: String, hex: String? = nil) -> Color {
 /// a **continuous hue** from a well-distributed hash: exact collisions
 /// become essentially impossible, and rendering in OKLCH at a fixed
 /// lightness + chroma keeps every hue equally vivid and legible on both
-/// light and dark backgrounds. (Collections and models stay on the curated
-/// `pacerColorPalette` — they're few and named, where a hand-picked
-/// palette looks best.)
+/// light and dark backgrounds. (Collections offer the curated
+/// `pacerColorPalette` as a hand override; models get a curated
+/// family-hue scheme — see `pacerModelColor` — because their ids are
+/// globally stable and worth naming.)
 public func pacerProjectColor(path: String, seed: String? = nil, hex: String? = nil) -> Color {
     if let hex, let c = Color(pacerHex: hex) { return c }
     return pacerGeneratedColor(seed ?? path)
@@ -63,8 +64,9 @@ private let pacerColorRidge: [(h: Double, l: Double, c: Double)] = [
 /// Interpolated (lightness, chroma) on the pretty ridge for any hue, with
 /// smoothstep easing and wraparound across the purple→pink gap. This is
 /// what lets a *continuous* generated hue look as good as the discrete
-/// system palette it was sampled from.
-private func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
+/// system palette it was sampled from. Internal so `PacerModelPalette` can
+/// seat its placed hues on the same ridge.
+func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
     let n = pacerColorRidge.count
     let hue = hue.truncatingRemainder(dividingBy: 360)
     for i in 0..<n {
@@ -152,15 +154,18 @@ func pacerOKLCH(l: Double, c: Double, hueDegrees: Double) -> Color {
     return Color(.sRGB, red: toSRGB(r), green: toSRGB(g), blue: toSRGB(bl))
 }
 
-/// Stable color for an LLM model. Model names are already stable, so no DB
-/// record is needed — just generate from the short name so every model
-/// donut, legend, and swatch across the app agrees (they used to use three
-/// different color systems). Keyed on `pacerShortModel` so provider
-/// prefixes don't split a model into two colors. Uses the same pretty ridge
-/// as projects: the old sum-of-scalars hash into a 10-color palette collided
-/// badly (birthday paradox: ~70% chance two of five models shared a color).
+/// Stable, curated color for an LLM model — the model-color entry point used
+/// across every donut, legend, chart, and swatch. Delegates to the active
+/// `PacerModelPalette` (see `ModelPalette.swift`), which spreads models along
+/// an ordered spectrum: four intelligence classes ~90° apart on the wheel,
+/// each family's versions building toward the next tier, with clear jumps
+/// between major versions. Unrecognized families fall back to the generated
+/// (hashed) color, so nothing ever renders colorless.
+///
+/// Symmetric: the raw `claude-opus-4-7` and its display form `Opus 4.7`
+/// resolve to the same color, so callers can pass whichever they have.
 public func pacerModelColor(_ model: String) -> Color {
-    pacerGeneratedColor(pacerShortModel(model))
+    pacerCurrentModelPalette().color(for: model)
 }
 
 public extension Color {

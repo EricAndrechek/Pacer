@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import PacerCore
+import PacerUI
 
 /// In-process background data collector. Runs `ScanCoordinator`
 /// (FSEvents-driven JSONL scan + OAuth polling + SwiftData
@@ -379,6 +380,7 @@ final class AppBackgroundService {
     private func startEngine() {
         guard engineRecomputeObserver == nil else { return }
         Task { @MainActor [weak self] in
+            self?.refreshModelPalette()
             await self?.recomputeEngineIfDue(force: true)
         }
         installEngineRecomputeObserver()
@@ -396,9 +398,23 @@ final class AppBackgroundService {
             let relevant = (summary?.samplesChanged ?? false) || (summary?.rateLimitsChanged ?? false)
             guard relevant else { return }
             Task { @MainActor [weak self] in
+                self?.refreshModelPalette()
                 await self?.recomputeEngineIfDue()
             }
         }
+    }
+
+    /// Rebuild the model-color palette from the distinct models seen in the
+    /// store, so a model the bundled catalog doesn't know about still gets a
+    /// proper in-band color (and reflows its family) instead of the fallback.
+    /// Cheap — fetches only the `model` column; runs at startup and on each
+    /// scan cycle that carried new samples.
+    private func refreshModelPalette() {
+        let context = ModelContext(container)
+        var desc = FetchDescriptor<DailyAggregate>()
+        desc.propertiesToFetch = [\.model]
+        guard let rows = try? context.fetch(desc) else { return }
+        pacerRefreshModelPalette(observed: Array(Set(rows.map(\.model))))
     }
 
     /// Throttled engine refit. Posts `.pacerEngineDidRecompute` after a real

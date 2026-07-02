@@ -99,7 +99,7 @@ struct PerModelTodayCard: View {
                 let myTotal = r.inputTokens + r.outputTokens
                 let pct = total > 0 ? Int(Double(myTotal) / Double(total) * 100) : 0
                 HStack(spacing: 8) {
-                    Text(pacerShortModel(r.model))
+                    Text(pacerModelDisplayName(r.model))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text("\(pct)%")
@@ -152,7 +152,7 @@ struct PerModelTodayCard: View {
         return rows.prefix(5).map { row in
             let tokens = row.inputTokens + row.outputTokens
             let pct = Int(Double(tokens) / Double(total) * 100)
-            return "\(pacerShortModel(row.model)) \(pct) percent"
+            return "\(pacerModelDisplayName(row.model)) \(pct) percent"
         }.joined(separator: ", ")
     }
 
@@ -161,7 +161,7 @@ struct PerModelTodayCard: View {
             ForEach(rows) { row in
                 PacerDonutLegendRow(
                     color: pacerModelColor(row.model),
-                    label: pacerShortModel(row.model),
+                    label: pacerModelDisplayName(row.model),
                     labelMaxWidth: 220
                 ) {
                     Text("in \(pacerTokens(row.inputTokens))")

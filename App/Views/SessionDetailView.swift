@@ -83,7 +83,7 @@ struct SessionDetailView: View {
     /// if @Query hasn't hydrated yet. Falls back to the session id
     /// prefix if SessionInfo genuinely doesn't exist.
     private var chromeTitle: String {
-        if let session { return pacerShortModel(session.topModel) }
+        if let session { return pacerModelDisplayName(session.topModel) }
         return "Session"
     }
 
@@ -131,7 +131,7 @@ struct SessionDetailView: View {
                     value: pacerTokens(session.totalTokens), label: "tokens",
                     tooltip: pacerTokensExact(session.totalTokens)
                 )
-                MetricTile(value: pacerShortModel(session.topModel), label: "top model", size: .compact)
+                MetricTile(value: pacerModelDisplayName(session.topModel), label: "top model", size: .compact)
                 MetricTile(value: Self.durationLabel(for: session), label: "duration", size: .compact)
             }
         }

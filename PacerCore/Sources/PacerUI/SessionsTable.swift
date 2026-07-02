@@ -173,7 +173,7 @@ public struct SessionsTable: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .frame(width: 80, alignment: .leading)
-                Text(pacerShortModel(row.topModel))
+                Text(pacerModelDisplayName(row.topModel))
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)

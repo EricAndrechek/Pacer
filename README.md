@@ -52,8 +52,18 @@ keeps all of your data on your own Mac.
 </p>
 
 <details>
-<summary><strong>More screenshots</strong> — the six-month history view</summary>
+<summary><strong>More screenshots</strong> — models, projects &amp; collections, six-month history</summary>
 <br>
+<p align="center">
+  <img src="docs/screenshots/models.png" width="760"
+       alt="Pacer models tab — a token/cost share donut, a daily model-mix trend, and a per-model table; every Claude model in its own color, groupable by model or class">
+  <br><sub><b>Models — share, trend, and per-model table; group by model or class</b></sub>
+</p>
+<p align="center">
+  <img src="docs/screenshots/projects-collections.png" width="760"
+       alt="Pacer projects tab with collections — group projects into non-destructive, overlapping, nestable collections and scope totals to them">
+  <br><sub><b>Projects &amp; Collections — group projects, scope totals to a collection</b></sub>
+</p>
 <p align="center">
   <img src="docs/screenshots/history.png" width="760"
        alt="Pacer history — lifetime totals, a six-month GitHub-style activity heatmap, and monthly spend">
@@ -89,8 +99,10 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
 - **Costs, your way.** See spend the way Claude Code reports it, or have Pacer
   price it from tokens itself — switchable in Settings. Daily, monthly, and
   all-time totals included.
-- **Where it's going.** Break usage down by project and by model, drill into any
-  single day, and see a GitHub-style activity heatmap of the last six months.
+- **Where it's going.** Break usage down by project — grouped into your own
+  non-destructive **collections** — and by model, with every Claude model in its
+  own color and groupable by class. Drill into any single day, and see a
+  GitHub-style activity heatmap of the last six months.
 - **Live "today" view.** Your current burn rate plus a running "at this pace,
   today will end at about $X" projection.
 - **At a glance, always.** A configurable menu-bar readout (icon, percent, or

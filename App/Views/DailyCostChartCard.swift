@@ -123,7 +123,8 @@ struct DailyCostChartCard: View {
     }
 
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
-        Chart {
+        let dateAxis = pacerDateAxis(totals.map(\.date))
+        return Chart {
             ForEach(totals) { d in
                 BarMark(
                     x: .value("Date", d.date),
@@ -159,10 +160,10 @@ struct DailyCostChartCard: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: stridedDates(every: 5, totals: totals)) { value in
+            AxisMarks(values: dateAxis.values) { value in
                 AxisValueLabel {
                     if let date = value.as(String.self) {
-                        Text(shortDate(date))
+                        Text(dateAxis.label(date))
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
@@ -202,21 +203,8 @@ struct DailyCostChartCard: View {
         .accessibilityHint(onDayTap != nil ? "Click a bar to drill into that day" : "")
     }
 
-    private func stridedDates(every n: Int, totals: [DailyTotal]) -> [String] {
-        guard !totals.isEmpty else { return [] }
-        return stride(from: 0, to: totals.count, by: n)
-            .map { totals[$0].date }
-    }
-
     private func barColor(for cost: Double) -> Color {
         cost > 0 ? .accentColor : .accentColor.opacity(0.3)
-    }
-
-    /// `2026-04-30` → `04-30`. Year out of axis labels at this density
-    /// since the user knows their context.
-    private func shortDate(_ ymd: String) -> String {
-        guard ymd.count == 10 else { return ymd }
-        return String(ymd.suffix(5))
     }
 }
 
