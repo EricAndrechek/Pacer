@@ -47,9 +47,17 @@ public func pacerProjectColor(path: String, seed: String? = nil, hex: String? = 
 public func pacerGeneratedColor(_ seed: String) -> Color {
     let h = pacerFNV1a(seed)
     let hue = Double(h % 360)
-    let lightnessLevels: [Double] = [0.58, 0.67, 0.76]
-    let lightness = lightnessLevels[Int((h / 360) % UInt64(lightnessLevels.count))]
-    return pacerOKLCH(l: lightness, c: 0.16, hueDegrees: hue)
+    // Yellow/orange/green hues turn muddy (mustard, olive) at mid
+    // lightness — they need to be brighter to look clean. Lift lightness
+    // over that hue band; reds, blues, and purples stay richer and deeper.
+    // The band is centred on OKLCH yellow (~110°) and tapers to zero by
+    // ~±60°, so only the muddy hues get lifted.
+    let yellowLift = 0.14 * max(0, cos((hue - 110) * .pi / 120))
+    // A small value jitter from an independent hash slice separates the
+    // rare pair that lands on nearby hues.
+    let jitter = [-0.03, 0.0, 0.03][Int((h / 360) % 3)]
+    let lightness = 0.70 + yellowLift + jitter
+    return pacerOKLCH(l: lightness, c: 0.15, hueDegrees: hue)
 }
 
 /// FNV-1a 64-bit hash with a murmur-style avalanche finalizer. The
