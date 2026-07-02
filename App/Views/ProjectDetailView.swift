@@ -208,7 +208,10 @@ struct ProjectDetailView: View {
             }
         }
         cachedTotals = t
-        cachedDailySeries = days
+        // Sort by date explicitly rather than leaning on the `@Query(sort:)`
+        // staying put — the band-date chart that plots this needs a
+        // chronological x-domain (same invariant as the Models trend).
+        cachedDailySeries = days.sorted { $0.date < $1.date }
         cachedModelSlices = byModel.map { (model, v) in
             ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
         }.sorted { $0.tokens > $1.tokens }

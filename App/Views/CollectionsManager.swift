@@ -92,9 +92,12 @@ struct CollectionsManager: View {
         .padding(20)
     }
 
-    @ViewBuilder
     private var content: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        // Resolve every collection's rollup ONCE per render. `resolveAll`
+        // walks all aggregates, so subscripting `rollups` inside the
+        // `ForEach` below re-ran that whole walk for every collection row.
+        let rollups = rollups
+        return VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Spacer()
                 Button {

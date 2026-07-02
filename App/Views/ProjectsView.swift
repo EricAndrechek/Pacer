@@ -416,7 +416,14 @@ private struct ProjectsContent: View {
         )
         cachedCollectionRollups = CollectionUsageRollup
             .resolveAll(collections: collections, aggregates: aggregates)
-            .sorted { $0.totals.cost > $1.totals.cost }
+            // Stable tiebreaker on the collection id so two equal-cost
+            // collections don't swap order (and reshuffle the filter chips)
+            // between scan ticks — Swift's sort isn't guaranteed stable.
+            .sorted {
+                $0.totals.cost != $1.totals.cost
+                    ? $0.totals.cost > $1.totals.cost
+                    : $0.id < $1.id
+            }
         refreshFilteredRows()
     }
 

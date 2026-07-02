@@ -259,9 +259,10 @@ private struct PaceChartColumn: View {
 
     /// `chartData` plus the forecast overlay — used only by the live dashboard
     /// chart. `chartData` itself stays projection-free so the shared image
-    /// (which renders from it) is unchanged.
-    private var liveChartData: PaceChartView.Data? {
-        guard let base = chartData else { return nil }
+    /// (which renders from it) is unchanged. Takes the already-resolved
+    /// `base` so `body` computes the window filter+sort a single time.
+    private func liveChartData(base: PaceChartView.Data?) -> PaceChartView.Data? {
+        guard let base else { return nil }
         guard let projection else { return base }
         return PaceChartView.Data(
             cycleStart: base.cycleStart,
@@ -275,11 +276,19 @@ private struct PaceChartColumn: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
+        // Resolve the chart data ONCE per body pass. Building it filters +
+        // sorts the window's samples (~1–2k on the 7-day window), and it was
+        // previously recomputed independently by the header's compare/share
+        // controls and the chart slot — each `.onHover` toggle re-fires body,
+        // so that was several redundant sorts per hover. `base` stays
+        // projection-free (share-image parity); `live` layers the forecast.
+        let base = chartData
+        let live = liveChartData(base: base)
+        return VStack(alignment: .leading, spacing: 8) {
+            header(chartData: base)
             heroLine
             chipRow
-            chartSlot
+            chartSlot(live: live)
             outlookLines
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -387,7 +396,7 @@ private struct PaceChartColumn: View {
     /// Linear/Things idiom): the affordance is there when you reach for it,
     /// invisible when you're just reading the chart.
     @ViewBuilder
-    private var compareButton: some View {
+    private func compareButton(chartData: PaceChartView.Data?) -> some View {
         if let onCompare, cycle?.isAwaiting == false, chartData != nil, projection != nil {
             Button { onCompare(windowKey) } label: {
                 Image(systemName: "chart.xyaxis.line")
@@ -405,7 +414,7 @@ private struct PaceChartColumn: View {
     /// chart as an image — built from the same resolved values the live
     /// chart draws, so the shared image *is* the live chart, blown up.
     /// `nil` (button hidden) when there's no active cycle with data.
-    private var sharePayload: PaceSharePayload? {
+    private func sharePayload(chartData: PaceChartView.Data?) -> PaceSharePayload? {
         guard let chartData,
               let cycle, !cycle.isAwaiting,
               let latest, let resets = latest.resetsAt
@@ -426,8 +435,8 @@ private struct PaceChartColumn: View {
     /// Hover-revealed share button + its preview popover. Lives only when
     /// there's a shareable cycle; the popover anchors here.
     @ViewBuilder
-    private var shareButton: some View {
-        if let payload = sharePayload {
+    private func shareButton(chartData: PaceChartView.Data?) -> some View {
+        if let payload = sharePayload(chartData: chartData) {
             Button { sharing = true } label: {
                 Image(systemName: "square.and.arrow.up")
                     .font(.system(size: 11, weight: .semibold))
@@ -450,7 +459,7 @@ private struct PaceChartColumn: View {
     /// when awaiting. Same vertical footprint either way so the parent
     /// HStack's equal-height layout stays stable.
     @ViewBuilder
-    private var chartSlot: some View {
+    private func chartSlot(live: PaceChartView.Data?) -> some View {
         if cycle?.isAwaiting == true {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Awaiting first sample of new cycle")
@@ -464,8 +473,8 @@ private struct PaceChartColumn: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .frame(height: 96, alignment: .topLeading)
-        } else if let liveChartData {
-            PaceChartView(data: liveChartData, style: .detailed)
+        } else if let live {
+            PaceChartView(data: live, style: .detailed)
                 .frame(height: 96)
         } else if idleUsedPct != nil {
             // A reading exists but no window is anchored yet — nothing to
@@ -491,12 +500,12 @@ private struct PaceChartColumn: View {
         }
     }
 
-    private var header: some View {
+    private func header(chartData: PaceChartView.Data?) -> some View {
         HStack(spacing: 8) {
             Eyebrow(text: title)
             Spacer(minLength: 8)
-            compareButton
-            shareButton
+            compareButton(chartData: chartData)
+            shareButton(chartData: chartData)
             caption
         }
     }

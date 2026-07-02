@@ -364,9 +364,18 @@ private struct ModelsContent: View {
             e.tokens += r.inputTokens + r.outputTokens
             mix[dk] = e
         }
-        let dailyMix: [DailyMix] = mix.map { (dk, v) in
-            DailyMix(date: dk.date, model: dk.key, displayName: v.label, tokens: v.tokens)
-        }
+        // `mix` is a Dictionary, so `.map` yields hash order. The trend
+        // chart plots a categorical (String) x-axis, whose band order Swift
+        // Charts takes from the order rows first appear here — and
+        // `pacerDateAxis` assumes that band domain is chronological. Sort by
+        // date (then group key) so the axis, its labels, and the bars stay
+        // in a stable calendar order instead of reshuffling every time a
+        // background refresh rebuilds the dictionary.
+        let dailyMix: [DailyMix] = mix
+            .map { (dk, v) in
+                DailyMix(date: dk.date, model: dk.key, displayName: v.label, tokens: v.tokens)
+            }
+            .sorted { $0.date != $1.date ? $0.date < $1.date : $0.model < $1.model }
         var buckets: [String: [(model: String, tokens: Int64)]] = [:]
         for entry in dailyMix {
             buckets[entry.date, default: []].append(
