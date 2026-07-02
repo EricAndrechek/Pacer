@@ -21,10 +21,15 @@ shipped; if implementation diverges, update the doc.
   rollup as a second fold), `ProjectMeta` (per-project color store),
   reverse membership index, `pacerDisambiguatedNames`. All additive.
 
-**Deferred follow-ups:** the per-project color *well* in project detail
-(store landed; UI + the flagged donut/legend recolor still owed), and
-scoping History (Dashboard pace/rate-limit stay account-wide — they can't
-scope).
+**Colors shipped:** stable, pretty identity colors for projects and models
+now drive every donut/legend/dot — see [identity-colors.md](identity-colors.md).
+The per-project color *picker* was **declined** (Eric chose auto colors that
+never need managing over a color well); collections keep their manual
+`colorHex` picker. The color system is a pure function of a recorded seed
+(survives rename/remote), so no per-view management is needed.
+
+**Deferred follow-ups:** scoping History (Dashboard pace/rate-limit stay
+account-wide — they can't scope).
 
 ## What v1 got right (keep)
 

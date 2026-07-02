@@ -243,6 +243,22 @@ private extension CollectionRollupResult {
 
 // MARK: Color round-trip
 
+@Test func generatedProjectColorsAreStableAndDistinct() {
+    // Deterministic: same seed → same color.
+    #expect(pacerHexString(from: pacerGeneratedColor("/x/y")) ==
+            pacerHexString(from: pacerGeneratedColor("/x/y")))
+    // Avalanche: sibling paths sharing a long prefix get distinct colors
+    // (the whole point of the hash finalizer).
+    let siblings = ["/Users/x/Code/acme/api",
+                    "/Users/x/Code/acme/web",
+                    "/Users/x/Code/acme/firmware",
+                    "/Users/x/Code/acme/infra"]
+    let colors = Set(siblings.compactMap { pacerHexString(from: pacerGeneratedColor($0)) })
+    #expect(colors.count == siblings.count)
+    // Explicit hex override still wins over the generated color.
+    #expect(pacerHexString(from: pacerProjectColor(path: "/a", seed: "/a", hex: "#123456")) == "#123456")
+}
+
 @Test func colorHexParsesAndSerializes() {
     #expect(Color(pacerHex: "#FF8800") != nil)
     #expect(Color(pacerHex: "zzz") == nil)

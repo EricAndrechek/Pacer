@@ -15,6 +15,10 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         SessionInfo.self,
         ClaudeCodeMeta.self,
         ProjectPathAlias.self,
+        ProjectPathProbe.self,
+        ProjectBudget.self,
+        ProjectMeta.self,
+        ProjectCollection.self,
         configurations: config
     )
 }
@@ -377,6 +381,61 @@ private func makeAssistantLine(
     let samplesFinal = try ModelContext(container).fetch(FetchDescriptor<TokenSample>())
     #expect(samplesFinal.count == 1)
     #expect(samplesFinal[0].projectPath == "/Users/test/new-name")
+}
+
+@Test func coordinatorAssignsColorSeedAndReattributesUserRowsOnMerge() async throws {
+    // A project gets a stable color seed on first scan; and when it's
+    // merged into another via an alias, its ProjectMeta + ProjectBudget
+    // follow the merge instead of orphaning at the old path.
+    let line = makeAssistantLine(
+        timestamp: "2026-04-30T12:00:00.000Z",
+        inputTokens: 100, outputTokens: 50,
+        storedCost: 0.10,
+        messageId: "msg-color", requestId: "req-color",
+        cwd: "/Users/test/old-color",
+        sessionId: "sess-color"
+    )
+    let root = try makeFixtureRoot(withLines: [line])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resolver = ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+
+    let container = try makeInMemoryContainer()
+    let coordinator = ScanCoordinator(
+        container: container,
+        configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+        resolver: resolver
+    )
+
+    _ = try await coordinator.runOnce()
+    let context = ModelContext(container)
+
+    // A stable color seed was recorded for the project.
+    let metasBefore = try context.fetch(FetchDescriptor<ProjectMeta>())
+    #expect(metasBefore.count == 1)
+    #expect(metasBefore[0].projectPath == "/Users/test/old-color")
+    #expect(metasBefore[0].colorSeed != nil)
+
+    // User sets a budget on the same (soon-to-be-merged) project.
+    context.insert(ProjectBudget(projectPath: "/Users/test/old-color", dailyLimitUSD: 5))
+    try context.save()
+
+    // Merge old → new.
+    let manager = ProjectPathAliasManager(context: context)
+    try manager.upsert(
+        sourcePath: "/Users/test/old-color",
+        canonicalPath: "/Users/test/new-color"
+    )
+    _ = try await coordinator.runOnce()
+
+    // Both path-keyed user rows followed the merge (not orphaned).
+    let ctx2 = ModelContext(container)
+    let metasAfter = try ctx2.fetch(FetchDescriptor<ProjectMeta>())
+    #expect(metasAfter.contains { $0.projectPath == "/Users/test/new-color" })
+    #expect(!metasAfter.contains { $0.projectPath == "/Users/test/old-color" })
+    let budgetsAfter = try ctx2.fetch(FetchDescriptor<ProjectBudget>())
+    #expect(budgetsAfter.count == 1)
+    #expect(budgetsAfter[0].projectPath == "/Users/test/new-color")
+    #expect(budgetsAfter[0].dailyLimitUSD == 5)
 }
 
 @ScanActor

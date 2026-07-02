@@ -115,7 +115,6 @@ struct PerModelTodayCard: View {
             } else {
                 HStack(alignment: .top, spacing: 24) {
                     donut
-                        .frame(width: 160, height: 160)
                     table
                 }
             }
@@ -131,23 +130,17 @@ struct PerModelTodayCard: View {
     }
 
     private var donut: some View {
-        Chart(rows) { row in
-            SectorMark(
-                angle: .value("Tokens", Double(row.inputTokens + row.outputTokens)),
-                innerRadius: .ratio(0.62),
-                angularInset: 1.5
-            )
-            .foregroundStyle(by: .value("Model", row.model))
-            .cornerRadius(2)
-            // Subtle highlight: opacity drops on non-hovered slices,
-            // pinpointing the one under the cursor without changing
-            // the chart's geometry.
-            .opacity(hoveredRow.map { $0.id == row.id ? 1.0 : 0.45 } ?? 1.0)
-        }
-        .chartLegend(.hidden)
-        .chartAngleSelection(value: $hoveredAngle)
-        .accessibilityLabel("Today's token share by model")
-        .accessibilityValue(perModelShareSummary)
+        PacerDonut(
+            slices: rows.map {
+                PacerDonutSlice(id: $0.model, value: Double($0.inputTokens + $0.outputTokens),
+                                color: pacerModelColor($0.model))
+            },
+            innerRatio: 0.62,
+            hoveredID: hoveredRow?.model,
+            hoveredAngle: $hoveredAngle,
+            accessibilityLabel: "Today's token share by model",
+            accessibilityValue: perModelShareSummary
+        )
     }
 
     /// Summary string read aloud by VoiceOver in place of the donut.
@@ -166,15 +159,11 @@ struct PerModelTodayCard: View {
     private var table: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(rows) { row in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Circle()
-                        .fill(swatchColor(for: row.model))
-                        .frame(width: 8, height: 8)
-                    Text(pacerShortModel(row.model))
-                        .font(.system(size: 12, weight: .medium))
-                        .frame(maxWidth: 220, alignment: .leading)
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
+                PacerDonutLegendRow(
+                    color: pacerModelColor(row.model),
+                    label: pacerShortModel(row.model),
+                    labelMaxWidth: 220
+                ) {
                     Text("in \(pacerTokens(row.inputTokens))")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
@@ -201,15 +190,6 @@ struct PerModelTodayCard: View {
         }
     }
 
-    /// Stable per-model color so the donut and table swatches line up
-    /// across launches. Sum-of-unicode-scalars hash because Swift's
-    /// `Hasher` is randomized per process.
-    private func swatchColor(for model: String) -> Color {
-        let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .yellow, .red]
-        let scalarSum = model.unicodeScalars.reduce(0) { $0 + UInt32($1.value) }
-        let idx = Int(scalarSum % UInt32(palette.count))
-        return palette[idx]
-    }
 }
 
 private struct ModelRow: Identifiable {

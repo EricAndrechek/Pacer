@@ -373,28 +373,23 @@ private struct ModelsContent: View {
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
-                Chart(rows) { r in
-                    SectorMark(
-                        angle: .value("Tokens", r.totalTokens),
-                        innerRadius: .ratio(0.6),
-                        angularInset: 1.5
-                    )
-                    .foregroundStyle(by: .value("Model", r.displayName))
-                    .cornerRadius(2)
-                    .opacity(hoveredShareRow.map { $0.id == r.id ? 1.0 : 0.45 } ?? 1.0)
-                }
-                .frame(width: 180, height: 180)
-                .chartLegend(.hidden)
-                .chartAngleSelection(value: $hoveredShareAngle)
-                .accessibilityLabel("Token share across models")
-                .accessibilityValue(shareSummary)
+                PacerDonut(
+                    slices: rows.map {
+                        PacerDonutSlice(id: $0.displayName, value: Double($0.totalTokens),
+                                        color: pacerModelColor($0.displayName))
+                    },
+                    size: 180,
+                    hoveredID: hoveredShareRow?.displayName,
+                    hoveredAngle: $hoveredShareAngle,
+                    accessibilityLabel: "Token share across models",
+                    accessibilityValue: shareSummary
+                )
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(rows.prefix(8)) { row in
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(row.displayName)
-                                .font(.system(size: 13, weight: .medium))
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
+                        PacerDonutLegendRow(
+                            color: pacerModelColor(row.displayName),
+                            label: row.displayName
+                        ) {
                             Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
@@ -434,6 +429,13 @@ private struct ModelsContent: View {
         return (h, slices)
     }
 
+    /// Distinct model names in the trend, sorted for a stable
+    /// color-scale domain so the pinned per-model colors (and the Charts
+    /// legend) don't reshuffle between renders.
+    private var trendModelDomain: [String] {
+        Array(Set(dailyMix.map(\.displayName))).sorted()
+    }
+
     private var trendCard: some View {
         PacerCard("Trend", trailing: {
             // Hover swaps the trailing slot for the date + total tokens.
@@ -470,6 +472,10 @@ private struct ModelsContent: View {
                     }
                 }
                 .frame(height: 200)
+                .chartForegroundStyleScale(
+                    domain: trendModelDomain,
+                    range: trendModelDomain.map { pacerModelColor($0) }
+                )
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
                         AxisGridLine().foregroundStyle(.secondary.opacity(0.18))

@@ -82,4 +82,8 @@ public enum ClaudeCodeMetaKey {
     /// Independent of `pathCanonicalizationVersion` because it only
     /// touches a UI-facing flag, never re-attributes samples.
     public static let aliasOriginClassificationVersion = "alias_origin_classification_version"
+
+    /// Bumped to force a one-time backfill that records a stable color
+    /// seed (`ProjectMeta.colorSeed`) for every existing project.
+    public static let colorSeedVersion = "color_seed_version"
 }

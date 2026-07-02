@@ -821,27 +821,22 @@ struct ProjectDetailView: View {
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
-                Chart(modelSlices) { m in
-                    SectorMark(
-                        angle: .value("tokens", m.tokens),
-                        innerRadius: .ratio(0.6),
-                        angularInset: 1.5
-                    )
-                    .foregroundStyle(by: .value("Model", pacerShortModel(m.model)))
-                    .cornerRadius(2)
-                    .opacity(hoveredModelSlice.map { $0.id == m.id ? 1.0 : 0.45 } ?? 1.0)
-                }
-                .frame(width: 160, height: 160)
-                .chartLegend(.hidden)
-                .chartAngleSelection(value: $hoveredModelAngle)
-                .accessibilityLabel("Model share for \(displayName)")
-                .accessibilityValue(modelSlicesSummary(total: total))
+                PacerDonut(
+                    slices: modelSlices.map {
+                        PacerDonutSlice(id: pacerShortModel($0.model), value: Double($0.tokens),
+                                        color: pacerModelColor($0.model))
+                    },
+                    hoveredID: hoveredModelSlice.map { pacerShortModel($0.model) },
+                    hoveredAngle: $hoveredModelAngle,
+                    accessibilityLabel: "Model share for \(displayName)",
+                    accessibilityValue: modelSlicesSummary(total: total)
+                )
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(modelSlices) { m in
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(pacerShortModel(m.model))
-                                .font(.system(size: 12, weight: .medium))
-                            Spacer(minLength: 8)
+                        PacerDonutLegendRow(
+                            color: pacerModelColor(m.model),
+                            label: pacerShortModel(m.model)
+                        ) {
                             Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
