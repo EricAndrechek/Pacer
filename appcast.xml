@@ -467,5 +467,23 @@
             type="application/octet-stream"
             sparkle:edSignature="dm73INskJusLfZbXt6yyFke3PWoSkoSrU4AVeqoHkPIpo8eQYhO+E4PQi4N3njhwJjGZaO2eTEedtWZlIcWJDw==" />
     </item>
+            <item>
+        <title>Version 0.3.18</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): sort Models trend by date + kill redundant view recompute by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4798256845" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/113" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/113/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/113">EricAndrechek/Pacer#113</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.17...v0.3.18">EricAndrechek/Pacer@<tt>v0.3.17...v0.3.18</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 21:27:34 +0000</pubDate>
+        <sparkle:version>1783027379</sparkle:version>
+        <sparkle:shortVersionString>0.3.18</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.18/Pacer-0.3.18.dmg"
+            length="7145730"
+            type="application/octet-stream"
+            sparkle:edSignature="91YOV4hCRTekHGRCAIbRXqHtXRciL3mL9fJ9cWSZWgh4b4BwLbF26yK5i9hCyEyTBls3Z4urt/4vO2oFo34LBA==" />
+    </item>
         </channel>
 </rss>
