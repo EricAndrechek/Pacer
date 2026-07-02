@@ -88,26 +88,46 @@ public struct PacerModelIdentity: Equatable, Sendable {
         // 4. Date pin = the first 8-digit run anywhere in the id.
         self.datePin = tokens.first { $0.count == 8 && $0.allSatisfy(\.isNumber) }
 
-        // 5. Version numbers. Prefer the numeric run immediately AFTER the
-        //    family token (modern order); fall back to numbers BEFORE it
-        //    (legacy `claude-3-5-sonnet`). Stop at the first non-numeric or
-        //    8-digit (date) token so region/rev suffixes never leak in.
-        func versionRun(_ slice: ArraySlice<String>) -> [Int] {
-            var out: [Int] = []
-            for t in slice {
-                guard t.count != 8, t.allSatisfy(\.isNumber), let n = Int(t) else { break }
-                out.append(n)
-                if out.count == 2 { break }
+        // 5. Version. Prefer the contiguous numeric run immediately AFTER the
+        //    family token (modern order); else the contiguous run immediately
+        //    BEFORE it (legacy `claude-3-5-sonnet`). Only digits *adjacent* to
+        //    the family word count, so a provider region like `us-gov-east-1`
+        //    never leaks into the version (its `1` is not adjacent to the
+        //    family). An 8-digit token is a date and ends the run.
+        func isVer(_ t: String) -> Bool { t.count != 8 && !t.isEmpty && t.allSatisfy(\.isNumber) }
+        var run: [String] = []
+        for t in tokens[(familyIdx + 1)...] {
+            guard isVer(t) else { break }
+            run.append(t)
+            if run.count == 2 { break }
+        }
+        if run.isEmpty {
+            var j = familyIdx - 1
+            while j >= 0, isVer(tokens[j]) {
+                run.insert(tokens[j], at: 0)
+                j -= 1
+                if run.count == 2 { break }
             }
-            return out
         }
-        var nums = versionRun(tokens[(familyIdx + 1)...])
-        if nums.isEmpty {
-            let before = tokens[..<familyIdx].filter { $0.count != 8 && $0.allSatisfy(\.isNumber) }
-            nums = Array(before.suffix(2)).compactMap(Int.init)
+        if run.count >= 2 {
+            self.major = Int(run[0])
+            self.minor = Int(run[1])
+        } else if let one = run.first {
+            if one.count == 2,
+               let first = one.first.flatMap({ Int(String($0)) }), first >= 3,
+               let second = one.last.flatMap({ Int(String($0)) }) {
+                // Compressed provider form like `opus-41` → major 4, minor 1
+                // (a leading digit < 3 stays a real major, e.g. `10` → 10).
+                self.major = first
+                self.minor = second
+            } else {
+                self.major = Int(one)
+                self.minor = nil
+            }
+        } else {
+            self.major = nil
+            self.minor = nil
         }
-        self.major = nums.first
-        self.minor = nums.count > 1 ? nums[1] : nil
     }
 
     /// `"4.7"`, `"5"`, or nil when no version parsed.
@@ -122,6 +142,15 @@ public struct PacerModelIdentity: Equatable, Sendable {
     public var versionRank: Double? {
         guard let major else { return nil }
         return Double(major) + Double(minor ?? 0) / 10.0
+    }
+
+    /// Canonical `(family, major, minor)` for color placement — a bare major
+    /// counts as minor `0` (so `Opus 4` and `Opus 4.0` place identically),
+    /// even though `displayName` still renders "Opus 4". nil unless both the
+    /// family and a major version parsed.
+    public var canonical: (family: Family, major: Int, minor: Int)? {
+        guard let family, let major else { return nil }
+        return (family, major, minor ?? 0)
     }
 
     /// Pretty, user-facing name — `"Opus 4.7"`, `"Sonnet 5"`, `"Haiku 4.5"`.

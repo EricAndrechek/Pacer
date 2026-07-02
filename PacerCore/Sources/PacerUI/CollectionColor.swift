@@ -64,8 +64,9 @@ private let pacerColorRidge: [(h: Double, l: Double, c: Double)] = [
 /// Interpolated (lightness, chroma) on the pretty ridge for any hue, with
 /// smoothstep easing and wraparound across the purple→pink gap. This is
 /// what lets a *continuous* generated hue look as good as the discrete
-/// system palette it was sampled from.
-private func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
+/// system palette it was sampled from. Internal so `PacerModelPalette` can
+/// seat its placed hues on the same ridge.
+func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
     let n = pacerColorRidge.count
     let hue = hue.truncatingRemainder(dividingBy: 360)
     for i in 0..<n {
@@ -153,54 +154,18 @@ func pacerOKLCH(l: Double, c: Double, hueDegrees: Double) -> Color {
     return Color(.sRGB, red: toSRGB(r), green: toSRGB(g), blue: toSRGB(bl))
 }
 
-/// Hand-picked base hue per model family, placed on the same pretty ridge
-/// as generated colors so each family reads as one of Apple's system
-/// colors. Model ids are globally stable, so — unlike project colors, which
-/// are hashed because paths are personal — these are *curated*: everyone's
-/// Opus is the same indigo. Hues are spread around the wheel EXCEPT Fable
-/// and Mythos, which sit as warm neighbors: they're the closest pair, so
-/// the two premium "creative" families read as related while staying
-/// distinct.
-///   Haiku  → green/mint  (fast, light)
-///   Sonnet → blue        (the workhorse)
-///   Opus   → indigo      (deep, premium)
-///   Fable  → orange  ┐ warm neighbors — the
-///   Mythos → red     ┘ closest pair on the wheel
-private let pacerModelFamilyHue: [PacerModelIdentity.Family: Double] = [
-    .haiku: 150, .sonnet: 238, .opus: 285, .fable: 50, .mythos: 22,
-]
-
-/// Stable, curated color for an LLM model. Family sets the hue (hand-picked
-/// above); the version shades within that hue, so every Opus is a shade of
-/// indigo and every Sonnet a shade of blue — an at-a-glance family grouping
-/// with no UI. Older sub-versions run a touch deeper, newer ones lighter,
-/// and newer generations a touch more vivid; every offset is bounded, so an
-/// unreleased `4-9` / `5` / odd sub-release gets a sensible shade with no
-/// code change. Unrecognized families fall back to the generated (hashed)
-/// color, so nothing ever renders colorless.
+/// Stable, curated color for an LLM model — the model-color entry point used
+/// across every donut, legend, chart, and swatch. Delegates to the active
+/// `PacerModelPalette` (see `ModelPalette.swift`), which spreads models along
+/// an ordered spectrum: four intelligence classes ~90° apart on the wheel,
+/// each family's versions building toward the next tier, with clear jumps
+/// between major versions. Unrecognized families fall back to the generated
+/// (hashed) color, so nothing ever renders colorless.
 ///
-/// A pure function of the id — and symmetric: the raw `claude-opus-4-7` and
-/// its display form `Opus 4.7` resolve to the same color, so callers can
-/// pass whichever they have.
+/// Symmetric: the raw `claude-opus-4-7` and its display form `Opus 4.7`
+/// resolve to the same color, so callers can pass whichever they have.
 public func pacerModelColor(_ model: String) -> Color {
-    let id = PacerModelIdentity(model)
-    guard let family = id.family, let hue = pacerModelFamilyHue[family] else {
-        return pacerGeneratedColor(pacerShortModel(model))
-    }
-    var (l, c) = pacerRidge(hue)
-    // Sub-version within a generation, centered on minor 5: lower → deeper,
-    // higher → lighter, bounded so it never washes out. A bare flagship
-    // (no minor, e.g. `sonnet-5`) sits at the family's base color.
-    if let minor = id.minor {
-        l += min(max(Double(minor - 5) * 0.025, -0.09), 0.09)
-    }
-    // Newer generation → slightly more vivid; bounded ±0.04.
-    if let major = id.major {
-        c += min(max(Double(major - 4) * 0.02, -0.04), 0.04)
-    }
-    // Keep the light families (green) from blowing out.
-    l = min(max(l, 0.42), 0.86)
-    return pacerOKLCH(l: l, c: c, hueDegrees: hue)
+    pacerModelPalette.color(for: model)
 }
 
 public extension Color {

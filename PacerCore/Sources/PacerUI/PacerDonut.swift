@@ -59,7 +59,10 @@ public struct PacerDonut: View {
             SectorMark(
                 angle: .value("Value", slice.value),
                 innerRadius: .ratio(innerRatio),
-                angularInset: 1.5
+                // A clear gap between wedges so adjacent same-family slices
+                // (Opus 4.7 next to 4.8) read as separate even when their
+                // colors are close neighbors on the spectrum.
+                angularInset: 2.5
             )
             .foregroundStyle(by: .value("Slice", slice.id))
             .cornerRadius(2)
