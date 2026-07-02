@@ -430,5 +430,23 @@
             type="application/octet-stream"
             sparkle:edSignature="ddl2FHUVUR1fAVrnq3FZm/DJFPx1Ap4PU+VYJU0IiBleXf8Ft/11x9oYdxj9AJaqKDfFLyBWX3sgSPCxQk0yCg==" />
     </item>
+            <item>
+        <title>Version 0.3.16</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat: project collections (overlapping, nestable groupings) by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4777587288" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/110" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/110/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/110">EricAndrechek/Pacer#110</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.15...v0.3.16">EricAndrechek/Pacer@<tt>v0.3.15...v0.3.16</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 11:21:11 +0000</pubDate>
+        <sparkle:version>1782991007</sparkle:version>
+        <sparkle:shortVersionString>0.3.16</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.16/Pacer-0.3.16.dmg"
+            length="7004462"
+            type="application/octet-stream"
+            sparkle:edSignature="jmPAt1UnpK9uQYbk4sJ3pgdxdpaJd/ZH0uATbpuw6vxq5uuu05rciFYan2x6WrmAVITspE7k3jFeozaeZ85eDA==" />
+    </item>
         </channel>
 </rss>
