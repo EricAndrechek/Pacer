@@ -1,10 +1,30 @@
 # Project Collections — design
 
-Status: **v1 shipped behind PR #110 (not merged), redesign in progress.**
-v1 proved the data spine (model, resolver, rollup, lane/tree/detail/manager)
-but real-world use surfaced that the UX is thin: the editor is confusing,
-rules are opaque, and collections feel bolted-on. This doc is the redesign.
-If implementation diverges, update the doc.
+Status: **shipped (v0.3.16, PR #110).** Non-destructive, overlapping,
+nestable collections, integrated *inside* the Projects tab — not a
+separate tab. The first cut (a separate Projects | Collections tab with a
+lane/tree/detail modal) was scrapped after real-world use: it felt
+bolted-on and the editor was confusing. This doc records the design that
+shipped; if implementation diverges, update the doc.
+
+**What shipped:**
+- Collections live in the Projects tab: a **filter bar** (chip per
+  collection, click to scope the donut + table), **membership dots** on
+  each project row (names on hover), **"Add to collection…"** on
+  right-click, and a **"Made up of"** composition breakdown when a scoped
+  collection nests others.
+- A rebuilt **editor** (Smart-Folder skeleton): folder-picker rules with
+  live match previews + real globs (`*`/`**`), multi-rule, stage
+  data-less folders, disambiguated project rows, color palette + custom
+  picker.
+- Core: `ProjectCollection` (references not leaves; cycle-safe resolver;
+  rollup as a second fold), `ProjectMeta` (per-project color store),
+  reverse membership index, `pacerDisambiguatedNames`. All additive.
+
+**Deferred follow-ups:** the per-project color *well* in project detail
+(store landed; UI + the flagged donut/legend recolor still owed), and
+scoping History (Dashboard pace/rate-limit stay account-wide — they can't
+scope).
 
 ## What v1 got right (keep)
 
