@@ -54,22 +54,27 @@ public struct SessionsTable: View {
     private static let scrollMaxHeight: CGFloat = 320
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // Sort once per body eval — `sortedRows` is read up to four times
+        // below, and a parent's un-debounced donut-hover `@State` re-fires
+        // this body on every pointer tick, so recomputing the sort inline
+        // would re-sort the whole list several times per hover frame.
+        let visibleRows = sortedRows
+        return VStack(alignment: .leading, spacing: 4) {
             header
             Divider().padding(.vertical, 2)
-            if sortedRows.isEmpty {
+            if visibleRows.isEmpty {
                 Text("No sessions in scope.")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 8)
-            } else if sortedRows.count <= Self.inlineRowThreshold {
-                ForEach(sortedRows, id: \.sessionId) { row in
+            } else if visibleRows.count <= Self.inlineRowThreshold {
+                ForEach(visibleRows, id: \.sessionId) { row in
                     rowView(row)
                 }
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(sortedRows, id: \.sessionId) { row in
+                        ForEach(visibleRows, id: \.sessionId) { row in
                             rowView(row)
                         }
                     }
