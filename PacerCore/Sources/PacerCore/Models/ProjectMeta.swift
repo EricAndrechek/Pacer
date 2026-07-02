@@ -20,18 +20,30 @@ import SwiftData
 public final class ProjectMeta {
     @Attribute(.unique) public var projectPath: String
 
-    /// User-chosen color as `#RRGGBB`. `nil` → fall back to the stable
-    /// hash-of-path auto color.
+    /// Frozen color seed captured when the project was first seen — the
+    /// git remote origin URL when the project has one, else its canonical
+    /// path. The UI hashes this into a stable palette color
+    /// (`pacerProjectColor`). Recording it (rather than hashing the live
+    /// path each render) means the color survives a folder rename, a
+    /// remote change, or a rank reshuffle. Declared optional with a
+    /// default so the column is additive.
+    public var colorSeed: String?
+
+    /// Optional user-chosen color override as `#RRGGBB`. Wins over
+    /// `colorSeed` when set. (No picker UI yet — reserved for a future
+    /// manual override.)
     public var colorHex: String?
 
     public var updatedAt: Date
 
     public init(
         projectPath: String,
+        colorSeed: String? = nil,
         colorHex: String? = nil,
         updatedAt: Date = Date()
     ) {
         self.projectPath = projectPath
+        self.colorSeed = colorSeed
         self.colorHex = colorHex
         self.updatedAt = updatedAt
     }

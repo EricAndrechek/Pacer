@@ -832,6 +832,10 @@ struct ProjectDetailView: View {
                     .opacity(hoveredModelSlice.map { $0.id == m.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
+                .chartForegroundStyleScale(
+                    domain: modelSlices.map { pacerShortModel($0.model) },
+                    range: modelSlices.map { pacerModelColor($0.model) }
+                )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredModelAngle)
                 .accessibilityLabel("Model share for \(displayName)")

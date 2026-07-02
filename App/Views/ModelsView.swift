@@ -384,6 +384,10 @@ private struct ModelsContent: View {
                     .opacity(hoveredShareRow.map { $0.id == r.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 180, height: 180)
+                .chartForegroundStyleScale(
+                    domain: rows.map(\.displayName),
+                    range: rows.map { pacerModelColor($0.displayName) }
+                )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredShareAngle)
                 .accessibilityLabel("Token share across models")
@@ -434,6 +438,13 @@ private struct ModelsContent: View {
         return (h, slices)
     }
 
+    /// Distinct model names in the trend, sorted for a stable
+    /// color-scale domain so the pinned per-model colors (and the Charts
+    /// legend) don't reshuffle between renders.
+    private var trendModelDomain: [String] {
+        Array(Set(dailyMix.map(\.displayName))).sorted()
+    }
+
     private var trendCard: some View {
         PacerCard("Trend", trailing: {
             // Hover swaps the trailing slot for the date + total tokens.
@@ -470,6 +481,10 @@ private struct ModelsContent: View {
                     }
                 }
                 .frame(height: 200)
+                .chartForegroundStyleScale(
+                    domain: trendModelDomain,
+                    range: trendModelDomain.map { pacerModelColor($0) }
+                )
                 .chartYAxis {
                     AxisMarks(position: .leading) { value in
                         AxisGridLine().foregroundStyle(.secondary.opacity(0.18))

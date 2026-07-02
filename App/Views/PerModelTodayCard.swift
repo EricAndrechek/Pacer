@@ -144,6 +144,12 @@ struct PerModelTodayCard: View {
             // the chart's geometry.
             .opacity(hoveredRow.map { $0.id == row.id ? 1.0 : 0.45 } ?? 1.0)
         }
+        // Pin each model to its stable color so the wedges match the table
+        // swatches below (and every other model chart in the app).
+        .chartForegroundStyleScale(
+            domain: rows.map(\.model),
+            range: rows.map { pacerModelColor($0.model) }
+        )
         .chartLegend(.hidden)
         .chartAngleSelection(value: $hoveredAngle)
         .accessibilityLabel("Today's token share by model")
@@ -168,7 +174,7 @@ struct PerModelTodayCard: View {
             ForEach(rows) { row in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Circle()
-                        .fill(swatchColor(for: row.model))
+                        .fill(pacerModelColor(row.model))
                         .frame(width: 8, height: 8)
                     Text(pacerShortModel(row.model))
                         .font(.system(size: 12, weight: .medium))
@@ -201,15 +207,6 @@ struct PerModelTodayCard: View {
         }
     }
 
-    /// Stable per-model color so the donut and table swatches line up
-    /// across launches. Sum-of-unicode-scalars hash because Swift's
-    /// `Hasher` is randomized per process.
-    private func swatchColor(for model: String) -> Color {
-        let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .yellow, .red]
-        let scalarSum = model.unicodeScalars.reduce(0) { $0 + UInt32($1.value) }
-        let idx = Int(scalarSum % UInt32(palette.count))
-        return palette[idx]
-    }
 }
 
 private struct ModelRow: Identifiable {

@@ -230,6 +230,8 @@ private struct ProjectsContent: View {
     /// membership chips, and scope resolution all read from one source.
     @Query(sort: [SortDescriptor(\ProjectCollection.sortOrder, order: .reverse)])
     private var collections: [ProjectCollection]
+    /// Per-project metadata (stable color seed). Small, sparse table.
+    @Query private var projectMetas: [ProjectMeta]
     @Environment(\.modelContext) private var modelContext
 
     /// Pending one-tap merge from the "Merge into → X" submenu.
@@ -360,6 +362,10 @@ private struct ProjectsContent: View {
         /// rendering doesn't do per-row filesystem syscalls during
         /// a scroll pass.
         let status: ProjectStatusBadge.State
+        /// Stable-color inputs from `ProjectMeta` (frozen seed / optional
+        /// override), folded in at cache-build time.
+        let colorSeed: String?
+        let colorHex: String?
         var id: String { path }
     }
 
@@ -466,6 +472,7 @@ private struct ProjectsContent: View {
         // distinguishable in the leaderboard. Computed once over the whole
         // path set, folded into the cached row.
         let names = pacerDisambiguatedNames(Array(byProject.keys))
+        let metaByPath = Dictionary(projectMetas.map { ($0.projectPath, $0) }, uniquingKeysWith: { a, _ in a })
         let fm = FileManager.default
         let unsorted = byProject.map { (key, a) in
             // Per-row fs check folded into the cache build so scroll
@@ -487,7 +494,9 @@ private struct ProjectsContent: View {
                 sessionCount: a.sessionCount,
                 lastActive: a.lastActive,
                 modelCount: a.modelCount,
-                status: status
+                status: status,
+                colorSeed: metaByPath[key]?.colorSeed,
+                colorHex: metaByPath[key]?.colorHex
             )
         }
         return apply(sort: sort, descending: descending, to: unsorted)
@@ -613,6 +622,7 @@ private struct ProjectsContent: View {
         .onChange(of: descending) { _, _ in refreshAllRows() }
         .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
         .onChange(of: collections.count) { _, _ in refreshAllRows() }
+        .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
         // Probe count drives the badge state. Refreshing on count
         // change picks up the very first probe write (first scan
         // after install) plus any churn from the user clearing the
@@ -815,6 +825,13 @@ private struct ProjectsContent: View {
                     .opacity(hovered.map { $0.id == row.id ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
+                // Pin each project to its stable color so the wedge matches
+                // its legend dot (they used to use two unrelated color
+                // systems) and doesn't reshuffle when the ranking changes.
+                .chartForegroundStyleScale(
+                    domain: top.map(\.displayName),
+                    range: top.map { pacerProjectColor(path: $0.path, seed: $0.colorSeed, hex: $0.colorHex) }
+                )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredOverviewAngle)
                 .accessibilityLabel("Top 5 projects by \(overviewMetric.label)")
@@ -824,7 +841,7 @@ private struct ProjectsContent: View {
                         let v = value(for: overviewMetric, in: row)
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
-                                .fill(legendColor(idx))
+                                .fill(pacerProjectColor(path: row.path, seed: row.colorSeed, hex: row.colorHex))
                                 .frame(width: 8, height: 8)
                             Text(row.displayName)
                                 .font(.system(size: 12, weight: .medium))
@@ -1292,8 +1309,4 @@ private struct ProjectsContent: View {
         }
     }
 
-    private func legendColor(_ idx: Int) -> Color {
-        let palette: [Color] = [.blue, .green, .orange, .red, .purple, .pink, .teal, .yellow]
-        return palette[idx % palette.count]
-    }
 }

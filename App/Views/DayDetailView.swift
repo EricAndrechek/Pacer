@@ -425,6 +425,10 @@ struct DayDetailView: View {
                     .opacity(hoveredAgg.map { $0.dateModelKey == agg.dateModelKey ? 1.0 : 0.45 } ?? 1.0)
                 }
                 .frame(width: 160, height: 160)
+                .chartForegroundStyleScale(
+                    domain: sortedAggsByCost.map { pacerShortModel($0.model) },
+                    range: sortedAggsByCost.map { pacerModelColor($0.model) }
+                )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredAggAngle)
                 .accessibilityLabel("Models used on \(prettyDate)")

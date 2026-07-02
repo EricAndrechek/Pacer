@@ -17,12 +17,24 @@ public func pacerCollectionColor(seed: String, hex: String? = nil) -> Color {
     return pacerHashedColor(seed)
 }
 
-/// Stable color for a project. Explicit `hex` (from `ProjectMeta`) wins,
-/// else a stable hash of the canonical path — so a project keeps its color
-/// regardless of its rank in any list.
-public func pacerProjectColor(path: String, hex: String? = nil) -> Color {
+/// Stable color for a project. Precedence: an explicit user `hex` wins;
+/// else the recorded `seed` (frozen in `ProjectMeta` — the git remote URL
+/// or path captured when the project was first seen) is hashed; else the
+/// live canonical path is hashed as a fallback before the seed is
+/// recorded. Anchoring on the recorded seed means a later folder rename,
+/// remote change, or rank shuffle never recolors the project.
+public func pacerProjectColor(path: String, seed: String? = nil, hex: String? = nil) -> Color {
     if let hex, let c = Color(pacerHex: hex) { return c }
-    return pacerHashedColor(path)
+    return pacerHashedColor(seed ?? path)
+}
+
+/// Stable color for an LLM model. Model names are already stable, so no DB
+/// record is needed — just hash the short name so every model donut,
+/// legend, and swatch across the app agrees (they used to use three
+/// different color systems). Keyed on `pacerShortModel` so provider
+/// prefixes don't split a model into two colors.
+public func pacerModelColor(_ model: String) -> Color {
+    pacerHashedColor(pacerShortModel(model))
 }
 
 /// Sum-of-unicode-scalars → palette index. The same recipe as the
