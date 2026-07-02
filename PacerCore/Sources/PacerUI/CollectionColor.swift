@@ -165,7 +165,7 @@ func pacerOKLCH(l: Double, c: Double, hueDegrees: Double) -> Color {
 /// Symmetric: the raw `claude-opus-4-7` and its display form `Opus 4.7`
 /// resolve to the same color, so callers can pass whichever they have.
 public func pacerModelColor(_ model: String) -> Color {
-    pacerModelPalette.color(for: model)
+    pacerCurrentModelPalette().color(for: model)
 }
 
 public extension Color {

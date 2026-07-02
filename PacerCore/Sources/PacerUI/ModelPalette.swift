@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 /// The curated catalog of Claude models Pacer knows about, per family, sorted
@@ -85,6 +86,27 @@ public struct PacerModelPalette: Sendable {
         self.hues = hues
     }
 
+    /// Build a palette from the bundled catalog unioned with the user's
+    /// OBSERVED model ids — so a model a user actually has that the catalog
+    /// doesn't know still gets placed (and reflows its family's band) instead
+    /// of only getting the newest-edge fallback. Deterministic for a set.
+    public init(observed: [String]) {
+        var byFamily: [PacerModelIdentity.Family: Set<[Int]>] = [:]
+        for (family, versions) in pacerModelCatalog {
+            byFamily[family] = Set(versions.map { [$0.major, $0.minor] })
+        }
+        for id in observed {
+            if let c = PacerModelIdentity(id).canonical {
+                byFamily[c.family, default: []].insert([c.major, c.minor])
+            }
+        }
+        var catalog: [PacerModelIdentity.Family: [(major: Int, minor: Int)]] = [:]
+        for (family, set) in byFamily {
+            catalog[family] = set.map { (major: $0[0], minor: $0[1]) }
+        }
+        self.init(catalog: catalog)
+    }
+
     /// The color for a raw model id. Parses to a canonical `(family, major,
     /// minor)`; catalogued models use their placed hue, a known family with an
     /// uncatalogued version lands at the family's newest edge (so a just-
@@ -115,7 +137,26 @@ public struct PacerModelPalette: Sendable {
     }
 }
 
-/// The active model palette. Built from the bundled catalog, so it's identical
-/// for every user and only shifts when the catalog is regenerated (i.e. when a
-/// new model ships). Read by `pacerModelColor`.
-public let pacerModelPalette = PacerModelPalette()
+/// The active model palette behind `pacerModelColor`. Starts from the bundled
+/// catalog (so colors are stable and identical for every user before any data
+/// loads) and is rebuilt with the user's observed models via
+/// `pacerRefreshModelPalette(observed:)` on scan completion. A lock guards it
+/// so the rebuild can run off the main actor while SwiftUI reads it on-main.
+private let pacerPaletteLock = NSLock()
+nonisolated(unsafe) private var pacerActiveModelPalette = PacerModelPalette()
+
+/// Rebuild the active palette to also include the user's observed model ids.
+/// Cheap (dozens of models); call it whenever the seen-model set may change.
+public func pacerRefreshModelPalette(observed: [String]) {
+    let palette = PacerModelPalette(observed: observed)
+    pacerPaletteLock.lock()
+    pacerActiveModelPalette = palette
+    pacerPaletteLock.unlock()
+}
+
+/// A thread-safe snapshot of the current palette. Used by `pacerModelColor`.
+func pacerCurrentModelPalette() -> PacerModelPalette {
+    pacerPaletteLock.lock()
+    defer { pacerPaletteLock.unlock() }
+    return pacerActiveModelPalette
+}
