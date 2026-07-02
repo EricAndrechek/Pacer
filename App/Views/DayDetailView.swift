@@ -414,25 +414,16 @@ struct DayDetailView: View {
                 // Use pre-sorted aggregates from the cache so we don't
                 // re-sort the array on every body render (which fired
                 // on every hover tick before).
-                Chart(sortedAggsByCost, id: \.dateModelKey) { agg in
-                    SectorMark(
-                        angle: .value("Cost", agg.totalCostUSD),
-                        innerRadius: .ratio(0.6),
-                        angularInset: 1.5
-                    )
-                    .foregroundStyle(by: .value("Model", pacerShortModel(agg.model)))
-                    .cornerRadius(2)
-                    .opacity(hoveredAgg.map { $0.dateModelKey == agg.dateModelKey ? 1.0 : 0.45 } ?? 1.0)
-                }
-                .frame(width: 160, height: 160)
-                .chartForegroundStyleScale(
-                    domain: sortedAggsByCost.map { pacerShortModel($0.model) },
-                    range: sortedAggsByCost.map { pacerModelColor($0.model) }
+                PacerDonut(
+                    slices: sortedAggsByCost.map {
+                        PacerDonutSlice(id: pacerShortModel($0.model), value: $0.totalCostUSD,
+                                        color: pacerModelColor($0.model))
+                    },
+                    hoveredID: hoveredAgg.map { pacerShortModel($0.model) },
+                    hoveredAngle: $hoveredAggAngle,
+                    accessibilityLabel: "Models used on \(prettyDate)",
+                    accessibilityValue: modelsAccessibilitySummary
                 )
-                .chartLegend(.hidden)
-                .chartAngleSelection(value: $hoveredAggAngle)
-                .accessibilityLabel("Models used on \(prettyDate)")
-                .accessibilityValue(modelsAccessibilitySummary)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         SortableColumnHeader(
