@@ -105,6 +105,29 @@ enum ScreenshotMode {
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
+        // Projects ▸ Collections — the manager, the editor, and the
+        // integrated Projects tab. Synthetic collections over synthetic
+        // project rollups (see `seedCollections`).
+        await capture("collections-manager", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            CollectionsManager()
+        }
+        await capture("collections-editor", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            CollectionEditorShowcase()
+        }
+        // The integrated Projects tab: collection filter bar + per-row
+        // membership chips (the "not a separate tab" model).
+        await capture("projects-collections", width: 1060, height: 900, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            ProjectsView()
+        }
+        // Scoped into a nested collection — shows the composition breakdown.
+        await capture("projects-collections-scoped", width: 1060, height: 940, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            ProjectsView(initialScope: "client")
+        }
+
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
         captureShareCard(container: container)
@@ -314,6 +337,7 @@ extension ScreenshotMode {
         seedRateLimits(ctx, now: now)
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
+        seedCollections(ctx, startOfToday: startOfToday, cal: cal)
 
         ctx.insert(ClaudeCodeMeta(
             key: ClaudeCodeMetaKey.lastIncrementalScanAt,
@@ -365,6 +389,78 @@ extension ScreenshotMode {
             insertDaily(ctx, date: ds, model: sonnet, cost: sonnetCost)
             insertDaily(ctx, date: ds, model: haiku, cost: haikuCost)
         }
+    }
+
+    /// Fake project rollups + a few collections so the Projects ▸
+    /// Collections lane, tree, detail, and manager render populated. The
+    /// leaf paths are absolute (tilde-expanded) so the folder rule matches
+    /// them. Fictional placeholder names only. Demonstrates all three
+    /// membership kinds plus overlap (firmware is in Acme Corp via rule
+    /// AND Side Projects by hand) and nesting (the Globex client
+    /// collection contains Acme Corp).
+    private static func seedCollections(
+        _ ctx: ModelContext, startOfToday: Date, cal: Calendar
+    ) {
+        let home = NSHomeDirectory()
+        let workRoot = "\(home)/Code/work/acme-corp"
+        // (path, per-day cost base)
+        let leaves: [(String, Double)] = [
+            ("\(workRoot)/api", 16),
+            ("\(workRoot)/firmware", 9),
+            ("\(workRoot)/web-dashboard", 7),
+            ("\(workRoot)/cloud-infra", 5),
+            ("\(home)/Code/personal/notes-app", 8),
+            ("\(home)/Projects/home-sensors", 4),
+            ("\(home)/Code/oss/pacer", 12),
+            ("\(home)/Code/personal/dotfiles", 2),
+        ]
+        for (li, leaf) in leaves.enumerated() {
+            let (path, base) = leaf
+            for d in 0..<42 {
+                guard let day = cal.date(byAdding: .day, value: -d, to: startOfToday) else { continue }
+                if d != 0 && noise(d &* 11 &+ li &* 3) < 0.18 { continue }   // gap days
+                let ds = TokenSample.formatDate(day)
+                let cost = base * (0.45 + 1.1 * noise(d &* 7 &+ li))
+                let input = Int64(cost * 9_000)
+                let output = Int64(cost * 2_400)
+                ctx.insert(ProjectDailyAggregate(
+                    projectPath: path,
+                    date: ds,
+                    inputTokens: input,
+                    outputTokens: output,
+                    cacheReadTokens: input * 6,
+                    totalCostUSD: cost,
+                    sessionCount: 1 + Int(noise(d &+ li) * 3),
+                    modelCount: 2,
+                    lastActive: day
+                ))
+            }
+        }
+
+        let collections = [
+            ProjectCollection(
+                id: "acme", name: "Acme Corp", sortOrder: 40,
+                rules: [workRoot]
+            ),
+            ProjectCollection(
+                id: "side", name: "Side Projects", sortOrder: 30,
+                includePaths: [
+                    "\(home)/Code/personal/notes-app",
+                    "\(home)/Projects/home-sensors",
+                    "\(workRoot)/firmware",   // overlaps Acme Corp on purpose
+                ]
+            ),
+            ProjectCollection(
+                id: "oss", name: "Open Source", sortOrder: 20,
+                includePaths: ["\(home)/Code/oss/pacer"]
+            ),
+            ProjectCollection(
+                id: "client", name: "Client: Globex", sortOrder: 50,
+                includePaths: ["\(home)/Code/oss/pacer"],
+                childCollectionIDs: ["acme"]   // nesting
+            ),
+        ]
+        collections.forEach { ctx.insert($0) }
     }
 
     /// Prior days' hourly rollups (~70 days) so the intelligence engine has
@@ -630,6 +726,33 @@ extension ScreenshotMode {
 /// A macOS window titlebar — traffic-light buttons at the left, a faint
 /// centered window title — prepended to window scenes so they read like a
 /// real app-window screenshot.
+/// Renders the redesigned collection editor with representative data so
+/// `make screenshots` shows the rule live-preview, the disambiguated
+/// member rows, and the color picker.
+private struct CollectionEditorShowcase: View {
+    var body: some View {
+        let home = NSHomeDirectory()
+        let known = [
+            "\(home)/Code/work/acme-corp/api",
+            "\(home)/Code/work/acme-corp/firmware",
+            "\(home)/Code/work/acme-corp/web-dashboard",
+            "\(home)/Code/work/acme-corp/cloud-infra",
+            "\(home)/Code/personal/notes-app",
+            "\(home)/Code/oss/pacer",
+        ]
+        var draft = CollectionEditorDraft()
+        draft.name = "Acme Corp"
+        draft.rules = ["\(home)/Code/work/acme-corp"]
+        draft.includePaths = ["\(home)/Code/oss/pacer"]
+        return CollectionEditorSheet(
+            draft: draft,
+            knownPaths: known,
+            otherCollections: [("side", "Side Projects")],
+            onSave: { _ in }
+        )
+    }
+}
+
 private struct MacWindowChrome: View {
     let title: String
 

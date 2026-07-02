@@ -28,7 +28,27 @@ struct ProjectsView: View {
     @AppStorage("pacer.projects.overviewMetric", store: PacerSettings.store)
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
+    /// Active collection scope on the Projects tab — `""` = All projects.
+    /// Collections live inline here (a filter bar), not in a separate tab.
+    /// Not persisted: scope is a transient browsing choice, and reopening
+    /// on "All" is the least surprising default.
+    @State private var collectionFilter: String = ""
+
+    /// Optional starting scope (used by the screenshot harness to render a
+    /// scoped collection; nil in normal use).
+    var initialScope: String? = nil
+
     @State private var searchText: String = ""
+    /// Drives the collections-manager sheet, opened from the lane's
+    /// "Manage…" button.
+    @State private var showingCollectionsManager = false
+    /// When true, the collections manager opens straight into the
+    /// new-collection editor (from a "New collection" button) rather than
+    /// the plain list (from "Manage…").
+    @State private var collectionsManagerStartNew = false
+    /// When set, the manager opens straight into this collection's editor
+    /// (from a scope-header or chip "Edit" action).
+    @State private var editingCollectionID: String?
     /// Drives the project-alias manager sheet, opened from the toolbar.
     /// Lives here (alongside `.searchable`) so the sheet attaches at the
     /// same level as the toolbar item that opens it, outside the
@@ -64,16 +84,29 @@ struct ProjectsView: View {
                 descending: sortDescending,
                 overviewMetric: overviewMetric,
                 searchText: searchText,
+                collectionFilter: collectionFilter,
                 rangeBinding: rangeBinding,
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
+                collectionFilterBinding: $collectionFilter,
                 onSelectProject: { path, displayName, since in
-                    modalRoot = .project(
-                        path: path,
-                        displayName: displayName,
-                        since: since
-                    )
+                    modalRoot = .project(path: path, displayName: displayName, since: since)
+                },
+                onNewCollection: {
+                    editingCollectionID = nil
+                    collectionsManagerStartNew = true
+                    showingCollectionsManager = true
+                },
+                onManageCollections: {
+                    editingCollectionID = nil
+                    collectionsManagerStartNew = false
+                    showingCollectionsManager = true
+                },
+                onEditCollection: { id in
+                    collectionsManagerStartNew = false
+                    editingCollectionID = id
+                    showingCollectionsManager = true
                 }
             )
             .id("\(range.rawValue)")
@@ -93,7 +126,13 @@ struct ProjectsView: View {
         .sheet(isPresented: $showingAliasManager) {
             ProjectAliasManager()
         }
+        .sheet(isPresented: $showingCollectionsManager) {
+            CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
+        }
         .pacerModalNavigation(root: $modalRoot)
+        .onAppear {
+            if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
+        }
     }
 
     /// Tab-level controls in the page header: the alias-manager entry
@@ -119,7 +158,7 @@ struct ProjectsView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 280)
+            .frame(width: 260)
             .controlSize(.small)
             .labelsHidden()
         }
@@ -187,6 +226,10 @@ private struct ProjectsContent: View {
     /// drive the git/no-git badge on each row. The auto-aliaser
     /// maintains this table during the scan cycle.
     @Query private var probes: [ProjectPathProbe]
+    /// Collections are small; queried here so the filter bar, per-row
+    /// membership chips, and scope resolution all read from one source.
+    @Query(sort: [SortDescriptor(\ProjectCollection.sortOrder, order: .reverse)])
+    private var collections: [ProjectCollection]
     @Environment(\.modelContext) private var modelContext
 
     /// Pending one-tap merge from the "Merge into → X" submenu.
@@ -224,21 +267,32 @@ private struct ProjectsContent: View {
     /// each row's menu builder via path-equality skip, dropping the
     /// per-render filter to O(rows).
     @State private var cachedMergeCandidates: [ProjectRow]?
+    /// path -> collection ids, for the per-row membership chips. Built once
+    /// per scan tick (not per row) to keep the table scroll cheap.
+    @State private var cachedMembership: [String: [String]] = [:]
+    /// Resolved + rolled-up collections for the filter bar, ranked by cost.
+    @State private var cachedCollectionRollups: [CollectionRollupResult] = []
 
     let rangeSince: Date?
     let searchText: String
     let sort: ProjectSort
     let descending: Bool
     let overviewMetric: ProjectMetric
+    /// Active collection scope — `""` = All projects.
+    let collectionFilter: String
 
     let rangeBinding: Binding<TimeRange>
     let sortFieldBinding: Binding<ProjectSort>
     let sortDescendingBinding: Binding<Bool>
     let overviewMetricBinding: Binding<ProjectMetric>
+    let collectionFilterBinding: Binding<String>
     /// Callback into the page-level modal navigator. Receives the
     /// project's path + display name + the range's start-date so the
     /// detail view can scope its @Query.
     let onSelectProject: (_ path: String, _ displayName: String, _ since: Date?) -> Void
+    let onNewCollection: () -> Void
+    let onManageCollections: () -> Void
+    let onEditCollection: (_ id: String) -> Void
 
     init(
         range: TimeRange,
@@ -246,11 +300,16 @@ private struct ProjectsContent: View {
         descending: Bool,
         overviewMetric: ProjectMetric,
         searchText: String,
+        collectionFilter: String,
         rangeBinding: Binding<TimeRange>,
         sortFieldBinding: Binding<ProjectSort>,
         sortDescendingBinding: Binding<Bool>,
         overviewMetricBinding: Binding<ProjectMetric>,
-        onSelectProject: @escaping (_ path: String, _ displayName: String, _ since: Date?) -> Void
+        collectionFilterBinding: Binding<String>,
+        onSelectProject: @escaping (_ path: String, _ displayName: String, _ since: Date?) -> Void,
+        onNewCollection: @escaping () -> Void,
+        onManageCollections: @escaping () -> Void,
+        onEditCollection: @escaping (_ id: String) -> Void
     ) {
         let since: Date?
         let cutoffString: String?
@@ -267,11 +326,16 @@ private struct ProjectsContent: View {
         self.sort = sort
         self.descending = descending
         self.overviewMetric = overviewMetric
+        self.collectionFilter = collectionFilter
         self.rangeBinding = rangeBinding
         self.sortFieldBinding = sortFieldBinding
         self.sortDescendingBinding = sortDescendingBinding
         self.overviewMetricBinding = overviewMetricBinding
+        self.collectionFilterBinding = collectionFilterBinding
         self.onSelectProject = onSelectProject
+        self.onNewCollection = onNewCollection
+        self.onManageCollections = onManageCollections
+        self.onEditCollection = onEditCollection
         if let cutoffString {
             _aggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
@@ -337,7 +401,34 @@ private struct ProjectsContent: View {
         cachedMergeCandidates = rows.filter {
             $0.path != ProjectDailyAggregate.unknownProjectPath
         }
+        // Collection derivations, built once per scan tick (not per row):
+        // the per-path membership map for row chips, and the ranked
+        // rollups for the filter bar.
+        let allPaths = rows.map(\.path)
+        cachedMembership = CollectionResolver.membership(
+            of: allPaths, collections: collections, knownPaths: allPaths
+        )
+        cachedCollectionRollups = CollectionUsageRollup
+            .resolveAll(collections: collections, aggregates: aggregates)
+            .sorted { $0.totals.cost > $1.totals.cost }
         refreshFilteredRows()
+    }
+
+    /// Resolve the active collection scope to its member paths, or nil for
+    /// "All". Cheap set-ops; used to filter the displayed rows.
+    private func scopeMemberPaths() -> Set<String>? {
+        guard !collectionFilter.isEmpty else { return nil }
+        return cachedCollectionRollups.first { $0.id == collectionFilter }?.memberPaths
+            ?? {
+                let byID = Dictionary(collections.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                let known = (cachedAllRows ?? []).map(\.path)
+                return CollectionResolver.resolve(collectionFilter, collections: byID, knownPaths: known)
+            }()
+    }
+
+    private func applyScope(_ rows: [ProjectRow]) -> [ProjectRow] {
+        guard let members = scopeMemberPaths() else { return rows }
+        return rows.filter { members.contains($0.path) }
     }
 
     /// Pure computation over `aggregates` + `probes` + `sort` +
@@ -371,6 +462,10 @@ private struct ProjectsContent: View {
         // table (~one row per known project) so the dict build is
         // ~microseconds.
         let probeByPath = Dictionary(uniqueKeysWithValues: probes.map { ($0.path, $0) })
+        // Collision-aware names so two "website" projects are
+        // distinguishable in the leaderboard. Computed once over the whole
+        // path set, folded into the cached row.
+        let names = pacerDisambiguatedNames(Array(byProject.keys))
         let fm = FileManager.default
         let unsorted = byProject.map { (key, a) in
             // Per-row fs check folded into the cache build so scroll
@@ -383,7 +478,7 @@ private struct ProjectsContent: View {
             )
             return ProjectRow(
                 path: key,
-                displayName: pacerShortPath(key),
+                displayName: names[key] ?? pacerShortPath(key),
                 cost: a.cost,
                 inputTokens: a.input,
                 outputTokens: a.output,
@@ -402,7 +497,7 @@ private struct ProjectsContent: View {
     /// Cheap — O(cachedAllRows), no per-row recompute — but worth
     /// caching too so view body never does string lowercasing.
     private func refreshFilteredRows() {
-        let source = cachedAllRows ?? computeAllRowsSync()
+        let source = applyScope(cachedAllRows ?? computeAllRowsSync())
         cachedFilteredRows = filter(rows: source, by: debouncedSearch)
     }
 
@@ -450,7 +545,7 @@ private struct ProjectsContent: View {
     /// after a `.id(range)` re-init never shows an empty list.
     private var rows: [ProjectRow] {
         if let cached = cachedFilteredRows { return cached }
-        return filter(rows: allRows, by: debouncedSearch)
+        return filter(rows: applyScope(allRows), by: debouncedSearch)
     }
 
     var body: some View {
@@ -459,16 +554,17 @@ private struct ProjectsContent: View {
         // ScrollView rather than inside its content. This view just
         // sets the binding when the user picks a project; the parent
         // owns the modal layer.
-        Group {
+        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+            collectionFilterBar
+            if !collectionFilter.isEmpty { scopeHeader }
+            if let comp = scopeComposition() { compositionCard(comp) }
             if rows.isEmpty && !searchText.isEmpty {
                 noSearchMatchesState
             } else if rows.isEmpty {
                 emptyState
             } else {
-                VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-                    overviewCard
-                    projectListCard
-                }
+                overviewCard
+                projectListCard
             }
         }
         .sheet(item: $bulkMergeDraft) { draft in
@@ -515,6 +611,8 @@ private struct ProjectsContent: View {
         .onChange(of: rangeSince) { _, _ in refreshAllRows() }
         .onChange(of: sort) { _, _ in refreshAllRows() }
         .onChange(of: descending) { _, _ in refreshAllRows() }
+        .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
+        .onChange(of: collections.count) { _, _ in refreshAllRows() }
         // Probe count drives the badge state. Refreshing on count
         // change picks up the very first probe write (first scan
         // after install) plus any churn from the user clearing the
@@ -823,6 +921,9 @@ private struct ProjectsContent: View {
                                 }
                             }
                             Divider()
+                            if !collections.isEmpty {
+                                addToCollectionMenu(for: row)
+                            }
                             mergeIntoMenu(for: row)
                             Divider()
                             Button("Copy path") {
@@ -896,6 +997,262 @@ private struct ProjectsContent: View {
         .padding(.bottom, 4)
     }
 
+    // MARK: - Collections (inline in the Projects tab)
+
+    private var collectionsByID: [String: ProjectCollection] {
+        Dictionary(collections.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// Horizontal filter bar: "All" + one chip per collection (with its
+    /// rolled-up total). Selecting a chip scopes the donut + table to that
+    /// collection. This is where collections live now — inline in Projects,
+    /// not a separate tab.
+    @ViewBuilder
+    private var collectionFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                if cachedCollectionRollups.isEmpty {
+                    Text("Collections")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button(action: onNewCollection) {
+                        Label("Group projects…", systemImage: "plus.circle")
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .help("Roll up related projects into a collection you can filter by, right here.")
+                } else {
+                    filterChip(id: "", label: "All", hue: .secondary, cost: nil)
+                    ForEach(cachedCollectionRollups) { r in
+                        filterChip(
+                            id: r.id,
+                            label: r.name,
+                            hue: pacerCollectionColor(seed: r.colorSeed, hex: r.colorHex),
+                            cost: r.totals.cost
+                        )
+                    }
+                    Divider().frame(height: 16).padding(.horizontal, 2)
+                    Button(action: onNewCollection) {
+                        Image(systemName: "plus")
+                    }
+                    .controlSize(.small).buttonStyle(.borderless).help("New collection")
+                    Button("Manage", action: onManageCollections)
+                        .controlSize(.small).buttonStyle(.borderless)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func filterChip(id: String, label: String, hue: Color, cost: Double?) -> some View {
+        let active = collectionFilter == id
+        return Button {
+            collectionFilterBinding.wrappedValue = active ? "" : id
+        } label: {
+            HStack(spacing: 5) {
+                if !id.isEmpty {
+                    Circle().fill(hue).frame(width: 7, height: 7)
+                }
+                Text(label)
+                    .font(.system(size: 12, weight: active ? .semibold : .regular))
+                if let cost {
+                    Text(pacerCost(cost))
+                        .font(.system(size: 11)).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(active ? hue.opacity(0.20) : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                Capsule().stroke(active ? hue.opacity(0.55) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// When a collection is scoped, a slim summary: hue + name + totals +
+    /// Edit + clear. The donut and table below are already filtered to it.
+    @ViewBuilder
+    private var scopeHeader: some View {
+        if let r = cachedCollectionRollups.first(where: { $0.id == collectionFilter }) {
+            let hue = pacerCollectionColor(seed: r.colorSeed, hex: r.colorHex)
+            HStack(spacing: 10) {
+                Circle().fill(hue).frame(width: 10, height: 10)
+                Text(r.name).font(.system(size: 15, weight: .semibold))
+                Text("\(r.memberCount) project\(r.memberCount == 1 ? "" : "s") · \(pacerCost(r.totals.cost)) · \(pacerTokens(r.totals.totalTokens))")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Edit collection") { onEditCollection(r.id) }
+                    .controlSize(.small)
+                Button {
+                    collectionFilterBinding.wrappedValue = ""
+                } label: { Label("All projects", systemImage: "xmark.circle.fill") }
+                    .controlSize(.small).buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hue.opacity(0.08))
+            )
+        }
+    }
+
+    private struct CompositionRow: Identifiable {
+        let id: String
+        let name: String
+        let hue: Color
+        let cost: Double
+        let share: Double     // fraction of the parent's total
+        let isDirect: Bool
+    }
+
+    /// When the scoped collection nests others, break its total down by
+    /// sub-collection (+ a "directly added" bucket) so nesting carries
+    /// proportional meaning, not just bulk-add convenience. Returns nil
+    /// when there's nothing to break down.
+    private func scopeComposition() -> (rows: [CompositionRow], overlaps: Bool)? {
+        guard !collectionFilter.isEmpty,
+              let parent = collections.first(where: { $0.id == collectionFilter }),
+              !parent.childCollectionIDs.isEmpty else { return nil }
+        let byID = collectionsByID
+        let perPath = CollectionUsageRollup.perPathTotals(from: aggregates)
+        let known = Array(perPath.keys)
+        let parentMembers = CollectionResolver.resolve(parent.id, collections: byID, knownPaths: known)
+        let parentCost = CollectionUsageRollup.totals(for: parentMembers, perPath: perPath).cost
+        guard parentCost > 0 else { return nil }
+
+        var rows: [CompositionRow] = []
+        var childUnion: Set<String> = []
+        var shareSum = 0.0
+        for cid in parent.childCollectionIDs {
+            guard let child = byID[cid] else { continue }
+            let m = CollectionResolver.resolve(cid, collections: byID, knownPaths: known)
+            childUnion.formUnion(m)
+            let cost = CollectionUsageRollup.totals(for: m, perPath: perPath).cost
+            let share = cost / parentCost
+            shareSum += share
+            rows.append(CompositionRow(
+                id: cid, name: child.name,
+                hue: pacerCollectionColor(seed: child.colorSeed, hex: child.colorHex),
+                cost: cost, share: share, isDirect: false
+            ))
+        }
+        // Projects that belong to the parent directly (not via any child).
+        let directOnly = parentMembers.subtracting(childUnion)
+        let directCost = CollectionUsageRollup.totals(for: directOnly, perPath: perPath).cost
+        if directCost > 0 {
+            rows.append(CompositionRow(
+                id: "__direct__", name: "Directly in \(parent.name)",
+                hue: .secondary, cost: directCost, share: directCost / parentCost, isDirect: true
+            ))
+        }
+        // Children overlap if their shares plus the direct share exceed 1
+        // (a project counted in more than one sub-collection).
+        let overlaps = (shareSum + directCost / parentCost) > 1.001
+        return (rows.sorted { $0.cost > $1.cost }, overlaps)
+    }
+
+    private func compositionCard(_ comp: (rows: [CompositionRow], overlaps: Bool)) -> some View {
+        let maxShare = comp.rows.map(\.share).max() ?? 1
+        return PacerCard("Made up of") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(comp.rows) { r in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 8) {
+                            Circle().fill(r.hue).frame(width: 8, height: 8)
+                            Text(r.name)
+                                .font(.callout)
+                                .foregroundStyle(r.isDirect ? .secondary : .primary)
+                            Spacer(minLength: 8)
+                            Text("\(Int((r.share * 100).rounded()))%")
+                                .font(.system(size: 12, weight: .semibold)).monospacedDigit()
+                            Text(pacerCost(r.cost))
+                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                .fill(r.hue.opacity(0.55))
+                                .frame(width: maxShare > 0 ? geo.size.width * (r.share / maxShare) : 0, height: 5)
+                        }
+                        .frame(height: 5)
+                    }
+                }
+            }
+        } footer: {
+            if comp.overlaps {
+                Text("Sub-collections share some projects, so their percentages add up to more than 100%.")
+            }
+        }
+    }
+
+    /// Membership provenance for a project row — a small cluster of
+    /// collection-colored dots (names on hover), excluding the one
+    /// currently scoped. Dots instead of name-pills keep the leaderboard
+    /// from getting busy. Scoping is done from the filter bar.
+    @ViewBuilder
+    private func membershipDots(for path: String) -> some View {
+        let ids = (cachedMembership[path] ?? []).filter { $0 != collectionFilter }
+        if !ids.isEmpty {
+            let names = ids.compactMap { collectionsByID[$0]?.name }
+            HStack(spacing: 3) {
+                ForEach(ids.prefix(5), id: \.self) { id in
+                    if let c = collectionsByID[id] {
+                        Circle()
+                            .fill(pacerCollectionColor(seed: c.colorSeed, hex: c.colorHex))
+                            .frame(width: 6, height: 6)
+                    }
+                }
+            }
+            .help(names.count == 1 ? "In \(names[0])" : "In \(names.joined(separator: ", "))")
+        }
+    }
+
+    /// Context-menu submenu to tag a project into a collection (distinct
+    /// from the destructive "Merge into…"). A checkmark marks collections
+    /// the project already belongs to.
+    @ViewBuilder
+    private func addToCollectionMenu(for row: ProjectRow) -> some View {
+        if row.path != ProjectDailyAggregate.unknownProjectPath {
+            Menu("Add to collection") {
+                ForEach(collections) { c in
+                    let isMember = (cachedMembership[row.path] ?? []).contains(c.id)
+                    Button {
+                        toggleMembership(row.path, c.id, isMember: isMember)
+                    } label: {
+                        if isMember {
+                            Label(c.name, systemImage: "checkmark")
+                        } else {
+                            Text(c.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("New collection…") { onNewCollection() }
+            }
+        }
+    }
+
+    private func toggleMembership(_ path: String, _ collectionID: String, isMember: Bool) {
+        guard let c = collections.first(where: { $0.id == collectionID }) else { return }
+        if isMember {
+            let byID = collectionsByID
+            let known = (cachedAllRows ?? []).map(\.path)
+            let viaRuleOrChild = CollectionResolver.resolve(collectionID, collections: byID, knownPaths: known)
+                .contains(path) && !c.includePaths.contains(path)
+            // If it's in via a rule/child, removing the manual include
+            // isn't enough — but for the common manual case just drop it.
+            CollectionsMutator.removeProject(path, from: c, stillMatchesViaRuleOrChild: viaRuleOrChild)
+        } else {
+            CollectionsMutator.addProject(path, to: c)
+        }
+        try? modelContext.save()
+        refreshAllRows()
+        NotificationCenter.default.post(name: .pacerRequestImmediateScan, object: nil)
+    }
+
     @ViewBuilder
     private func projectRow(_ row: ProjectRow) -> some View {
         HStack(alignment: .firstTextBaseline) {
@@ -905,6 +1262,7 @@ private struct ProjectsContent: View {
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
                     ProjectStatusBadge(state: row.status)
+                    membershipDots(for: row.path)
                 }
                 Text(row.path)
                     .font(.system(size: 10, design: .monospaced))

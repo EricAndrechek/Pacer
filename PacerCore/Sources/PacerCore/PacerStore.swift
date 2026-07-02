@@ -112,6 +112,8 @@ public enum PacerStore {
         ProjectPathAlias.self,
         ProjectPathProbe.self,
         ProjectBudget.self,
+        ProjectCollection.self,
+        ProjectMeta.self,
         AlertRule.self,
         ForecastModelOutcome.self,
         EngineEvalOutcome.self,

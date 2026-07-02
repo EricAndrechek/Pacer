@@ -22,6 +22,8 @@ private func makeInMemoryContainer() throws -> ModelContainer {
         SessionInfo.self,
         ClaudeCodeMeta.self,
         ProjectPathAlias.self,
+        ProjectCollection.self,
+        ProjectMeta.self,
         configurations: config
     )
 }

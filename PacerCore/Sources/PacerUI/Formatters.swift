@@ -185,3 +185,50 @@ public func pacerShortPath(_ path: String) -> String {
     let last = (path as NSString).lastPathComponent
     return last.isEmpty ? path : last
 }
+
+/// Collision-aware display names for a *set* of project paths. The bare
+/// leaf ("website") is ambiguous when two projects share it; this returns
+/// `path -> label` where a colliding leaf is extended with parent
+/// components ("clientA / website" vs "personal / website") just far
+/// enough to be unique. Non-colliding leaves stay bare, so the common
+/// case adds no noise. `pacerShortPath` can't do this alone because it
+/// sees one path at a time; feed this the full visible set.
+///
+/// Separator is " / " (spaced slash) so it reads as a breadcrumb, not a
+/// real path. O(paths · depth); compute once per visible set, not per row.
+public func pacerDisambiguatedNames(_ paths: [String]) -> [String: String] {
+    // Component arrays (drop empties from leading "/"), leaf last.
+    let comps: [String: [String]] = Dictionary(
+        uniqueKeysWithValues: paths.map { path in
+            (path, (path as NSString).pathComponents.filter { $0 != "/" && !$0.isEmpty })
+        }
+    )
+    var result: [String: String] = [:]
+    // Depth 1 = leaf only; grow until each colliding label is unique or we
+    // run out of components.
+    var unresolved = Set(paths)
+    var depth = 1
+    let maxDepth = (comps.values.map(\.count).max() ?? 1)
+    while !unresolved.isEmpty && depth <= maxDepth {
+        // Build candidate labels at this depth for the still-unresolved set.
+        var labelToPaths: [String: [String]] = [:]
+        for path in unresolved {
+            let c = comps[path] ?? []
+            let tail = c.suffix(depth)
+            let label = tail.joined(separator: " / ")
+            labelToPaths[label, default: []].append(path)
+        }
+        for (label, group) in labelToPaths where group.count == 1 {
+            // Unique at this depth — lock it in.
+            result[group[0]] = label
+            unresolved.remove(group[0])
+        }
+        depth += 1
+    }
+    // Anything still unresolved (paths that are identical in their tails,
+    // e.g. equal-length duplicates) falls back to the full path.
+    for path in unresolved {
+        result[path] = (comps[path] ?? []).joined(separator: " / ")
+    }
+    return result
+}
