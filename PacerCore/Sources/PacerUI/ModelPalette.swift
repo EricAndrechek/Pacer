@@ -135,6 +135,19 @@ public struct PacerModelPalette: Sendable {
         let (l, c) = pacerRidge(hue)
         return pacerOKLCH(l: l, c: c, hueDegrees: hue)
     }
+
+    /// The representative color for a whole family/class — its band's center
+    /// hue. Used when the Models tab groups by class so a class reads the same
+    /// color there as its versions do in the per-model view, and stays on the
+    /// ~90°-apart class anchors (already well separated: Opus purple, Sonnet
+    /// blue, Haiku green, Fable orange, Mythos red).
+    public static func classColor(_ family: PacerModelIdentity.Family) -> Color {
+        guard let hue = center[family] else {
+            return pacerGeneratedColor(family.rawValue)
+        }
+        let (l, c) = pacerRidge(hue)
+        return pacerOKLCH(l: l, c: c, hueDegrees: hue)
+    }
 }
 
 /// The active model palette behind `pacerModelColor`. Starts from the bundled

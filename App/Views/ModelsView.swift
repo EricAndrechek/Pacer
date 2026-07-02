@@ -397,10 +397,19 @@ private struct ModelsContent: View {
         metric == .cost ? pacerCostExact(row.cost) : pacerTokensExact(row.totalTokens)
     }
     /// Color for a slice/label. Ungrouped uses the curated blend palette; a
-    /// grouped view uses well-separated hashed colors (a handful of buckets
-    /// read better spread out than as a within-family gradient).
+    /// class-grouped view uses each family's class-center color, so a class
+    /// reads the same color it does in the per-model view (and stays on the
+    /// well-separated ~90°-apart class anchors).
     private func colorFor(_ label: String) -> Color {
-        grouping == .none ? pacerModelColor(label) : pacerGeneratedColor(label)
+        switch grouping {
+        case .none:
+            return pacerModelColor(label)
+        case .family:
+            if let f = PacerModelIdentity(label).family {
+                return PacerModelPalette.classColor(f)
+            }
+            return pacerGeneratedColor(label)
+        }
     }
 
     var body: some View {
