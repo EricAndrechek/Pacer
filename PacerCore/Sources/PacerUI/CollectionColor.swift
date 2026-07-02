@@ -1,20 +1,21 @@
 import SwiftUI
 import AppKit
 
-/// The curated swatch palette offered in color pickers and used as the
-/// auto-assigned fallback. Order is stable, so a hash-derived index gives
-/// a stable color across launches.
+/// The curated swatch grid offered in the collection color picker (a hand
+/// override the user can pick, stored as `colorHex`). Order is stable.
+/// Auto-assigned colors don't come from here — they're *generated* on the
+/// pretty ridge (`pacerGeneratedColor`), so they never collide.
 public let pacerColorPalette: [Color] = [
     .blue, .green, .orange, .purple, .pink, .teal, .indigo, .red, .mint, .cyan,
 ]
 
-/// Stable identity hue for a collection. Uses the explicit `hex` when the
-/// user picked one, else hashes `seed` (the collection's name at creation)
-/// into the palette — `Hasher` is per-process randomized, so we can't use
+/// Stable identity color for a collection. Uses the explicit `hex` when the
+/// user picked one, else *generates* a color from `seed` (the collection's
+/// name at creation) — `Hasher` is per-process randomized, so we can't use
 /// it for a color that must survive relaunch.
 public func pacerCollectionColor(seed: String, hex: String? = nil) -> Color {
     if let hex, let c = Color(pacerHex: hex) { return c }
-    return pacerHashedColor(seed)
+    return pacerGeneratedColor(seed)
 }
 
 /// Stable color for a project. Precedence: an explicit user `hex` wins;
@@ -38,26 +39,65 @@ public func pacerProjectColor(path: String, seed: String? = nil, hex: String? = 
     return pacerGeneratedColor(seed ?? path)
 }
 
+/// Anchor points sampled from Apple's macOS system colors converted to
+/// OKLCH — the palette Pacer's model swatches always used and that reads as
+/// "pretty". Pretty colors don't live on a flat lightness/chroma plane:
+/// reds, blues, and purples are deep and saturated (L≈0.6, C≈0.22), yellow
+/// is light (L≈0.87), and the teals are soft (C≈0.11). A flat plane washes
+/// out the deep hues and muddies the light ones. Sorted by hue so
+/// `pacerRidge` can interpolate between them.
+private let pacerColorRidge: [(h: Double, l: Double, c: Double)] = [
+    (17.9, 0.650, 0.238),  // pink
+    (28.7, 0.654, 0.232),  // red
+    (62.6, 0.765, 0.175),  // orange
+    (90.4, 0.865, 0.177),  // yellow
+    (147.4, 0.730, 0.194), // green
+    (189.0, 0.748, 0.130), // mint
+    (212.7, 0.700, 0.111), // teal
+    (233.9, 0.707, 0.133), // cyan
+    (257.4, 0.603, 0.218), // blue
+    (278.3, 0.529, 0.191), // indigo
+    (312.4, 0.615, 0.213), // purple
+]
+
+/// Interpolated (lightness, chroma) on the pretty ridge for any hue, with
+/// smoothstep easing and wraparound across the purple→pink gap. This is
+/// what lets a *continuous* generated hue look as good as the discrete
+/// system palette it was sampled from.
+private func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
+    let n = pacerColorRidge.count
+    let hue = hue.truncatingRemainder(dividingBy: 360)
+    for i in 0..<n {
+        let a = pacerColorRidge[i], b = pacerColorRidge[(i + 1) % n]
+        var span = (b.h - a.h).truncatingRemainder(dividingBy: 360)
+        if span < 0 { span += 360 }
+        var off = (hue - a.h).truncatingRemainder(dividingBy: 360)
+        if off < 0 { off += 360 }
+        if off <= span || i == n - 1 {
+            if span == 0 { span = 360 }
+            let raw = off / span
+            let t = raw * raw * (3 - 2 * raw) // smoothstep
+            return (a.l + (b.l - a.l) * t, a.c + (b.c - a.c) * t)
+        }
+    }
+    return (0.70, 0.15)
+}
+
 /// A distinct, stable, good-looking color generated from an identity
-/// string. Continuous OKLCH hue from one slice of the hash, plus a
-/// lightness level from an independent slice — so two identities that
-/// happen to land on nearby hues still separate by value (light vs deep
-/// teal), which a hue-only scheme can't. Chroma is high enough to read as
-/// vivid, not muddy.
+/// string. The hash picks a continuous hue; lightness and chroma come from
+/// the pretty ridge at that hue, so every generated color has the vividness
+/// of Apple's system palette and exact collisions are essentially
+/// impossible. An independent hash slice adds a light/deep jitter so two
+/// identities that land on nearby hues still separate (light vs deep teal).
 public func pacerGeneratedColor(_ seed: String) -> Color {
     let h = pacerFNV1a(seed)
     let hue = Double(h % 360)
-    // Yellow/orange/green hues turn muddy (mustard, olive) at mid
-    // lightness — they need to be brighter to look clean. Lift lightness
-    // over that hue band; reds, blues, and purples stay richer and deeper.
-    // The band is centred on OKLCH yellow (~110°) and tapers to zero by
-    // ~±60°, so only the muddy hues get lifted.
-    let yellowLift = 0.14 * max(0, cos((hue - 110) * .pi / 120))
-    // A small value jitter from an independent hash slice separates the
-    // rare pair that lands on nearby hues.
-    let jitter = [-0.03, 0.0, 0.03][Int((h / 360) % 3)]
-    let lightness = 0.70 + yellowLift + jitter
-    return pacerOKLCH(l: lightness, c: 0.15, hueDegrees: hue)
+    let (l, c) = pacerRidge(hue)
+    var lift = [-0.055, 0.0, 0.055][Int((h / 360) % 3)]
+    // Never *darken* the already-light yellow band — that re-introduces the
+    // mustard/olive mud a flat scheme suffers from. Lightening is always safe.
+    if l > 0.76 && lift < 0 { lift = 0 }
+    return pacerOKLCH(l: l + lift, c: c, hueDegrees: hue)
 }
 
 /// FNV-1a 64-bit hash with a murmur-style avalanche finalizer. The
@@ -103,20 +143,14 @@ func pacerOKLCH(l: Double, c: Double, hueDegrees: Double) -> Color {
 }
 
 /// Stable color for an LLM model. Model names are already stable, so no DB
-/// record is needed — just hash the short name so every model donut,
-/// legend, and swatch across the app agrees (they used to use three
+/// record is needed — just generate from the short name so every model
+/// donut, legend, and swatch across the app agrees (they used to use three
 /// different color systems). Keyed on `pacerShortModel` so provider
-/// prefixes don't split a model into two colors.
+/// prefixes don't split a model into two colors. Uses the same pretty ridge
+/// as projects: the old sum-of-scalars hash into a 10-color palette collided
+/// badly (birthday paradox: ~70% chance two of five models shared a color).
 public func pacerModelColor(_ model: String) -> Color {
-    pacerHashedColor(pacerShortModel(model))
-}
-
-/// Sum-of-unicode-scalars → palette index. The same recipe as the
-/// per-model swatches; deterministic across processes.
-func pacerHashedColor(_ seed: String) -> Color {
-    guard !seed.isEmpty else { return pacerColorPalette[0] }
-    let sum = seed.unicodeScalars.reduce(UInt32(0)) { $0 &+ UInt32($1.value) }
-    return pacerColorPalette[Int(sum % UInt32(pacerColorPalette.count))]
+    pacerGeneratedColor(pacerShortModel(model))
 }
 
 public extension Color {
