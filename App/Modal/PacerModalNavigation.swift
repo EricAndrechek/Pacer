@@ -48,10 +48,6 @@ public enum PacerModalDestination: Hashable, Identifiable {
     case day(date: String)
     /// A single project's drill-down — daily activity, models, sessions.
     case project(path: String, displayName: String, since: Date?)
-    /// A collection's scoped drill-down — its rolled-up usage, member
-    /// projects ranked within, and any sub-collections. Identified by the
-    /// collection's stable id so a rename doesn't break navigation.
-    case collection(id: String)
     /// One session's full transcript metadata.
     case session(sessionId: String, projectDisplayName: String)
     /// The compare-models projection detail for one rate-limit window
@@ -62,7 +58,6 @@ public enum PacerModalDestination: Hashable, Identifiable {
         switch self {
         case .day(let d):                return "day:\(d)"
         case .project(let path, _, _):   return "project:\(path)"
-        case .collection(let cid):       return "collection:\(cid)"
         case .session(let sid, _):       return "session:\(sid)"
         case .projection(let w):         return "projection:\(w)"
         }
@@ -147,8 +142,6 @@ struct PacerModalRouter: View {
                 displayName: displayName,
                 since: since
             )
-        case .collection(let id):
-            CollectionDetailView(collectionID: id)
         case .session(let sessionId, let projectDisplayName):
             SessionDetailView(
                 sessionId: sessionId,

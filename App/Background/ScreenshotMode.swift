@@ -105,21 +105,9 @@ enum ScreenshotMode {
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
-        // Projects ▸ Collections — the lane, the tree bake-off, the
-        // scope-drill detail, and the manager. Synthetic collections over
-        // synthetic project rollups (see `seedCollections`).
-        await capture("collections-lane", width: 960, height: 720, scheme: .light,
-                      card: true, chrome: true, title: "Projects", container: container) {
-            CollectionsShowcase(mode: .lane)
-        }
-        await capture("collections-tree", width: 960, height: 720, scheme: .light,
-                      card: true, chrome: true, title: "Projects", container: container) {
-            CollectionsShowcase(mode: .tree)
-        }
-        await capture("collections-detail", width: nil, height: nil, scheme: .light,
-                      card: true, container: container) {
-            CollectionDetailView(collectionID: "client")
-        }
+        // Projects ▸ Collections — the manager, the editor, and the
+        // integrated Projects tab. Synthetic collections over synthetic
+        // project rollups (see `seedCollections`).
         await capture("collections-manager", width: nil, height: nil, scheme: .light,
                       card: true, container: container) {
             CollectionsManager()
@@ -733,30 +721,6 @@ extension ScreenshotMode {
 /// A macOS window titlebar — traffic-light buttons at the left, a faint
 /// centered window title — prepended to window scenes so they read like a
 /// real app-window screenshot.
-/// Hosts the real `CollectionsContent` inside a page scaffold for the
-/// screenshot, in either presentation mode. Bindings are constant and
-/// callbacks are no-ops — capture renders a static frame.
-private struct CollectionsShowcase: View {
-    let mode: CollectionsViewMode
-    var body: some View {
-        PageScaffold(
-            "Projects",
-            subtitle: "Roll up related projects into overlapping collections."
-        ) {
-            CollectionsContent(
-                range: .ninetyDays,
-                searchText: "",
-                viewMode: mode,
-                viewModeBinding: .constant(mode),
-                onSelectCollection: { _ in },
-                onSelectProject: { _, _ in },
-                onNew: {},
-                onManage: {}
-            )
-        }
-    }
-}
-
 /// Renders the redesigned collection editor with representative data so
 /// `make screenshots` shows the rule live-preview, the disambiguated
 /// member rows, and the color picker.
