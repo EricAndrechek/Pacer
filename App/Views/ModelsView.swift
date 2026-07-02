@@ -437,7 +437,8 @@ private struct ModelsContent: View {
     }
 
     private var trendCard: some View {
-        PacerCard("Trend", trailing: {
+        let trendAxis = pacerDateAxis(dailyMix.map(\.date))
+        return PacerCard("Trend", trailing: {
             // Hover swaps the trailing slot for the date + total tokens.
             // Detail per-model breakdown shows below the chart on hover
             // — same overlay-text pattern keeps the chart geometry
@@ -488,7 +489,17 @@ private struct ModelsContent: View {
                         }
                     }
                 }
-                .chartXAxis(.hidden)
+                .chartXAxis {
+                    AxisMarks(values: trendAxis.values) { value in
+                        AxisValueLabel {
+                            if let date = value.as(String.self) {
+                                Text(trendAxis.label(date))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
                 .chartXSelection(value: $rawTrendHoverDate)
                 .onChange(of: rawTrendHoverDate) { _, newValue in
                     trendHoverDebounce?.cancel()
