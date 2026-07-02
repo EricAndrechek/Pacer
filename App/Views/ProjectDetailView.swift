@@ -804,7 +804,6 @@ struct ProjectDetailView: View {
 
     private var modelsCard: some View {
         let total = modelSlices.reduce(Int64(0)) { $0 + $1.tokens }
-        let modelColors = pacerDistinctColors(modelSlices.map { (seed: pacerShortModel($0.model), hex: nil) })
         return PacerCard("Models", trailing: {
             if let m = hoveredModelSlice {
                 let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
@@ -835,17 +834,17 @@ struct ProjectDetailView: View {
                 .frame(width: 160, height: 160)
                 .chartForegroundStyleScale(
                     domain: modelSlices.map { pacerShortModel($0.model) },
-                    range: modelColors
+                    range: modelSlices.map { pacerModelColor($0.model) }
                 )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredModelAngle)
                 .accessibilityLabel("Model share for \(displayName)")
                 .accessibilityValue(modelSlicesSummary(total: total))
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(modelSlices.enumerated()), id: \.element.id) { idx, m in
+                    ForEach(modelSlices) { m in
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
-                                .fill(idx < modelColors.count ? modelColors[idx] : .gray)
+                                .fill(pacerModelColor(m.model))
                                 .frame(width: 8, height: 8)
                             Text(pacerShortModel(m.model))
                                 .font(.system(size: 12, weight: .medium))

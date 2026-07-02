@@ -393,14 +393,7 @@ struct DayDetailView: View {
     }
 
     private var modelsCard: some View {
-        // Guaranteed-distinct colors keyed by model name, so the donut and
-        // the (differently-sorted) table below stay in agreement.
-        let modelColorMap = Dictionary(
-            zip(sortedAggsByCost.map { pacerShortModel($0.model) },
-                pacerDistinctColors(sortedAggsByCost.map { (seed: pacerShortModel($0.model), hex: nil) })),
-            uniquingKeysWith: { first, _ in first }
-        )
-        return PacerCard("Models", trailing: {
+        PacerCard("Models", trailing: {
             if let agg = hoveredAgg {
                 let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
                 let pct = total > 0 ? Int(agg.totalCostUSD / total * 100) : 0
@@ -434,7 +427,7 @@ struct DayDetailView: View {
                 .frame(width: 160, height: 160)
                 .chartForegroundStyleScale(
                     domain: sortedAggsByCost.map { pacerShortModel($0.model) },
-                    range: sortedAggsByCost.map { modelColorMap[pacerShortModel($0.model)] ?? .gray }
+                    range: sortedAggsByCost.map { pacerModelColor($0.model) }
                 )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredAggAngle)
@@ -471,7 +464,7 @@ struct DayDetailView: View {
                     ForEach(sortedAggregates, id: \.dateModelKey) { agg in
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
-                                .fill(modelColorMap[pacerShortModel(agg.model)] ?? .gray)
+                                .fill(pacerModelColor(agg.model))
                                 .frame(width: 8, height: 8)
                             Text(pacerShortModel(agg.model))
                                 .font(.system(size: 12, weight: .medium))
