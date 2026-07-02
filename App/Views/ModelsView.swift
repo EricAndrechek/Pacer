@@ -57,7 +57,7 @@ struct ModelsView: View {
                         ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 186)
+                    .frame(width: 132)
                     .controlSize(.small)
                     .labelsHidden()
                     Picker("Time range", selection: rangeBinding) {
@@ -131,14 +131,12 @@ enum ModelMetric: String, CaseIterable, Identifiable {
 enum ModelGrouping: String, CaseIterable, Identifiable {
     case none
     case family
-    case major
 
     var id: String { rawValue }
     var label: String {
         switch self {
         case .none:   return "Model"
         case .family: return "Class"
-        case .major:  return "Version"
         }
     }
 
@@ -151,10 +149,6 @@ enum ModelGrouping: String, CaseIterable, Identifiable {
             return (model, pacerModelDisplayName(model))
         case .family:
             if let f = id.family { return (f.rawValue, f.label) }
-        case .major:
-            if let f = id.family, let mj = id.major {
-                return ("\(f.rawValue)-\(mj)", "\(f.label) \(mj)")
-            }
         }
         return (model, pacerModelDisplayName(model))
     }
