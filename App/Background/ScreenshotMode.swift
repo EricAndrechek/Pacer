@@ -128,6 +128,12 @@ enum ScreenshotMode {
                       card: true, container: container) {
             CollectionEditorShowcase()
         }
+        // The integrated Projects tab: collection filter bar + per-row
+        // membership chips (the "not a separate tab" model).
+        await capture("projects-collections", width: 1060, height: 900, scheme: .light,
+                      card: true, chrome: true, title: "Projects", container: container) {
+            ProjectsView()
+        }
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.

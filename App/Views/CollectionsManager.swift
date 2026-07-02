@@ -22,6 +22,9 @@ struct CollectionsManager: View {
     /// When opened from a "New collection" button, jump straight into the
     /// editor instead of the list.
     var startNew: Bool = false
+    /// When set, open straight into this collection's editor (from a
+    /// scope-header / chip "Edit collection" action).
+    var editCollectionID: String? = nil
 
     @State private var editor: CollectionEditorDraft?
     @State private var didAutoStart = false
@@ -52,9 +55,13 @@ struct CollectionsManager: View {
         }
         .frame(width: 640, height: 600)
         .onAppear {
-            if startNew && !didAutoStart {
-                didAutoStart = true
+            guard !didAutoStart else { return }
+            didAutoStart = true
+            if startNew {
                 editor = CollectionEditorDraft()
+            } else if let id = editCollectionID,
+                      let c = collections.first(where: { $0.id == id }) {
+                editor = CollectionEditorDraft(from: c)
             }
         }
         .sheet(item: $editor) { draft in

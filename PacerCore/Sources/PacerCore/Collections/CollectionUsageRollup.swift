@@ -89,6 +89,7 @@ public enum CollectionUsageRollup {
                 id: collection.id,
                 name: collection.name,
                 colorSeed: collection.colorSeed,
+                colorHex: collection.colorHex,
                 memberPaths: members,
                 totals: totals(for: members, perPath: perPath),
                 childCollectionIDs: collection.childCollectionIDs,
@@ -106,6 +107,7 @@ public struct CollectionRollupResult: Identifiable, Sendable {
     public let id: String
     public let name: String
     public let colorSeed: String
+    public let colorHex: String?
     /// De-duped leaf project paths (nesting flattened).
     public let memberPaths: Set<String>
     public let totals: ProjectUsageTotals
@@ -122,6 +124,7 @@ public struct CollectionRollupResult: Identifiable, Sendable {
         id: String,
         name: String,
         colorSeed: String,
+        colorHex: String? = nil,
         memberPaths: Set<String>,
         totals: ProjectUsageTotals,
         childCollectionIDs: [String],
@@ -131,6 +134,7 @@ public struct CollectionRollupResult: Identifiable, Sendable {
         self.id = id
         self.name = name
         self.colorSeed = colorSeed
+        self.colorHex = colorHex
         self.memberPaths = memberPaths
         self.totals = totals
         self.childCollectionIDs = childCollectionIDs
