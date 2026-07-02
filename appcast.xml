@@ -448,5 +448,24 @@
             type="application/octet-stream"
             sparkle:edSignature="jmPAt1UnpK9uQYbk4sJ3pgdxdpaJd/ZH0uATbpuw6vxq5uuu05rciFYan2x6WrmAVITspE7k3jFeozaeZ85eDA==" />
     </item>
+            <item>
+        <title>Version 0.3.17</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Stable, pretty identity colors + shared donut component by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4795381436" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/111" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/111/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/111">EricAndrechek/Pacer#111</a></li>
+<li>Model naming + ordered-spectrum colors, Models group-by/metric, chart-axis fixes by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4797959238" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/112" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/112/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/112">EricAndrechek/Pacer#112</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.16...v0.3.17">EricAndrechek/Pacer@<tt>v0.3.16...v0.3.17</tt></a></p>]]></description>
+        <pubDate>Thu, 02 Jul 2026 20:36:59 +0000</pubDate>
+        <sparkle:version>1783024359</sparkle:version>
+        <sparkle:shortVersionString>0.3.17</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.17/Pacer-0.3.17.dmg"
+            length="7139633"
+            type="application/octet-stream"
+            sparkle:edSignature="dm73INskJusLfZbXt6yyFke3PWoSkoSrU4AVeqoHkPIpo8eQYhO+E4PQi4N3njhwJjGZaO2eTEedtWZlIcWJDw==" />
+    </item>
         </channel>
 </rss>
