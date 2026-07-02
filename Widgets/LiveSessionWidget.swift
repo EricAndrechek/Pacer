@@ -141,7 +141,7 @@ struct LiveSessionWidgetView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
                     statColumn(
                         value: pacerCost(s.costUSD),
-                        label: s.topModel.isEmpty ? "session" : pacerShortModel(s.topModel)
+                        label: s.topModel.isEmpty ? "session" : pacerModelDisplayName(s.topModel)
                     )
                     Divider().frame(height: 30)
                     statColumn(

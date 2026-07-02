@@ -92,6 +92,8 @@ enum ScreenshotMode {
                       card: true, chrome: true, title: "Dashboard", container: container) { ContentView() }
         await capture("history", width: 1180, height: 840, scheme: .light,
                       card: true, chrome: true, title: "History", container: container) { HistoryView() }
+        await capture("models", width: 1180, height: 900, scheme: .light,
+                      card: true, chrome: true, title: "Models", container: container) { ModelsView() }
 
         // The menu-bar experience as one cohesive image: a slice of the
         // macOS menu bar with Pacer's readout, and the click-down popover
@@ -314,12 +316,28 @@ enum ScreenshotMode {
 extension ScreenshotMode {
     // Model mix mirrors a real heavy Claude Code user: overwhelmingly
     // Opus, a little Sonnet, a sliver of Haiku.
-    private static let opus = "claude-opus-4-7"
-    private static let sonnet = "claude-sonnet-4-6"
+    // "Today" / session / hourly surfaces use the current flagships.
+    private static let opus = "claude-opus-4-8"
+    private static let sonnet = "claude-sonnet-5"
     private static let haiku = "claude-haiku-4-5"
-    private static let opusShare = 0.88
-    private static let sonnetShare = 0.09
-    // haiku gets the remainder
+
+    /// A realistic multi-family, multi-version mix for the six-month daily
+    /// rollups, so the Models tab (list, share donut, trend) and the
+    /// dashboard's per-model card show the curated family/version colors and
+    /// pretty names. Each model is "active" over a window of day-offsets from
+    /// today (0 = today): newer Opus sub-versions arrive as older ones fade,
+    /// Sonnet rolls 4-6 → 5, and Fable/Mythos appear as recent slivers.
+    private struct SeedModel { let id: String; let weight: Double; let active: ClosedRange<Int> }
+    private static let seedModels: [SeedModel] = [
+        SeedModel(id: "claude-opus-4-6",   weight: 0.50, active: 62...150),
+        SeedModel(id: "claude-opus-4-7",   weight: 0.80, active: 20...130),
+        SeedModel(id: "claude-opus-4-8",   weight: 0.90, active: 0...40),
+        SeedModel(id: "claude-sonnet-4-6", weight: 0.10, active: 6...182),
+        SeedModel(id: "claude-sonnet-5",   weight: 0.16, active: 0...4),
+        SeedModel(id: "claude-haiku-4-5",  weight: 0.05, active: 0...182),
+        SeedModel(id: "claude-fable-5",    weight: 0.09, active: 0...30),
+        SeedModel(id: "claude-mythos-5",   weight: 0.06, active: 0...16),
+    ]
 
     /// Fill an (in-memory) container with deterministic, healthy-looking
     /// usage so every dashboard / history / menu-bar card renders
@@ -381,13 +399,17 @@ extension ScreenshotMode {
             if !isWeekend && noise(d &* 13 &+ 1) > 0.94 { dayCost *= 3.0 }
             if d == 0 { dayCost = todayCost }
 
-            // Opus-dominant, with a little Sonnet and a sliver of Haiku.
-            let opusCost = dayCost * (opusShare + (r - 0.5) * 0.06)
-            let sonnetCost = dayCost * sonnetShare
-            let haikuCost = max(0.1, dayCost - opusCost - sonnetCost)
-            insertDaily(ctx, date: ds, model: opus, cost: opusCost)
-            insertDaily(ctx, date: ds, model: sonnet, cost: sonnetCost)
-            insertDaily(ctx, date: ds, model: haiku, cost: haikuCost)
+            // Spread the day's cost across the models active on this day,
+            // by weight (Opus-dominant), with a little per-model jitter so
+            // the trend has texture rather than flat bands.
+            let active = seedModels.filter { $0.active.contains(d) }
+            let totalW = active.reduce(0.0) { $0 + $1.weight }
+            guard totalW > 0 else { continue }
+            for m in active {
+                let jitter = 0.8 + 0.4 * noise(d &* 17 &+ m.id.count)
+                let cost = dayCost * (m.weight / totalW) * jitter
+                if cost >= 0.05 { insertDaily(ctx, date: ds, model: m.id, cost: cost) }
+            }
         }
     }
 

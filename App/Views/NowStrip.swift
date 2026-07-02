@@ -284,7 +284,7 @@ struct NowStrip: View {
                 Text("Nothing running.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text("Last activity \(pacerRelative(latest.sampledAt)) — \(pacerShortModel(latest.model)).")
+                Text("Last activity \(pacerRelative(latest.sampledAt)) — \(pacerModelDisplayName(latest.model)).")
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }

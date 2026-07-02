@@ -788,7 +788,7 @@ struct ProjectDetailView: View {
         guard total > 0 else { return "no data" }
         return modelSlices.prefix(5).map { m in
             let pct = Int(Double(m.tokens) / Double(total) * 100)
-            return "\(pacerShortModel(m.model)) \(pct) percent"
+            return "\(pacerModelDisplayName(m.model)) \(pct) percent"
         }.joined(separator: ", ")
     }
 
@@ -808,7 +808,7 @@ struct ProjectDetailView: View {
             if let m = hoveredModelSlice {
                 let pct = total > 0 ? Int(Double(m.tokens) / Double(total) * 100) : 0
                 HStack(spacing: 6) {
-                    Text(pacerShortModel(m.model))
+                    Text(pacerModelDisplayName(m.model))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
@@ -835,7 +835,7 @@ struct ProjectDetailView: View {
                     ForEach(modelSlices) { m in
                         PacerDonutLegendRow(
                             color: pacerModelColor(m.model),
-                            label: pacerShortModel(m.model)
+                            label: pacerModelDisplayName(m.model)
                         ) {
                             Text(pacerTokens(m.tokens)).help(pacerTokensExact(m.tokens))
                                 .font(.system(size: 11))

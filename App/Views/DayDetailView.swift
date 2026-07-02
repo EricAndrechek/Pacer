@@ -380,7 +380,7 @@ struct DayDetailView: View {
         guard total > 0 else { return "no data" }
         return sortedAggsByCost.prefix(5).map { agg in
             let pct = Int(agg.totalCostUSD / total * 100)
-            return "\(pacerShortModel(agg.model)) \(pct) percent"
+            return "\(pacerModelDisplayName(agg.model)) \(pct) percent"
         }.joined(separator: ", ")
     }
 
@@ -398,7 +398,7 @@ struct DayDetailView: View {
                 let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
                 let pct = total > 0 ? Int(agg.totalCostUSD / total * 100) : 0
                 HStack(spacing: 6) {
-                    Text(pacerShortModel(agg.model))
+                    Text(pacerModelDisplayName(agg.model))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     Text(pacerCost(agg.totalCostUSD)).help(pacerCostExact(agg.totalCostUSD))
@@ -457,7 +457,7 @@ struct DayDetailView: View {
                             Circle()
                                 .fill(pacerModelColor(agg.model))
                                 .frame(width: 8, height: 8)
-                            Text(pacerShortModel(agg.model))
+                            Text(pacerModelDisplayName(agg.model))
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)
                             Spacer(minLength: 8)

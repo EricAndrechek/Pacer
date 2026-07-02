@@ -216,7 +216,7 @@ private struct ModelsContent: View {
         let unsorted = byModel.map { (model, a) in
             ModelRow(
                 model: model,
-                displayName: pacerShortModel(model),
+                displayName: pacerModelDisplayName(model),
                 cost: a.cost,
                 inputTokens: a.input,
                 outputTokens: a.output,
@@ -263,7 +263,7 @@ private struct ModelsContent: View {
             DailyMix(
                 date: $0.date,
                 model: $0.model,
-                displayName: pacerShortModel($0.model),
+                displayName: pacerModelDisplayName($0.model),
                 tokens: $0.inputTokens + $0.outputTokens
             )
         }
