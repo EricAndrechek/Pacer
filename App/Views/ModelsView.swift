@@ -356,6 +356,9 @@ private struct ModelsContent: View {
 
     private var shareCard: some View {
         let total = shareTotalTokens
+        // Guaranteed-distinct colors over the shown models, shared by the
+        // donut wedges and the legend swatches so they always agree.
+        let shareColors = pacerDistinctColors(rows.map { (seed: pacerShortModel($0.displayName), hex: nil) })
         return PacerCard("Token share", trailing: {
             if let r = hoveredShareRow {
                 let pct = total > 0 ? Int(Double(r.totalTokens) / Double(total) * 100) : 0
@@ -386,15 +389,18 @@ private struct ModelsContent: View {
                 .frame(width: 180, height: 180)
                 .chartForegroundStyleScale(
                     domain: rows.map(\.displayName),
-                    range: rows.map { pacerModelColor($0.displayName) }
+                    range: shareColors
                 )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredShareAngle)
                 .accessibilityLabel("Token share across models")
                 .accessibilityValue(shareSummary)
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(rows.prefix(8)) { row in
+                    ForEach(Array(rows.prefix(8).enumerated()), id: \.offset) { idx, row in
                         HStack(alignment: .firstTextBaseline) {
+                            Circle()
+                                .fill(idx < shareColors.count ? shareColors[idx] : .gray)
+                                .frame(width: 8, height: 8)
                             Text(row.displayName)
                                 .font(.system(size: 13, weight: .medium))
                                 .lineLimit(1)

@@ -784,6 +784,11 @@ private struct ProjectsContent: View {
         let index = overviewIndex
         let totalForMetric = index.total
         let hovered = hoveredOverviewProject(cumulative: index.cumulative)
+        // Guarantee the wedges (and their legend dots) are all
+        // visually distinct — a pure per-project hash can leave two in the
+        // perceptually-narrow yellow band looking identical. Computed once
+        // over the shown set so the donut and legend always agree.
+        let topColors = pacerDistinctColors(top.map { (seed: $0.colorSeed ?? $0.path, hex: $0.colorHex) })
         return PacerCard("Top projects", trailing: {
             HStack(spacing: 12) {
                 if let h = hovered {
@@ -830,7 +835,7 @@ private struct ProjectsContent: View {
                 // systems) and doesn't reshuffle when the ranking changes.
                 .chartForegroundStyleScale(
                     domain: top.map(\.displayName),
-                    range: top.map { pacerProjectColor(path: $0.path, seed: $0.colorSeed, hex: $0.colorHex) }
+                    range: topColors
                 )
                 .chartLegend(.hidden)
                 .chartAngleSelection(value: $hoveredOverviewAngle)
@@ -841,7 +846,7 @@ private struct ProjectsContent: View {
                         let v = value(for: overviewMetric, in: row)
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
-                                .fill(pacerProjectColor(path: row.path, seed: row.colorSeed, hex: row.colorHex))
+                                .fill(idx < topColors.count ? topColors[idx] : .gray)
                                 .frame(width: 8, height: 8)
                             Text(row.displayName)
                                 .font(.system(size: 12, weight: .medium))

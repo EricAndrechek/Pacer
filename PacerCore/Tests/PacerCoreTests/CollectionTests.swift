@@ -268,6 +268,56 @@ private extension CollectionRollupResult {
     #expect(custom != seeded)
 }
 
+/// OKLab distance between two `Color`s, recomputed independently of the
+/// implementation so the separation guarantee is checked, not assumed.
+private func oklabDistance(_ x: Color, _ y: Color) -> Double {
+    func lab(_ c: Color) -> (Double, Double, Double) {
+        let n = NSColor(c).usingColorSpace(.sRGB) ?? .black
+        func lin(_ v: Double) -> Double { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        let r = lin(Double(n.redComponent)), g = lin(Double(n.greenComponent)), b = lin(Double(n.blueComponent))
+        let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+        let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+        let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+        let l_ = cbrt(l), m_ = cbrt(m), s_ = cbrt(s)
+        return (0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+                1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+                0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+    }
+    let a = lab(x), b = lab(y)
+    return ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1) + (a.2 - b.2) * (a.2 - b.2)).squareRoot()
+}
+
+@Test func distinctColorsSeparatesPerceptuallyClosePairs() {
+    // Brute-force a pair of seeds whose *base* generated colors read as
+    // near-identical (the two-yellows problem the user hit).
+    let seeds = (0..<400).map { "project-\($0)" }
+    var worst: (a: String, b: String, d: Double)?
+    for i in 0..<seeds.count {
+        let ci = pacerGeneratedColor(seeds[i])
+        for j in (i + 1)..<seeds.count {
+            let d = oklabDistance(ci, pacerGeneratedColor(seeds[j]))
+            if worst == nil || d < worst!.d { worst = (seeds[i], seeds[j], d) }
+        }
+    }
+    let pair = try! #require(worst)
+    #expect(pair.d < 0.17)  // the raw hash really does produce a too-close pair
+
+    // Passed through the de-collision pass together, they must clear 0.17.
+    let set = [pair.a, pair.b, "project-3", "project-9"]
+    let colors = pacerDistinctColors(set.map { (seed: $0, hex: nil) })
+    for i in 0..<colors.count {
+        for j in (i + 1)..<colors.count {
+            #expect(oklabDistance(colors[i], colors[j]) >= 0.17 - 0.001)
+        }
+    }
+    // Deterministic: identical input → identical output.
+    let again = pacerDistinctColors(set.map { (seed: $0, hex: nil) })
+    #expect(zip(colors, again).allSatisfy { pacerHexString(from: $0) == pacerHexString(from: $1) })
+    // A hex override is preserved verbatim (immovable anchor).
+    let withHex = pacerDistinctColors([("project-3", "#123456"), ("project-9", nil)])
+    #expect(pacerHexString(from: withHex[0]) == "#123456")
+}
+
 // MARK: Mutator
 
 @Test func mutatorAddIsIdempotentAndClearsExclusion() {

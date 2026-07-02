@@ -90,6 +90,16 @@ private func pacerRidge(_ hue: Double) -> (l: Double, c: Double) {
 /// impossible. An independent hash slice adds a light/deep jitter so two
 /// identities that land on nearby hues still separate (light vs deep teal).
 public func pacerGeneratedColor(_ seed: String) -> Color {
+    let g = pacerGeneratedComponents(seed)
+    return pacerOKLCH(l: g.l, c: g.c, hueDegrees: g.hue)
+}
+
+/// The pre-de-collision OKLCH components for a generated seed. Continuous
+/// hue from the hash; lightness+chroma from the pretty ridge; a hue-safe
+/// light/deep jitter from an independent hash slice. Returned as parts so
+/// both the `Color` and its OKLab coordinates (for perceptual-distance
+/// checks in `pacerDistinctColors`) come from one place.
+private func pacerGeneratedComponents(_ seed: String) -> (hue: Double, l: Double, c: Double) {
     let h = pacerFNV1a(seed)
     let hue = Double(h % 360)
     let (l, c) = pacerRidge(hue)
@@ -97,7 +107,7 @@ public func pacerGeneratedColor(_ seed: String) -> Color {
     // Never *darken* the already-light yellow band — that re-introduces the
     // mustard/olive mud a flat scheme suffers from. Lightening is always safe.
     if l > 0.76 && lift < 0 { lift = 0 }
-    return pacerOKLCH(l: l + lift, c: c, hueDegrees: hue)
+    return (hue, l + lift, c)
 }
 
 /// FNV-1a 64-bit hash with a murmur-style avalanche finalizer. The
@@ -151,6 +161,102 @@ func pacerOKLCH(l: Double, c: Double, hueDegrees: Double) -> Color {
 /// badly (birthday paradox: ~70% chance two of five models shared a color).
 public func pacerModelColor(_ model: String) -> Color {
     pacerGeneratedColor(pacerShortModel(model))
+}
+
+// MARK: - Guaranteed-distinct colors for one chart
+
+/// Assign visually-distinct colors to a set of identities shown together in
+/// a single chart (a donut's slices + its legend). Each identity starts at
+/// its stable color — the `hex` override if set, else the generated ridge
+/// color — and any pair closer than `minDelta` in OKLab (i.e. that would
+/// read as "the same color") is separated by rotating the lower-priority
+/// identity's hue along the bright ridge until it clears.
+///
+/// A pure hash-per-seed can't promise this: a gold (~85°) and a chartreuse
+/// (~125°) are only ΔE≈0.15 apart yet both read as "yellow", so they need
+/// *active* separation. Priority is a stable sort (hex overrides first as
+/// immovable anchors, then by seed), so the result depends only on *which*
+/// identities are present — colors stay put across value re-sorts and shift
+/// only when the visible set itself changes. Returns colors in input order.
+public func pacerDistinctColors(
+    _ items: [(seed: String, hex: String?)],
+    minDelta: Double = 0.17
+) -> [Color] {
+    let n = items.count
+    guard n > 0 else { return [] }
+    var result = [Color?](repeating: nil, count: n)
+    var placed: [(Double, Double, Double)] = []
+
+    let order = (0..<n).sorted { a, b in
+        let ha = items[a].hex != nil, hb = items[b].hex != nil
+        if ha != hb { return ha }                 // hex overrides placed first
+        return items[a].seed < items[b].seed
+    }
+    func minDist(_ lab: (Double, Double, Double)) -> Double {
+        placed.map { pacerLabDistance($0, lab) }.min() ?? .infinity
+    }
+
+    for i in order {
+        // Hex override: an immovable anchor that still repels generated colors.
+        if let hex = items[i].hex, let c = Color(pacerHex: hex) {
+            placed.append(pacerLabFromColor(c)); result[i] = c; continue
+        }
+        let g = pacerGeneratedComponents(items[i].seed)
+        let baseLab = pacerLabFromLCH(l: g.l, c: g.c, hue: g.hue)
+        if minDist(baseLab) >= minDelta {
+            placed.append(baseLab)
+            result[i] = pacerOKLCH(l: g.l, c: g.c, hueDegrees: g.hue)
+            continue
+        }
+        // Rotate along the *bright* ridge (lift 0 — never darken into mud),
+        // small alternating steps so the nudge stays minimal. Keep the best
+        // separation seen as a fallback for a crowded wheel.
+        var chosen: (lab: (Double, Double, Double), color: Color)?
+        var best: (dist: Double, lab: (Double, Double, Double), color: Color)?
+        rotate: for step in 1...30 {
+            for sign in [1.0, -1.0] {
+                var hue = (g.hue + sign * Double(step) * 12).truncatingRemainder(dividingBy: 360)
+                if hue < 0 { hue += 360 }
+                let (l, c) = pacerRidge(hue)
+                let lab = pacerLabFromLCH(l: l, c: c, hue: hue)
+                let color = pacerOKLCH(l: l, c: c, hueDegrees: hue)
+                let d = minDist(lab)
+                if d >= minDelta { chosen = (lab, color); break rotate }
+                if best == nil || d > best!.dist { best = (d, lab, color) }
+            }
+        }
+        let pick = chosen ?? best.map { ($0.lab, $0.color) }
+            ?? (baseLab, pacerOKLCH(l: g.l, c: g.c, hueDegrees: g.hue))
+        placed.append(pick.0); result[i] = pick.1
+    }
+    return result.map { $0 ?? .gray }
+}
+
+/// OKLab (l, a, b) for an OKLCH triple — the space perceptual distance is
+/// measured in.
+private func pacerLabFromLCH(l: Double, c: Double, hue: Double) -> (Double, Double, Double) {
+    let h = hue * .pi / 180
+    return (l, c * cos(h), c * sin(h))
+}
+
+/// OKLab (l, a, b) for an arbitrary `Color` (used for hex overrides, which
+/// aren't generated from a ridge hue). sRGB → linear → OKLab.
+private func pacerLabFromColor(_ color: Color) -> (Double, Double, Double) {
+    let ns = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.black
+    func lin(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+    let R = lin(Double(ns.redComponent)), G = lin(Double(ns.greenComponent)), B = lin(Double(ns.blueComponent))
+    let l = 0.4122214708 * R + 0.5363325363 * G + 0.0514459929 * B
+    let m = 0.2119034982 * R + 0.6806995451 * G + 0.1073969566 * B
+    let s = 0.0883024619 * R + 0.2817188376 * G + 0.6299787005 * B
+    let l_ = cbrt(l), m_ = cbrt(m), s_ = cbrt(s)
+    return (0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+}
+
+private func pacerLabDistance(_ x: (Double, Double, Double), _ y: (Double, Double, Double)) -> Double {
+    let dl = x.0 - y.0, da = x.1 - y.1, db = x.2 - y.2
+    return (dl * dl + da * da + db * db).squareRoot()
 }
 
 public extension Color {

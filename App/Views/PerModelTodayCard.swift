@@ -130,6 +130,12 @@ struct PerModelTodayCard: View {
         }
     }
 
+    /// Guaranteed-distinct colors over today's models, shared by the donut
+    /// wedges and the table swatches (deterministic, so both agree).
+    private var modelColors: [Color] {
+        pacerDistinctColors(rows.map { (seed: pacerShortModel($0.model), hex: nil) })
+    }
+
     private var donut: some View {
         Chart(rows) { row in
             SectorMark(
@@ -148,7 +154,7 @@ struct PerModelTodayCard: View {
         // swatches below (and every other model chart in the app).
         .chartForegroundStyleScale(
             domain: rows.map(\.model),
-            range: rows.map { pacerModelColor($0.model) }
+            range: modelColors
         )
         .chartLegend(.hidden)
         .chartAngleSelection(value: $hoveredAngle)
@@ -171,10 +177,10 @@ struct PerModelTodayCard: View {
 
     private var table: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(rows) { row in
+            ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Circle()
-                        .fill(pacerModelColor(row.model))
+                        .fill(idx < modelColors.count ? modelColors[idx] : .gray)
                         .frame(width: 8, height: 8)
                     Text(pacerShortModel(row.model))
                         .font(.system(size: 12, weight: .medium))
