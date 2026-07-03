@@ -345,8 +345,9 @@ private struct PaceChartColumn: View {
 
     @ViewBuilder
     private var burnChipView: some View {
-        if let outlook,
-           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate, duration: duration) {
+        if let latest, let outlook,
+           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate,
+                                    duration: duration, usedPct: latest.usedPercentage) {
             Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
                 .fixedSize()
                 .help(chip.help)
@@ -354,15 +355,28 @@ private struct PaceChartColumn: View {
     }
 
     /// Chip text + tint + tooltip for the burn outlook. nil when effectively
-    /// idle (chip hidden). Outcome language, not rate ratios: "limit in
-    /// 7 hr" (red) when a pre-reset hit is projected, "≈52% at reset"
-    /// (colored by burn health) otherwise, raw "+2.1%/hr" as the
-    /// young-history fallback.
+    /// idle (chip hidden). Outcome language, not rate ratios: "at the limit"
+    /// (red) when the live reading is already at the cap, "limit in 7 hr"
+    /// (red) when a pre-reset hit is projected, "≈52% at reset" (colored by
+    /// burn health) otherwise, raw "+2.1%/hr" as the young-history fallback.
+    ///
+    /// `usedPct` is the LIVE reading the hero shows, deliberately separate from
+    /// `outlook.usedPct` (which is the engine's last-refit snapshot). When the
+    /// hero reads 100% we must never project a *future* crossing — the snapshot
+    /// can lag a percent or two behind and would otherwise say "limit in N min"
+    /// under a bold "100%".
     private static func burnChip(
         outlook: UsageIntelligenceEngine.BurnOutlook,
         endEstimate: Estimate?,
-        duration: TimeInterval
+        duration: TimeInterval,
+        usedPct: Double
     ) -> (text: String, tint: Color, help: String)? {
+        // At the cap as displayed (rounds to 100%, matching the hero): say so
+        // directly instead of projecting a crossing that's already behind us.
+        if usedPct.rounded() >= 100 {
+            return ("at the limit", .red,
+                    "You're at the top of this window — usage can't climb further until it resets.")
+        }
         let ratio = IntelligenceFormatting.capPaceRatio(
             slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
         guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
