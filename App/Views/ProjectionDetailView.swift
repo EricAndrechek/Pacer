@@ -78,12 +78,20 @@ struct ProjectionCompareModal: View {
             idealHeight: 580
         ) {
             if let data = chartData, !trajectories.isEmpty {
+                // Re-anchor every model's projection onto the live actual tail
+                // so the dashed lines (and the "now" rule) branch from exactly
+                // where the solid line ends — the engine's snapshot origin is
+                // otherwise stale, leaving the whole fan starting below and to
+                // the left of the current dot.
+                let overlays = data.points.last.map { tail in
+                    trajectories.map { $0.reanchored(toTime: tail.time, value: tail.value) }
+                } ?? trajectories
                 ProjectionDetailView(
                     cycleStart: data.cycleStart,
                     resetsAt: data.resetsAt,
                     durationSeconds: duration,
                     actual: data.points,
-                    trajectories: trajectories
+                    trajectories: overlays
                 )
             } else if loaded {
                 Text("Not enough data to compare models yet.")
@@ -143,6 +151,10 @@ struct ProjectionDetailView: View {
               let rawEnd = trajectories.compactMap({ $0.trajectory.points.last?.at }).max()
         else { return resetsAt }
         let span = rawEnd.timeIntervalSince(now)
+        // Degenerate at the cap: every trajectory has collapsed to its origin
+        // (re-anchored onto a tail already at 100%), so there's no forward
+        // span. Fall back to the full window so the x-domain stays valid.
+        guard span > 0 else { return resetsAt }
         let padded = rawEnd.addingTimeInterval(span * 0.08)
         return min(padded, resetsAt)
     }

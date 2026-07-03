@@ -130,4 +130,72 @@ struct BurnTrajectoryTests {
         let rows = vals.enumerated().map { (at(Double($0.offset) * 0.5), $0.element, reset) }
         #expect(BurnTrajectory.postResetStartIndex(rows) == 0)
     }
+
+    // MARK: - Re-anchoring the projection onto the live tail
+
+    /// A trajectory whose first point is the (stale) snapshot origin and which
+    /// climbs linearly to `endValue` at `endHour`, `steps` samples apart.
+    private func traj(originHour: Double, originValue: Double,
+                      endHour: Double, endValue: Double, steps: Int = 4) -> BurnTrajectory.Trajectory {
+        var pts: [BurnTrajectory.Sample] = []
+        for i in 0...steps {
+            let f = Double(i) / Double(steps)
+            pts.append(.init(at: at(originHour + (endHour - originHour) * f),
+                             usedPercentage: originValue + (endValue - originValue) * f))
+        }
+        return .init(modelId: "t", points: pts, crossesFullAt: nil)
+    }
+
+    @Test func reanchorPinsOriginToLiveTailAndShiftsForward() {
+        // Snapshot said 60% at hour 2; the live tail is 70% at hour 2.5.
+        let t = traj(originHour: 2, originValue: 60, endHour: 5, endValue: 72)
+        let r = t.reanchored(toTime: at(2.5), value: 70)
+        // First rebased point IS the live tail — the join is exact.
+        #expect(r.points.first!.at == at(2.5))
+        #expect(abs(r.points.first!.usedPercentage - 70) < 1e-9)
+        // Time shifted forward by +0.5 h; every sample stays at/after the tail.
+        #expect(r.points.allSatisfy { $0.at >= at(2.5) })
+        #expect(r.points.last!.at == at(5.5))
+        // The slope (shape) is preserved: +12 pts overall ⇒ last ≈ 70+12, sub-cap.
+        #expect(r.crossesFullAt == nil)
+        #expect(abs(r.points.last!.usedPercentage - 82) < 1e-9)
+    }
+
+    @Test func reanchorRecomputesCrossingWhenLiftedOverCap() {
+        // Snapshot never reached the cap (ends at 92%), but the live tail is
+        // higher, so the lifted curve now crosses 100% — the marker must move
+        // to the first rebased sample that reaches it.
+        let t = traj(originHour: 2, originValue: 80, endHour: 5, endValue: 92)
+        let r = t.reanchored(toTime: at(2), value: 88)   // +8 lift, no time shift
+        #expect(r.crossesFullAt != nil)
+        // Truncated at the crossing: the last point is exactly the cap.
+        #expect(abs(r.points.last!.usedPercentage - 100) < 1e-9)
+        #expect(r.points.last!.at == r.crossesFullAt)
+        #expect(r.points.allSatisfy { $0.usedPercentage <= 100 + 1e-9 })
+    }
+
+    @Test func reanchorCollapsesAtTheCap() {
+        // Live tail already at the cap ⇒ nothing to project: the trajectory
+        // collapses to its origin so the chart draws no dashed line / dot.
+        let t = traj(originHour: 2, originValue: 80, endHour: 5, endValue: 92)
+        let r = t.reanchored(toTime: at(2.5), value: 100)
+        #expect(r.points.count == 1)
+        #expect(r.crossesFullAt == at(2.5))
+    }
+
+    @Test func reanchorTupleAndTrajectoryAgree() {
+        // The widget path (tuple-based) and the app path (Trajectory) must
+        // produce identical geometry.
+        let t = traj(originHour: 1, originValue: 40, endHour: 5, endValue: 88)
+        let viaTrajectory = t.reanchored(toTime: at(1.3), value: 55)
+        let viaTuple = BurnTrajectory.reanchor(
+            points: t.points.map { ($0.at, $0.usedPercentage) },
+            toTime: at(1.3), value: 55)
+        #expect(viaTrajectory.points.count == viaTuple.points.count)
+        for (a, b) in zip(viaTrajectory.points, viaTuple.points) {
+            #expect(a.at == b.at)
+            #expect(abs(a.usedPercentage - b.value) < 1e-9)
+        }
+        #expect(viaTrajectory.crossesFullAt == viaTuple.crossesFullAt)
+    }
 }

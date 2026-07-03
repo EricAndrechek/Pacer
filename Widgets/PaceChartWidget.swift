@@ -177,8 +177,19 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
                 .filter { $0.time >= cycleStart && $0.time <= resetsAt }
             if pts.count >= 2 {
-                projection = pts
-                crossing = outlook.crossingDate
+                // Re-anchor onto this widget's synthesized tail (last plotted
+                // actual point) so the dashed line continues the solid one —
+                // the same fix the app chart uses. The persisted snapshot's
+                // origin is often several minutes stale here, so the gap is
+                // even larger than in-app.
+                let r = BurnTrajectory.reanchor(
+                    points: pts.map { ($0.time, $0.value) },
+                    toTime: tailTime, value: latest.usedPercentage)
+                let rebased = r.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.value) }
+                if rebased.count >= 2 {
+                    projection = rebased
+                    crossing = r.crossesFullAt
+                }
             }
         }
         let chart = PaceChartView.Data(
