@@ -76,24 +76,23 @@ struct AdvisorBadges: View {
     }
 
     var body: some View {
-        // EmptyView'd entirely when no hints — kept inside a single
-        // container so .onAppear/.onChange land in the view tree at
-        // a stable identity. Without the wrapping Group, the
-        // .onAppear-attached strip appears and disappears as
-        // hints flip in/out, which (a) tears down + rebuilds the
-        // SwiftData @Query subscriptions and (b) loses the
-        // .onChange observer mid-tick.
-        Group {
-            if !cachedHints.isEmpty || !engineHints.isEmpty {
-                HStack(spacing: 8) {
-                    ForEach(engineHints) { hint in
-                        engineBadge(hint)
-                    }
-                    ForEach(cachedHints.indices, id: \.self) { idx in
-                        hintBadge(cachedHints[idx])
-                    }
-                }
+        // One wrapping flow for the whole header strip. The data-source chip
+        // is the last element of the SAME flow (not a sibling), so when
+        // several notices fire the pills stay atomic — each sized to its own
+        // text, never wrapping mid-phrase — and gracefully spill onto a second
+        // right-aligned row instead of clipping or squeezing. Notices still
+        // appear only when notable; the source chip is always present, so the
+        // view always renders (which also keeps the @Query subscriptions and
+        // the .onChange observer at a stable identity — the reason the strip
+        // was previously kept in a single non-EmptyView container).
+        FlowLayout(spacing: 8, rowSpacing: 6, alignment: .trailing) {
+            ForEach(engineHints) { hint in
+                engineBadge(hint)
             }
+            ForEach(cachedHints.indices, id: \.self) { idx in
+                hintBadge(cachedHints[idx])
+            }
+            RateLimitSourceChip()
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
@@ -125,7 +124,7 @@ struct AdvisorBadges: View {
                 id: "pace-heavy",
                 icon: "speedometer",
                 tint: .orange,
-                title: pace.value >= 0.95 ? "Heaviest pace in weeks" : "One of your heavier days",
+                title: pace.value >= 0.95 ? "Heaviest pace in weeks" : "Heavier day than usual",
                 detail: "Today's projected total sits at the \(Int((pace.value * 100).rounded()))th percentile of your \(dayName)s."))
         }
         engineHints = next
@@ -160,7 +159,7 @@ struct AdvisorBadges: View {
     private func shortTitle(for hint: UsageHints.Hint) -> String {
         switch hint {
         case .heavyPremiumShare:
-            return "Mostly premium models today"
+            return "Mostly premium models"
         case .lowCacheHitRate:
             return "Low cache hit rate"
         }
