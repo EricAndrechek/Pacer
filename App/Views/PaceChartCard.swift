@@ -35,8 +35,11 @@ struct PaceChartCard: View {
     @State private var endEstimates: [String: Estimate] = [:]
 
     struct WindowProjection: Equatable, Sendable {
-        var points: [PaceChartView.Data.Point]
-        var crossesFullAt: Date?
+        /// The selected model's raw forward trajectory (origin = the engine's
+        /// last-refit snapshot). Re-anchored onto the live actual tail at
+        /// render time in `liveChartData` so the dashed line continues the
+        /// solid one seamlessly.
+        var trajectory: BurnTrajectory.Trajectory
     }
 
     init(onCompare: ((String) -> Void)? = nil) {
@@ -83,9 +86,7 @@ struct PaceChartCard: View {
                 let list = await engine.rateLimitTrajectories(window: window)
                 guard !list.isEmpty else { continue }
                 if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
-                    nextSelected[window.rawValue] = WindowProjection(
-                        points: chosen.trajectory.points.map { .init(time: $0.at, value: $0.usedPercentage) },
-                        crossesFullAt: chosen.trajectory.crossesFullAt)
+                    nextSelected[window.rawValue] = WindowProjection(trajectory: chosen.trajectory)
                 }
             }
             return (nextSelected, nextOutlooks, nextEnds)
@@ -264,14 +265,27 @@ private struct PaceChartColumn: View {
     private func liveChartData(base: PaceChartView.Data?) -> PaceChartView.Data? {
         guard let base else { return nil }
         guard let projection else { return base }
+        // Re-anchor the forecast onto the live actual tail (`base.points.last`
+        // — the same synthesized "now" point the solid line ends at) so the
+        // dashed line continues it without a step. The engine's trajectory
+        // starts at its last-refit snapshot, which by render time sits below
+        // and behind the current dot; un-anchored it drew a gap and, near the
+        // cap, a stray floating crossing dot.
+        guard let tail = base.points.last else { return base }
+        let rebased = projection.trajectory.reanchored(toTime: tail.time, value: tail.value)
+        let pts = rebased.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.usedPercentage) }
+        // At/over the cap the trajectory collapses to its origin — nothing
+        // meaningful to project, and drawing it would re-introduce the stray
+        // dot. Fall back to the projection-free chart.
+        guard pts.count >= 2 else { return base }
         return PaceChartView.Data(
             cycleStart: base.cycleStart,
             resetsAt: base.resetsAt,
             durationSeconds: base.durationSeconds,
             points: base.points,
             usedPct: base.usedPct,
-            projection: projection.points,
-            projectionCrossesFullAt: projection.crossesFullAt
+            projection: pts,
+            projectionCrossesFullAt: rebased.crossesFullAt
         )
     }
 
@@ -331,8 +345,9 @@ private struct PaceChartColumn: View {
 
     @ViewBuilder
     private var burnChipView: some View {
-        if let outlook,
-           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate, duration: duration) {
+        if let latest, let outlook,
+           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate,
+                                    duration: duration, usedPct: latest.usedPercentage) {
             Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
                 .fixedSize()
                 .help(chip.help)
@@ -340,15 +355,28 @@ private struct PaceChartColumn: View {
     }
 
     /// Chip text + tint + tooltip for the burn outlook. nil when effectively
-    /// idle (chip hidden). Outcome language, not rate ratios: "limit in
-    /// 7 hr" (red) when a pre-reset hit is projected, "≈52% at reset"
-    /// (colored by burn health) otherwise, raw "+2.1%/hr" as the
-    /// young-history fallback.
+    /// idle (chip hidden). Outcome language, not rate ratios: "at the limit"
+    /// (red) when the live reading is already at the cap, "limit in 7 hr"
+    /// (red) when a pre-reset hit is projected, "≈52% at reset" (colored by
+    /// burn health) otherwise, raw "+2.1%/hr" as the young-history fallback.
+    ///
+    /// `usedPct` is the LIVE reading the hero shows, deliberately separate from
+    /// `outlook.usedPct` (which is the engine's last-refit snapshot). When the
+    /// hero reads 100% we must never project a *future* crossing — the snapshot
+    /// can lag a percent or two behind and would otherwise say "limit in N min"
+    /// under a bold "100%".
     private static func burnChip(
         outlook: UsageIntelligenceEngine.BurnOutlook,
         endEstimate: Estimate?,
-        duration: TimeInterval
+        duration: TimeInterval,
+        usedPct: Double
     ) -> (text: String, tint: Color, help: String)? {
+        // At the cap as displayed (rounds to 100%, matching the hero): say so
+        // directly instead of projecting a crossing that's already behind us.
+        if usedPct.rounded() >= 100 {
+            return ("at the limit", .red,
+                    "You're at the top of this window — usage can't climb further until it resets.")
+        }
         let ratio = IntelligenceFormatting.capPaceRatio(
             slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
         guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing

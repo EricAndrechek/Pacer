@@ -499,7 +499,16 @@ struct MenuStatusContent: View {
                     // The trailing caption escalates to the projected cap hit
                     // when the engine sees one coming — same answer the
                     // dashboard tiles and the notification share.
-                    if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                    if s.usedPercentage.rounded() >= 100 {
+                        // Already at the cap (as displayed): say so, never a
+                        // future crossing. The outlook's last-refit snapshot can
+                        // lag a point behind the live reading and would
+                        // otherwise read "limit in N min" beside a "100%".
+                        Text("at the limit")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.red)
+                            .lineLimit(1)
+                    } else if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
                         Text("limit \(eta)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)

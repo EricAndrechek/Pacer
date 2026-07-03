@@ -232,4 +232,74 @@ public enum BurnTrajectory {
         let s = xs.sorted(); let n = s.count
         return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
     }
+
+    /// Rebase a forward projection so its first sample lands exactly on the
+    /// live actual-line tail `(tailTime, tailValue)`, so the dashed line
+    /// *continues* the solid one with no step.
+    ///
+    /// Why this is needed: the engine builds a trajectory from the feature
+    /// snapshot captured at its last refit — its first point is `(f.now,
+    /// usedNow)`. By the time a view (or a widget reading a persisted
+    /// snapshot) renders, a newer sample and a later clock have usually moved
+    /// the actual tail *past* that origin, so the projection draws starting
+    /// below and behind the current dot — a visible gap in the compare-models
+    /// modal, and near the cap a stray floating crossing dot on the dashboard
+    /// card. The join can't be reconciled engine-side (the actor never sees
+    /// the view's live `@Query` tail), so we shift the whole curve here: time
+    /// by the clock delta, value by the level delta (every rebased sample
+    /// stays ≥ `tailTime` because the inputs are time-ordered from the
+    /// origin). The cap crossing is recomputed as the first rebased sample to
+    /// reach `cap`, so the drawn line and the "limit in N min" marker agree
+    /// with the live position rather than the stale snapshot.
+    ///
+    /// Tuple-based and public so the app views (via ``Trajectory/reanchored(toTime:value:cap:)``)
+    /// and the widget extension (which only has decoded `(time, value)` points)
+    /// share the exact same math.
+    public static func reanchor(
+        points: [(at: Date, value: Double)],
+        toTime tailTime: Date,
+        value tailValue: Double,
+        cap: Double = 100
+    ) -> (points: [(at: Date, value: Double)], crossesFullAt: Date?) {
+        guard let origin = points.first else { return (points, nil) }
+        let dt = tailTime.timeIntervalSince(origin.at)
+        let dy = tailValue - origin.value
+        var out: [(at: Date, value: Double)] = []
+        out.reserveCapacity(points.count)
+        var crossing: Date?
+        for p in points {
+            let t = p.at.addingTimeInterval(dt)
+            let raw = p.value + dy
+            out.append((t, min(cap, max(0, raw))))
+            // The curve ends at the cap: a flat run pinned at 100% past the
+            // crossing is noise (matches how the engine truncates its own).
+            if raw >= cap { crossing = t; break }
+        }
+        return (out, crossing)
+    }
+}
+
+public extension BurnTrajectory.Trajectory {
+    /// ``BurnTrajectory/reanchor(points:toTime:value:cap:)`` applied to this
+    /// trajectory's samples — see there for the full rationale.
+    func reanchored(toTime tailTime: Date, value tailValue: Double, cap: Double = 100) -> BurnTrajectory.Trajectory {
+        let r = BurnTrajectory.reanchor(
+            points: points.map { ($0.at, $0.usedPercentage) },
+            toTime: tailTime, value: tailValue, cap: cap)
+        return BurnTrajectory.Trajectory(
+            modelId: modelId,
+            points: r.points.map { .init(at: $0.at, usedPercentage: $0.value) },
+            crossesFullAt: r.crossesFullAt)
+    }
+}
+
+public extension BurnTrajectory.ScoredTrajectory {
+    /// Rebase the underlying trajectory onto the live tail while preserving
+    /// this candidate's accuracy record and selection flag.
+    func reanchored(toTime tailTime: Date, value tailValue: Double, cap: Double = 100) -> BurnTrajectory.ScoredTrajectory {
+        BurnTrajectory.ScoredTrajectory(
+            modelId: modelId, complexity: complexity,
+            trajectory: trajectory.reanchored(toTime: tailTime, value: tailValue, cap: cap),
+            medianAbsError: medianAbsError, coverage: coverage, isSelected: isSelected)
+    }
 }

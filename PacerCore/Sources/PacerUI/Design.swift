@@ -276,6 +276,94 @@ public struct Chip: View {
     }
 }
 
+// MARK: - Flow layout
+
+/// A single-row-preferring wrapping layout: lays subviews left-to-right and
+/// only breaks to a new row when the next one wouldn't fit the proposed width.
+/// Used for the dashboard header's advisor-badge strip so the pills stay
+/// atomic (each sized to its own content, never wrapping its text) and flow
+/// onto a second row instead of clipping when several fire at once.
+///
+/// Rows are `alignment`-anchored (default `.trailing`, to hug the right edge
+/// of a right-anchored header), and the layout reports a `firstTextBaseline`
+/// so it still lines up with a sibling title in a baseline-aligned HStack.
+public struct FlowLayout: Layout {
+    public enum HAlign: Sendable { case leading, center, trailing }
+
+    public var spacing: CGFloat
+    public var rowSpacing: CGFloat
+    public var alignment: HAlign
+
+    public init(spacing: CGFloat = 8, rowSpacing: CGFloat = 6, alignment: HAlign = .trailing) {
+        self.spacing = spacing
+        self.rowSpacing = rowSpacing
+        self.alignment = alignment
+    }
+
+    private struct Row { var indices: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func rows(maxWidth: CGFloat, _ subviews: Subviews) -> [Row] {
+        var out: [Row] = []
+        var row = Row()
+        for i in subviews.indices {
+            let s = subviews[i].sizeThatFits(.unspecified)
+            let gap = row.indices.isEmpty ? 0 : spacing
+            if !row.indices.isEmpty, row.width + gap + s.width > maxWidth {
+                out.append(row); row = Row()
+            }
+            let g = row.indices.isEmpty ? 0 : spacing
+            row.width += g + s.width
+            row.height = max(row.height, s.height)
+            row.indices.append(i)
+        }
+        if !row.indices.isEmpty { out.append(row) }
+        return out
+    }
+
+    public func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rs = rows(maxWidth: maxWidth, subviews)
+        let width = rs.map(\.width).max() ?? 0
+        let height = rs.map(\.height).reduce(0, +) + rowSpacing * CGFloat(max(0, rs.count - 1))
+        return CGSize(width: maxWidth.isFinite ? min(width, maxWidth) : width, height: height)
+    }
+
+    public func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rs = rows(maxWidth: bounds.width, subviews)
+        var y = bounds.minY
+        for row in rs {
+            let slack = max(0, bounds.width - row.width)
+            var x = bounds.minX + (alignment == .trailing ? slack : alignment == .center ? slack / 2 : 0)
+            for i in row.indices {
+                let s = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(
+                    at: CGPoint(x: x, y: y + (row.height - s.height) / 2),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(s))
+                x += s.width + spacing
+            }
+            y += row.height + rowSpacing
+        }
+    }
+
+    /// Keep the strip baseline-aligned with a sibling title: report the first
+    /// row's first pill's text baseline.
+    public func explicitAlignment(
+        of guide: VerticalAlignment, in bounds: CGRect,
+        proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) -> CGFloat? {
+        guard guide == .firstTextBaseline, let first = subviews.first else { return nil }
+        let firstRow = rows(maxWidth: bounds.width, subviews).first
+        let rowHeight = firstRow?.height ?? first.sizeThatFits(.unspecified).height
+        let s = first.sizeThatFits(.unspecified)
+        let top = (rowHeight - s.height) / 2
+        if let base = first.dimensions(in: ProposedViewSize(s))[explicit: .firstTextBaseline] {
+            return top + base
+        }
+        return nil
+    }
+}
+
 // MARK: - Freshness pulse
 
 /// Tiny live-state indicator: a colored dot with a subtle pulsing
