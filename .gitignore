@@ -56,5 +56,7 @@ updates/
 .idea/
 *.swp
 
-# Loop runtime state — local only
-.claude/
+# Claude Code local state — ignored, EXCEPT shared project skills (checked in
+# so every contributor/agent gets them, e.g. .claude/skills/ship).
+.claude/*
+!.claude/skills/

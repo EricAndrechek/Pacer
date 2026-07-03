@@ -96,5 +96,13 @@ but its widgets won't show data.
 4. Comments explain *why*, not *what* — especially where Pacer deliberately
    deviates from `ccusage` or upstream defaults.
 
+## Releasing
+
+Releases are tag-driven and mostly automated. Maintainers: see
+[`docs/releasing.md`](docs/releasing.md) and the `bin/ship.sh` helper
+(`preflight` → `release` → `verify`). If you use Claude Code, the committed
+[`/ship`](.claude/skills/ship/SKILL.md) skill encodes the full protocol
+(install-first, single approval gate, then autonomous land + release + verify).
+
 By contributing you agree your contributions are licensed under the repository's
 [MIT License](LICENSE).

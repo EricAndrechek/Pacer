@@ -6,7 +6,35 @@ The release pipeline lives in
 tag-driven, GitHub-Actions-hosted, no local steps once the secrets are
 in place.
 
-## Cutting a release (steady state)
+## The fast path: `bin/ship.sh`
+
+Most of a release is plumbing you shouldn't babysit. [`bin/ship.sh`](../bin/ship.sh)
+does the mechanical parts and exits non-zero the moment something's off:
+
+```sh
+bin/ship.sh preflight            # on main? clean? synced? → suggested next version
+bin/ship.sh notes <version>      # preview the exact notes CI will publish
+bin/ship.sh release <version>    # tag → watch the Release run → verify (backgroundable)
+bin/ship.sh verify <version>     # health-check a published release any time
+```
+
+`release` blocks until the workflow finishes and then runs `verify`, which
+checks the whole chain end to end: the GitHub Release has the DMG asset, the
+live appcast advertises the version, its `<enclosure>` length matches the
+published asset, and — if `uv` is available — the DMG's EdDSA signature
+validates against the app's embedded `SUPublicEDKey`. Run `release` / `wait-ci`
+backgrounded so nothing has to poll them.
+
+> **Agent note.** A Claude Code skill, [`/ship`](../.claude/skills/ship/SKILL.md),
+> wraps this with the project's release *protocol*: work on branches, install
+> locally first, then a **single** approval gate (version bump + notes) before
+> anything is pushed/merged/tagged; after approval it lands the PR, converges
+> branches, and runs `bin/ship.sh release` autonomously. It never drives your
+> GUI to confirm the Sparkle update — the headless signature check stands in.
+
+## Cutting a release (steady state, under the hood)
+
+The steps `bin/ship.sh` automates, spelled out:
 
 1. Land your changes on `main`. `CI` (PacerCore tests + verify build)
    should be green.
