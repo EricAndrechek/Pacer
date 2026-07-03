@@ -485,5 +485,23 @@
             type="application/octet-stream"
             sparkle:edSignature="91YOV4hCRTekHGRCAIbRXqHtXRciL3mL9fJ9cWSZWgh4b4BwLbF26yK5i9hCyEyTBls3Z4urt/4vO2oFo34LBA==" />
     </item>
+            <item>
+        <title>Version 0.3.19</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>fix(ui): rate-limit projection/burn-chip live-reading reconcile + header badge wrapping by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4803562042" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/114" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/114/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/114">EricAndrechek/Pacer#114</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.18...v0.3.19">EricAndrechek/Pacer@<tt>v0.3.18...v0.3.19</tt></a></p>]]></description>
+        <pubDate>Fri, 03 Jul 2026 15:45:53 +0000</pubDate>
+        <sparkle:version>1783093311</sparkle:version>
+        <sparkle:shortVersionString>0.3.19</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.19/Pacer-0.3.19.dmg"
+            length="7164997"
+            type="application/octet-stream"
+            sparkle:edSignature="k+gxj9wVJVL9qnw0UP7aX1MzsRVRFdcbYFhuFsRHY4Skz7WbACQu9ZUvP0pkxVui+gE6tWCUEs5/hmyf4mSkCg==" />
+    </item>
         </channel>
 </rss>
