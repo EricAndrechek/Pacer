@@ -503,5 +503,24 @@
             type="application/octet-stream"
             sparkle:edSignature="k+gxj9wVJVL9qnw0UP7aX1MzsRVRFdcbYFhuFsRHY4Skz7WbACQu9ZUvP0pkxVui+gE6tWCUEs5/hmyf4mSkCg==" />
     </item>
+            <item>
+        <title>Version 0.3.20</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>tooling: bin/ship.sh + /ship skill for the release workflow by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4805171189" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/115" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/115/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/115">EricAndrechek/Pacer#115</a></li>
+<li>Prediction feedback loop v2: gated bands, snapshot trail, versioned params, shadow models, replay harness by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819394764" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/116" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/116/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/116">EricAndrechek/Pacer#116</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.19...v0.3.20">EricAndrechek/Pacer@<tt>v0.3.19...v0.3.20</tt></a></p>]]></description>
+        <pubDate>Mon, 06 Jul 2026 13:14:06 +0000</pubDate>
+        <sparkle:version>1783343415</sparkle:version>
+        <sparkle:shortVersionString>0.3.20</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.20/Pacer-0.3.20.dmg"
+            length="7285164"
+            type="application/octet-stream"
+            sparkle:edSignature="0GV0WXtWvGbsC6PQWQgt00HnKtJe7OFDE3E7PCPUkovhkvbVPW/cUOmY5+NiBkxSTdpfgccAmQKDiPBUwBQWAQ==" />
+    </item>
         </channel>
 </rss>
