@@ -170,24 +170,20 @@ enum IntelligenceFormatting {
         return "→ limit \(point)"
     }
 
-    /// "in 45 min" / "in 3–8 hr" / "in 2–4 days" — the relative form of the
+    /// "in 45 min" / "in 7 hr" / "in 3 days" — the relative form of the
     /// crossing for the hero-tile chip, the menu bar, and notification
-    /// titles. Same honesty rule as `crossingPhrase`: lead with the
-    /// calibrated range, collapsing to a point only when both ends round to
-    /// the same words.
+    /// titles. A POINT, deliberately (points not ranges — Eric, 2026-07-06):
+    /// the chip surfaces are glanceable and a "5 min–32 hr" range there reads
+    /// broken, while the coarse units already say "approximately". The
+    /// calibrated earliest–latest range still speaks where there's room to
+    /// explain it — `crossingPhrase` in the hover tooltip and the
+    /// notification body's "likely between…" line.
     static func relativeCrossingPhrase(_ o: UsageIntelligenceEngine.BurnOutlook) -> String? {
-        relativeCrossingPhrase(at: o.projectedFullAt, earliest: o.projectedFullAtEarliest,
-                               latest: o.projectedFullAtLatest)
+        relativeCrossingPhrase(at: o.projectedFullAt)
     }
 
-    static func relativeCrossingPhrase(at hit: Date?, earliest: Date?, latest: Date?) -> String? {
+    static func relativeCrossingPhrase(at hit: Date?) -> String? {
         guard let hit else { return nil }
-        if let earliest, let latest, latest > earliest {
-            let a = coarseEta(earliest), b = coarseEta(latest)
-            if a.text == b.text { return "in \(a.text)" }
-            if a.unit == b.unit { return "in \(a.amount)–\(b.amount) \(b.unit)" }
-            return "in \(a.text)–\(b.text)"
-        }
         return "in \(coarseEta(hit).text)"
     }
 

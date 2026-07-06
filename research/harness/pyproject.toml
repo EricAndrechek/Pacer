@@ -1,0 +1,9 @@
+[project]
+name = "pacer-harness"
+version = "0.1.0"
+description = "Replay/backtest harness for Pacer's rate-limit prediction engine — walk-forward scoring and deterministic parameter sweeps over the real store."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false

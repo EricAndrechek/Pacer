@@ -76,12 +76,16 @@ public enum BurnTrajectory {
 
     /// Default roster. Quadratic is deliberately excluded — it reliably
     /// explodes on real cycles and was the worst fit in every backtest.
+    /// `KalmanTrend` rides along as a shadow candidate: it accumulates a
+    /// scored record like the others but can't be displayed until it clears
+    /// the promotion floor (`EngineParams.shadowPromotionMinPeriods`).
     public static var defaultModels: [any Model] {
         [
             LinearRecent(),
             RecencyWeighted(),
             DampedAcceleration(),
             Saturating(),
+            KalmanTrend(),
         ]
     }
 
@@ -222,6 +226,7 @@ public enum BurnTrajectory {
         case "recency-weighted": return "Recency-weighted"
         case "damped-acceleration": return "Damped acceleration"
         case "saturating": return "Saturating"
+        case "kalman-trend": return "Smoothed trend"
         case "diurnal-rate": return "Your daily rhythm"
         default: return modelId
         }

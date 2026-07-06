@@ -345,13 +345,12 @@ public final class NotificationCoordinator {
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
         let label: String = window == "five_hour" ? "5-hour" : "7-day"
-        // Heads-up title leads with the calibrated hit-time range ("in 3–8
-        // hr") — a single point time over-promises precision the models
-        // don't have. Imminent keeps the point: by then the range has
-        // collapsed and "in 45 minutes" is the actionable fact.
+        // Title carries the point ETA (points not ranges — Eric, 2026-07-06);
+        // the calibrated earliest–latest range lives in the body's "likely
+        // between…" line where there's room for it.
         content.title = tier == .imminent
             ? "\(label) limit imminent — projected \(Self.formatRelative(projectedFullAt))"
-            : "On pace to hit the \(label) limit \(IntelligenceFormatting.relativeCrossingPhrase(at: projectedFullAt, earliest: hitRangeEarliest, latest: hitRangeLatest) ?? Self.formatRelative(projectedFullAt))"
+            : "On pace to hit the \(label) limit \(IntelligenceFormatting.relativeCrossingPhrase(at: projectedFullAt) ?? Self.formatRelative(projectedFullAt))"
 
         // Body: the hit (with its plausible range when meaningfully tight),
         // the reset it beats, the current level, and the pace multiple.

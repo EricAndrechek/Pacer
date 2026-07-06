@@ -132,6 +132,7 @@ struct ProjectionDetailView: View {
         "recency-weighted": .green,
         "damped-acceleration": .purple,
         "saturating": .orange,
+        "kalman-trend": .pink,
         "diurnal-rate": .teal,
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }

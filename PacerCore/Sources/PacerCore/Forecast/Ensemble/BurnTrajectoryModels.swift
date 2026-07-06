@@ -11,9 +11,12 @@ extension BurnTrajectory {
     public struct LinearRecent: Model {
         public let id = "linear-recent"
         public let complexity = 1
-        /// Recent window as a fraction of the cycle duration.
+        /// Recent window as a fraction of the cycle duration (from
+        /// `EngineParams`, the versioned, harness-sweepable set).
         public let lookbackFraction: Double
-        public init(lookbackFraction: Double = 0.3) { self.lookbackFraction = lookbackFraction }
+        public init(lookbackFraction: Double = EngineParams.current.linearRecentLookbackFraction) {
+            self.lookbackFraction = lookbackFraction
+        }
 
         public func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)? {
             let cutoff = cycle.nowHours - cycle.durationHours * lookbackFraction
@@ -48,7 +51,7 @@ extension BurnTrajectory {
                 parameters: .init(
                     now: cycle.now, minSamples: 3,
                     minSpanSeconds: max(300, cycle.durationHours * 3600 * 0.05),
-                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * 0.15,
+                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * EngineParams.current.recencyHalfLifeFraction,
                     dampingTauSeconds: 3600, maxAccelSlopeFraction: 0))
             else { return nil }
             let now = cycle.now
@@ -70,11 +73,69 @@ extension BurnTrajectory {
                 parameters: .init(
                     now: cycle.now, minSamples: 4,
                     minSpanSeconds: max(300, cycle.durationHours * 3600 * 0.05),
-                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * 0.15,
+                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * EngineParams.current.recencyHalfLifeFraction,
                     dampingTauSeconds: remaining, maxAccelSlopeFraction: 1))
             else { return nil }
             let now = cycle.now
             return { date in estimate.projectedValue(at: date, now: now) }
+        }
+    }
+
+    /// Local-level + trend Kalman filter — a SHADOW candidate: scored into
+    /// the per-user record from day one like every roster member, but
+    /// display-promotion requires the shadow floor
+    /// (`EngineParams.shadowPromotionMinPeriods`) — see
+    /// `EngineSelfEval.bestMethod`. Tests whether optimal recursive smoothing
+    /// beats the recency-weighted regression at tracking the live burn slope;
+    /// projection is the filtered level carried forward at the filtered slope.
+    public struct KalmanTrend: Model {
+        public let id = "kalman-trend"
+        public let complexity = 5
+        /// Slope random-walk intensity (pp/hr per √hr) and measurement noise
+        /// (pp std). Fixed pending replay-harness sweeps.
+        static let processNoise = 0.5
+        static let measurementNoise = 0.5
+        public init() {}
+
+        public func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)? {
+            let samples = cycle.samples
+            guard samples.count >= 3 else { return nil }
+            // State [level (pp), slope (pp/hr)]; constant-velocity transition
+            // with continuous white-noise-acceleration process covariance.
+            var level = samples[0].usedPercentage
+            var slope = 0.0
+            var p00 = 25.0, p01 = 0.0, p11 = 25.0
+            let q = Self.processNoise * Self.processNoise
+            let r = Self.measurementNoise * Self.measurementNoise
+            var lastT = cycle.hours(samples[0].at)
+            for s in samples.dropFirst() {
+                let t = cycle.hours(s.at)
+                let dt = max(1e-3, t - lastT)
+                lastT = t
+                // Predict.
+                level += slope * dt
+                let np00 = p00 + 2 * dt * p01 + dt * dt * p11 + q * dt * dt * dt / 3
+                let np01 = p01 + dt * p11 + q * dt * dt / 2
+                let np11 = p11 + q * dt
+                // Update.
+                let innov = s.usedPercentage - level
+                let denom = np00 + r
+                guard denom > 1e-12 else { return nil }
+                let k0 = np00 / denom, k1 = np01 / denom
+                level += k0 * innov
+                slope += k1 * innov
+                p00 = (1 - k0) * np00
+                p01 = (1 - k0) * np01
+                p11 = np11 - k1 * np01
+            }
+            guard level.isFinite, slope.isFinite else { return nil }
+            let filteredLevel = level, filteredSlope = slope
+            let anchorHours = lastT
+            let cycleStart = cycle.cycleStart
+            return { date in
+                let t = date.timeIntervalSince(cycleStart) / 3600
+                return filteredLevel + filteredSlope * (t - anchorHours)
+            }
         }
     }
 

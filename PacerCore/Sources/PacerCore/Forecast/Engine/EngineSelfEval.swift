@@ -31,16 +31,17 @@ public enum EngineSelfEval {
     /// Pool-trimming bar — applied to each user's *own* accumulated record.
     /// A method joins a cut's pool when its per-cut median APE is within
     /// `poolTolerance` (relative) of the best method's, with at least
-    /// `poolMinPeriods` scored days behind it.
-    static let poolTolerance = 1.25
-    static let poolMinPeriods = 10
+    /// `poolMinPeriods` scored days behind it. Values live in `EngineParams`
+    /// (the versioned, harness-sweepable set).
+    static var poolTolerance: Double { EngineParams.current.poolTolerance }
+    static var poolMinPeriods: Int { EngineParams.current.poolMinPeriods }
     /// Selection looks at only the most recent scored days per cut — drift
     /// insurance. Validated on the real store: with the all-time record the
     /// hour-of-day shape (strong in the first weeks, weak in the current
     /// month's regime) re-entered the morning pools and dragged the median;
     /// a trailing window keeps selection tracking the regime the user is IN,
     /// while the all-time record still powers the accuracy display.
-    static let poolRecencyWindow = 30
+    static var poolRecencyWindow: Int { EngineParams.current.poolRecencyWindow }
 
     // MARK: - Decoupled value types (SwiftData-free)
 
@@ -231,14 +232,23 @@ public enum EngineSelfEval {
     /// displays (`medianAbsError`) — the two can never contradict each other.
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
+    ///
+    /// `provisionalMinPeriods` is the SHADOW promotion gate: methods listed
+    /// there need their own (much higher) floor of scored periods before they
+    /// can be selected at all. They accumulate record from day one like
+    /// everyone else — the gate only bounds what a thin early record can put
+    /// on screen, so a new candidate earns display instead of getting it on a
+    /// lucky week.
     public static func bestMethod(
         from records: [Record],
         minPeriods: Int = 2,
-        complexity: [String: Int] = [:]
+        complexity: [String: Int] = [:],
+        provisionalMinPeriods: [String: Int] = [:]
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
-            guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
+            let floor = provisionalMinPeriods[id] ?? minPeriods
+            guard Set(rows.map { $0.periodKey }).count >= floor else { return nil }
             return (id, median(rows.map { abs($0.predicted - $0.truth) }), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
