@@ -192,7 +192,8 @@ public actor UsageIntelligenceEngine {
             let surface = EngineSelfEval.rlSurface(window.rawValue)
             let recs = records(surface)
             accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs)
-            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(window)) {
+            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(window),
+                                                    provisionalMinPeriods: Self.rlShadowFloors(window)) {
                 rlSelection[window.rawValue] = pick
             }
         }
@@ -243,8 +244,21 @@ public actor UsageIntelligenceEngine {
     /// pick can break near-ties toward the simpler model.
     static func rlComplexities(_ window: RateLimitWindowKind) -> [String: Int] {
         var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
-        if window == .sevenDay { c["diurnal-rate"] = 3 }
+        c["diurnal-rate"] = 3
         return c
+    }
+
+    /// The SHADOW candidates for a window and the promotion floor each must
+    /// clear (completed periods in its scored record) before `bestMethod` may
+    /// select it for display. Kalman is new everywhere; the diurnal model is
+    /// established on 7d but a shadow on 5h — the 2026-06 backtest measured a
+    /// null there (5h cycles rarely straddle a day/night boundary), and the
+    /// shadow record re-tests that assumption instead of trusting it forever.
+    static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
+        let floor = EngineParams.current.shadowPromotionMinPeriods
+        var floors = ["kalman-trend": floor]
+        if window == .fiveHour { floors["diurnal-rate"] = floor }
+        return floors
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -714,14 +728,13 @@ public actor UsageIntelligenceEngine {
                   let duration = PaceMath.windowDuration(for: window.rawValue) else { continue }
             let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
 
-            // The 7-day window is where the diurnal idle structure lives; a 5h
-            // window rarely straddles a day/night boundary (a measured null),
-            // so it competes only the simple baselines there.
+            // The diurnal model competes on both windows now: established on
+            // 7d (where the idle structure lives), a promotion-gated SHADOW
+            // on 5h — the 2026-06 "measured null" there gets re-tested by the
+            // accumulating record instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
-            if window == .sevenDay {
-                let table = DiurnalBurnModel.rateTable(cycles: history, calendar: f.calendar, prior: f.activityGrid)
-                roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
-            }
+            let table = DiurnalBurnModel.rateTable(cycles: history, calendar: f.calendar, prior: f.activityGrid)
+            roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
 
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default
@@ -735,7 +748,12 @@ public actor UsageIntelligenceEngine {
             if let learned = rlSelection[window.rawValue] {
                 selectedId = learned
             } else {
-                let scores = BurnTrajectory.score(models: roster, cycles: history)
+                // Cold start never displays a shadow candidate — the whole
+                // point of the promotion floor is that new models earn
+                // display from the persisted record, not a cold backtest.
+                let shadowIds = Set(Self.rlShadowFloors(window).keys)
+                let scores = BurnTrajectory.score(models: roster.filter { !shadowIds.contains($0.id) },
+                                                  cycles: history)
                 selectedId = ForecastSelector.select(
                     scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
                     ?? (window == .sevenDay ? "diurnal-rate" : "recency-weighted")
@@ -1153,7 +1171,7 @@ public actor UsageIntelligenceEngine {
             out += EngineSelfEval.newOutcomesRL(
                 window: window.rawValue, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
                 existingKeys: existingKeys,
-                includeDiurnal: window == .sevenDay)
+                includeDiurnal: true)
         }
         return out
     }

@@ -232,14 +232,23 @@ public enum EngineSelfEval {
     /// displays (`medianAbsError`) — the two can never contradict each other.
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
+    ///
+    /// `provisionalMinPeriods` is the SHADOW promotion gate: methods listed
+    /// there need their own (much higher) floor of scored periods before they
+    /// can be selected at all. They accumulate record from day one like
+    /// everyone else — the gate only bounds what a thin early record can put
+    /// on screen, so a new candidate earns display instead of getting it on a
+    /// lucky week.
     public static func bestMethod(
         from records: [Record],
         minPeriods: Int = 2,
-        complexity: [String: Int] = [:]
+        complexity: [String: Int] = [:],
+        provisionalMinPeriods: [String: Int] = [:]
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
-            guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
+            let floor = provisionalMinPeriods[id] ?? minPeriods
+            guard Set(rows.map { $0.periodKey }).count >= floor else { return nil }
             return (id, median(rows.map { abs($0.predicted - $0.truth) }), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }

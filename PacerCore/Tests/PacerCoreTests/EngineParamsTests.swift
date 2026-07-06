@@ -34,6 +34,7 @@ struct EngineParamsTests {
         #expect(p.poolRecencyWindow == 30)
         #expect(p.linearRecentLookbackFraction == 0.3)
         #expect(p.recencyHalfLifeFraction == 0.15)
+        #expect(p.shadowPromotionMinPeriods == 15)
     }
 
     @Test func paramsRoundTripThroughJSON() throws {

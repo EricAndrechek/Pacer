@@ -81,6 +81,64 @@ extension BurnTrajectory {
         }
     }
 
+    /// Local-level + trend Kalman filter — a SHADOW candidate: scored into
+    /// the per-user record from day one like every roster member, but
+    /// display-promotion requires the shadow floor
+    /// (`EngineParams.shadowPromotionMinPeriods`) — see
+    /// `EngineSelfEval.bestMethod`. Tests whether optimal recursive smoothing
+    /// beats the recency-weighted regression at tracking the live burn slope;
+    /// projection is the filtered level carried forward at the filtered slope.
+    public struct KalmanTrend: Model {
+        public let id = "kalman-trend"
+        public let complexity = 5
+        /// Slope random-walk intensity (pp/hr per √hr) and measurement noise
+        /// (pp std). Fixed pending replay-harness sweeps.
+        static let processNoise = 0.5
+        static let measurementNoise = 0.5
+        public init() {}
+
+        public func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)? {
+            let samples = cycle.samples
+            guard samples.count >= 3 else { return nil }
+            // State [level (pp), slope (pp/hr)]; constant-velocity transition
+            // with continuous white-noise-acceleration process covariance.
+            var level = samples[0].usedPercentage
+            var slope = 0.0
+            var p00 = 25.0, p01 = 0.0, p11 = 25.0
+            let q = Self.processNoise * Self.processNoise
+            let r = Self.measurementNoise * Self.measurementNoise
+            var lastT = cycle.hours(samples[0].at)
+            for s in samples.dropFirst() {
+                let t = cycle.hours(s.at)
+                let dt = max(1e-3, t - lastT)
+                lastT = t
+                // Predict.
+                level += slope * dt
+                let np00 = p00 + 2 * dt * p01 + dt * dt * p11 + q * dt * dt * dt / 3
+                let np01 = p01 + dt * p11 + q * dt * dt / 2
+                let np11 = p11 + q * dt
+                // Update.
+                let innov = s.usedPercentage - level
+                let denom = np00 + r
+                guard denom > 1e-12 else { return nil }
+                let k0 = np00 / denom, k1 = np01 / denom
+                level += k0 * innov
+                slope += k1 * innov
+                p00 = (1 - k0) * np00
+                p01 = (1 - k0) * np01
+                p11 = np11 - k1 * np01
+            }
+            guard level.isFinite, slope.isFinite else { return nil }
+            let filteredLevel = level, filteredSlope = slope
+            let anchorHours = lastT
+            let cycleStart = cycle.cycleStart
+            return { date in
+                let t = date.timeIntervalSince(cycleStart) / 3600
+                return filteredLevel + filteredSlope * (t - anchorHours)
+            }
+        }
+    }
+
     /// Saturating exponential `L·(1 − e^(−k·s))` — captures usage that
     /// decelerates as a window fills or rolls old usage off. Fit by a grid over
     /// the ceiling `L` with a closed-form `k` per `L` (linear through the
