@@ -1,0 +1,5 @@
+{
+  "_comment": "Reference scores for weekly_check.py drift alarms — update when a deliberate change moves them (2026-07-06, params v1-4c0cc586).",
+  "five_hour": {"medianAbsErrorPP": 4.61, "coverage80": 0.761},
+  "seven_day": {"medianAbsErrorPP": 1.0, "coverage80": 0.75}
+}

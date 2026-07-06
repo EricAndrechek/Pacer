@@ -8,9 +8,17 @@ ship in Swift.
 
 ```
 uv run pacer_replay.py            # score the shipping configuration
+uv run pacer_replay.py --conformal-mode cuts   # calibration experiments
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
+uv run weekly_check.py            # the standing check (drift/promotions/sweep)
+uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
+
+`weekly_check.py` is the loop's heartbeat: replay vs `baselines.json`,
+shadow-promotion progress from the app's own record, and the default sweep —
+one line appended to `reports/log.jsonl` every run, a macOS notification only
+when something is actionable. Deterministic, no LLM in the loop.
 
 The store (`pacer.sqlite` in the app group) is copied to a temp dir and opened
 read-only — the live app is never touched. A full-history replay takes ~1s,
