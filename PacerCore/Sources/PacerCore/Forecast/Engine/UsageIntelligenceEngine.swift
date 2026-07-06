@@ -921,6 +921,16 @@ public actor UsageIntelligenceEngine {
     /// walk-forward over completed cycles, residual = truth − projection
     /// (percentage points), bucketed by `rlStratum` with a `"pooled"` fallback
     /// always present.
+    ///
+    /// **Per-cycle blocks below `conformalBlockMinCycles`:** residuals from
+    /// one cycle's eight cuts are strongly correlated (a heavy week blows all
+    /// of them at once), so counting them separately overstates the effective
+    /// sample — on the 7d window's thin history that produced 80% bands with
+    /// 12% realized coverage. With few cycles each cycle therefore
+    /// contributes its MEDIAN residual per bucket (effective n = cycles,
+    /// honest); with plentiful cycles the within-cycle spread is real tail
+    /// information and per-cut counting resumes (5h holds 0.785 coverage).
+    /// Validated fold-robust in research/harness (2026-07-06).
     static func stratifiedRLCalibrators(
         model: any BurnTrajectory.Model,
         history: [BurnTrajectory.Cycle],
@@ -928,9 +938,10 @@ public actor UsageIntelligenceEngine {
         calendar: Calendar,
         cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     ) -> [String: ConformalCalibrator] {
-        var byStratum: [String: [Double]] = [:]
-        var pooled: [Double] = []
-        for cycle in history {
+        // (cycle index, residual) pairs per bucket, then grouped per the rule.
+        var byStratum: [String: [(cycle: Int, residual: Double)]] = [:]
+        var pooled: [(cycle: Int, residual: Double)] = []
+        for (ci, cycle) in history.enumerated() {
             let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
             guard trueFinal > 0 else { continue }
             for cf in cutFractions {
@@ -941,13 +952,22 @@ public actor UsageIntelligenceEngine {
                     samples: seen, now: cutNow, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
                 guard let projection = model.fit(partial) else { continue }
                 let residual = trueFinal - projection(cycle.resetsAt)
-                pooled.append(residual)
-                byStratum[rlStratum(cutFraction: cf, cycleStart: cycle.cycleStart, calendar: calendar), default: []].append(residual)
+                pooled.append((ci, residual))
+                byStratum[rlStratum(cutFraction: cf, cycleStart: cycle.cycleStart, calendar: calendar), default: []].append((ci, residual))
             }
         }
-        var out: [String: ConformalCalibrator] = ["pooled": ConformalCalibrator(mode: .additive, residuals: pooled)]
-        for (key, residuals) in byStratum where residuals.count >= rlStratumMinScores {
-            out[key] = ConformalCalibrator(mode: .additive, residuals: residuals)
+        let blocks = history.count < EngineParams.current.conformalBlockMinCycles
+        func residuals(_ pairs: [(cycle: Int, residual: Double)]) -> [Double] {
+            guard blocks else { return pairs.map { $0.residual } }
+            let byCycle = Dictionary(grouping: pairs, by: { $0.cycle })
+            return byCycle.values.map { EngineSelfEval.median($0.map { $0.residual }) }
+        }
+        var out: [String: ConformalCalibrator] = ["pooled": ConformalCalibrator(mode: .additive, residuals: residuals(pooled))]
+        for (key, pairs) in byStratum {
+            let rs = residuals(pairs)
+            if rs.count >= rlStratumMinScores {
+                out[key] = ConformalCalibrator(mode: .additive, residuals: rs)
+            }
         }
         return out
     }

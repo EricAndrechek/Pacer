@@ -54,6 +54,19 @@ public struct EngineParams: Sendable, Equatable, Codable {
     /// only stops a lucky thin record from reaching the screen.
     public var shadowPromotionMinPeriods: Int = 15
 
+    // MARK: Conformal residual grouping
+
+    /// Below this many completed cycles, the rate-limit calibrator collapses
+    /// each cycle's cut-residuals to ONE per (cycle, stratum) — per-cycle
+    /// blocks. Residuals from one cycle are strongly correlated (a heavy week
+    /// blows all 8 cuts at once), so counting them separately overstates the
+    /// effective sample and yields confidently-too-narrow bands: measured
+    /// 0.12 coverage on an 80% band in the 7d window's first fold. With
+    /// plentiful cycles the within-cycle spread is real tail information
+    /// (5h holds 0.785 with per-cut residuals), so past the threshold the
+    /// grouping switches back. Validated in research/harness (2026-07-06).
+    public var conformalBlockMinCycles: Int = 40
+
     public init() {}
 
     /// The values the shipping engine runs with.
@@ -78,6 +91,7 @@ public struct EngineParams: Sendable, Equatable, Codable {
             "linearRecentLookbackFraction=\(g(linearRecentLookbackFraction))",
             "recencyHalfLifeFraction=\(g(recencyHalfLifeFraction))",
             "shadowPromotionMinPeriods=\(shadowPromotionMinPeriods)",
+            "conformalBlockMinCycles=\(conformalBlockMinCycles)",
         ].joined(separator: ";")
     }
 
