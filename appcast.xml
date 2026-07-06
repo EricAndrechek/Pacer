@@ -522,5 +522,23 @@
             type="application/octet-stream"
             sparkle:edSignature="0GV0WXtWvGbsC6PQWQgt00HnKtJe7OFDE3E7PCPUkovhkvbVPW/cUOmY5+NiBkxSTdpfgccAmQKDiPBUwBQWAQ==" />
     </item>
+            <item>
+        <title>Version 0.3.21</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>7d band-coverage fix (per-cycle block conformal) + shadow-progress UI + weekly watchdog by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819693909" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/117" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/117/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/117">EricAndrechek/Pacer#117</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.20...v0.3.21">EricAndrechek/Pacer@<tt>v0.3.20...v0.3.21</tt></a></p>]]></description>
+        <pubDate>Mon, 06 Jul 2026 13:49:23 +0000</pubDate>
+        <sparkle:version>1783345446</sparkle:version>
+        <sparkle:shortVersionString>0.3.21</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.21/Pacer-0.3.21.dmg"
+            length="7294474"
+            type="application/octet-stream"
+            sparkle:edSignature="hoMRj5MDVLVqoW9mwHqxZ7DJG4roSXOq32ohcTxb8EkZs36Hw8FHqyjHzpJup6NbhbKjuyiNFQUHbzQQAHKpCw==" />
+    </item>
         </channel>
 </rss>
