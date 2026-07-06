@@ -353,8 +353,9 @@ public actor UsageIntelligenceEngine {
         // late × weekday/weekend), pooled fallback when the stratum was thin.
         let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
         let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
-        let band80 = calibrator?.interval(around: raw, level: 0.8).map { clampPct($0) }
-        let band50 = calibrator?.interval(around: raw, level: 0.5).map { clampPct($0) }
+        let minResiduals = EngineParams.current.conformalMinResiduals
+        let band80 = calibrator?.interval(around: raw, level: 0.8, minResiduals: minResiduals).map { clampPct($0) }
+        let band50 = calibrator?.interval(around: raw, level: 0.5, minResiduals: minResiduals).map { clampPct($0) }
 
         let confidence: Estimate.Confidence
         if rf.historyCount < 3 { confidence = .low }
@@ -466,8 +467,9 @@ public actor UsageIntelligenceEngine {
             // its most extreme residual and the "range" degenerates to
             // "5 min – 32 hr". No honest band ⇒ earliest/latest stay nil and
             // the surfaces show the point crossing alone.
-            let hiShift = calibrator?.gatedQuantile(0.9)   // upper band → earliest plausible
-            let loShift = calibrator?.gatedQuantile(0.1)   // lower band → latest plausible
+            let minResiduals = EngineParams.current.conformalMinResiduals
+            let hiShift = calibrator?.gatedQuantile(0.9, minResiduals: minResiduals)   // upper band → earliest plausible
+            let loShift = calibrator?.gatedQuantile(0.1, minResiduals: minResiduals)   // lower band → latest plausible
             var t = f.now.addingTimeInterval(5 * 60)
             while t <= current.resetsAt {
                 let p = projection(t) + anchor
@@ -894,7 +896,8 @@ public actor UsageIntelligenceEngine {
         return "\(phase)|\(regime.rawValue)"
     }
     /// A stratum needs this many scores to stand alone; thinner ones pool.
-    static let rlStratumMinScores = 10
+    /// Lives in `EngineParams` (the versioned, harness-sweepable set).
+    static var rlStratumMinScores: Int { EngineParams.current.rlStratumMinScores }
 
     /// Stratified additive conformal calibrators for a rate-limit model:
     /// walk-forward over completed cycles, residual = truth − projection

@@ -11,6 +11,9 @@ public struct PacerPredictionHistory: Codable, Sendable {
     public let generatedAt: Date
     /// Version tag of the engine constants at export time (rows carry their own).
     public let currentParamsVersion: String
+    /// The full current knob values — so the replay harness reproduces the
+    /// shipping configuration without reading Swift source.
+    public let currentParams: EngineParams
     public let rows: [Row]
 
     public struct Row: Codable, Sendable {
@@ -81,6 +84,7 @@ public enum PacerPredictionHistoryBuilder {
         }
         return PacerPredictionHistory(
             schemaVersion: 1, generatedAt: now,
-            currentParamsVersion: EngineParams.version, rows: rows)
+            currentParamsVersion: EngineParams.version,
+            currentParams: EngineParams.current, rows: rows)
     }
 }

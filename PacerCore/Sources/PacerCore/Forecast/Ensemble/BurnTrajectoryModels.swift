@@ -11,9 +11,12 @@ extension BurnTrajectory {
     public struct LinearRecent: Model {
         public let id = "linear-recent"
         public let complexity = 1
-        /// Recent window as a fraction of the cycle duration.
+        /// Recent window as a fraction of the cycle duration (from
+        /// `EngineParams`, the versioned, harness-sweepable set).
         public let lookbackFraction: Double
-        public init(lookbackFraction: Double = 0.3) { self.lookbackFraction = lookbackFraction }
+        public init(lookbackFraction: Double = EngineParams.current.linearRecentLookbackFraction) {
+            self.lookbackFraction = lookbackFraction
+        }
 
         public func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)? {
             let cutoff = cycle.nowHours - cycle.durationHours * lookbackFraction
@@ -48,7 +51,7 @@ extension BurnTrajectory {
                 parameters: .init(
                     now: cycle.now, minSamples: 3,
                     minSpanSeconds: max(300, cycle.durationHours * 3600 * 0.05),
-                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * 0.15,
+                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * EngineParams.current.recencyHalfLifeFraction,
                     dampingTauSeconds: 3600, maxAccelSlopeFraction: 0))
             else { return nil }
             let now = cycle.now
@@ -70,7 +73,7 @@ extension BurnTrajectory {
                 parameters: .init(
                     now: cycle.now, minSamples: 4,
                     minSpanSeconds: max(300, cycle.durationHours * 3600 * 0.05),
-                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * 0.15,
+                    recencyHalfLifeSeconds: cycle.durationHours * 3600 * EngineParams.current.recencyHalfLifeFraction,
                     dampingTauSeconds: remaining, maxAccelSlopeFraction: 1))
             else { return nil }
             let now = cycle.now
