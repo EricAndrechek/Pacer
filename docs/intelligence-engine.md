@@ -132,6 +132,34 @@ Selection — EOD pools, RL picks — reads the accumulated record, so the engin
 regime shifts. Nothing trained on any other user ships; the only shared
 numbers are generic statistical bars (pool tolerance, minimum support).
 
+Three layers close the loop end-to-end (2026-07):
+
+- **Prediction trail** (`PredictionSnapshot`): every displayed answer is
+  recorded with its band, conformal stratum + residual count, anchor shift,
+  live state, and version tags — change-at-display-precision writes with a
+  30-min heartbeat, 180-day retention, exported at
+  `GET /v1/predictions/history`. The eval table says how methods did; the
+  trail says what the user was actually shown, and why.
+- **Versioned knobs** (`EngineParams`): all tuning constants live in one
+  struct whose `versionTag` is derived from the values (FNV over a canonical
+  string, bit-identical to the Python harness). The app never mutates its own
+  parameters; changes arrive as reviewed code and re-tag the trail
+  automatically.
+- **Shadow candidates**: new models (`kalman-trend` everywhere, the diurnal
+  model on 5h) score into the record from day one but can't be displayed
+  until they clear `shadowPromotionMinPeriods` completed periods AND win on
+  realized error — display is earned, never granted to a lucky thin record.
+  Cold-start selection skips shadows entirely.
+
+The tuning loop itself lives out-of-app in `research/harness` (Python/uv):
+a walk-forward replay of this whole pipeline over the real store (~1s for
+all history) scoring point error, **80%-band coverage**, pinball, and Brier,
+plus a deterministic grid sweep whose adoption rule is the hysteresis — a
+knob change is recommended only when fold-robust (≥3 of 4 time folds, ≥5%
+median improvement, coverage within [0.70, 0.92]). First run (2026-07-06):
+5h bands are honest (coverage 0.785 on 1032 cases); 7d bands under-cover
+(0.589 on 70 cases) — a cycle-count problem, not a knob problem.
+
 ## Presentation rules (the research, distilled)
 
 Uncertainty communication follows the weather/fintech evidence: a
@@ -155,7 +183,8 @@ evening accuracy from its own record.
   online coverage tracker (P-control on alpha) is the safety net to add with it.
 - CreateML tabular candidate joins the EOD roster via the scoreboard at ~6
   months of data.
-- 5-hour window: diurnal structure is a measured null (too short to straddle
-  day/night); cap-hit early-warning there has an information wall (44→100% in
-  12 minutes once observed). Don't rebuild these; they're not broken, they're
-  impossible.
+- 5-hour window: diurnal structure was a measured null in 2026-06 (too short
+  to straddle day/night) — now re-tested continuously as a promotion-gated
+  shadow candidate instead of trusted forever. Cap-hit early-warning there
+  has an information wall (44→100% in 12 minutes once observed); that one IS
+  impossible, don't rebuild it.

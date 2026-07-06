@@ -37,6 +37,13 @@ struct EngineParamsTests {
         #expect(p.shadowPromotionMinPeriods == 15)
     }
 
+    @Test func versionTagMatchesPythonHarness() {
+        // research/harness/pacer_replay.py `Params().version_tag()` computes
+        // the same FNV-1a over the same canonical string; this pin catches
+        // either side drifting. Update BOTH when a knob is added/changed.
+        #expect(EngineParams.current.versionTag == "v1-36d9fd53")
+    }
+
     @Test func paramsRoundTripThroughJSON() throws {
         let data = try JSONEncoder().encode(EngineParams.current)
         let back = try JSONDecoder().decode(EngineParams.self, from: data)
