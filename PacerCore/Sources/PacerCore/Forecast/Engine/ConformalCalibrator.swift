@@ -81,6 +81,17 @@ public struct ConformalCalibrator: Sendable, Equatable {
         return lower...upper
     }
 
+    /// `quantile(_:)` gated the same way `interval(around:level:)` is: `nil`
+    /// until at least `minResiduals` residuals exist. A tail read off a
+    /// handful of cases is just the most extreme thing that ever happened —
+    /// one bad week then stretches every band to "5 min to 32 hours" — so
+    /// callers that shift a curve by a raw quantile must use this form and
+    /// fall back to the unshifted point when it declines.
+    public func gatedQuantile(_ p: Double, minResiduals: Int = 8) -> Double? {
+        guard residuals.count >= minResiduals else { return nil }
+        return quantile(p)
+    }
+
     /// Empirical quantile of the residuals with the conformal `(n+1)` rank
     /// adjustment. `p` in [0,1]; saturates to the extreme residual past the range
     /// (the honest "can't be more precise than what we've seen").

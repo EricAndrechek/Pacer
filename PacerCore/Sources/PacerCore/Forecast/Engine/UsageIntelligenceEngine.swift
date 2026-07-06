@@ -377,10 +377,11 @@ public actor UsageIntelligenceEngine {
         public let projectedFullAt: Date?
         public let etaSeconds: TimeInterval?
         /// Earliest-plausible crossing (the upper conformal band's crossing —
-        /// "could hit as early as") and latest-plausible (lower band's). Both
-        /// nil when the respective shifted curve never crosses before reset.
-        /// The pair is the honest "on pace to hit between X and Y" range; a
-        /// very wide pair means the ETA shouldn't be shown as a point at all.
+        /// "could hit as early as") and latest-plausible (lower band's). Nil
+        /// when the shifted curve never crosses before reset, and BOTH nil
+        /// when the calibrator lacks the residuals for an honest band
+        /// (`gatedQuantile` declined) — detail surfaces then show the point
+        /// alone instead of a saturated worst-case range.
         public let projectedFullAtEarliest: Date?
         public let projectedFullAtLatest: Date?
         public let usedPct: Double
@@ -443,15 +444,20 @@ public actor UsageIntelligenceEngine {
         if current.usedNow < 100 {
             let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
             let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
-            let hiShift = calibrator?.quantile(0.9) ?? 0   // upper band → earliest plausible
-            let loShift = calibrator?.quantile(0.1) ?? 0   // lower band → latest plausible
+            // Band shifts are GATED on residual count (mirrors `interval()`):
+            // a 7-day calibrator built from ~5 completed cycles saturates to
+            // its most extreme residual and the "range" degenerates to
+            // "5 min – 32 hr". No honest band ⇒ earliest/latest stay nil and
+            // the surfaces show the point crossing alone.
+            let hiShift = calibrator?.gatedQuantile(0.9)   // upper band → earliest plausible
+            let loShift = calibrator?.gatedQuantile(0.1)   // lower band → latest plausible
             var t = f.now.addingTimeInterval(5 * 60)
             while t <= current.resetsAt {
                 let p = projection(t) + anchor
-                if earliest == nil, p + max(hiShift, 0) >= 100 { earliest = t }
+                if let hiShift, earliest == nil, p + max(hiShift, 0) >= 100 { earliest = t }
                 if crossing == nil, p >= 100 { crossing = t }
-                if latest == nil, p + min(loShift, 0) >= 100 { latest = t }
-                if earliest != nil, crossing != nil, latest != nil { break }
+                if let loShift, latest == nil, p + min(loShift, 0) >= 100 { latest = t }
+                if earliest != nil || hiShift == nil, crossing != nil, latest != nil || loShift == nil { break }
                 t = t.addingTimeInterval(5 * 60)
             }
         }
