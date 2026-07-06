@@ -254,7 +254,7 @@ public actor UsageIntelligenceEngine {
     /// established on 7d but a shadow on 5h — the 2026-06 backtest measured a
     /// null there (5h cycles rarely straddle a day/night boundary), and the
     /// shadow record re-tests that assumption instead of trusting it forever.
-    static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
+    public static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
         let floor = EngineParams.current.shadowPromotionMinPeriods
         var floors = ["kalman-trend": floor]
         if window == .fiveHour { floors["diurnal-rate"] = floor }
