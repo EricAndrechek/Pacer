@@ -17,6 +17,7 @@ struct ProjectionCompareModal: View {
     @Environment(\.usageEngine) private var engine
     @Query private var samples: [RateLimitSample]
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
+    @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
 
     init(windowKey: String) {
@@ -91,7 +92,9 @@ struct ProjectionCompareModal: View {
                     resetsAt: data.resetsAt,
                     durationSeconds: duration,
                     actual: data.points,
-                    trajectories: overlays
+                    trajectories: overlays,
+                    accuracy: accuracy,
+                    shadowFloors: UsageIntelligenceEngine.rlShadowFloors(kind)
                 )
             } else if loaded {
                 Text("Not enough data to compare models yet.")
@@ -111,6 +114,7 @@ struct ProjectionCompareModal: View {
     private func refresh() async {
         guard let engine else { loaded = true; return }
         trajectories = await engine.rateLimitTrajectories(window: kind)
+        accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(windowKey))
         loaded = true
     }
 }
@@ -125,6 +129,13 @@ struct ProjectionDetailView: View {
     let durationSeconds: TimeInterval
     let actual: [PaceChartView.Data.Point]
     let trajectories: [BurnTrajectory.ScoredTrajectory]
+    /// Per-method scored record for this window (completed cycles + median
+    /// miss) — powers the shadow-progress captions and the selected model's
+    /// earned-record footer. Nil until the engine has scored a cycle.
+    let accuracy: EngineSelfEval.Accuracy?
+    /// Shadow candidates for this window → the completed-cycle floor each
+    /// must clear before the engine may pick it for display.
+    let shadowFloors: [String: Int]
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -468,6 +479,37 @@ struct ProjectionDetailView: View {
 
     // MARK: - Accuracy table
 
+    /// Completed scored cycles for one method, from the persisted record.
+    private func scoredPeriods(_ modelId: String) -> Int {
+        accuracy?.methods.first(where: { $0.method == modelId })?.periods ?? 0
+    }
+
+    /// Shadow candidates are promotion-gated: they accumulate a scored record
+    /// like everyone else but can't drive the dashboard until they've banked
+    /// enough completed cycles AND win on realized error. Say so quietly, so
+    /// a new model visibly earns its place instead of appearing from nowhere.
+    /// Past the floor the caption collapses to "eligible" (and disappears on
+    /// a selected row — "on the dashboard" already says it graduated).
+    private func shadowCaption(_ st: BurnTrajectory.ScoredTrajectory) -> String? {
+        guard let floor = shadowFloors[st.modelId] else { return nil }
+        let periods = scoredPeriods(st.modelId)
+        guard periods < floor else { return st.isSelected ? nil : "eligible" }
+        return "earning trust — \(periods) of \(floor) cycles"
+    }
+
+    /// The selected model's earned record — how many completed cycles back
+    /// it. The miss itself already sits in the row's "within ±N%" column
+    /// (no number twice); the footer adds the depth of evidence behind the
+    /// pick. Only claim a record once it's meaningfully sized (≥ 5 cycles).
+    private var selectedRecordText: String? {
+        guard let selected = trajectories.first(where: { $0.isSelected }),
+              let stat = accuracy?.methods.first(where: { $0.method == selected.modelId }),
+              stat.periods >= 5
+        else { return nil }
+        return "Selected: \(BurnTrajectory.displayName(selected.modelId)) — "
+            + "earned on \(stat.periods) of your completed cycles."
+    }
+
     private var accuracyTable: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Column headers make the right-hand number self-explanatory —
@@ -490,8 +532,15 @@ struct ProjectionDetailView: View {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(color(st.modelId))
                         .frame(width: 14, height: 4)
-                    Text(BurnTrajectory.displayName(st.modelId))
-                        .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(BurnTrajectory.displayName(st.modelId))
+                            .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
+                        if let caption = shadowCaption(st) {
+                            Text("\(Image(systemName: "flask")) \(caption)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     if st.isSelected {
                         Text("on the dashboard").font(.system(size: 10, weight: .semibold))
                             .padding(.horizontal, 6).padding(.vertical, 2)
@@ -520,6 +569,14 @@ struct ProjectionDetailView: View {
                 if idx != ranked.indices.last {
                     Divider().opacity(0.25).padding(.leading, 34)
                 }
+            }
+
+            if let record = selectedRecordText {
+                Text(record)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
             }
         }
     }

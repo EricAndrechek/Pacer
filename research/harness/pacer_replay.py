@@ -59,6 +59,7 @@ class Params:
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
     shadow_promotion_min_periods: int = 15
+    conformal_block_min_cycles: int = 40
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -73,6 +74,7 @@ class Params:
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
             f"shadowPromotionMinPeriods={self.shadow_promotion_min_periods}",
+            f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
         ])
 
     def version_tag(self) -> str:
@@ -468,19 +470,69 @@ def stratum_key(cut_fraction: float, cycle_start: float) -> str:
     return f"{phase}|{regime}"
 
 
-def gated_quantile(residuals: list[float], p: float, min_residuals: int) -> float | None:
-    n = len(residuals)
-    if n < min_residuals:
+# Weighted residuals: list of (weight, residual). Unweighted modes use w=1.
+WeightedResiduals = list[tuple[float, float]]
+
+
+def kish_n(pairs: WeightedResiduals) -> float:
+    """Effective sample size under weights — (Σw)²/Σw²; equals n when w≡1."""
+    sw = sum(w for w, _ in pairs)
+    sww = sum(w * w for w, _ in pairs)
+    return (sw * sw / sww) if sww > 0 else 0.0
+
+
+def gated_quantile(pairs: WeightedResiduals, p: float, min_residuals: int) -> float | None:
+    """Conformal quantile with the (n+1) adjustment, gated on EFFECTIVE sample
+    size. Weighted form: target mass p·(Σw + w_test) with w_test = max weight
+    (the conservative choice for the unseen case)."""
+    if kish_n(pairs) < min_residuals:
         return None
-    rank = math.ceil((n + 1) * p)
-    return sorted(residuals)[min(max(rank, 1), n) - 1]
+    ordered = sorted(pairs, key=lambda x: x[1])
+    w_test = max(w for w, _ in ordered)
+    target = p * (sum(w for w, _ in ordered) + w_test)
+    acc = 0.0
+    for w, r in ordered:
+        acc += w
+        if acc >= target:
+            return r
+    return ordered[-1][1]
 
 
-def collect_residuals(model_fit, params: Params, history: list[Cycle]) -> dict[str, list[float]]:
+def mode_stratum(mode: str, cut_fraction: float, cycle_start: float) -> str:
+    if mode == "cut-matched":
+        return f"cut={cut_fraction:.2f}"
+    return stratum_key(cut_fraction, cycle_start)
+
+
+def collect_residuals(model_fit, params: Params, history: list[Cycle],
+                      mode: str = "cuts") -> dict[str, WeightedResiduals]:
     """Walk-forward residuals (truth_final − projection at reset), stratified,
-    with the pooled fallback — port of stratifiedRLCalibrators."""
-    by: dict[str, list[float]] = {"pooled": []}
-    for cyc in history:
+    with the pooled fallback — port of stratifiedRLCalibrators.
+
+    `mode` is the calibration experiment knob (NOT part of Params — it only
+    joins EngineParams once a winner ships):
+    - "cuts" (shipping behavior): every (cycle, cut) residual is its own
+      calibration case. Residuals from one cycle are strongly correlated (a
+      heavy week blows all 8 at once), so this OVERSTATES the effective n —
+      the suspected cause of the 7d under-coverage.
+    - "block": one residual per (cycle, stratum) — the median of that cycle's
+      residuals in the stratum. Honest effective n ≈ cycle count.
+    - "cut-matched": strata keyed by cut fraction instead of phase×regime
+      (each stratum ≈ one residual per cycle, matched to where you are in
+      the window).
+    - "recency": like "cuts" but residuals decay with cycle age
+      (half-life 5 cycles) — weighted conformal, gated on Kish effective n.
+    - "auto" (SHIPPING as of conformalBlockMinCycles): "block" while the
+      window has fewer than `params.conformal_block_min_cycles` completed
+      cycles (scarce cycles ⇒ the inflation actively distorts quantiles —
+      measured 0.12 fold coverage on 7d), else "cuts" (plentiful cycles ⇒
+      within-cycle spread adds real tail information — 5h holds 0.785).
+    """
+    raw: dict[str, list[tuple[int, float]]] = {"pooled": []}
+    n_cycles = len(history)
+    if mode == "auto":
+        mode = "block" if n_cycles < params.conformal_block_min_cycles else "cuts"
+    for ci, cyc in enumerate(history):
         true_final = cyc.final
         if true_final <= 0:
             continue
@@ -494,9 +546,29 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle]) -> dict[s
             if proj is None:
                 continue
             residual = true_final - proj(cyc.resets_at)
-            by["pooled"].append(residual)
-            by.setdefault(stratum_key(cf, cyc.cycle_start), []).append(residual)
-    return {k: v for k, v in by.items() if k == "pooled" or len(v) >= params.rl_stratum_min_scores}
+            raw["pooled"].append((ci, residual))
+            raw.setdefault(mode_stratum(mode, cf, cyc.cycle_start), []).append((ci, residual))
+
+    def reduce(pairs: list[tuple[int, float]]) -> WeightedResiduals:
+        if mode in ("cuts", "cut-matched"):
+            return [(1.0, r) for _, r in pairs]
+        if mode == "recency":
+            return [(0.5 ** ((n_cycles - 1 - ci) / 5.0), r) for ci, r in pairs]
+        if mode == "block":
+            by_cycle: dict[int, list[float]] = {}
+            for ci, r in pairs:
+                by_cycle.setdefault(ci, []).append(r)
+            out: WeightedResiduals = []
+            for rs in by_cycle.values():
+                rs.sort()
+                n = len(rs)
+                out.append((1.0, rs[n // 2] if n % 2 else (rs[n // 2 - 1] + rs[n // 2]) / 2))
+            return out
+        raise ValueError(f"unknown conformal mode {mode!r}")
+
+    by = {k: reduce(v) for k, v in raw.items()}
+    return {k: v for k, v in by.items()
+            if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
 def best_method(record: dict[str, dict[str, list[float]]], window: str, params: Params) -> str | None:
@@ -542,7 +614,8 @@ class CaseScore:
     band_stated: bool
 
 
-def replay_window(window: str, samples, activity_grid, params: Params) -> list[CaseScore]:
+def replay_window(window: str, samples, activity_grid, params: Params,
+                  conformal_mode: str = "auto") -> list[CaseScore]:
     duration = WINDOW_SECONDS[window]
     cycles = segment(samples, duration)
     completed = cycles[:-1] if cycles else []   # last group = current/live
@@ -563,7 +636,7 @@ def replay_window(window: str, samples, activity_grid, params: Params) -> list[C
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
         chosen = best_method(record, window, params) or (
             "diurnal-rate" if window == "seven_day" else "recency-weighted")
-        residuals = collect_residuals(roster[chosen], params, history)
+        residuals = collect_residuals(roster[chosen], params, history, mode=conformal_mode)
 
         for cf in RL_CUT_FRACTIONS:
             cut_now = cyc.cycle_start + cyc.duration * cf
@@ -578,17 +651,19 @@ def replay_window(window: str, samples, activity_grid, params: Params) -> list[C
             raw = proj(cyc.resets_at) + anchor
             point = min(100.0, max(partial.used_now, raw))
 
-            strat = residuals.get(stratum_key(cf, cyc.cycle_start), residuals.get("pooled", []))
+            strat = residuals.get(mode_stratum(conformal_mode, cf, cyc.cycle_start),
+                                  residuals.get("pooled", []))
             lo = gated_quantile(strat, 0.1, params.conformal_min_residuals)
             hi = gated_quantile(strat, 0.9, params.conformal_min_residuals)
             band_stated = lo is not None and hi is not None
             covered = (min(raw + lo, raw + hi) <= truth <= max(raw + lo, raw + hi)) if band_stated else None
             pb10 = pinball(truth, raw + lo, 0.1) if band_stated else None
             pb90 = pinball(truth, raw + hi, 0.9) if band_stated else None
-            # Hit probability: empirical share of residual-shifted outcomes ≥100
+            # Hit probability: weighted share of residual-shifted outcomes ≥100
             # (conformal predictive), falling back to the deterministic call.
-            if len(strat) >= params.conformal_min_residuals:
-                p_hit = sum(1 for r in strat if raw + r >= 100.0) / len(strat)
+            if kish_n(strat) >= params.conformal_min_residuals:
+                total_w = sum(w for w, _ in strat)
+                p_hit = sum(w for w, r in strat if raw + r >= 100.0) / total_w
             else:
                 p_hit = 1.0 if point >= 100.0 else 0.0
             scores.append(CaseScore(i, cf, chosen, abs(point - truth), covered,
@@ -639,16 +714,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", help="path to pacer.sqlite (default: app group)")
     ap.add_argument("--window", choices=["five_hour", "seven_day"], help="one window only")
+    ap.add_argument("--conformal-mode", default="auto",
+                    choices=["auto", "cuts", "block", "cut-matched", "recency"],
+                    help="calibration experiment (see collect_residuals; 'auto' = shipping behavior)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
 
     conn = open_copy(locate_store(args.store))
     grid = load_activity_grid(conn)
     params = Params()
-    report = {"paramsVersion": params.version_tag(), "params": params.canonical(), "windows": {}}
+    report = {"paramsVersion": params.version_tag(), "params": params.canonical(),
+              "conformalMode": args.conformal_mode, "windows": {}}
     for window in ([args.window] if args.window else ["five_hour", "seven_day"]):
         samples = load_rate_samples(conn, window)
-        scores = replay_window(window, samples, grid, params)
+        scores = replay_window(window, samples, grid, params, conformal_mode=args.conformal_mode)
         report["windows"][window] = summarize(scores)
     if args.json:
         print(json.dumps(report, indent=2))
