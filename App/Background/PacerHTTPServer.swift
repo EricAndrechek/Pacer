@@ -265,6 +265,15 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/predictions/history":
+            guard authorized(headers) else { return unauthorized(client) }
+            let days = query["days"].flatMap { Int($0) } ?? 7
+            let surface = query["surface"]
+            guard let history = try? PacerPredictionHistoryBuilder.history(days: days, surface: surface),
+                  let json = try? history.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/metrics":
             guard authorized(headers) else { return unauthorized(client) }
             guard let payload = currentPayload() else {
@@ -420,7 +429,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/usage/daily", "/v1/usage/models", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)

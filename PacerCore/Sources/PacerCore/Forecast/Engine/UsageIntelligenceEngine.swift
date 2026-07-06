@@ -76,6 +76,13 @@ public actor UsageIntelligenceEngine {
     /// Per-surface method track records (end-of-day, rate-limit windows),
     /// refreshed each recompute.
     private var accuracyBySurface: [String: EngineSelfEval.Accuracy] = [:]
+    /// Last prediction-snapshot written per surface (signature + when) — the
+    /// change/heartbeat policy that keeps the trail from growing per tick.
+    /// In-memory only: a relaunch writes one fresh row per surface, which
+    /// doubles as a restart marker in the trail.
+    private var lastSnapshotSig: [String: (at: Date, sig: String)] = [:]
+    /// Local-day key of the last retention prune (prune once per day).
+    private var lastSnapshotPruneDay: String?
 
     /// Per-user fitted state cached between scans. Holds the shapes that are
     /// expensive to derive (calibrators, the diurnal rate table); the cheap,
@@ -191,6 +198,11 @@ public actor UsageIntelligenceEngine {
         }
 
         self.fit = Self.makeFit(f, eodPools: pools, rlSelection: rlSelection)
+
+        // Prediction trail: record what this refit would tell the user —
+        // the live answers with their bands, residual evidence, and version
+        // tags — behind the change/heartbeat policy.
+        recordPredictionSnapshots(f, now: now)
     }
 
     /// Number of historical days the fit was trained on — for a future
@@ -386,6 +398,10 @@ public actor UsageIntelligenceEngine {
         public let projectedFullAtLatest: Date?
         public let usedPct: Double
         public let resetsAt: Date
+        /// Upward shift that pinned the model curve to the live reading —
+        /// recorded into prediction snapshots so a replay can separate model
+        /// error from anchoring.
+        public let anchorShift: Double
         /// Stable id of the model that produced the crossing (for affordances).
         public let method: String
         /// Natural-frequency facts over completed cycles, for honest risk
@@ -423,7 +439,8 @@ public actor UsageIntelligenceEngine {
         guard let model, let projection = model.fit(current) else {
             return BurnOutlook(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil,
                                projectedFullAtEarliest: nil, projectedFullAtLatest: nil,
-                               usedPct: current.usedNow, resetsAt: current.resetsAt, method: "none",
+                               usedPct: current.usedNow, resetsAt: current.resetsAt,
+                               anchorShift: 0, method: "none",
                                cyclesObserved: rf.cyclesObserved,
                                cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100)
         }
@@ -469,6 +486,7 @@ public actor UsageIntelligenceEngine {
             projectedFullAtLatest: latest,
             usedPct: current.usedNow,
             resetsAt: current.resetsAt,
+            anchorShift: anchor,
             method: model.id,
             cyclesObserved: rf.cyclesObserved,
             cyclesPeakOver90: rf.cyclesPeakOver90,
@@ -917,6 +935,153 @@ public actor UsageIntelligenceEngine {
         let lo = min(100, max(0, r.lowerBound))
         let hi = min(100, max(0, r.upperBound))
         return lo...max(lo, hi)
+    }
+
+    // MARK: - Prediction snapshot trail
+
+    /// A not-yet-persisted `PredictionSnapshot` — pure output of
+    /// `snapshotDrafts`, so the whole surface tests without a container.
+    struct SnapshotDraft {
+        let surface: String
+        let method: String
+        let periodKey: String
+        let periodEnd: Date?
+        let value: Double?
+        let lo80: Double?, hi80: Double?
+        let lo50: Double?, hi50: Double?
+        let confidence: String
+        let support: Int
+        let note: String?
+        var crossingAt: Date?
+        var crossingEarliest: Date?
+        var crossingLatest: Date?
+        var usedPct: Double?
+        var anchorShift: Double?
+        var slopePercentPerHour: Double?
+        var bandStratum: String?
+        var residualCount: Int?
+        var spendSoFar: Double?
+
+        /// The row's identity at DISPLAY precision: a new row is worth writing
+        /// exactly when the user-visible facts would change (utilisation to
+        /// the whole point, dollars to 2 significant figures, crossings to
+        /// the 15-minute bucket). Everything else re-records on the heartbeat.
+        var signature: String {
+            func pp(_ v: Double?) -> String { v.map { String(Int($0.rounded())) } ?? "-" }
+            func sig2(_ v: Double?) -> String {
+                guard let v, v.isFinite else { return "-" }
+                guard v > 0 else { return String(v) }
+                let mag = pow(10, floor(log10(v)) - 1)
+                return String(Int((v / mag).rounded() * mag))
+            }
+            func t(_ d: Date?) -> String { d.map { String(Int($0.timeIntervalSince1970 / 900)) } ?? "-" }
+            let isCost = surface == EngineSelfEval.surfaceEOD || surface == "month"
+            let v = isCost ? sig2 : pp
+            return [surface, method, confidence, periodKey,
+                    v(value), v(lo80), v(hi80),
+                    t(crossingAt), t(crossingEarliest), t(crossingLatest)].joined(separator: "|")
+        }
+    }
+
+    /// Even an unchanged prediction re-records this often, so the trail shows
+    /// "still saying X" rather than a gap.
+    static let snapshotHeartbeat: TimeInterval = 30 * 60
+
+    /// One draft per live surface — the same answers the views ask for, with
+    /// the band-evidence facts (stratum, residual count) the views don't show.
+    static func snapshotDrafts(_ f: EngineFeatures, _ fit: Fit) -> [SnapshotDraft] {
+        var out: [SnapshotDraft] = []
+        for window in RateLimitWindowKind.allCases {
+            guard let o = burnOutlook(f, fit, window: window) else { continue }
+            let key = window.rawValue
+            let est = rateLimitOutlook(f, fit, window: window)
+            var stratum: String?
+            var residuals: Int?
+            if let samples = f.rateLimit[key], let rf = fit.rl[key],
+               case let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now),
+               let current = currentOpt {
+                let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
+                let stratumKey = rlStratum(cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
+                if let cal = rf.calibrators[stratumKey] { stratum = stratumKey; residuals = cal.count }
+                else if let pooled = rf.calibrators["pooled"] { stratum = "pooled"; residuals = pooled.count }
+            }
+            out.append(SnapshotDraft(
+                surface: EngineSelfEval.rlSurface(key), method: o.method,
+                periodKey: EngineSelfEval.periodKeyRL(o.resetsAt), periodEnd: o.resetsAt,
+                value: est.isInsufficient ? nil : est.value,
+                lo80: est.interval80?.lowerBound, hi80: est.interval80?.upperBound,
+                lo50: est.interval50?.lowerBound, hi50: est.interval50?.upperBound,
+                confidence: est.confidence.rawValue, support: est.support, note: est.note,
+                crossingAt: o.projectedFullAt,
+                crossingEarliest: o.projectedFullAtEarliest,
+                crossingLatest: o.projectedFullAtLatest,
+                usedPct: o.usedPct, anchorShift: o.anchorShift,
+                slopePercentPerHour: o.slopePercentPerHour,
+                bandStratum: stratum, residualCount: residuals))
+        }
+
+        let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
+        let eod = projectedCostToday(f, fit)
+        out.append(SnapshotDraft(
+            surface: EngineSelfEval.surfaceEOD, method: eod.method,
+            periodKey: todayKey, periodEnd: f.todayStart.addingTimeInterval(86400),
+            value: eod.isInsufficient ? nil : eod.value,
+            lo80: eod.interval80?.lowerBound, hi80: eod.interval80?.upperBound,
+            lo50: eod.interval50?.lowerBound, hi50: eod.interval50?.upperBound,
+            confidence: eod.confidence.rawValue, support: eod.support, note: eod.note,
+            spendSoFar: f.todayElapsed.last?.cumulative ?? 0))
+
+        let month = MonthlyProjector.project(dailyCosts: f.dailyCosts, now: f.now, calendar: f.calendar)
+        out.append(SnapshotDraft(
+            surface: "month", method: month.method,
+            periodKey: String(todayKey.prefix(7)),
+            periodEnd: f.calendar.dateInterval(of: .month, for: f.now)?.end,
+            value: month.isInsufficient ? nil : month.value,
+            lo80: month.interval80?.lowerBound, hi80: month.interval80?.upperBound,
+            lo50: month.interval50?.lowerBound, hi50: month.interval50?.upperBound,
+            confidence: month.confidence.rawValue, support: month.support, note: month.note))
+        return out
+    }
+
+    /// Change/heartbeat write policy — pure, so the policy tests directly.
+    static func shouldRecordSnapshot(prev: (at: Date, sig: String)?, now: Date, signature: String) -> Bool {
+        guard let prev else { return true }
+        return prev.sig != signature || now.timeIntervalSince(prev.at) >= snapshotHeartbeat
+    }
+
+    private func recordPredictionSnapshots(_ f: EngineFeatures, now: Date) {
+        let engineVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        var dirty = false
+        for d in Self.snapshotDrafts(f, fit) {
+            let sig = d.signature
+            guard Self.shouldRecordSnapshot(prev: lastSnapshotSig[d.surface], now: now, signature: sig) else { continue }
+            modelContext.insert(PredictionSnapshot(
+                recordedAt: now, surface: d.surface, method: d.method,
+                paramsVersion: EngineParams.version, engineVersion: engineVersion,
+                periodKey: d.periodKey, periodEnd: d.periodEnd,
+                value: d.value, lo80: d.lo80, hi80: d.hi80, lo50: d.lo50, hi50: d.hi50,
+                confidence: d.confidence, support: d.support, note: d.note,
+                crossingAt: d.crossingAt, crossingEarliest: d.crossingEarliest,
+                crossingLatest: d.crossingLatest, usedPct: d.usedPct,
+                anchorShift: d.anchorShift, slopePercentPerHour: d.slopePercentPerHour,
+                bandStratum: d.bandStratum, residualCount: d.residualCount,
+                spendSoFar: d.spendSoFar))
+            lastSnapshotSig[d.surface] = (now, sig)
+            dirty = true
+        }
+
+        // Retention: once per local day, drop rows past the horizon. The
+        // eval table keeps the accuracy record forever; this is the
+        // high-resolution trail and 180 days of it is plenty for replay.
+        let dayKey = TokenSample.formatDate(now, timeZone: f.calendar.timeZone)
+        if lastSnapshotPruneDay != dayKey {
+            lastSnapshotPruneDay = dayKey
+            let cutoff = now.addingTimeInterval(-Double(PredictionSnapshot.retentionDays) * 86400)
+            try? modelContext.delete(model: PredictionSnapshot.self,
+                                     where: #Predicate { $0.recordedAt < cutoff })
+            dirty = true
+        }
+        if dirty { try? modelContext.save() }
     }
 
     // MARK: - Store reads
