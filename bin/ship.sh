@@ -174,6 +174,16 @@ cmd_verify() {
   # 2+3. Appcast advertises this version, and its <enclosure> is consistent
   #      with the published asset (same DMG, same byte length). Also grab the
   #      EdDSA signature + the app's embedded public key for the crypto check.
+  #
+  # gh-pages propagation lags the Release run by a minute or two (both
+  # v0.3.20 and v0.3.21 false-failed here) — poll until the appcast mentions
+  # the version, up to 5 minutes, before judging it.
+  local waited=0
+  until curl -fsSL "$APPCAST_URL" 2>/dev/null | grep -q ">${version}<"; do
+    [ "$waited" -ge 300 ] && break
+    sleep 20; waited=$((waited + 20))
+  done
+  [ "$waited" -gt 0 ] && info "waited ${waited}s for appcast propagation"
   local pubkey; pubkey="$(grep -E 'SUPublicEDKey:' project.yml | head -1 | sed -E 's/.*SUPublicEDKey:[[:space:]]*//')"
   APPCAST_URL="$APPCAST_URL" VERSION="$version" ASSET_SIZE="$size" python3 - <<'PY' || rc=1
 import os, sys, urllib.request, xml.etree.ElementTree as ET
