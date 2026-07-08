@@ -56,6 +56,13 @@ struct ContentView: View {
     @SceneStorage("pacer.sidebar.selection")
     private var selectionRaw: String = Destination.dashboard.rawValue
 
+    /// Widest sidebar tab label at the *current* Dynamic Type size,
+    /// measured off-screen by `sidebarLabelProbe`. Drives
+    /// `sidebarMinWidth` so the sidebar's resize floor tracks the actual
+    /// rendered text (which grows with accessibility text settings)
+    /// rather than a hardcoded number.
+    @State private var measuredLabelWidth: CGFloat = 0
+
     private var selection: Binding<Destination> {
         Binding(
             get: { Destination(rawValue: selectionRaw) ?? .dashboard },
@@ -192,12 +199,23 @@ struct ContentView: View {
         // the intended bounds. Drop the .frame so SwiftUI clamps
         // resize gestures to these limits cleanly.
         //
-        // `min: 220` rather than the prior 200 — at 200pt the
-        // "Dashboard" / "History" rows ran right up to the trailing
-        // edge of the selection background, eating the comfortable
-        // breathing room the rest of the layout has. 220 gives the
-        // selected-row pill room without making the sidebar feel wide.
-        .navigationSplitViewColumnWidth(min: 220, ideal: 230, max: 280)
+        // The MIN is derived, not hardcoded. The selection pill already
+        // spans the full column width (SidebarItem ends in a trailing
+        // Spacer), so the only thing the minimum has to protect is the
+        // label not clipping. `sidebarLabelProbe` measures the widest
+        // tab label at the current Dynamic Type size + semibold weight
+        // (the worst case), and `sidebarMinWidth` adds the fixed chrome
+        // around it. That way the floor is exactly "comfortably above
+        // the width the text needs" and grows automatically with the
+        // user's accessibility text size — no magic 220 that's too wide
+        // at the default size and could still clip at larger ones.
+        .overlay(alignment: .topLeading) { sidebarLabelProbe }
+        .onPreferenceChange(SidebarLabelWidthKey.self) { measuredLabelWidth = $0 }
+        .navigationSplitViewColumnWidth(
+            min: sidebarMinWidth,
+            ideal: max(230, sidebarMinWidth),
+            max: max(290, sidebarMinWidth + 60)
+        )
         // Keep the standard sidebar toggle (View → Show / Hide
         // Sidebar, plus the toolbar button). Previously removed for
         // visual cleanliness — but combined with the resize divider,
@@ -234,6 +252,60 @@ struct ContentView: View {
         }
         let next = (idx + delta + order.count) % order.count
         selection.wrappedValue = order[next]
+    }
+
+    /// The sidebar's minimum drag width. Not a magic number: it's the
+    /// fixed chrome that wraps a tab label plus the measured width of
+    /// the widest label at the current text size, plus a small comfort
+    /// gap so the label never sits flush against the clip point.
+    ///
+    /// Chrome accounting, per row, leading→trailing:
+    ///   8  ScrollView content VStack `.padding(.horizontal, 8)`
+    /// + 10 SidebarItem button `.padding(.horizontal, 10)`
+    /// + 18 icon frame width
+    /// + 10 icon↔label HStack spacing
+    /// + 10 trailing button padding
+    /// + 8  trailing VStack padding
+    /// = 64, plus ~18 the split view reserves for the column inset and
+    /// resize divider ⇒ 82pt of size-independent structure.
+    private var sidebarMinWidth: CGFloat {
+        let chrome: CGFloat = 82
+        let comfort: CGFloat = 14
+        // Floor for the first frame, before the probe's preference has
+        // propagated (`measuredLabelWidth` starts at 0). Once measured,
+        // the real value dominates and this is inert.
+        let preMeasureFloor: CGFloat = 150
+        return max(preMeasureFloor, chrome + comfort + measuredLabelWidth)
+    }
+
+    /// Off-screen probe that measures the widest tab label at the
+    /// current Dynamic Type size and the *selected* (semibold) weight —
+    /// the worst case for truncation. Its intrinsic width flows out
+    /// through `SidebarLabelWidthKey` and feeds `sidebarMinWidth`, so the
+    /// resize floor can never be dragged narrow enough to clip a label
+    /// at any accessibility text size, and never wider than it needs to
+    /// be at the default size. Hidden and non-interactive so it only
+    /// contributes geometry, never pixels or hit-testing.
+    private var sidebarLabelProbe: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Destination.allCases) { dest in
+                Text(dest.title)
+                    .font(.body)
+                    .fontWeight(.semibold)
+                    .fixedSize()
+            }
+        }
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(
+                    key: SidebarLabelWidthKey.self,
+                    value: geo.size.width
+                )
+            }
+        )
+        .hidden()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     /// Top-of-sidebar brand block: app glyph + name. Freshness moved
@@ -298,6 +370,16 @@ struct DayKeyedContent<Content: View>: View {
 }
 
 // MARK: - Sidebar building blocks
+
+/// Carries the widest measured sidebar-label width up from the
+/// off-screen `sidebarLabelProbe` to `ContentView`, reducing by `max`
+/// across the labels so the column floor fits the longest one.
+private struct SidebarLabelWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
 
 private struct SidebarSection<Content: View>: View {
     let title: String
