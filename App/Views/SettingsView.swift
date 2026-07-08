@@ -60,6 +60,10 @@ struct SettingsView: View {
             // the cards sit consistently flush with the sidebar.
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+            // Click anywhere off a text field to dismiss its focus ring.
+            #if canImport(AppKit)
+            .background(FocusResignOnClick())
+            #endif
         }
     }
 }
@@ -1103,17 +1107,45 @@ private struct DesktopCredentialsCard: View {
 /// each token comes from, which account it's tied to, when it expires,
 /// its health, and a Test that routes through the poller (so it persists
 /// and counts against that token's budget instead of racing it).
-/// A one-line shell command shown as a code block with a click-to-copy
-/// button that flips to a checkmark (+ a trackpad haptic). The button is
-/// fixed-width so the flip can't reflow the row; the command scrolls
-/// horizontally rather than wrapping.
+/// Fixed column widths shared by the Tokens header and rows so they line
+/// up exactly. SOURCE is the flexible column (fills the remainder).
+fileprivate enum TokenCol {
+    static let account: CGFloat = 244
+    static let status: CGFloat = 78
+    static let expires: CGFloat = 64
+    static let updated: CGFloat = 76
+    static let trash: CGFloat = 24
+    static let spacing: CGFloat = 12
+}
+
+#if canImport(AppKit)
+/// Transparent click-catcher placed behind content: a click on empty space
+/// resigns the window's first responder (dismissing a TextField's focus
+/// ring), while clicks on real controls still reach them (they sit in
+/// front). Fixes "the paste field stays focused when I click elsewhere".
+private struct FocusResignOnClick: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { CatcherView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    private final class CatcherView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(nil)
+            super.mouseDown(with: event)
+        }
+    }
+}
+#endif
+
+/// A one-line shell command shown as a code block. The whole box is
+/// click-to-copy (button flips to a checkmark + trackpad haptic); the
+/// command scrolls horizontally with a right-edge fade so it's clear it
+/// continues past the copy button rather than being all there is.
 private struct CopyableCommand: View {
     let command: String
     @State private var copied = false
     init(_ command: String) { self.command = command }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 14) {
             Image(systemName: "terminal")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -1125,26 +1157,27 @@ private struct CopyableCommand: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            Button(action: copy) {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(copied ? Color.green : Color.secondary)
-                    .frame(width: 16, height: 14)   // fixed → the flip can't shift layout
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .buttonStyle(.plain)
-            .help(copied ? "Copied!" : "Copy command")
+            .mask(
+                LinearGradient(
+                    stops: [.init(color: .black, location: 0),
+                            .init(color: .black, location: 0.88),
+                            .init(color: .clear, location: 1.0)],
+                    startPoint: .leading, endPoint: .trailing
+                )
+            )
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(copied ? Color.green : Color.secondary)
+                .frame(width: 18, height: 16)   // fixed → the flip can't shift layout
+                .contentTransition(.symbolEffect(.replace))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(0.06))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: copy)
+        .help(copied ? "Copied!" : "Click to copy")
     }
 
     private func copy() {
@@ -1161,10 +1194,9 @@ private struct CopyableCommand: View {
     }
 }
 
-/// Live view of the OAuth token pool the poller cycles through — where each
-/// token comes from, its account, expiry, health, and when it last polled;
-/// plus an inline "add a token" field. No per-row Test button (auto-polling
-/// keeps everything current; a newly-added token is validated on add).
+/// Live view of the OAuth token pool the poller cycles through — source,
+/// account, expiry, health, and when each last polled; plus an inline
+/// "add a token" field.
 private struct TokensCard: View {
     @State private var pool = TokenPoolStatus.shared
     @State private var draft: String = ""
@@ -1195,23 +1227,14 @@ private struct TokensCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                if let org = primaryOrg {
-                    Text("All tokens are for account \(org).")
-                }
                 Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit.")
                 Text("Claude Code and (if enabled below) Claude Desktop are read automatically. Only *add* a token Pacer can't read here — e.g. from another Mac, where you'd run this in Terminal:")
                     .padding(.top, 2)
                 CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
+                    .padding(.vertical, 6)
                 Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
-                    .padding(.top, 2)
             }
         })
-    }
-
-    /// The account all tokens belong to (shown once instead of on every row).
-    private var primaryOrg: String? {
-        pool.lanes.first(where: { $0.account == .primary })?.organizationId
-            ?? pool.lanes.first?.organizationId
     }
 
     private var cadenceHeader: some View {
@@ -1240,13 +1263,14 @@ private struct TokensCard: View {
     }
 
     private var columnHeader: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: TokenCol.spacing) {
             Text("SOURCE").frame(maxWidth: .infinity, alignment: .leading)
-            Text("STATUS").frame(width: 82, alignment: .leading)
-            Text("EXPIRES").frame(width: 72, alignment: .leading)
-            Text("UPDATED").frame(width: 82, alignment: .leading)
+            Text("ACCOUNT").frame(width: TokenCol.account, alignment: .leading)
+            Text("STATUS").frame(width: TokenCol.status, alignment: .leading)
+            Text("EXPIRES").frame(width: TokenCol.expires, alignment: .leading)
+            Text("UPDATED").frame(width: TokenCol.updated, alignment: .leading)
                 .help("When Pacer last fetched usage with this token")
-            Color.clear.frame(width: 24)   // trash column (manual rows only)
+            Color.clear.frame(width: TokenCol.trash)   // trash column (manual rows only)
         }
         .font(.system(size: 9, weight: .semibold))
         .tracking(0.5)
@@ -1275,10 +1299,6 @@ private struct TokensCard: View {
             if let addResult { addResultLabel(addResult) }
         }
         .padding(.top, 8)
-        // Click anywhere in the card off the field to dismiss its focus ring.
-        .background(
-            Color.clear.contentShape(Rectangle()).onTapGesture { fieldFocused = false }
-        )
     }
 
     @ViewBuilder private func addResultLabel(_ r: TokenTestResult) -> some View {
@@ -1327,9 +1347,7 @@ private struct TokensCard: View {
             let r = await TokenPoolStatus.shared.addManualToken(token)
             adding = false
             fieldFocused = false
-            // NB: don't clear `draft` — that fires onChange → wipes addResult.
-            addResult = r
-            // Flash the matching row when it's a duplicate.
+            addResult = r   // NB: don't clear `draft` — onChange would wipe this.
             if case .alreadyTracked(_, let fp) = r {
                 highlightId = fp
                 Task { @MainActor in
@@ -1349,7 +1367,7 @@ private struct TokenLaneRow: View {
     @State private var removing = false
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: TokenCol.spacing) {
             HStack(spacing: 7) {
                 Image(systemName: Self.icon(lane.source))
                     .font(.system(size: 12))
@@ -1369,26 +1387,37 @@ private struct TokenLaneRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            Text(lane.organizationId ?? "—")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: TokenCol.account, alignment: .leading)
+                .help(lane.organizationId ?? "")
+
             statusPill
-                .frame(width: 82, alignment: .leading)
+                .frame(width: TokenCol.status, alignment: .leading)
 
             Text(expiresText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
+                .frame(width: TokenCol.expires, alignment: .leading)
 
             Text(updatedText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 82, alignment: .leading)
+                .frame(width: TokenCol.updated, alignment: .leading)
 
             removeControl
-                .frame(width: 24, alignment: .trailing)
+                .frame(width: TokenCol.trash, alignment: .trailing)
         }
         .padding(.vertical, 7)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(highlighted ? Color.accentColor.opacity(0.14) : Color.clear)
+            // Bleed the highlight outward so it wraps the source icon and
+            // reaches the card edges, without shifting the row content.
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(highlighted ? Color.accentColor.opacity(0.16) : Color.clear)
+                .padding(.horizontal, -10)
         )
         .animation(.easeInOut(duration: 0.25), value: highlighted)
     }
@@ -1409,7 +1438,6 @@ private struct TokenLaneRow: View {
         removing = true
         Task { @MainActor in
             await TokenPoolStatus.shared.removeManualToken(id: lane.id)
-            // Lane vanishes from pool.lanes → this row is removed.
         }
     }
 
