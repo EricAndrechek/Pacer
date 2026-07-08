@@ -105,6 +105,39 @@ public struct DesktopOAuth: Sendable {
         }
     }
 
+    // MARK: - Layered read (cached-key path)
+
+    /// The encrypted cache blobs from `config.json` — a file-only read, no
+    /// keychain, so it never prompts. nil when Desktop isn't installed.
+    public func readCacheBlobs() -> [String]? {
+        cacheReader()
+    }
+
+    /// Read the `Claude Safe Storage` AES key. THIS is the only
+    /// prompt-risking step (a foreign-app keychain item), so callers gate
+    /// it behind the cached-key fast path.
+    public func readKey() -> Result<Data, DesktopOAuthError> {
+        keyReader()
+    }
+
+    /// Decrypt the given blobs with a SPECIFIC key and return the
+    /// `user:profile` credentials, freshest first. Empty when the key
+    /// can't decrypt them (⇒ the key rotated, e.g. a Desktop reinstall) or
+    /// nothing carries a profile token. No keychain access, so no prompt.
+    public func profileCredentials(fromBlobs blobs: [String], keyPassword: Data) -> [OAuthCredential] {
+        var merged: [String: Any] = [:]
+        var decryptedAny = false
+        for blob in blobs {
+            guard let plain = Self.decrypt(blobBase64: blob, keyPassword: keyPassword),
+                  let obj = try? JSONSerialization.jsonObject(with: plain) as? [String: Any]
+            else { continue }
+            decryptedAny = true
+            merged.merge(obj) { _, new in new }
+        }
+        guard decryptedAny else { return [] }
+        return Self.profileCredentials(cache: merged)
+    }
+
     /// Read + decrypt + merge every cache blob into one dict. Shared by
     /// `read()` / `readAll()`.
     private func decryptedCache() -> Result<[String: Any], DesktopOAuthError> {

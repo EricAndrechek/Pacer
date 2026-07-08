@@ -155,6 +155,13 @@ public actor OAuthPoller: TokenPoolTesting {
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
+    /// Pacer's persistent token pool (its own keychain). Seeded into lanes
+    /// once per launch so tokens survive a restart without reading Claude's
+    /// stores; re-saved when the confirmed-primary token set changes.
+    private let poolStore: TokenPoolStoring
+    private var seeded = false
+    private var lastSavedPoolTokens: Set<String> = []
+
     private var loopTask: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
     private var stopping = false
@@ -165,6 +172,7 @@ public actor OAuthPoller: TokenPoolTesting {
         configuration: Configuration = Configuration(),
         clock: PollerClock = SystemPollerClock(),
         activityProbe: (@Sendable () async -> Date?)? = nil,
+        poolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
         random: @escaping RandomSource = { Double.random(in: 0..<1) }
     ) {
         self.client = client
@@ -173,6 +181,7 @@ public actor OAuthPoller: TokenPoolTesting {
         self.clock = clock
         self.scheduler = OAuthPollScheduler(tuning: configuration.scheduler)
         self.activityProbe = activityProbe ?? Self.defaultActivityProbe(container: container)
+        self.poolStore = poolStore
         self.random = random
     }
 
@@ -404,10 +413,29 @@ public actor OAuthPoller: TokenPoolTesting {
     /// remains; always prunes expired lanes; keeps ordering primary-first.
     private func ensureLanes() {
         let now = clock.now()
+        // Seed from Pacer's persisted pool once per launch, so every token
+        // comes back on restart without touching Claude's stores.
+        if !seeded {
+            seeded = true
+            for stored in poolStore.loadAll() {
+                if let exp = stored.credential.expiresAt, exp < now { continue }
+                if lanes.contains(where: { $0.credential.accessToken == stored.credential.accessToken }) { continue }
+                lanes.append(Lane(
+                    credential: stored.credential,
+                    source: stored.source,
+                    state: OAuthPollScheduler.LaneState(),
+                    consecutiveFailures: 0,
+                    resolvedOrg: nil
+                ))
+            }
+        }
         let noUsable = !lanes.contains { $0.state.account != .foreign }
         let stale = lastDiscoveryAt.map { now.timeIntervalSince($0) >= configuration.laneRediscoverInterval } ?? true
         if stale || noUsable {
-            mergeCandidates(client.candidateCredentials())
+            // Hand the client our Desktop-origin tokens so its layered read
+            // can decide whether it even needs to touch Claude Desktop.
+            let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
+            mergeCandidates(client.candidateCredentials(cachedDesktopTokens: cachedDesktop))
             lastDiscoveryAt = now
         }
         // Drop lanes whose token has expired locally (server would 401).
@@ -416,6 +444,20 @@ public actor OAuthPoller: TokenPoolTesting {
             return false
         }
         sortLanes()
+        savePool()
+    }
+
+    /// Persist the confirmed same-account tokens to Pacer's keychain so
+    /// they survive a restart. Only `.primary` lanes — never a foreign
+    /// (different-account) or not-yet-confirmed token — and only when the
+    /// token set actually changed, to avoid a keychain write every poll.
+    private func savePool() {
+        let primary = lanes.filter { $0.state.account == .primary }
+        guard !primary.isEmpty else { return }   // don't wipe the pool pre-confirmation
+        let tokenSet = Set(primary.map { $0.credential.accessToken })
+        guard tokenSet != lastSavedPoolTokens else { return }
+        lastSavedPoolTokens = tokenSet
+        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
     }
 
     /// Union new candidate tokens into the lane set, preserving the state

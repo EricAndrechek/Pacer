@@ -62,7 +62,7 @@ public enum OAuthClientError: Error, Sendable {
 /// (keychain / manual override) when deciding which lane establishes
 /// the account the whole pool is guarded against.
 public struct CredentialCandidate: Sendable, Equatable {
-    public enum Source: String, Sendable, Equatable {
+    public enum Source: String, Sendable, Equatable, Codable {
         case override, keychain, held, desktop
     }
     public let credential: OAuthCredential
@@ -119,6 +119,12 @@ public struct OAuthClient: Sendable {
     /// reliably silence — only when its tokens actually changed. See
     /// `DesktopReadGate`.
     private let desktopGate: DesktopReadGate
+    /// Pacer's cached copy of Claude Desktop's `Claude Safe Storage` AES
+    /// key. Since that key is stable for the life of the Desktop install,
+    /// caching it lets `candidateCredentials` decrypt every future
+    /// `config.json` change without re-reading the (prompt-risking)
+    /// keychain item. See `KeychainDesktopKeyStore`.
+    private let desktopKeyStore: DesktopKeyStoring
 
     /// How long before a held token's expiry we go back to the sources for a
     /// fresher one. Until then we serve the held copy without touching
@@ -134,7 +140,8 @@ public struct OAuthClient: Sendable {
         desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() },
         heldStore: HeldCredentialStoring = EphemeralCredentialStore(),
         rejected: RejectedTokens = RejectedTokens(),
-        desktopGate: DesktopReadGate = DesktopReadGate()
+        desktopGate: DesktopReadGate = DesktopReadGate(),
+        desktopKeyStore: DesktopKeyStoring = EphemeralDesktopKeyStore()
     ) {
         self.keychain = keychain
         self.transport = transport
@@ -145,6 +152,7 @@ public struct OAuthClient: Sendable {
         self.heldStore = heldStore
         self.rejected = rejected
         self.desktopGate = desktopGate
+        self.desktopKeyStore = desktopKeyStore
     }
 
     /// Production transport: `URLSession.shared.data(for:)` plus the
@@ -254,13 +262,16 @@ public struct OAuthClient: Sendable {
     /// tagged with its source. The multi-token poller unions these into
     /// its persistent lane set.
     ///
-    /// Reads Claude Code's keychain (silent) and our held copy always;
-    /// reads opted-in Claude Desktop only when its token file changed
-    /// since the last read (the `DesktopReadGate`, to avoid re-prompting)
-    /// — so Desktop tokens surface on the first call and again on
-    /// rotation, and the poller keeps the lanes alive in between. A
-    /// manual override, when set, is returned as the sole candidate.
-    public func candidateCredentials() -> [CredentialCandidate] {
+    /// Reads Claude Code's keychain (silent) and, for opted-in Claude
+    /// Desktop, decrypts its token cache with our CACHED AES key — so no
+    /// prompt-risking keychain read unless that key has gone stale (see
+    /// `resolveDesktopTokens`). A manual override, when set, is the sole
+    /// candidate.
+    ///
+    /// - Parameter cachedDesktopTokens: the Desktop-origin tokens the
+    ///   caller (the poller) already holds, used only to decide the Desktop
+    ///   escalation.
+    public func candidateCredentials(cachedDesktopTokens: [OAuthCredential] = []) -> [CredentialCandidate] {
         if let override = tokenOverride() {
             return [CredentialCandidate(
                 credential: OAuthCredential(accessToken: override, expiresAt: nil, subscriptionType: nil),
@@ -289,13 +300,9 @@ public struct OAuthClient: Sendable {
         // held store exists to cover.
         if case .success(let c) = keychain.read() { add(c, .keychain) }
         if desktopEnabled() {
-            let fingerprint = desktop.cacheFingerprint()
-            if desktopGate.shouldRead(fingerprint: fingerprint) {
-                desktopGate.record(fingerprint: fingerprint)
-                if case .success(let creds) = desktop.readAll() {
-                    for c in creds { add(c, .desktop) }
-                }
-            }
+            let (tokens, newKey) = resolveDesktopTokens(cachedDesktop: cachedDesktopTokens, now: referenceNow)
+            if let newKey { desktopKeyStore.save(newKey) }
+            for c in tokens { add(c, .desktop) }
         }
         if let held = heldStore.load() { add(held, .held) }
 
@@ -306,6 +313,44 @@ public struct OAuthClient: Sendable {
             let b = $1.credential.expiresAt ?? .distantFuture
             return a != b ? a > b : $0.credential.accessToken < $1.credential.accessToken
         }
+    }
+
+    /// Resolve Claude Desktop's tokens with the layered fallback that keeps
+    /// us off the `Claude Safe Storage` prompt:
+    ///   1. Decrypt the current `config.json` with our **cached AES key**
+    ///      (file read + AES only — no keychain, no prompt). Because the
+    ///      key is stable for the install's life, this succeeds ~always and
+    ///      also picks up any freshly-rotated tokens.
+    ///   2. If the cached key can't decrypt it (⇒ the key rotated, e.g. a
+    ///      Desktop reinstall) but we still hold working Desktop tokens,
+    ///      keep using those and DEFER the prompt.
+    ///   3. Only when the cached key is stale **and** no cached Desktop
+    ///      token still works do we re-read `Claude Safe Storage` (the one
+    ///      prompt-risking step), caching the fresh key.
+    /// Returns the tokens plus a new key to persist (nil unless step 3 read
+    /// one).
+    private func resolveDesktopTokens(
+        cachedDesktop: [OAuthCredential],
+        now: Date
+    ) -> (tokens: [OAuthCredential], newKey: Data?) {
+        let working = { cachedDesktop.filter { $0.expiresAt == nil || $0.expiresAt! >= now } }
+        guard let blobs = desktop.readCacheBlobs(), !blobs.isEmpty else {
+            return (working(), nil)   // Desktop not installed — keep cached
+        }
+        // Layer 1: cached key (no prompt).
+        if let cachedKey = desktopKeyStore.load() {
+            let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: cachedKey)
+            if !creds.isEmpty { return (creds, nil) }
+            // Layer 2: cached key stale, but working cached tokens remain.
+            let stillWorking = working()
+            if !stillWorking.isEmpty { return (stillWorking, nil) }
+        }
+        // Layer 3 (or first-ever read): the only prompt-risking step.
+        guard case .success(let key) = desktop.readKey() else {
+            return (working(), nil)
+        }
+        let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: key)
+        return creds.isEmpty ? (working(), nil) : (creds, key)
     }
 
     // MARK: - Credential resolution

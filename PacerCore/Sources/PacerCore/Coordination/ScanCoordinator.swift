@@ -331,7 +331,8 @@ public final class ScanCoordinator {
         configuration: Configuration = Configuration(),
         statsCacheURL: URL? = nil,
         resolver: ClaudePathResolver = ClaudePathResolver(),
-        oauthClient: OAuthClient? = nil
+        oauthClient: OAuthClient? = nil,
+        oauthPoolStore: TokenPoolStoring = EphemeralTokenPoolStore()
     ) {
         self.container = container
         self.configuration = configuration
@@ -347,7 +348,8 @@ public final class ScanCoordinator {
             self.oauthPoller = OAuthPoller(
                 client: oauthClient,
                 container: container,
-                configuration: configuration.oauthPolling
+                configuration: configuration.oauthPolling,
+                poolStore: oauthPoolStore
             )
         } else {
             self.oauthPoller = nil
