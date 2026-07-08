@@ -38,6 +38,7 @@ struct SettingsView: View {
                     NotificationTestCard()
                 }
                 SettingsSection("Authentication") {
+                    TokensCard()
                     DesktopCredentialsCard()
                     OAuthTokenOverrideCard()
                 }
@@ -1258,69 +1259,271 @@ private struct OAuthTokenOverrideCard: View {
     ///     production poller would do it. Useful for confirming a
     ///     fresh `claude login` produced a working token before
     ///     trusting Pacer's next poll.
+    /// Route the test through the running poller so the reading is
+    /// persisted and counts against that token's budget — instead of a
+    /// separate throwaway request that races the poller's own polls.
     private func runTest() {
         let token = trimmedDraft
         testInProgress = true
         testResult = nil
         Task { @MainActor in
-            let client: OAuthClient
+            let outcome: TokenTestResult
             if token.isEmpty {
-                // Production path: real keychain, no override.
-                client = OAuthClient(tokenOverride: { nil })
+                // Empty field ⇒ test the token Pacer reads from the
+                // keychain. Resolve it here, then route the raw token
+                // through the poller like any other.
+                switch KeychainOAuth().read() {
+                case .success(let cred):
+                    outcome = await TokenPoolStatus.shared.testAdHoc(token: cred.accessToken)
+                case .failure:
+                    outcome = .failure(reason: "No readable Claude Code token in the keychain.")
+                }
             } else {
-                // Draft path: deliberately broken keychain so the
-                // result reflects the typed token alone.
-                let brokenKeychain = KeychainOAuth(rawReader: { .failure(.notFound) })
-                client = OAuthClient(
-                    keychain: brokenKeychain,
-                    tokenOverride: { token }
-                )
+                outcome = await TokenPoolStatus.shared.testAdHoc(token: token)
             }
-            let result = await client.fetchUsage()
             testInProgress = false
-            testResult = Self.classify(result)
+            testResult = Self.classify(outcome)
         }
     }
 
-    /// Translate the typed OAuthClient outcome into a user-facing
-    /// result. We don't surface raw HTTP bodies — they're noisy and
-    /// usually point at the same actionable advice ("get a fresh token").
-    private static func classify(
-        _ result: Result<RateLimitSnapshot, OAuthClientError>
-    ) -> TestResult {
+    /// Map the poller's test outcome to the card's status line. The
+    /// poller already distills HTTP errors into human messages.
+    private static func classify(_ result: TokenTestResult) -> TestResult {
         switch result {
-        case .success(let snapshot):
-            return .success(
-                fiveHourPct: snapshot.fiveHour?.usedPercentage,
-                sevenDayPct: snapshot.sevenDay?.usedPercentage
-            )
-        case .failure(.unauthorized):
-            return .failure(message: "Anthropic rejected this token (401). It may be expired or revoked — fetch a fresh one.")
-        case .failure(.rateLimited):
-            return .failure(message: "Rate-limited by Anthropic (429). Wait a moment and try again.")
-        case .failure(.transport):
-            return .failure(message: "Network error. Check your connection and retry.")
-        case .failure(.http(403, _)):
-            // 403 ≠ 401: Anthropic accepted the token as valid auth
-            // but won't honor it for /api/oauth/usage. Almost always
-            // means the token lacks the `user:sessions:claude_code`
-            // scope — i.e. it came from `claude setup-token` or a
-            // web-console API key rather than the interactive
-            // `claude login` flow.
-            return .failure(message: "Token rejected for this endpoint (403). Use a token from `claude logout && claude login`, not `claude setup-token` or a console API key.")
-        case .failure(.http(let status, _)):
-            return .failure(message: "Anthropic returned HTTP \(status).")
-        case .failure(.responseSchemaMismatch):
-            return .failure(message: "Anthropic's response didn't match Pacer's expected shape. Likely a server-side change.")
-        case .failure(.credentialsNotFound),
-             .failure(.keychainAccessDenied),
-             .failure(.keychainMalformed),
-             .failure(.keychainStatus),
-             .failure(.tokenExpired):
-            // The override path shouldn't reach any of these. Surface a
-            // generic message rather than crashing — keeps the UI honest
-            // if the client's failure modes ever expand.
-            return .failure(message: "Pacer hit an unexpected internal error while testing.")
+        case .success(let fh, let sd):
+            return .success(fiveHourPct: fh, sevenDayPct: sd)
+        case .foreignAccount(let org):
+            let suffix = org.map { " (\($0.prefix(8))…)" } ?? ""
+            return .failure(message: "This token belongs to a different account\(suffix) — Pacer keeps it out of the pool.")
+        case .failure(let reason):
+            return .failure(message: reason)
+        case .unavailable:
+            return .failure(message: "Pacer's poller isn't running yet — try again in a moment.")
+        }
+    }
+}
+
+// MARK: - Token pool
+
+/// Live view of the OAuth token pool the poller cycles through — where
+/// each token comes from, which account it's tied to, when it expires,
+/// its health, and a Test that routes through the poller (so it persists
+/// and counts against that token's budget instead of racing it).
+private struct TokensCard: View {
+    @State private var pool = TokenPoolStatus.shared
+
+    var body: some View {
+        PacerCard("Tokens", trailing: {
+            cadenceHeader
+        }, content: {
+            if pool.lanes.isEmpty {
+                Text("No tokens yet — sign into Claude Code, or add one below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    columnHeader
+                    ForEach(pool.lanes) { lane in
+                        Divider().opacity(0.35)
+                        TokenLaneRow(lane: lane)
+                    }
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit. Tokens are cycled by priority (top first).")
+                Text("Add more by enabling Claude Desktop below (its tokens join the pool) or pasting one in “OAuth token override”. Testing a token here fetches real usage through the poller — it updates your history and counts against that token's budget.")
+                    .padding(.top, 2)
+            }
+        })
+    }
+
+    private var cadenceHeader: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(pool.isActive ? Color.green : Color.secondary.opacity(0.6))
+                .frame(width: 7, height: 7)
+            Text(cadenceText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var cadenceText: String {
+        let n = pool.lanes.filter { $0.account != .foreign }.count
+        let tokens = "\(n) token\(n == 1 ? "" : "s")"
+        guard let seconds = pool.effectiveIntervalSeconds else { return tokens }
+        return "Updating ~\(Self.formatInterval(seconds)) · \(tokens) · \(pool.isActive ? "active" : "idle")"
+    }
+
+    static func formatInterval(_ s: TimeInterval) -> String {
+        if s < 90 { return "\(Int(s.rounded()))s" }
+        let m = s / 60
+        return m.rounded() == m ? "\(Int(m)) min" : String(format: "%.1f min", m)
+    }
+
+    private var columnHeader: some View {
+        HStack(spacing: 10) {
+            Text("SOURCE").frame(width: 148, alignment: .leading)
+            Text("ACCOUNT").frame(width: 96, alignment: .leading)
+            Text("STATUS").frame(width: 74, alignment: .leading)
+            Text("EXPIRES").frame(width: 66, alignment: .leading)
+            Text("UPDATED").frame(width: 70, alignment: .leading)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 9, weight: .semibold))
+        .tracking(0.5)
+        .foregroundStyle(.tertiary)
+        .padding(.bottom, 6)
+    }
+}
+
+/// One row in the token pool. Owns its own Test in-flight state.
+private struct TokenLaneRow: View {
+    let lane: TokenLaneStatus
+    @State private var testing = false
+    @State private var result: TokenTestResult?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: Self.icon(lane.source))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 15)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(Self.name(lane.source))
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Text("#\(lane.priority + 1) · …\(lane.id.suffix(4))")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 148, alignment: .leading)
+
+            Text(accountText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 96, alignment: .leading)
+                .help(lane.organizationId ?? "")
+
+            statusPill
+                .frame(width: 74, alignment: .leading)
+
+            Text(expiresText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 66, alignment: .leading)
+
+            Text(updatedText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: 70, alignment: .leading)
+
+            Spacer(minLength: 4)
+
+            testControl
+        }
+        .padding(.vertical, 7)
+    }
+
+    @ViewBuilder private var testControl: some View {
+        HStack(spacing: 5) {
+            if let result, !testing { resultIcon(result) }
+            if testing {
+                ProgressView().controlSize(.small)
+            } else {
+                Button("Test") { runTest() }
+                    .controlSize(.small)
+                    .help("Fetch usage with this token through the poller (persists + counts against its budget).")
+            }
+        }
+    }
+
+    private func runTest() {
+        testing = true
+        result = nil
+        Task { @MainActor in
+            let r = await TokenPoolStatus.shared.testLane(id: lane.id)
+            result = r
+            testing = false
+        }
+    }
+
+    @ViewBuilder private func resultIcon(_ r: TokenTestResult) -> some View {
+        switch r {
+        case .success:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12)).help("Valid")
+        case .foreignAccount:
+            Image(systemName: "person.crop.circle.badge.xmark").foregroundStyle(.purple).font(.system(size: 12)).help("Different account")
+        case .failure(let reason):
+            Image(systemName: "xmark.circle.fill").foregroundStyle(.red).font(.system(size: 12)).help(reason)
+        case .unavailable:
+            Image(systemName: "questionmark.circle").foregroundStyle(.secondary).font(.system(size: 12)).help("Poller not running")
+        }
+    }
+
+    private var statusPill: some View {
+        let info = statusInfo
+        return Text(info.0)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(info.1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(info.1.opacity(0.14)))
+    }
+
+    private var statusInfo: (String, Color) {
+        let now = Date()
+        if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
+        if lane.account == .foreign { return ("other acct", .purple) }
+        if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
+        if lane.account == .primary { return ("active", .green) }
+        return ("pending", .gray)
+    }
+
+    private var accountText: String {
+        guard let org = lane.organizationId else { return "—" }
+        return "…\(org.suffix(6))"
+    }
+
+    private var expiresText: String {
+        guard let exp = lane.expiresAt else { return "—" }
+        if exp < Date() { return "expired" }
+        return Self.relative.localizedString(for: exp, relativeTo: Date())
+    }
+
+    private var updatedText: String {
+        guard let last = lane.lastPolledAt else { return "never" }
+        return Self.relative.localizedString(for: last, relativeTo: Date())
+    }
+
+    private static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    private static func name(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "Claude Code"
+        case .desktop:  return "Claude Desktop"
+        case .override: return "Manual override"
+        case .held:     return "Saved by Pacer"
+        }
+    }
+
+    private static func icon(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "terminal"
+        case .desktop:  return "desktopcomputer"
+        case .override: return "key.fill"
+        case .held:     return "lock.fill"
         }
     }
 }

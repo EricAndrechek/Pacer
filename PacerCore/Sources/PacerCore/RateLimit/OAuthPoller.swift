@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import CryptoKit
 
 /// Abstraction over wall-clock time for the poller's loop. Production
 /// uses `SystemPollerClock`. Tests inject a controllable clock so they
@@ -64,7 +65,7 @@ public struct SystemPollerClock: PollerClock {
 ///     never over-poll.
 ///
 /// `start()`/`stop()` symmetrical; safe to call from any context.
-public actor OAuthPoller {
+public actor OAuthPoller: TokenPoolTesting {
 
     public struct Configuration: Sendable {
         /// Cadence policy (per-token floor, active/idle targets, activity
@@ -131,6 +132,9 @@ public actor OAuthPoller {
         let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
+        /// The account this token resolved to (from a successful poll's
+        /// `anthropic-organization-id`); nil until first polled.
+        var resolvedOrg: String?
     }
 
     private let client: OAuthClient
@@ -144,6 +148,9 @@ public actor OAuthPoller {
     private var lanes: [Lane] = []
     private var primaryOrg: String?
     private var lastDiscoveryAt: Date?
+    /// Most recent activity time seen by the loop, cached so status
+    /// publishes can report active/idle without another probe.
+    private var lastActivityAt: Date?
     private var lastOutcome: PollOutcome?
     private var lastPollAt: Date?
     private var nextPollAt: Date?
@@ -175,6 +182,8 @@ public actor OAuthPoller {
     public func start() {
         guard loopTask == nil else { return }
         stopping = false
+        // Let the Settings "Tokens" section route Test clicks back here.
+        Task { await MainActor.run { TokenPoolStatus.shared.tester = self } }
         loopTask = Task { [weak self] in
             await self?.loop()
         }
@@ -229,6 +238,114 @@ public actor OAuthPoller {
         )
     }
 
+    // MARK: - Manual test + status publishing (TokenPoolTesting)
+
+    /// Stable, non-reversible id for a token — 12 hex chars of its
+    /// SHA-256. The lane's UI identity + test-routing key; never exposes
+    /// token bytes.
+    private static func laneId(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Test an existing lane by id. Routes through the normal poll path so
+    /// the reading is persisted and the lane is stamped — a manual test
+    /// spends that token's budget through the same accounting as an auto
+    /// poll, never a hidden extra request.
+    public func testLane(id: String) async -> TokenTestResult {
+        ensureLanes()
+        guard let idx = lanes.firstIndex(where: { Self.laneId($0.credential.accessToken) == id }) else {
+            return .failure(reason: "That token is no longer available.")
+        }
+        let outcome = await pollLane(idx)
+        await publishStatus()
+        return Self.testResult(from: outcome)
+    }
+
+    /// Test a raw token the UI holds (an unsaved override draft). If it's
+    /// already a lane, route through it (stamped/counted); otherwise poll
+    /// once and persist when it's the same account, so the reading isn't
+    /// thrown away.
+    public func testAdHoc(token: String) async -> TokenTestResult {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        ensureLanes()
+        if let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) {
+            let outcome = await pollLane(idx)
+            await publishStatus()
+            return Self.testResult(from: outcome)
+        }
+        let cred = OAuthCredential(accessToken: trimmed, expiresAt: nil, subscriptionType: nil)
+        switch await client.fetchUsage(using: cred) {
+        case .success(let snap):
+            let org = snap.organizationId
+            let matches: Bool
+            if let primary = primaryOrg { matches = (org == nil || org == primary) }
+            else { primaryOrg = org; matches = true }
+            if matches {
+                await persist(snap, laneSource: .override)
+                return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
+            }
+            return .foreignAccount(org: org)
+        case .failure(let error):
+            return Self.testFailure(error)
+        }
+    }
+
+    /// Publish a display-safe snapshot of the lane pool + effective
+    /// cadence to `TokenPoolStatus.shared` for the Settings section.
+    private func publishStatus() async {
+        let tuning = configuration.scheduler
+        let usable = lanes.filter { $0.state.account != .foreign }.count
+        let active = lastActivityAt.map { clock.now().timeIntervalSince($0) <= tuning.activeWindow } ?? false
+        let realizedActive = max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usable, 1)))
+        let effective: TimeInterval? = usable == 0 ? nil : (active ? realizedActive : tuning.idleInterval)
+        let statuses = lanes.enumerated().map { i, lane in
+            TokenLaneStatus(
+                id: Self.laneId(lane.credential.accessToken),
+                source: lane.source,
+                organizationId: lane.resolvedOrg,
+                account: lane.state.account,
+                expiresAt: lane.credential.expiresAt,
+                lastPolledAt: lane.state.lastPolledAt,
+                cooldownUntil: lane.state.cooldownUntil,
+                consecutiveFailures: lane.consecutiveFailures,
+                priority: i
+            )
+        }
+        await MainActor.run {
+            TokenPoolStatus.shared.publish(lanes: statuses, isActive: active, effectiveIntervalSeconds: effective)
+        }
+    }
+
+    private static func testResult(from outcome: PollOutcome) -> TokenTestResult {
+        switch outcome {
+        case .success(let fh, let sd):   return .success(fiveHour: fh, sevenDay: sd)
+        case .foreignAccount:            return .foreignAccount(org: nil)
+        case .rateLimited:               return .failure(reason: "Rate-limited (429). This token is cooling down.")
+        case .unauthorized:              return .failure(reason: "Anthropic rejected this token (401).")
+        case .tokenExpired:              return .failure(reason: "This token is expired.")
+        case .transport:                 return .failure(reason: "Network error. Check your connection.")
+        case .http(let s):               return .failure(reason: "Server returned HTTP \(s).")
+        case .responseSchemaMismatch:    return .failure(reason: "Unexpected response shape from Anthropic.")
+        case .credentialsNotFound:       return .failure(reason: "That token is no longer available.")
+        case .keychainAccessDenied:      return .failure(reason: "Keychain access denied.")
+        case .keychainMalformed, .keychainStatus:
+            return .failure(reason: "Couldn't read the credential.")
+        }
+    }
+
+    private static func testFailure(_ error: OAuthClientError) -> TokenTestResult {
+        switch error {
+        case .rateLimited:            return .failure(reason: "Rate-limited (429). Try again shortly.")
+        case .unauthorized:           return .failure(reason: "Anthropic rejected this token (401). A `claude setup-token` value is user:inference-only and won't work here — paste the user:profile access token.")
+        case .transport:              return .failure(reason: "Network error.")
+        case .http(let s, _):         return .failure(reason: "Server returned HTTP \(s).")
+        case .responseSchemaMismatch: return .failure(reason: "Unexpected response shape.")
+        case .tokenExpired:           return .failure(reason: "This token is expired.")
+        default:                      return .failure(reason: "Couldn't validate this token.")
+        }
+    }
+
     // MARK: - Loop
 
     private func loop() async {
@@ -239,15 +356,18 @@ public actor OAuthPoller {
 
         while !stopping && !Task.isCancelled {
             ensureLanes()
+            let activity = await activityProbe()
+            lastActivityAt = activity
+
             if lanes.allSatisfy({ $0.state.account == .foreign }) || lanes.isEmpty {
                 // Nothing usable — record it once and idle until rediscovery.
                 if lanes.isEmpty { lastOutcome = .credentialsNotFound }
+                await publishStatus()
                 nextPollAt = clock.now().addingTimeInterval(configuration.scheduler.idleInterval)
                 await nap(configuration.scheduler.idleInterval)
                 continue
             }
 
-            let activity = await activityProbe()
             let decision = scheduler.decide(
                 lanes: lanes.map(\.state),
                 lastActivityAt: activity,
@@ -256,8 +376,10 @@ public actor OAuthPoller {
             switch decision {
             case .poll(let idx):
                 _ = await pollLane(idx)
+                await publishStatus()
             case .wait(let seconds):
                 nextPollAt = clock.now().addingTimeInterval(seconds)
+                await publishStatus()
                 await nap(seconds)
             }
         }
@@ -307,7 +429,8 @@ public actor OAuthPoller {
                 credential: candidate.credential,
                 source: candidate.source,
                 state: OAuthPollScheduler.LaneState(),
-                consecutiveFailures: 0
+                consecutiveFailures: 0,
+                resolvedOrg: nil
             ))
             known.insert(candidate.credential.accessToken)
         }
@@ -379,6 +502,7 @@ public actor OAuthPoller {
                 primaryOrg = org
                 matches = true
             }
+            lanes[idx].resolvedOrg = org ?? primaryOrg
             if matches {
                 lanes[idx].state.account = .primary
                 await persist(snapshot, laneSource: lanes[idx].source)
