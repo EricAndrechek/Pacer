@@ -57,11 +57,10 @@ struct ContentView: View {
     private var selectionRaw: String = Destination.dashboard.rawValue
 
     /// Widest sidebar tab label at the *current* Dynamic Type size,
-    /// measured off-screen by `sidebarLabelProbe`. Drives
-    /// `sidebarMinWidth` so the sidebar's resize floor tracks the actual
-    /// rendered text (which grows with accessibility text settings)
-    /// rather than a hardcoded number.
-    @State private var measuredLabelWidth: CGFloat = 0
+    /// measured off-screen by `sidebarLabelProbe`. `nil` until the first
+    /// measurement lands — `sidebarMinWidth` errs wide until then so a
+    /// label can never clip in the gap. Grows with accessibility text.
+    @State private var measuredLabelWidth: CGFloat?
 
     private var selection: Binding<Destination> {
         Binding(
@@ -210,7 +209,6 @@ struct ContentView: View {
         // user's accessibility text size — no magic 220 that's too wide
         // at the default size and could still clip at larger ones.
         .overlay(alignment: .topLeading) { sidebarLabelProbe }
-        .onPreferenceChange(SidebarLabelWidthKey.self) { measuredLabelWidth = $0 }
         .navigationSplitViewColumnWidth(
             min: sidebarMinWidth,
             ideal: max(230, sidebarMinWidth),
@@ -271,11 +269,13 @@ struct ContentView: View {
     private var sidebarMinWidth: CGFloat {
         let chrome: CGFloat = 82
         let comfort: CGFloat = 14
-        // Floor for the first frame, before the probe's preference has
-        // propagated (`measuredLabelWidth` starts at 0). Once measured,
-        // the real value dominates and this is inert.
-        let preMeasureFloor: CGFloat = 150
-        return max(preMeasureFloor, chrome + comfort + measuredLabelWidth)
+        // Until the probe reports a real (positive) width, err WIDE — a
+        // safe over-estimate that can't clip a label — rather than
+        // guessing narrow. Once measured, the measured width governs
+        // exactly; there's deliberately no `max()` flooring that would
+        // let a stale guess override a correct, smaller measurement.
+        guard let measured = measuredLabelWidth, measured > 0 else { return 210 }
+        return chrome + comfort + measured
     }
 
     /// Off-screen probe that measures the widest tab label at the
@@ -295,14 +295,12 @@ struct ContentView: View {
                     .fixedSize()
             }
         }
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(
-                    key: SidebarLabelWidthKey.self,
-                    value: geo.size.width
-                )
-            }
-        )
+        // `.fixedSize()` makes each row take its intrinsic width, so the
+        // VStack's width is exactly the widest label — independent of the
+        // column width, which is what keeps this from becoming a layout
+        // feedback loop. `onGeometryChange` (macOS 15+) reads that width
+        // directly, no PreferenceKey / GeometryReader-in-background dance.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { measuredLabelWidth = $0 }
         .hidden()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -370,16 +368,6 @@ struct DayKeyedContent<Content: View>: View {
 }
 
 // MARK: - Sidebar building blocks
-
-/// Carries the widest measured sidebar-label width up from the
-/// off-screen `sidebarLabelProbe` to `ContentView`, reducing by `max`
-/// across the labels so the column floor fits the longest one.
-private struct SidebarLabelWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
 
 private struct SidebarSection<Content: View>: View {
     let title: String
