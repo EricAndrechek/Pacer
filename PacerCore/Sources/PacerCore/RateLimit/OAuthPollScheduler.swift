@@ -21,9 +21,9 @@ import Foundation
 /// (the hard invariant that keeps us off the throttle) — to hit a tighter
 /// *effective* endpoint cadence when it matters:
 ///
-///   - **Active** (recent Claude usage): aim for `activeInterval` (~2.5
-///     min). Achievable only with ≥2 lanes; with one lane it floors at
-///     `perTokenMinInterval`.
+///   - **Active** (recent Claude usage): the fastest *even* cadence the
+///     lanes can sustain — `max(activeInterval floor, perTokenMin/lanes)`.
+///     5 tokens → ~1 min, 2 → ~2.5 min, 1 → 5 min.
 ///   - **Idle**: relax to `idleInterval` — nothing's moving, so be
 ///     polite and bank budget. Poll-on-wake (the poller nudging us when
 ///     usage resumes) makes the idle→active transition feel instant.
@@ -33,8 +33,10 @@ public struct OAuthPollScheduler: Sendable {
         /// The invariant. No single token is polled more often than this,
         /// ever — this is what keeps every lane off the ~30-min throttle.
         public var perTokenMinInterval: TimeInterval
-        /// Target endpoint cadence while actively burning tokens.
-        /// Realized only when there are enough lanes to sustain it.
+        /// Floor on the active endpoint cadence — the fastest we'll poll
+        /// even with many tokens (politeness to the shared endpoint). The
+        /// realized active interval is `max(this, perTokenMinInterval /
+        /// usableLanes)`, so more tokens poll faster, down to this floor.
         public var activeInterval: TimeInterval
         /// Endpoint cadence when idle.
         public var idleInterval: TimeInterval
@@ -48,7 +50,7 @@ public struct OAuthPollScheduler: Sendable {
 
         public init(
             perTokenMinInterval: TimeInterval = 300,
-            activeInterval: TimeInterval = 150,
+            activeInterval: TimeInterval = 60,
             idleInterval: TimeInterval = 600,
             activeWindow: TimeInterval = 900,
             minWait: TimeInterval = 1
@@ -107,7 +109,15 @@ public struct OAuthPollScheduler: Sendable {
         guard !usableIdx.isEmpty else { return .wait(seconds: tuning.idleInterval) }
 
         let active = lastActivityAt.map { now.timeIntervalSince($0) <= tuning.activeWindow } ?? false
-        let target = active ? tuning.activeInterval : tuning.idleInterval
+        // Active target = the fastest EVEN cadence the usable lanes can
+        // sustain (each lane ≤ perTokenMinInterval), floored at
+        // activeInterval. More tokens ⇒ faster (5 tokens → 1 min), fewer
+        // ⇒ slower (2 → 2.5 min, 1 → 5 min), never below the floor. Using
+        // the lane-count-aware target here (not the raw floor) keeps the
+        // cadence evenly spaced instead of bunching quick polls then idling.
+        let target: TimeInterval = active
+            ? max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usableIdx.count, 1)))
+            : tuning.idleInterval
 
         // When the endpoint-cadence gate next allows a poll: the most
         // recent poll of any usable lane + target. No prior poll ⇒ now.

@@ -58,6 +58,21 @@ import Testing
         #expect(sched.decide(lanes: [a0, b150], lastActivityAt: t0, now: at(300)) == .poll(laneIndex: 0))
     }
 
+    @Test func fiveLanesActiveTargetsOneMinuteFloor() {
+        // 5 usable lanes sustain a 60s endpoint cadence (each lane every
+        // 300s). Lane 0 just polled; the target is 60s, not 150s.
+        var lanes = [Lane(lastPolledAt: t0, account: .primary)]
+        lanes.append(contentsOf: (0..<4).map { _ in Lane(account: .primary) })
+        #expect(sched.decide(lanes: lanes, lastActivityAt: t0, now: t0) == .wait(seconds: 60))
+    }
+
+    @Test func manyLanesNeverGoBelowActiveFloor() {
+        // 10 lanes could sustain 30s, but the 60s floor holds.
+        var lanes = [Lane(lastPolledAt: t0, account: .primary)]
+        lanes.append(contentsOf: (0..<9).map { _ in Lane(account: .primary) })
+        #expect(sched.decide(lanes: lanes, lastActivityAt: t0, now: t0) == .wait(seconds: 60))
+    }
+
     @Test func allLanesWithinMinIntervalWaitsUntilEarliestFrees() {
         let a = Lane(lastPolledAt: at(100), account: .primary)   // free at 400
         let b = Lane(lastPolledAt: at(50), account: .primary)    // free at 350

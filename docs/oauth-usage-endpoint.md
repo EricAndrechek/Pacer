@@ -62,8 +62,9 @@ the lever the poller pulls.
   - **Per-token invariant:** no lane polled more than once per
     `perTokenMinInterval` (300s) — the hard rail that keeps every lane off
     the ~30-min throttle.
-  - **Active** (recent Claude usage): aim for `activeInterval` (150s),
-    realized by interleaving lanes. One lane floors at 300s.
+  - **Active** (recent Claude usage): the fastest *even* cadence the
+    lanes sustain — `max(activeInterval floor 60s, perTokenMin/lanes)`.
+    So 5 tokens → ~1 min, 2 → ~2.5 min, 1 → 5 min.
   - **Idle:** relax to `idleInterval` (600s).
   - **Poll-on-wake:** the `ScanCoordinator` calls `notifyActivity()` when
     fresh usage lands, waking the loop to re-evaluate (still bounded by the

@@ -1367,12 +1367,13 @@ private struct TokensCard: View {
 
     private var columnHeader: some View {
         HStack(spacing: 10) {
-            Text("SOURCE").frame(width: 148, alignment: .leading)
-            Text("ACCOUNT").frame(width: 96, alignment: .leading)
+            Text("SOURCE").frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+            Text("ACCOUNT").frame(minWidth: 70, maxWidth: .infinity, alignment: .leading)
             Text("STATUS").frame(width: 74, alignment: .leading)
-            Text("EXPIRES").frame(width: 66, alignment: .leading)
-            Text("UPDATED").frame(width: 70, alignment: .leading)
-            Spacer(minLength: 0)
+            Text("EXPIRES").frame(width: 62, alignment: .leading)
+            Text("UPDATED").frame(width: 74, alignment: .leading)
+                .help("When Pacer last fetched usage with this token")
+            Color.clear.frame(width: 56)   // aligns over the Test button
         }
         .font(.system(size: 9, weight: .semibold))
         .tracking(0.5)
@@ -1389,6 +1390,7 @@ private struct TokenLaneRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            // SOURCE — flexible; the id sub-line truncates first when narrow.
             HStack(spacing: 7) {
                 Image(systemName: Self.icon(lane.source))
                     .font(.system(size: 12))
@@ -1398,18 +1400,23 @@ private struct TokenLaneRow: View {
                     Text(Self.name(lane.source))
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
-                    Text("#\(lane.priority + 1) · …\(lane.id.suffix(4))")
+                    Text("#\(lane.priority + 1) · \(lane.id)")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help("Token fingerprint \(lane.id)")
                 }
             }
-            .frame(width: 148, alignment: .leading)
+            .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
 
+            // ACCOUNT — flexible; middle-truncates, hover for the full org id.
             Text(accountText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .frame(width: 96, alignment: .leading)
+                .truncationMode(.middle)
+                .frame(minWidth: 70, maxWidth: .infinity, alignment: .leading)
                 .help(lane.organizationId ?? "")
 
             statusPill
@@ -1418,16 +1425,15 @@ private struct TokenLaneRow: View {
             Text(expiresText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 66, alignment: .leading)
+                .frame(width: 62, alignment: .leading)
 
             Text(updatedText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 70, alignment: .leading)
-
-            Spacer(minLength: 4)
+                .frame(width: 74, alignment: .leading)
 
             testControl
+                .frame(width: 56, alignment: .trailing)
         }
         .padding(.vertical, 7)
     }
@@ -1488,8 +1494,7 @@ private struct TokenLaneRow: View {
     }
 
     private var accountText: String {
-        guard let org = lane.organizationId else { return "—" }
-        return "…\(org.suffix(6))"
+        lane.organizationId ?? "—"
     }
 
     private var expiresText: String {
@@ -1500,6 +1505,8 @@ private struct TokenLaneRow: View {
 
     private var updatedText: String {
         guard let last = lane.lastPolledAt else { return "never" }
+        // A just-now poll can round to a spurious "in 0s"; clamp it.
+        if abs(Date().timeIntervalSince(last)) < 10 { return "just now" }
         return Self.relative.localizedString(for: last, relativeTo: Date())
     }
 
