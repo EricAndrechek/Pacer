@@ -33,17 +33,28 @@ public struct RateLimitSnapshot: Sendable, Equatable {
     /// who can exceed quota at metered rates. nil when the response
     /// omits the field or it's a shape we don't recognize.
     public let extraUsageCents: Int?
+    /// The account this observation belongs to, read from the
+    /// `anthropic-organization-id` response header. The multi-token
+    /// poller uses it as a same-account guard: a Desktop token that
+    /// resolves to a *different* organization is dropped from the poll
+    /// pool and its samples are never persisted, so interleaving tokens
+    /// can never mix two accounts' usage into one timeline. nil when the
+    /// header was absent (older server, or a transport that doesn't
+    /// surface it).
+    public let organizationId: String?
 
     public init(
         sampledAt: Date,
         fiveHour: RateLimitWindow?,
         sevenDay: RateLimitWindow?,
-        extraUsageCents: Int? = nil
+        extraUsageCents: Int? = nil,
+        organizationId: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.extraUsageCents = extraUsageCents
+        self.organizationId = organizationId
     }
 }
 

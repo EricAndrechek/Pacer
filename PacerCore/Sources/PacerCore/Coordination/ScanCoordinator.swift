@@ -331,7 +331,8 @@ public final class ScanCoordinator {
         configuration: Configuration = Configuration(),
         statsCacheURL: URL? = nil,
         resolver: ClaudePathResolver = ClaudePathResolver(),
-        oauthClient: OAuthClient? = nil
+        oauthClient: OAuthClient? = nil,
+        oauthPoolStore: TokenPoolStoring = EphemeralTokenPoolStore()
     ) {
         self.container = container
         self.configuration = configuration
@@ -347,7 +348,8 @@ public final class ScanCoordinator {
             self.oauthPoller = OAuthPoller(
                 client: oauthClient,
                 container: container,
-                configuration: configuration.oauthPolling
+                configuration: configuration.oauthPolling,
+                poolStore: oauthPoolStore
             )
         } else {
             self.oauthPoller = nil
@@ -1147,6 +1149,14 @@ public final class ScanCoordinator {
                 projectAttributionChanged: needsPathMigration
             )
             Task { @MainActor in postScanCycleSummary(summary) }
+            // Poll-on-wake: fresh Claude usage just landed, so nudge the
+            // OAuth poller to re-evaluate its cadence — an idle→active
+            // transition polls promptly instead of waiting out the idle
+            // interval. The scheduler still enforces the per-token floor,
+            // so this can never cause an over-poll.
+            if let oauthPoller {
+                Task { await oauthPoller.notifyActivity() }
+            }
         }
         phase.notifMs = tickMs()
 

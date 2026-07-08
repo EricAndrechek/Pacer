@@ -102,11 +102,15 @@ final class AppBackgroundService {
         // Claude's stores only ~once per token lifetime and keep working if
         // the user logs out of Claude Code / removes Desktop. Tests and
         // Settings probes use the default in-memory store (no real keychain).
-        let oauthClient = OAuthClient(heldStore: KeychainCredentialStore())
+        let oauthClient = OAuthClient(
+            heldStore: KeychainCredentialStore(),
+            desktopKeyStore: KeychainDesktopKeyStore()
+        )
         let scanCoordinator = ScanCoordinator(
             container: container,
             configuration: ScanCoordinator.Configuration(costMode: costMode),
-            oauthClient: oauthClient
+            oauthClient: oauthClient,
+            oauthPoolStore: KeychainTokenPoolStore()
         )
         coordinator = scanCoordinator
 

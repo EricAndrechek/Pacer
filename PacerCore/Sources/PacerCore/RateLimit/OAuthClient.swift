@@ -57,6 +57,22 @@ public enum OAuthClientError: Error, Sendable {
 /// cooperative-task-cancellable, and `KeychainOAuth.read()` is a fast
 /// synchronous SecItem call. The client is `Sendable` so the poller
 /// actor can hold and call it without isolation hops.
+/// One credential the poller could spend, tagged with where it came
+/// from. `source` lets the poller prefer a primary-account token
+/// (keychain / manual override) when deciding which lane establishes
+/// the account the whole pool is guarded against.
+public struct CredentialCandidate: Sendable, Equatable {
+    public enum Source: String, Sendable, Equatable, Codable {
+        case override, keychain, held, desktop
+    }
+    public let credential: OAuthCredential
+    public let source: Source
+    public init(credential: OAuthCredential, source: Source) {
+        self.credential = credential
+        self.source = source
+    }
+}
+
 public struct OAuthClient: Sendable {
 
     /// Anthropic's undocumented usage endpoint. Stable for ~a year;
@@ -103,6 +119,12 @@ public struct OAuthClient: Sendable {
     /// reliably silence — only when its tokens actually changed. See
     /// `DesktopReadGate`.
     private let desktopGate: DesktopReadGate
+    /// Pacer's cached copy of Claude Desktop's `Claude Safe Storage` AES
+    /// key. Since that key is stable for the life of the Desktop install,
+    /// caching it lets `candidateCredentials` decrypt every future
+    /// `config.json` change without re-reading the (prompt-risking)
+    /// keychain item. See `KeychainDesktopKeyStore`.
+    private let desktopKeyStore: DesktopKeyStoring
 
     /// How long before a held token's expiry we go back to the sources for a
     /// fresher one. Until then we serve the held copy without touching
@@ -118,7 +140,8 @@ public struct OAuthClient: Sendable {
         desktopEnabled: @escaping @Sendable () -> Bool = { PacerPreferences.desktopCredentialsEnabled() },
         heldStore: HeldCredentialStoring = EphemeralCredentialStore(),
         rejected: RejectedTokens = RejectedTokens(),
-        desktopGate: DesktopReadGate = DesktopReadGate()
+        desktopGate: DesktopReadGate = DesktopReadGate(),
+        desktopKeyStore: DesktopKeyStoring = EphemeralDesktopKeyStore()
     ) {
         self.keychain = keychain
         self.transport = transport
@@ -129,6 +152,7 @@ public struct OAuthClient: Sendable {
         self.heldStore = heldStore
         self.rejected = rejected
         self.desktopGate = desktopGate
+        self.desktopKeyStore = desktopKeyStore
     }
 
     /// Production transport: `URLSession.shared.data(for:)` plus the
@@ -144,15 +168,12 @@ public struct OAuthClient: Sendable {
         return (data, http)
     }
 
-    /// One round-trip against `/api/oauth/usage`. Returns the typed
-    /// snapshot or an `OAuthClientError`.
+    /// One round-trip against `/api/oauth/usage` using the auto-resolved
+    /// credential (manual override → keychain → held → opted-in Desktop,
+    /// freshest wins). Used by the Settings probe and any single-token
+    /// caller. The multi-token poller uses `candidateCredentials()` +
+    /// `fetchUsage(using:)` instead so it controls which budget it spends.
     public func fetchUsage() async -> Result<RateLimitSnapshot, OAuthClientError> {
-        // Step 1: resolve the access token. Manual override (Settings
-        // → Authentication) wins when present — we don't even read the
-        // keychain, since the override exists exactly for cases where
-        // the keychain copy is stale (#6). Otherwise: keychain read,
-        // mapping its errors to ours so the caller switches on one
-        // error type.
         let credential: OAuthCredential
         let fromHeldStore: Bool
         switch resolveCredential() {
@@ -162,8 +183,29 @@ public struct OAuthClient: Sendable {
         case .failure(let error):
             return .failure(error)
         }
+        let result = await performFetch(credential: credential)
+        // Preserve the single-token path's behavior: a 401 on the held
+        // copy drops it so the next poll re-derives from the sources.
+        if case .failure(.unauthorized) = result, fromHeldStore {
+            heldStore.clear()
+        }
+        return result
+    }
 
-        // Step 3: build request.
+    /// One round-trip using a SPECIFIC credential, bypassing resolution.
+    /// The multi-token poller calls this per lane so it controls exactly
+    /// which token — and thus which independent rate-limit budget — each
+    /// poll spends. A 401 rejects the token process-wide (so lane
+    /// selection won't re-pick it) but never touches the held store;
+    /// lane lifecycle is the poller's job.
+    public func fetchUsage(using credential: OAuthCredential) async -> Result<RateLimitSnapshot, OAuthClientError> {
+        await performFetch(credential: credential)
+    }
+
+    /// The shared HTTP round-trip: build → send → status-branch → decode.
+    /// On 401 it rejects the token; held-store cleanup is left to the
+    /// caller so the specific-token path doesn't disturb resolution state.
+    private func performFetch(credential: OAuthCredential) async -> Result<RateLimitSnapshot, OAuthClientError> {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "GET"
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
@@ -173,8 +215,8 @@ public struct OAuthClient: Sendable {
         // makes proxies and CDNs less likely to vary the response.
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        // Step 4: send. URLSession.data is task-cancellable so a
-        // poller stop propagates here cleanly.
+        // URLSession.data is task-cancellable so a poller stop
+        // propagates here cleanly.
         let data: Data
         let response: HTTPURLResponse
         do {
@@ -183,20 +225,14 @@ public struct OAuthClient: Sendable {
             return .failure(.transport(underlying: error))
         }
 
-        // Step 5: status branching.
         let body = String(data: data, encoding: .utf8) ?? "<non-UTF8 body, \(data.count) bytes>"
         switch response.statusCode {
         case 200..<300:
             break // fall through to decode
         case 401:
-            // This token is bad. Blocklist it so resolution falls through to
-            // the next-freshest candidate, and drop our held copy so the next
-            // poll re-derives from the sources. (`fromHeldStore` is logged
-            // intent; we clear regardless since the held copy may equal the
-            // rejected token.)
-            _ = fromHeldStore
+            // This token is bad. Blocklist it so resolution / lane
+            // selection falls through to the next candidate.
             rejected.reject(credential.accessToken)
-            heldStore.clear()
             return .failure(.unauthorized(body: truncate(body, max: 200)))
         case 429:
             return .failure(.rateLimited(
@@ -206,16 +242,113 @@ public struct OAuthClient: Sendable {
             return .failure(.http(status: response.statusCode, body: truncate(body, max: 200)))
         }
 
-        // Step 6: decode. We tolerate either window being missing/null
-        // and tolerate `resets_at: null`. Only a wholly-broken shape is
-        // a hard failure.
+        // Same-account guard input: the account this response belongs to.
+        let orgId = response.value(forHTTPHeaderField: "anthropic-organization-id")
+
+        // Decode. We tolerate either window being missing/null and
+        // tolerate `resets_at: null`. Only a wholly-broken shape is a
+        // hard failure.
         let snapshot: RateLimitSnapshot
         do {
-            snapshot = try decode(body: data, sampledAt: now())
+            snapshot = try decode(body: data, sampledAt: now(), organizationId: orgId)
         } catch {
             return .failure(.responseSchemaMismatch(error.localizedDescription))
         }
         return .success(snapshot)
+    }
+
+    /// All usable (non-expired, non-rejected) candidate credentials for
+    /// polling, de-duplicated by access token, freshest first, each
+    /// tagged with its source. The multi-token poller unions these into
+    /// its persistent lane set.
+    ///
+    /// Reads Claude Code's keychain (silent) and, for opted-in Claude
+    /// Desktop, decrypts its token cache with our CACHED AES key — so no
+    /// prompt-risking keychain read unless that key has gone stale (see
+    /// `resolveDesktopTokens`). A manual override, when set, is the sole
+    /// candidate.
+    ///
+    /// - Parameter cachedDesktopTokens: the Desktop-origin tokens the
+    ///   caller (the poller) already holds, used only to decide the Desktop
+    ///   escalation.
+    public func candidateCredentials(cachedDesktopTokens: [OAuthCredential] = []) -> [CredentialCandidate] {
+        // Manually-added tokens are no longer a "sole override" that
+        // replaces auto-discovery — they live in the poller's pool as
+        // `.override` lanes and are seeded from there, so here we only
+        // gather the live sources and let them union into the pool.
+        let referenceNow = now()
+        let usable: (OAuthCredential) -> Bool = { [rejected] cred in
+            !rejected.isRejected(cred.accessToken)
+                && (cred.expiresAt == nil || cred.expiresAt! >= referenceNow)
+        }
+        var out: [CredentialCandidate] = []
+        var seen = Set<String>()
+        func add(_ cred: OAuthCredential, _ source: CredentialCandidate.Source) {
+            guard usable(cred), !seen.contains(cred.accessToken) else { return }
+            seen.insert(cred.accessToken)
+            out.append(CredentialCandidate(credential: cred, source: source))
+        }
+
+        // Order matters for the source LABEL of a token that appears in
+        // more than one place: a live source (Claude Code keychain /
+        // Claude Desktop) wins over our held copy, so a token is shown by
+        // where it actually lives. "Saved by Pacer" then surfaces only for
+        // a genuine survivor — a token we still hold that no live source
+        // has anymore (e.g. after logout) — which is exactly the case the
+        // held store exists to cover.
+        if case .success(let c) = keychain.read() { add(c, .keychain) }
+        if desktopEnabled() {
+            let (tokens, newKey) = resolveDesktopTokens(cachedDesktop: cachedDesktopTokens, now: referenceNow)
+            if let newKey { desktopKeyStore.save(newKey) }
+            for c in tokens { add(c, .desktop) }
+        }
+        if let held = heldStore.load() { add(held, .held) }
+
+        // Freshest first (nil expiry sorts as "never expires" ⇒ leads);
+        // ties broken by token so the ordering is deterministic.
+        return out.sorted {
+            let a = $0.credential.expiresAt ?? .distantFuture
+            let b = $1.credential.expiresAt ?? .distantFuture
+            return a != b ? a > b : $0.credential.accessToken < $1.credential.accessToken
+        }
+    }
+
+    /// Resolve Claude Desktop's tokens with the layered fallback that keeps
+    /// us off the `Claude Safe Storage` prompt:
+    ///   1. Decrypt the current `config.json` with our **cached AES key**
+    ///      (file read + AES only — no keychain, no prompt). Because the
+    ///      key is stable for the install's life, this succeeds ~always and
+    ///      also picks up any freshly-rotated tokens.
+    ///   2. If the cached key can't decrypt it (⇒ the key rotated, e.g. a
+    ///      Desktop reinstall) but we still hold working Desktop tokens,
+    ///      keep using those and DEFER the prompt.
+    ///   3. Only when the cached key is stale **and** no cached Desktop
+    ///      token still works do we re-read `Claude Safe Storage` (the one
+    ///      prompt-risking step), caching the fresh key.
+    /// Returns the tokens plus a new key to persist (nil unless step 3 read
+    /// one).
+    private func resolveDesktopTokens(
+        cachedDesktop: [OAuthCredential],
+        now: Date
+    ) -> (tokens: [OAuthCredential], newKey: Data?) {
+        let working = { cachedDesktop.filter { $0.expiresAt == nil || $0.expiresAt! >= now } }
+        guard let blobs = desktop.readCacheBlobs(), !blobs.isEmpty else {
+            return (working(), nil)   // Desktop not installed — keep cached
+        }
+        // Layer 1: cached key (no prompt).
+        if let cachedKey = desktopKeyStore.load() {
+            let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: cachedKey)
+            if !creds.isEmpty { return (creds, nil) }
+            // Layer 2: cached key stale, but working cached tokens remain.
+            let stillWorking = working()
+            if !stillWorking.isEmpty { return (stillWorking, nil) }
+        }
+        // Layer 3 (or first-ever read): the only prompt-risking step.
+        guard case .success(let key) = desktop.readKey() else {
+            return (working(), nil)
+        }
+        let creds = desktop.profileCredentials(fromBlobs: blobs, keyPassword: key)
+        return creds.isEmpty ? (working(), nil) : (creds, key)
     }
 
     // MARK: - Credential resolution
@@ -313,7 +446,7 @@ public struct OAuthClient: Sendable {
 
     private struct DecodeError: Error { let detail: String }
 
-    private func decode(body: Data, sampledAt: Date) throws -> RateLimitSnapshot {
+    private func decode(body: Data, sampledAt: Date, organizationId: String? = nil) throws -> RateLimitSnapshot {
         guard let top = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             throw DecodeError(detail: "top level was not a JSON object")
         }
@@ -326,7 +459,8 @@ public struct OAuthClient: Sendable {
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
             sevenDay: decodeWindow(top["seven_day"]),
-            extraUsageCents: Self.decodeExtraUsage(top["extra_usage"])
+            extraUsageCents: Self.decodeExtraUsage(top["extra_usage"]),
+            organizationId: organizationId
         )
     }
 

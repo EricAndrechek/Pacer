@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import CryptoKit
 
 /// Abstraction over wall-clock time for the poller's loop. Production
 /// uses `SystemPollerClock`. Tests inject a controllable clock so they
@@ -38,65 +39,71 @@ public struct SystemPollerClock: PollerClock {
     }
 }
 
-/// Polls `/api/oauth/usage` on a 5-minute cadence (the server's
-/// aggregation interval — faster polling returns stale data) and
-/// persists each successful observation as one or two
-/// `RateLimitSample` rows (one per window present in the response).
+/// Polls `/api/oauth/usage` with an **adaptive, multi-token cadence**.
 ///
-/// Backoff state machine on errors:
+/// The endpoint computes usage live per request but rate-limits to ~1
+/// poll / 5 min / token with no budget headers (over-poll ⇒ ~30-min
+/// throttle). An account often has several independent tokens (Claude
+/// Code + Claude Desktop), each its own budget. So the poller keeps one
+/// **lane** per discovered token and lets `OAuthPollScheduler` spread
+/// polls across them: a tighter *effective* cadence when you're actively
+/// burning tokens (interleaving two lanes → ~2.5 min), relaxing when
+/// idle, while **no single lane is ever polled more than once per 5
+/// min** — the invariant that keeps every lane off the throttle. With
+/// one token it degrades cleanly to single-lane activity-gating.
 ///
-///   - 200 OK with rows                     →  reset backoff, sleep `baseInterval ± jitter`
-///   - 429 with Retry-After                  →  sleep max(retryAfter, baseInterval), capped at maxBackoff
-///   - 429 without Retry-After               →  exponential backoff (baseInterval × 2^consecutive429s),
-///                                              capped at maxBackoff
-///   - 401 / network / schema error          →  sleep `baseInterval ± jitter`, no backoff growth
-///                                              (these recover on next poll without our help)
-///   - credentials missing / token expired   →  sleep `baseInterval ± jitter`, no log spam
-///   - keychain access denied                →  sleep `baseInterval ± jitter` (one warn-once
-///                                              log; user must approve in foreground app)
+/// Safety rails:
+///   - **Same-account guard.** The first successful poll sets the pool's
+///     primary account (from `anthropic-organization-id`); a lane that
+///     resolves to a different org is marked foreign — never selected,
+///     never persisted — so interleaving can't mix two accounts.
+///   - **Per-lane cooldown.** A 429/transport/5xx cools *that lane*
+///     (exponential, capped); other lanes keep the timeline fresh.
+///   - **Poll-on-wake.** `notifyActivity()` (called by the coordinator
+///     when new usage lands) wakes the loop to re-evaluate — the
+///     scheduler still enforces the per-token floor, so a nudge can
+///     never over-poll.
 ///
-/// Each successful 200 resets `consecutive429s`. The actor is
-/// `start()`/`stop()` symmetrical and safe to call from any context.
-public actor OAuthPoller {
+/// `start()`/`stop()` symmetrical; safe to call from any context.
+public actor OAuthPoller: TokenPoolTesting {
 
     public struct Configuration: Sendable {
-        /// Steady-state cadence. 5 minutes matches the server's
-        /// aggregation interval — faster polls just return the same
-        /// numbers and waste rate-limit budget.
-        public var baseInterval: TimeInterval
-        /// Jitter range applied to each sleep, ±. Defaults to ±30s so
-        /// a fleet of Pacer instances can't synchronize their wakeups
-        /// (which would create thundering-herd load on Anthropic's
-        /// usage endpoint).
-        public var jitterSeconds: TimeInterval
-        /// Hard cap on any sleep duration. Even on persistent 429s we
-        /// won't sleep longer than this — at the cap, we keep
-        /// re-attempting once an hour so a recovering server is
-        /// noticed within reasonable time.
-        public var maxBackoff: TimeInterval
-        /// Optional delay before the first poll. Useful if the daemon
-        /// wants the JSONL scanner to settle before kicking off a
-        /// network call. Default 0.
+        /// Cadence policy (per-token floor, active/idle targets, activity
+        /// window). See `OAuthPollScheduler.Tuning`.
+        public var scheduler: OAuthPollScheduler.Tuning
+        /// Optional delay before the first discovery + poll. Lets the
+        /// JSONL scanner settle first. Default 0.
         public var startupDelay: TimeInterval
+        /// First cooldown applied to a lane after a failed poll; doubles
+        /// per consecutive failure on that lane.
+        public var laneCooldownBase: TimeInterval
+        /// Cap on a lane's cooldown.
+        public var laneCooldownMax: TimeInterval
+        /// How long a discovered lane set is reused before re-running
+        /// candidate discovery (picks up Desktop token rotation / new
+        /// logins). Discovery also runs whenever no usable lane remains.
+        public var laneRediscoverInterval: TimeInterval
 
         public init(
-            baseInterval: TimeInterval = 5 * 60,
-            jitterSeconds: TimeInterval = 30,
-            maxBackoff: TimeInterval = 60 * 60,
-            startupDelay: TimeInterval = 0
+            scheduler: OAuthPollScheduler.Tuning = .init(),
+            startupDelay: TimeInterval = 0,
+            laneCooldownBase: TimeInterval = 300,
+            laneCooldownMax: TimeInterval = 3600,
+            laneRediscoverInterval: TimeInterval = 1800
         ) {
-            self.baseInterval = baseInterval
-            self.jitterSeconds = jitterSeconds
-            self.maxBackoff = maxBackoff
+            self.scheduler = scheduler
             self.startupDelay = startupDelay
+            self.laneCooldownBase = laneCooldownBase
+            self.laneCooldownMax = laneCooldownMax
+            self.laneRediscoverInterval = laneRediscoverInterval
         }
     }
 
-    /// Categorized outcome of one poll cycle, surfaced for tests and
-    /// for the daemon UI's debug view.
+    /// Categorized outcome of one poll, surfaced for tests and debug UI.
     public enum PollOutcome: Sendable, Equatable {
         case success(fiveHourPct: Double?, sevenDayPct: Double?)
-        case credentialsNotFound
+        case foreignAccount            // succeeded but a different org — dropped
+        case credentialsNotFound       // no usable token / lane at all
         case keychainAccessDenied
         case keychainMalformed
         case keychainStatus(OSStatus)
@@ -108,132 +115,592 @@ public actor OAuthPoller {
         case responseSchemaMismatch
     }
 
-    /// Snapshot of poller state, useful for logging and tests.
     public struct Snapshot: Sendable {
         public let lastOutcome: PollOutcome?
-        public let consecutive429s: Int
+        public let laneCount: Int
+        public let primaryLaneCount: Int
         public let nextPollAt: Date?
         public let lastPollAt: Date?
+        public let primaryOrg: String?
     }
 
     public typealias RandomSource = @Sendable () -> Double
+
+    /// One pollable token + its scheduling state.
+    private struct Lane {
+        let credential: OAuthCredential
+        let source: CredentialCandidate.Source
+        var state: OAuthPollScheduler.LaneState
+        var consecutiveFailures: Int
+        /// The account this token resolved to (from a successful poll's
+        /// `anthropic-organization-id`); nil until first polled.
+        var resolvedOrg: String?
+    }
+
+    /// Sendable carrier for a lane's persisted metadata — read from and
+    /// written to SwiftData (`TokenLaneMeta`) across the MainActor hop,
+    /// and cached in-memory so lane seeding/rediscovery can restore state
+    /// without a fetch. Keyed by the lane fingerprint (`id`).
+    private struct LaneMetaSnapshot: Sendable {
+        var id: String
+        var sourceRaw: String
+        var organizationId: String?
+        var account: OAuthPollScheduler.AccountStatus
+        var expiresAt: Date?
+        var lastPolledAt: Date?
+        var cooldownUntil: Date?
+        var consecutiveFailures: Int
+    }
 
     private let client: OAuthClient
     private let container: ModelContainer
     private let configuration: Configuration
     private let clock: PollerClock
-    /// Returns a uniform random value in [0,1). Injected so tests can
-    /// freeze jitter to a known value.
+    private let scheduler: OAuthPollScheduler
+    private let activityProbe: @Sendable () async -> Date?
     private let random: RandomSource
 
-    private var loopTask: Task<Void, Never>?
-    private var consecutive429s: Int = 0
+    private var lanes: [Lane] = []
+    private var primaryOrg: String?
+    private var lastDiscoveryAt: Date?
+    /// Most recent activity time seen by the loop, cached so status
+    /// publishes can report active/idle without another probe.
+    private var lastActivityAt: Date?
     private var lastOutcome: PollOutcome?
-    private var nextPollAt: Date?
     private var lastPollAt: Date?
+    private var nextPollAt: Date?
+
+    /// Pacer's persistent token pool (its own keychain). Seeded into lanes
+    /// once per launch so tokens survive a restart without reading Claude's
+    /// stores; re-saved when the confirmed-primary token set changes.
+    private let poolStore: TokenPoolStoring
+    private var seeded = false
+    private var lastSavedPoolTokens: Set<String> = []
+
+    /// Persisted lane metadata (account / cooldown / last-poll / org),
+    /// loaded once per launch so seeded + rediscovered lanes restore their
+    /// status without an immediate re-poll and the Tokens UI isn't blank
+    /// on boot. Written back after every poll and pool mutation.
+    private var persistedMeta: [String: LaneMetaSnapshot] = [:]
+    private var metaLoaded = false
+
+    private var loopTask: Task<Void, Never>?
+    private var sleeper: Task<Void, Never>?
+    private var stopping = false
 
     public init(
         client: OAuthClient = OAuthClient(),
         container: ModelContainer,
         configuration: Configuration = Configuration(),
         clock: PollerClock = SystemPollerClock(),
+        activityProbe: (@Sendable () async -> Date?)? = nil,
+        poolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
         random: @escaping RandomSource = { Double.random(in: 0..<1) }
     ) {
         self.client = client
         self.container = container
         self.configuration = configuration
         self.clock = clock
+        self.scheduler = OAuthPollScheduler(tuning: configuration.scheduler)
+        self.activityProbe = activityProbe ?? Self.defaultActivityProbe(container: container)
+        self.poolStore = poolStore
         self.random = random
     }
 
-    /// Spawn the loop task. Idempotent — calling start twice does
-    /// nothing the second time. The loop runs until `stop()` cancels
-    /// it.
+    // MARK: - Lifecycle
+
+    /// Spawn the loop task. Idempotent.
     public func start() {
         guard loopTask == nil else { return }
+        stopping = false
+        // Let the Settings "Tokens" section route Test clicks back here.
+        Task { await MainActor.run { TokenPoolStatus.shared.tester = self } }
         loopTask = Task { [weak self] in
             await self?.loop()
         }
     }
 
-    /// Cancel the loop and wait for it to unwind. Safe to call from
-    /// anywhere; idempotent.
+    /// Cancel the loop and wait for it to unwind. Idempotent.
     public func stop() async {
-        guard let task = loopTask else { return }
+        stopping = true
+        sleeper?.cancel()
+        loopTask?.cancel()
+        let task = loopTask
         loopTask = nil
-        task.cancel()
-        await task.value
+        await task?.value
     }
 
-    /// Test entry — run exactly one fetch + persist + state-update.
-    /// Returns the categorized outcome. Does NOT sleep, does NOT loop.
+    /// Wake the loop to re-evaluate cadence — call when fresh Claude
+    /// usage lands so an idle→active transition polls promptly. Safe to
+    /// call at any rate: the scheduler still enforces the per-token
+    /// floor, so a nudge can never cause an over-poll.
+    public func notifyActivity() {
+        sleeper?.cancel()
+    }
+
+    /// Test entry — discover lanes and poll the best eligible one once,
+    /// ignoring the cadence gate (but honoring foreign/cooldown). Returns
+    /// the categorized outcome. Does NOT loop or sleep.
     @discardableResult
     public func runOnce() async -> PollOutcome {
-        await runOneCycle()
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        let now = clock.now()
+        let idx = lanes.indices
+            .filter {
+                lanes[$0].state.account != .foreign
+                    && (lanes[$0].state.cooldownUntil.map { now >= $0 } ?? true)
+            }
+            .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
+        guard let idx else {
+            lastOutcome = .credentialsNotFound
+            return .credentialsNotFound
+        }
+        return await pollLane(idx)
     }
 
-    /// Read-only view of current poller state. Tests assert against
-    /// `nextPollAt` to verify backoff math.
     public func snapshot() -> Snapshot {
         Snapshot(
             lastOutcome: lastOutcome,
-            consecutive429s: consecutive429s,
+            laneCount: lanes.count,
+            primaryLaneCount: lanes.filter { $0.state.account == .primary }.count,
             nextPollAt: nextPollAt,
-            lastPollAt: lastPollAt
+            lastPollAt: lastPollAt,
+            primaryOrg: primaryOrg
         )
+    }
+
+    // MARK: - Manual test + status publishing (TokenPoolTesting)
+
+    /// Stable, non-reversible id for a token — 12 hex chars of its
+    /// SHA-256. The lane's UI identity + test-routing key; never exposes
+    /// token bytes.
+    static func laneId(_ token: String) -> String {
+        SHA256.hash(data: Data(token.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Test an existing lane by id. Routes through the normal poll path so
+    /// the reading is persisted and the lane is stamped — a manual test
+    /// spends that token's budget through the same accounting as an auto
+    /// poll, never a hidden extra request.
+    public func testLane(id: String) async -> TokenTestResult {
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        guard let idx = lanes.firstIndex(where: { Self.laneId($0.credential.accessToken) == id }) else {
+            return .failure(reason: "That token is no longer available.")
+        }
+        let outcome = await pollLane(idx)
+        await publishStatus()
+        return Self.testResult(from: outcome)
+    }
+
+    /// Test a raw token the UI holds (an unsaved override draft). If it's
+    /// already a lane, route through it (stamped/counted); otherwise poll
+    /// once and persist when it's the same account, so the reading isn't
+    /// thrown away.
+    public func testAdHoc(token: String) async -> TokenTestResult {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        if let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) {
+            let outcome = await pollLane(idx)
+            await publishStatus()
+            return Self.testResult(from: outcome)
+        }
+        let cred = OAuthCredential(accessToken: trimmed, expiresAt: nil, subscriptionType: nil)
+        switch await client.fetchUsage(using: cred) {
+        case .success(let snap):
+            let org = snap.organizationId
+            let matches: Bool
+            if let primary = primaryOrg { matches = (org == nil || org == primary) }
+            else { primaryOrg = org; matches = true }
+            if matches {
+                await persist(snap, laneSource: .override)
+                return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
+            }
+            return .foreignAccount(org: org)
+        case .failure(let error):
+            return Self.testFailure(error)
+        }
+    }
+
+    /// Add a manually-supplied token as an `.override` lane and poll it
+    /// once to confirm your account. Kept (and persisted) only if it's the
+    /// same account; a duplicate / foreign / invalid token isn't retained.
+    public func addManualToken(_ token: String) async -> TokenTestResult {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        // Offline format gate first — reject an obviously wrong paste
+        // instantly, without spending a network request on it.
+        if case .invalid(let reason) = TokenFormat.validate(trimmed) {
+            return .failure(reason: reason)
+        }
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        if let existing = lanes.first(where: { $0.credential.accessToken == trimmed }) {
+            return .alreadyTracked(source: existing.source, fingerprint: Self.laneId(existing.credential.accessToken))
+        }
+        // Unknown local expiry — the server 401s when it lapses.
+        lanes.append(Lane(
+            credential: OAuthCredential(accessToken: trimmed, expiresAt: nil, subscriptionType: nil),
+            source: .override,
+            state: OAuthPollScheduler.LaneState(),
+            consecutiveFailures: 0,
+            resolvedOrg: nil
+        ))
+        sortLanes()
+        guard let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) else {
+            return .failure(reason: "Couldn't add the token.")
+        }
+        let outcome = await pollLane(idx)
+        let lane = lanes.first(where: { $0.credential.accessToken == trimmed })
+        if lane?.state.account == .primary {
+            savePool()
+            await publishStatus()
+            return Self.testResult(from: outcome)
+        }
+        // Foreign account / 401 / invalid — don't keep it in the pool.
+        let foreignOrg = lane?.resolvedOrg
+        lanes.removeAll { $0.credential.accessToken == trimmed }
+        await saveAllLaneMeta()   // prune the rejected lane's metadata
+        await publishStatus()
+        if case .foreignAccount = outcome { return .foreignAccount(org: foreignOrg) }
+        return Self.testResult(from: outcome)
+    }
+
+    /// Remove a manually-added (`.override`) lane by its opaque id.
+    public func removeManualToken(id: String) async {
+        lanes.removeAll { $0.source == .override && Self.laneId($0.credential.accessToken) == id }
+        // Force-persist the removal (bypass savePool's "don't wipe" guard) so
+        // the removed token can't reappear from the pool on the next launch.
+        let primary = lanes.filter { $0.state.account == .primary }
+        lastSavedPoolTokens = Set(primary.map { $0.credential.accessToken })
+        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+        await saveAllLaneMeta()   // prune the removed lane's metadata
+        await publishStatus()
+    }
+
+    /// Publish a display-safe snapshot of the lane pool + effective
+    /// cadence to `TokenPoolStatus.shared` for the Settings section.
+    private func publishStatus() async {
+        let tuning = configuration.scheduler
+        let usable = lanes.filter { $0.state.account != .foreign }.count
+        let active = lastActivityAt.map { clock.now().timeIntervalSince($0) <= tuning.activeWindow } ?? false
+        let realizedActive = max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usable, 1)))
+        let effective: TimeInterval? = usable == 0 ? nil : (active ? realizedActive : tuning.idleInterval)
+        let statuses = lanes.enumerated().map { i, lane in
+            TokenLaneStatus(
+                id: Self.laneId(lane.credential.accessToken),
+                source: lane.source,
+                organizationId: lane.resolvedOrg,
+                account: lane.state.account,
+                expiresAt: lane.credential.expiresAt,
+                lastPolledAt: lane.state.lastPolledAt,
+                cooldownUntil: lane.state.cooldownUntil,
+                consecutiveFailures: lane.consecutiveFailures,
+                priority: i
+            )
+        }
+        await MainActor.run {
+            TokenPoolStatus.shared.publish(lanes: statuses, isActive: active, effectiveIntervalSeconds: effective)
+        }
+    }
+
+    private static func testResult(from outcome: PollOutcome) -> TokenTestResult {
+        switch outcome {
+        case .success(let fh, let sd):   return .success(fiveHour: fh, sevenDay: sd)
+        case .foreignAccount:            return .foreignAccount(org: nil)
+        case .rateLimited:               return .failure(reason: "Rate-limited (429). This token is cooling down.")
+        case .unauthorized:              return .failure(reason: "Anthropic rejected this token (401).")
+        case .tokenExpired:              return .failure(reason: "This token is expired.")
+        case .transport:                 return .failure(reason: "Network error. Check your connection.")
+        case .http(let s):               return .failure(reason: "Server returned HTTP \(s).")
+        case .responseSchemaMismatch:    return .failure(reason: "Unexpected response shape from Anthropic.")
+        case .credentialsNotFound:       return .failure(reason: "That token is no longer available.")
+        case .keychainAccessDenied:      return .failure(reason: "Keychain access denied.")
+        case .keychainMalformed, .keychainStatus:
+            return .failure(reason: "Couldn't read the credential.")
+        }
+    }
+
+    private static func testFailure(_ error: OAuthClientError) -> TokenTestResult {
+        switch error {
+        case .rateLimited:            return .failure(reason: "Rate-limited (429). Try again shortly.")
+        case .unauthorized:           return .failure(reason: "Anthropic rejected this token (401). A `claude setup-token` value is user:inference-only and won't work here — paste the user:profile access token.")
+        case .transport:              return .failure(reason: "Network error.")
+        case .http(let s, _):         return .failure(reason: "Server returned HTTP \(s).")
+        case .responseSchemaMismatch: return .failure(reason: "Unexpected response shape.")
+        case .tokenExpired:           return .failure(reason: "This token is expired.")
+        default:                      return .failure(reason: "Couldn't validate this token.")
+        }
     }
 
     // MARK: - Loop
 
     private func loop() async {
+        // Restore persisted lane state and publish it *before* the startup
+        // delay, so the Tokens UI shows last-known status/account/expiry the
+        // instant the window opens instead of flashing "no tokens yet" while
+        // the delay elapses. This only reads the pool + cached metadata; the
+        // delay still gates the first live poll.
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        await publishStatus()
+
         if configuration.startupDelay > 0 {
-            do {
-                try await clock.sleep(seconds: configuration.startupDelay)
-            } catch {
-                return
-            }
+            await nap(configuration.startupDelay)
+            if stopping || Task.isCancelled { return }
         }
 
-        while !Task.isCancelled {
-            _ = await runOneCycle()
+        while !stopping && !Task.isCancelled {
+            ensureLanes()
+            let activity = await activityProbe()
+            lastActivityAt = activity
 
-            // sleep until nextPollAt (computed inside runOneCycle).
-            let targetDate = nextPollAt ?? clock.now().addingTimeInterval(configuration.baseInterval)
-            let remaining = targetDate.timeIntervalSince(clock.now())
-            do {
-                try await clock.sleep(seconds: remaining)
-            } catch {
-                // CancellationError or anything else — exit cleanly.
-                return
+            if lanes.allSatisfy({ $0.state.account == .foreign }) || lanes.isEmpty {
+                // Nothing usable — record it once and idle until rediscovery.
+                if lanes.isEmpty { lastOutcome = .credentialsNotFound }
+                await publishStatus()
+                nextPollAt = clock.now().addingTimeInterval(configuration.scheduler.idleInterval)
+                await nap(configuration.scheduler.idleInterval)
+                continue
+            }
+
+            let decision = scheduler.decide(
+                lanes: lanes.map(\.state),
+                lastActivityAt: activity,
+                now: clock.now()
+            )
+            switch decision {
+            case .poll(let idx):
+                _ = await pollLane(idx)
+                await publishStatus()
+            case .wait(let seconds):
+                nextPollAt = clock.now().addingTimeInterval(seconds)
+                await publishStatus()
+                await nap(seconds)
             }
         }
     }
 
-    // MARK: - One cycle
+    /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
+    /// task to return early; `try?` swallows the CancellationError so the
+    /// loop simply re-evaluates (or exits on `stopping`).
+    private func nap(_ seconds: TimeInterval) async {
+        guard seconds > 0 else { return }
+        let clock = self.clock
+        let task = Task { _ = try? await clock.sleep(seconds: seconds) }
+        sleeper = task
+        await task.value
+        sleeper = nil
+    }
 
-    private func runOneCycle() async -> PollOutcome {
-        let result = await client.fetchUsage()
+    // MARK: - Lane discovery
+
+    /// Ensure `lanes` reflects the currently available tokens. Rediscovers
+    /// on first run, on the rediscover interval, or when no usable lane
+    /// remains; always prunes expired lanes; keeps ordering primary-first.
+    private func ensureLanes() {
+        let now = clock.now()
+        // Seed from Pacer's persisted pool once per launch, so every token
+        // comes back on restart without touching Claude's stores.
+        if !seeded {
+            seeded = true
+            for stored in poolStore.loadAll() {
+                if let exp = stored.credential.expiresAt, exp < now { continue }
+                if lanes.contains(where: { $0.credential.accessToken == stored.credential.accessToken }) { continue }
+                var lane = Lane(
+                    credential: stored.credential,
+                    source: stored.source,
+                    state: OAuthPollScheduler.LaneState(),
+                    consecutiveFailures: 0,
+                    resolvedOrg: nil
+                )
+                applyPersistedMeta(to: &lane)   // restore last-known status
+                lanes.append(lane)
+            }
+        }
+        let noUsable = !lanes.contains { $0.state.account != .foreign }
+        let stale = lastDiscoveryAt.map { now.timeIntervalSince($0) >= configuration.laneRediscoverInterval } ?? true
+        if stale || noUsable {
+            // Hand the client our Desktop-origin tokens so its layered read
+            // can decide whether it even needs to touch Claude Desktop.
+            let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
+            mergeCandidates(client.candidateCredentials(cachedDesktopTokens: cachedDesktop))
+            lastDiscoveryAt = now
+        }
+        // Drop lanes whose token has expired locally (server would 401).
+        lanes.removeAll { lane in
+            if let exp = lane.credential.expiresAt, exp < now { return true }
+            return false
+        }
+        sortLanes()
+        savePool()
+    }
+
+    /// Persist the confirmed same-account tokens to Pacer's keychain so
+    /// they survive a restart. Only `.primary` lanes — never a foreign
+    /// (different-account) or not-yet-confirmed token — and only when the
+    /// token set actually changed, to avoid a keychain write every poll.
+    private func savePool() {
+        let primary = lanes.filter { $0.state.account == .primary }
+        guard !primary.isEmpty else { return }   // don't wipe the pool pre-confirmation
+        let tokenSet = Set(primary.map { $0.credential.accessToken })
+        guard tokenSet != lastSavedPoolTokens else { return }
+        lastSavedPoolTokens = tokenSet
+        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+    }
+
+    /// Union new candidate tokens into the lane set, preserving the state
+    /// of lanes we already hold (Desktop lanes persist between the gated
+    /// keychain re-reads, so we don't lose them when discovery skips a
+    /// re-read).
+    private func mergeCandidates(_ candidates: [CredentialCandidate]) {
+        var known = Set(lanes.map { $0.credential.accessToken })
+        for candidate in candidates where !known.contains(candidate.credential.accessToken) {
+            var lane = Lane(
+                credential: candidate.credential,
+                source: candidate.source,
+                state: OAuthPollScheduler.LaneState(),
+                consecutiveFailures: 0,
+                resolvedOrg: nil
+            )
+            applyPersistedMeta(to: &lane)   // restore last-known status for a rediscovered token
+            lanes.append(lane)
+            known.insert(candidate.credential.accessToken)
+        }
+    }
+
+    /// Order primary-eligible sources first so the scheduler's index
+    /// tie-break polls a Claude Code / override token before a Desktop
+    /// one — letting the primary account establish the org guard.
+    private func sortLanes() {
+        func rank(_ s: CredentialCandidate.Source) -> Int {
+            switch s {
+            case .override: return 0
+            case .keychain: return 1
+            case .held:     return 2
+            case .desktop:  return 3
+            }
+        }
+        lanes.sort { a, b in
+            let ra = rank(a.source), rb = rank(b.source)
+            return ra != rb ? ra < rb : a.credential.accessToken < b.credential.accessToken
+        }
+    }
+
+    // MARK: - One poll
+
+    @discardableResult
+    private func pollLane(_ idx: Int) async -> PollOutcome {
+        guard idx < lanes.count else { return .credentialsNotFound }
+        let credential = lanes[idx].credential
+        let result = await client.fetchUsage(using: credential)
         let now = clock.now()
         lastPollAt = now
-
-        let previousOutcome = lastOutcome
-        let outcome = await categorize(result)
-        lastOutcome = outcome
-        let delay = nextDelaySeconds(for: outcome, result: result)
-        nextPollAt = now.addingTimeInterval(delay)
-
-        // Telemetry for #3: log on outcome-category transitions. A
-        // steady-state failure (.tokenExpired for 16 hours) produces a
-        // single log line, not one per poll; recovery logs once too.
-        if !Self.sameCategory(previousOutcome, outcome) {
-            Log.write("OAuthPoller", Self.summarize(outcome: outcome, delay: delay))
+        // Guard: the lane array can change across the await (rediscovery
+        // never runs concurrently on the same actor, but be defensive).
+        guard idx < lanes.count, lanes[idx].credential.accessToken == credential.accessToken else {
+            return lastOutcome ?? .transport
         }
+        lanes[idx].state.lastPolledAt = now
+
+        let previous = lastOutcome
+        let outcome = await apply(result: result, laneIndex: idx, now: now)
+        lastOutcome = outcome
+        if !Self.sameCategory(previous, outcome) {
+            Log.write("OAuthPoller", Self.summarize(outcome: outcome, laneCount: lanes.count))
+        }
+        // Persist the lane's freshly-learned state (account/org/last-poll/
+        // cooldown) so it survives a restart.
+        await saveAllLaneMeta()
         return outcome
     }
 
-    /// Two outcomes are "the same category" when their enum case is the
-    /// same, ignoring associated values — so a stream of `.http(503)`
-    /// then `.http(504)` is treated as one ongoing transport problem.
+    /// Apply one poll's result to lane state + persistence, return outcome.
+    private func apply(
+        result: Result<RateLimitSnapshot, OAuthClientError>,
+        laneIndex idx: Int,
+        now: Date
+    ) async -> PollOutcome {
+        switch result {
+        case .success(let snapshot):
+            lanes[idx].consecutiveFailures = 0
+            lanes[idx].state.cooldownUntil = nil
+            // Same-account guard. First success sets the primary org
+            // (even if the header was absent → nil); a lane whose org
+            // differs is marked foreign and never persisted. A missing
+            // header on a later poll is tolerated as a match rather than
+            // dropping a lane over a transient omission.
+            let org = snapshot.organizationId
+            let matches: Bool
+            if let primary = primaryOrg {
+                matches = (org == nil || org == primary)
+            } else {
+                primaryOrg = org
+                matches = true
+            }
+            lanes[idx].resolvedOrg = org ?? primaryOrg
+            if matches {
+                lanes[idx].state.account = .primary
+                await persist(snapshot, laneSource: lanes[idx].source)
+                return .success(
+                    fiveHourPct: snapshot.fiveHour?.usedPercentage,
+                    sevenDayPct: snapshot.sevenDay?.usedPercentage
+                )
+            } else {
+                lanes[idx].state.account = .foreign
+                return .foreignAccount
+            }
+
+        case .failure(.unauthorized):
+            // Token rejected server-side — drop the lane outright.
+            if idx < lanes.count { lanes.remove(at: idx) }
+            return .unauthorized
+
+        case .failure(.tokenExpired):
+            if idx < lanes.count { lanes.remove(at: idx) }
+            return .tokenExpired
+
+        case .failure(.rateLimited(let retryAfter)):
+            cooldownLane(idx, now: now, retryAfter: retryAfter)
+            return .rateLimited(retryAfter: retryAfter)
+
+        case .failure(.transport):
+            cooldownLane(idx, now: now, retryAfter: nil)
+            return .transport
+
+        case .failure(.http(let status, _)):
+            cooldownLane(idx, now: now, retryAfter: nil)
+            return .http(status: status)
+
+        case .failure(.responseSchemaMismatch):
+            cooldownLane(idx, now: now, retryAfter: nil)
+            return .responseSchemaMismatch
+
+        // These come only from the auto-resolve path; a specific-token
+        // poll can't produce them, but map them for completeness.
+        case .failure(.credentialsNotFound):  return .credentialsNotFound
+        case .failure(.keychainAccessDenied): return .keychainAccessDenied
+        case .failure(.keychainMalformed):    return .keychainMalformed
+        case .failure(.keychainStatus(let s)): return .keychainStatus(s)
+        }
+    }
+
+    /// Grow a lane's cooldown exponentially per consecutive failure,
+    /// honoring a larger `Retry-After` when present, capped.
+    private func cooldownLane(_ idx: Int, now: Date, retryAfter: TimeInterval?) {
+        guard idx < lanes.count else { return }
+        lanes[idx].consecutiveFailures += 1
+        let n = lanes[idx].consecutiveFailures
+        let exponential = configuration.laneCooldownBase * pow(2.0, Double(n - 1))
+        let chosen = min(max(retryAfter ?? 0, exponential), configuration.laneCooldownMax)
+        lanes[idx].state.cooldownUntil = now.addingTimeInterval(chosen)
+    }
+
+    // MARK: - Logging helpers
+
     private static func sameCategory(_ a: PollOutcome?, _ b: PollOutcome?) -> Bool {
         switch (a, b) {
         case (nil, nil): return true
@@ -245,108 +712,241 @@ public actor OAuthPoller {
         }
     }
 
-    private static func summarize(outcome: PollOutcome, delay: TimeInterval) -> String {
-        let next = "next=\(Int(delay.rounded()))s"
+    private static func summarize(outcome: PollOutcome, laneCount: Int) -> String {
+        let lanes = "lanes=\(laneCount)"
         switch outcome {
         case .success(let fh, let sd):
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"
             let s = sd.map { String(format: "%.1f%%", $0) } ?? "nil"
-            return "ok 5h=\(f) 7d=\(s); \(next)"
+            return "ok 5h=\(f) 7d=\(s); \(lanes)"
+        case .foreignAccount:
+            return "token is a different account — excluded; \(lanes)"
         case .credentialsNotFound:
-            return "credentials missing — sign into Claude Code; \(next)"
+            return "no usable token — sign into Claude Code; \(lanes)"
         case .keychainAccessDenied:
-            return "keychain access denied — approve in foreground app; \(next)"
+            return "keychain access denied — approve in foreground app; \(lanes)"
         case .keychainMalformed:
-            return "keychain blob malformed; \(next)"
+            return "keychain blob malformed; \(lanes)"
         case .keychainStatus(let status):
-            return "keychain OSStatus=\(status); \(next)"
+            return "keychain OSStatus=\(status); \(lanes)"
         case .tokenExpired:
-            return "access token expired — Claude Code must refresh it; \(next)"
+            return "access token expired — dropped lane; \(lanes)"
         case .unauthorized:
-            return "unauthorized (401); \(next)"
+            return "unauthorized (401) — dropped lane; \(lanes)"
         case .rateLimited(let retryAfter):
             let ra = retryAfter.map { "\(Int($0))s" } ?? "nil"
-            return "rate-limited (429) retryAfter=\(ra); \(next)"
+            return "rate-limited (429) retryAfter=\(ra) — lane cooling; \(lanes)"
         case .http(let status):
-            return "http \(status); \(next)"
+            return "http \(status) — lane cooling; \(lanes)"
         case .transport:
-            return "transport error (network); \(next)"
+            return "transport error (network) — lane cooling; \(lanes)"
         case .responseSchemaMismatch:
-            return "response schema mismatch; \(next)"
+            return "response schema mismatch; \(lanes)"
         }
     }
 
-    private func categorize(_ result: Result<RateLimitSnapshot, OAuthClientError>) async -> PollOutcome {
-        switch result {
-        case .success(let snapshot):
-            await persist(snapshot)
-            consecutive429s = 0
-            return .success(
-                fiveHourPct: snapshot.fiveHour?.usedPercentage,
-                sevenDayPct: snapshot.sevenDay?.usedPercentage
-            )
-        case .failure(.credentialsNotFound):
-            return .credentialsNotFound
-        case .failure(.keychainAccessDenied):
-            return .keychainAccessDenied
-        case .failure(.keychainMalformed):
-            return .keychainMalformed
-        case .failure(.keychainStatus(let status)):
-            return .keychainStatus(status)
-        case .failure(.tokenExpired):
-            return .tokenExpired
-        case .failure(.unauthorized):
-            return .unauthorized
-        case .failure(.rateLimited(let retryAfter)):
-            consecutive429s += 1
-            return .rateLimited(retryAfter: retryAfter)
-        case .failure(.http(let status, _)):
-            return .http(status: status)
-        case .failure(.transport):
-            return .transport
-        case .failure(.responseSchemaMismatch):
-            return .responseSchemaMismatch
+    // MARK: - Activity probe
+
+    /// Default activity signal: the most recent moment Claude Code
+    /// produced usage or a session was seen — the JSONL watcher advances
+    /// both as work happens, so "recent" here means "actively burning".
+    private static func defaultActivityProbe(container: ModelContainer) -> @Sendable () async -> Date? {
+        { @Sendable in
+            await MainActor.run {
+                let context = ModelContext(container)
+                var tokenProbe = FetchDescriptor<TokenSample>(
+                    sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+                )
+                tokenProbe.fetchLimit = 1
+                let lastToken = (try? context.fetch(tokenProbe))?.first?.sampledAt
+                var sessionProbe = FetchDescriptor<SessionInfo>(
+                    sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
+                )
+                sessionProbe.fetchLimit = 1
+                let lastSession = (try? context.fetch(sessionProbe))?.first?.lastSeenAt
+                return [lastToken, lastSession].compactMap { $0 }.max()
+            }
         }
     }
 
-    // MARK: - Backoff math
+    // MARK: - Non-monotonic usage diagnostics
 
-    private func nextDelaySeconds(
-        for outcome: PollOutcome,
-        result: Result<RateLimitSnapshot, OAuthClientError>
-    ) -> TimeInterval {
-        switch outcome {
-        case .rateLimited(let retryAfter):
-            // 429 path. Use Retry-After if larger than our exponential
-            // schedule; otherwise grow exponentially.
-            let exponential = configuration.baseInterval * pow(2.0, Double(consecutive429s - 1))
-            let chosen = max(retryAfter ?? 0, exponential)
-            return min(chosen, configuration.maxBackoff)
-        case .success, .credentialsNotFound, .keychainAccessDenied,
-             .keychainMalformed, .keychainStatus, .tokenExpired,
-             .unauthorized, .http, .transport, .responseSchemaMismatch:
-            return baseIntervalWithJitter()
-        }
+    /// Most recent persisted OAuth sample for a window (or nil).
+    @MainActor
+    private static func latestSample(_ context: ModelContext, window: String) -> RateLimitSample? {
+        var d = FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.window == window && $0.source == "oauth" },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return (try? context.fetch(d))?.first
     }
 
-    private func baseIntervalWithJitter() -> TimeInterval {
-        let r = max(0.0, min(1.0, random()))
-        let offset = (r * 2.0 - 1.0) * configuration.jitterSeconds
-        return max(0, configuration.baseInterval + offset)
+    /// Log when a window's utilization *decreases* for a reason that
+    /// isn't one of the two resets we already recognize — i.e. a small
+    /// within-window wobble, the kind a lagging backend replica (possibly
+    /// surfaced by interleaving tokens) could produce. Purely diagnostic:
+    /// one grep-able line, no behavior change. We deliberately do NOT log:
+    ///   - a normal rollover — `resets_at` advanced past the prior anchor;
+    ///   - an off-schedule global reset — a collapse from a meaningful
+    ///     level to ~0 (handled by `GlobalRateLimitReset`).
+    @MainActor
+    private static func logIfUsageWentDown(
+        windowName: String,
+        prior: RateLimitSample?,
+        newUsed: Double,
+        newReset: Date?,
+        laneSource: CredentialCandidate.Source
+    ) {
+        guard let prior else { return }
+        let priorUsed = prior.usedPercentage
+        guard newUsed < priorUsed - 0.01 else { return }   // not a decrease
+
+        // Rollover: the window advanced to a later reset anchor.
+        let rolloverTolerance: TimeInterval = 10 * 60
+        if let pr = prior.resetsAt, let nr = newReset, nr.timeIntervalSince(pr) > rolloverTolerance {
+            return
+        }
+        // Off-schedule global reset: collapse to ~0 on an unchanged anchor.
+        if priorUsed > 5, newUsed < 1 { return }
+
+        let anchor: String
+        if let pr = prior.resetsAt, let nr = newReset {
+            let drift = Int(nr.timeIntervalSince(pr).rounded())
+            anchor = drift == 0 ? "resets_at unchanged" : "resets_at drift \(drift)s"
+        } else {
+            anchor = "resets_at nil"
+        }
+        Log.write("OAuthPoller", String(
+            format: "usage DECREASED (non-reset): %@ %.1f%%→%.1f%% via %@ token; %@ — likely backend replica lag",
+            windowName, priorUsed, newUsed, laneSource.rawValue, anchor
+        ))
+    }
+
+    // MARK: - Lane metadata persistence
+
+    /// Load persisted lane metadata once per launch (MainActor for
+    /// SwiftData). Restores the pool's primary org so the same-account
+    /// guard is intact immediately, and populates the cache that
+    /// `ensureLanes`/`mergeCandidates` read to rehydrate lanes.
+    private func loadPersistedMetaIfNeeded() async {
+        guard !metaLoaded else { return }
+        metaLoaded = true
+        let container = self.container
+        let loaded: ([String: LaneMetaSnapshot], String?) = await MainActor.run {
+            let context = ModelContext(container)
+            let rows = (try? context.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
+            var map: [String: LaneMetaSnapshot] = [:]
+            var primary: String?
+            for r in rows {
+                let account = OAuthPollScheduler.AccountStatus(rawValue: r.accountRaw)
+                map[r.id] = LaneMetaSnapshot(
+                    id: r.id,
+                    sourceRaw: r.sourceRaw,
+                    organizationId: r.organizationId,
+                    account: account,
+                    expiresAt: r.expiresAt,
+                    lastPolledAt: r.lastPolledAt,
+                    cooldownUntil: r.cooldownUntil,
+                    consecutiveFailures: r.consecutiveFailures
+                )
+                if account == .primary, primary == nil { primary = r.organizationId }
+            }
+            return (map, primary)
+        }
+        persistedMeta = loaded.0
+        if primaryOrg == nil { primaryOrg = loaded.1 }
+    }
+
+    /// Restore a freshly-seeded/discovered lane's learned state from the
+    /// persisted cache, so a known token doesn't show as blank/pending or
+    /// get needlessly re-polled right after launch.
+    private func applyPersistedMeta(to lane: inout Lane) {
+        guard let meta = persistedMeta[Self.laneId(lane.credential.accessToken)] else { return }
+        lane.state.account = meta.account
+        lane.state.lastPolledAt = meta.lastPolledAt
+        lane.state.cooldownUntil = meta.cooldownUntil
+        lane.resolvedOrg = meta.organizationId
+        lane.consecutiveFailures = meta.consecutiveFailures
+    }
+
+    private func laneMetaSnapshot(for lane: Lane) -> LaneMetaSnapshot {
+        LaneMetaSnapshot(
+            id: Self.laneId(lane.credential.accessToken),
+            sourceRaw: lane.source.rawValue,
+            organizationId: lane.resolvedOrg,
+            account: lane.state.account,
+            expiresAt: lane.credential.expiresAt,
+            lastPolledAt: lane.state.lastPolledAt,
+            cooldownUntil: lane.state.cooldownUntil,
+            consecutiveFailures: lane.consecutiveFailures
+        )
+    }
+
+    /// Persist all current lanes' metadata (upsert by fingerprint) and
+    /// prune rows for tokens no longer in the pool, so the Tokens table and
+    /// the scheduler restore real state on the next launch. Called after a
+    /// poll and after any pool mutation.
+    private func saveAllLaneMeta() async {
+        let rows = lanes.map { laneMetaSnapshot(for: $0) }
+        // Keep the in-memory cache in step with what we persist.
+        persistedMeta = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let keep = Set(rows.map { $0.id })
+        let now = clock.now()
+        let container = self.container
+        await MainActor.run {
+            let context = ModelContext(container)
+            let existing = (try? context.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
+            var byId: [String: TokenLaneMeta] = [:]
+            for e in existing { byId[e.id] = e }
+            for row in rows {
+                if let m = byId[row.id] {
+                    m.sourceRaw = row.sourceRaw
+                    m.organizationId = row.organizationId
+                    m.accountRaw = row.account.rawValue
+                    m.expiresAt = row.expiresAt
+                    m.lastPolledAt = row.lastPolledAt
+                    m.cooldownUntil = row.cooldownUntil
+                    m.consecutiveFailures = row.consecutiveFailures
+                    m.updatedAt = now
+                } else {
+                    context.insert(TokenLaneMeta(
+                        id: row.id,
+                        sourceRaw: row.sourceRaw,
+                        organizationId: row.organizationId,
+                        accountRaw: row.account.rawValue,
+                        expiresAt: row.expiresAt,
+                        lastPolledAt: row.lastPolledAt,
+                        cooldownUntil: row.cooldownUntil,
+                        consecutiveFailures: row.consecutiveFailures,
+                        updatedAt: now
+                    ))
+                }
+            }
+            for e in existing where !keep.contains(e.id) { context.delete(e) }
+            do { try context.save() }
+            catch { Log.write("OAuthPoller", "lane-meta persist failed: \(error)") }
+        }
     }
 
     // MARK: - Persistence
 
-    /// Write one row per present window. Called from inside the actor;
-    /// hops to the main actor for SwiftData since `ModelContext` is
-    /// `@MainActor` in our setup.
-    private func persist(_ snapshot: RateLimitSnapshot) async {
+    /// Write one row per present window. Hops to the main actor for
+    /// SwiftData since `ModelContext` is `@MainActor` in our setup.
+    private func persist(_ snapshot: RateLimitSnapshot, laneSource: CredentialCandidate.Source) async {
         let container = self.container
         let captured = snapshot
         await MainActor.run {
             let context = ModelContext(container)
             var wroteAnyWindow = false
             if let window = captured.fiveHour {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.fiveHour,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
                 context.insert(RateLimitSample(
                     sampledAt: captured.sampledAt,
                     window: RateLimitWindowName.fiveHour,
@@ -357,6 +957,13 @@ public actor OAuthPoller {
                 wroteAnyWindow = true
             }
             if let window = captured.sevenDay {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.sevenDay,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
                 context.insert(RateLimitSample(
                     sampledAt: captured.sampledAt,
                     window: RateLimitWindowName.sevenDay,
@@ -366,11 +973,10 @@ public actor OAuthPoller {
                 ))
                 wroteAnyWindow = true
             }
-            // Extra-usage is account-level (not per-window), so we
-            // write at most one row per snapshot when the field was
-            // present. nil means Anthropic omitted the field for this
-            // account — leave the prior row in place, don't overwrite
-            // with a phantom zero.
+            // Extra-usage is account-level (not per-window); write at most
+            // one row per snapshot when present. nil means the field was
+            // omitted — leave the prior row rather than overwrite with a
+            // phantom zero.
             if let cents = captured.extraUsageCents {
                 context.insert(ExtraUsageSample(
                     sampledAt: captured.sampledAt,
@@ -381,21 +987,10 @@ public actor OAuthPoller {
             }
             do {
                 try context.save()
-                // Tell WidgetKit consumers (pace widgets, mainly) that
-                // a fresh sample landed. The widget extension doesn't
-                // observe SwiftData @Query — without an explicit kick
-                // its timelines refresh on their own ~5min cadence,
-                // which is half the OAuth poll cadence and feels stale.
                 if wroteAnyWindow {
-                    postScanCycleSummary(ScanCycleSummary(
-                        rateLimitsChanged: true
-                    ))
+                    postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
                 }
             } catch {
-                // Disk full / migration mid-flight — log to stderr and
-                // move on. The next successful poll will write fresh
-                // samples; we deliberately don't stop the poller for
-                // a single persistence failure.
                 Log.write("OAuthPoller", "persist failed: \(error)")
             }
         }

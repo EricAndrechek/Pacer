@@ -291,7 +291,7 @@ private func makeAssistantLine(
             // Tight timing so the poller fires at least once before
             // stop() — but no real sleep because the loop's first
             // cycle runs immediately.
-            oauthPolling: .init(baseInterval: 60, jitterSeconds: 0)
+            oauthPolling: .init()
         ),
         resolver: resolver,
         oauthClient: client

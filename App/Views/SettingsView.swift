@@ -38,8 +38,8 @@ struct SettingsView: View {
                     NotificationTestCard()
                 }
                 SettingsSection("Authentication") {
+                    TokensCard()
                     DesktopCredentialsCard()
-                    OAuthTokenOverrideCard()
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
@@ -61,6 +61,10 @@ struct SettingsView: View {
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        // Click anywhere off a text field to dismiss its focus ring.
+        #if canImport(AppKit)
+        .modifier(DismissFocusOnOutsideClick())
+        #endif
     }
 }
 
@@ -1097,230 +1101,437 @@ private struct DesktopCredentialsCard: View {
     }
 }
 
-/// Manual OAuth access-token override. When non-empty, the OAuth poller
-/// uses this token instead of the keychain / `.credentials.json` copy.
-/// Escape hatch for environments where neither source is readable (a
-/// sandboxed/SSH context), or while a fresh token propagates.
-///
-/// Must be a `user:profile`-scoped interactive access token (the
-/// `accessToken` from the keychain blob). A `claude setup-token` value is
-/// `user:inference`-only and `/api/oauth/usage` rejects it with 401.
-///
-/// UX shape: draft state local to the card, committed to `@AppStorage`
-/// only on Save. Test runs a one-off `OAuthClient.fetchUsage()` with the
-/// *draft* (not the saved value), so the user can validate before
-/// committing — same one-call shape the poller itself uses, no
-/// special-case server hit.
-private struct OAuthTokenOverrideCard: View {
-    @AppStorage(PacerSettings.Key.oauthTokenOverride, store: PacerSettings.store)
-    private var savedOverride: String = ""
+// MARK: - Token pool
 
-    @State private var draft: String = ""
-    @State private var testResult: TestResult?
-    @State private var testInProgress: Bool = false
+/// Live view of the OAuth token pool the poller cycles through — where
+/// each token comes from, which account it's tied to, when it expires,
+/// its health, and a Test that routes through the poller (so it persists
+/// and counts against that token's budget instead of racing it).
+/// Column widths shared by the Tokens header and rows so they line up
+/// exactly. SOURCE and ACCOUNT are both flexible (they split the leftover
+/// evenly and are the first to truncate as the window narrows — hover to
+/// see them in full); STATUS/EXPIRES/UPDATED/trash are fixed and small.
+fileprivate enum TokenCol {
+    static let status: CGFloat = 76
+    static let expires: CGFloat = 58
+    static let updated: CGFloat = 72
+    static let trash: CGFloat = 24
+    static let spacing: CGFloat = 12
+}
 
-    /// Result of running the Test button against the draft token. Kept
-    /// alongside the UI rather than persisted — once the user types
-    /// anything, the prior verdict is no longer authoritative.
-    private enum TestResult: Equatable {
-        case success(fiveHourPct: Double?, sevenDayPct: Double?)
-        case failure(message: String)
+#if canImport(AppKit)
+/// Dismisses text-field focus when the user clicks anything that isn't a
+/// text field. SwiftUI on macOS keeps a `TextField` focused until another
+/// responder takes over, and a background click-catcher can't fix it —
+/// opaque SwiftUI views above it swallow the click. A window-level mouse
+/// monitor is the reliable route: on any left click, if the hit view
+/// isn't the field editor, resign first responder (which clears the
+/// SwiftUI `@FocusState` too). Clicking into an unfocused field still
+/// focuses it, since the click proceeds normally afterward.
+private struct DismissFocusOnOutsideClick: ViewModifier {
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+                    guard let window = event.window else { return event }
+                    let hit = window.contentView?.hitTest(event.locationInWindow)
+                    // The field editor of a focused NSTextField is an NSTextView.
+                    if !(hit is NSTextView) {
+                        window.makeFirstResponder(nil)
+                    }
+                    return event
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
     }
+}
+#endif
 
-    private var trimmedDraft: String {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    private var draftIsEmpty: Bool { trimmedDraft.isEmpty }
-    private var isDirty: Bool { draft != savedOverride }
+/// A one-line shell command shown as a code block. The entire box is a
+/// single click-to-copy button (flips to a checkmark + trackpad haptic).
+/// The command is clipped with a right-edge fade so it's clear it runs
+/// past the copy icon rather than being all there is; hover shows it in
+/// full. It's deliberately not text-selectable — a stray click-drag used
+/// to leave text stuck-highlighted, and copying is one click anyway.
+private struct CopyableCommand: View {
+    let command: String
+    @State private var copied = false
+    init(_ command: String) { self.command = command }
 
     var body: some View {
-        PacerCard("OAuth token override", content: {
-            VStack(alignment: .leading, spacing: 10) {
-                TextField("Paste OAuth access token", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+        Button(action: copy) {
+            HStack(spacing: 14) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text(command)
                     .font(.system(size: 11, design: .monospaced))
-                    .lineLimit(2...4)
-                    .onChange(of: draft) { _, _ in
-                        // Editing invalidates the prior test verdict.
-                        testResult = nil
-                    }
-
-                HStack(spacing: 8) {
-                    statusLabel
-                    Spacer(minLength: 8)
-                    Button(draftIsEmpty ? "Test keychain" : "Test") { runTest() }
-                        .controlSize(.small)
-                        .disabled(testInProgress)
-                        .help(draftIsEmpty
-                            ? "Tests the OAuth token Pacer currently reads from the Claude Code keychain."
-                            : "Tests the token in the field above (not yet saved).")
-                    Button("Save") {
-                        savedOverride = draft
-                        // Saving a different value invalidates the prior test;
-                        // the saved value is now what the poller will use.
-                        testResult = nil
-                    }
-                    .controlSize(.small)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isDirty || testInProgress)
-                    Button("Clear") {
-                        draft = ""
-                        savedOverride = ""
-                        testResult = nil
-                    }
-                    .controlSize(.small)
-                    .disabled(draftIsEmpty && savedOverride.isEmpty || testInProgress)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)   // draw at full width…
+                    .frame(maxWidth: .infinity, alignment: .leading) // …clipped to the box
+                    .clipped()
+                    .mask(
+                        LinearGradient(
+                            stops: [.init(color: .black, location: 0),
+                                    .init(color: .black, location: 0.9),
+                                    .init(color: .clear, location: 1.0)],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                    )
+                ZStack {
+                    Image(systemName: "doc.on.doc").opacity(copied ? 0 : 1)
+                    Image(systemName: "checkmark").foregroundStyle(.green).opacity(copied ? 1 : 0)
                 }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 18, height: 16)   // fixed → the flip can't shift layout
+                .animation(.easeInOut(duration: 0.15), value: copied)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(copied ? "Copied!" : command)
+    }
+
+    private func copy() {
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        #endif
+        copied = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            copied = false
+        }
+    }
+}
+
+/// Live view of the OAuth token pool the poller cycles through — source,
+/// account, expiry, health, and when each last polled; plus an inline
+/// "add a token" field.
+private struct TokensCard: View {
+    @State private var pool = TokenPoolStatus.shared
+    @State private var draft: String = ""
+    @State private var adding = false
+    @State private var addResult: TokenTestResult?
+    @State private var highlightId: String?
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        PacerCard("Tokens", trailing: {
+            cadenceHeader
+        }, content: {
+            VStack(alignment: .leading, spacing: 0) {
+                if !pool.hasLoaded {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading tokens…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                } else if pool.lanes.isEmpty {
+                    Text("No tokens yet — sign into Claude Code, enable Claude Desktop below, or add one manually.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 4)
+                } else {
+                    columnHeader
+                    ForEach(pool.lanes) { lane in
+                        Divider().opacity(0.35)
+                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    }
+                }
+                addTokenRow
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Normally Pacer reads the token itself — from the Claude Code keychain entry, or from `~/.claude/.credentials.json` when the keychain isn't readable (Linux, or macOS over SSH). Only paste here if neither works for you.")
-                Text("Paste the interactive `user:profile` access token (NOT a `claude setup-token`, which lacks the scope the usage endpoint needs). Fetch it after signing into Claude Code:")
+                Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit.")
+                Text("Claude Code and (if enabled below) Claude Desktop are read automatically. Only *add* a token Pacer can't read here — e.g. from another Mac, where you'd run this in Terminal:")
                     .padding(.top, 2)
-                Text("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                Text("Access tokens last ~8 hours; re-paste when Pacer's chip turns yellow again.")
-                    .padding(.top, 2)
+                CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
+                    .padding(.vertical, 6)
+                Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
             }
         })
-        .onAppear { draft = savedOverride }
     }
 
-    /// Single source of truth for the status icon + caption sitting to
-    /// the left of the action buttons. Test result takes precedence
-    /// (the user just asked for it) over saved/dirty state.
-    @ViewBuilder
-    private var statusLabel: some View {
-        if testInProgress {
-            ProgressView()
-                .controlSize(.small)
-            Text("Testing…")
+    private var cadenceHeader: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(pool.isActive ? Color.green : Color.secondary.opacity(0.6))
+                .frame(width: 7, height: 7)
+            Text(cadenceText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        } else if let result = testResult {
-            switch result {
-            case .success(let fh, let sd):
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 12))
-                Text("Valid · \(formatSuccess(fiveHour: fh, sevenDay: sd))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            case .failure(let msg):
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.system(size: 12))
-                Text(msg)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-            }
-        } else if isDirty {
-            Image(systemName: "pencil")
-                .foregroundStyle(.orange)
-                .font(.system(size: 12))
-            Text("Unsaved changes")
-                .font(.caption)
-                .foregroundStyle(.orange)
-        } else if !savedOverride.isEmpty {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.system(size: 12))
-            Text("Saved · Pacer is using this token")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        } else {
-            Image(systemName: "key")
-                .foregroundStyle(.tertiary)
-                .font(.system(size: 12))
-            Text("Empty · Pacer reads from keychain")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
     }
 
-    private func formatSuccess(fiveHour: Double?, sevenDay: Double?) -> String {
-        let f = fiveHour.map { "5h=\(Int($0.rounded()))%" } ?? "5h=—"
-        let s = sevenDay.map { "7d=\(Int($0.rounded()))%" } ?? "7d=—"
+    private var cadenceText: String {
+        let n = pool.lanes.filter { $0.account != .foreign }.count
+        let tokens = "\(n) token\(n == 1 ? "" : "s")"
+        guard let seconds = pool.effectiveIntervalSeconds else { return tokens }
+        return "Updating ~\(Self.formatInterval(seconds)) · \(tokens) · \(pool.isActive ? "active" : "idle")"
+    }
+
+    static func formatInterval(_ s: TimeInterval) -> String {
+        if s < 90 { return "\(Int(s.rounded()))s" }
+        let m = s / 60
+        return m.rounded() == m ? "\(Int(m)) min" : String(format: "%.1f min", m)
+    }
+
+    private var columnHeader: some View {
+        HStack(spacing: TokenCol.spacing) {
+            Text("SOURCE").frame(maxWidth: .infinity, alignment: .leading)
+            Text("ACCOUNT").frame(maxWidth: .infinity, alignment: .leading)
+            Text("STATUS").frame(width: TokenCol.status, alignment: .leading)
+            Text("EXPIRES").frame(width: TokenCol.expires, alignment: .leading)
+            Text("UPDATED").frame(width: TokenCol.updated, alignment: .leading)
+                .help("When Pacer last fetched usage with this token")
+            Color.clear.frame(width: TokenCol.trash, height: 1)   // trash column (manual rows only)
+        }
+        .font(.system(size: 9, weight: .semibold))
+        .tracking(0.5)
+        .foregroundStyle(.tertiary)
+        .padding(.bottom, 6)
+    }
+
+    private var addTokenRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().opacity(0.35).padding(.top, 4)
+            HStack(spacing: 8) {
+                TextField("Paste a token to add (e.g. from another Mac)", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .focused($fieldFocused)
+                    .onSubmit(add)
+                    .onChange(of: draft) { _, _ in addResult = nil }
+                if adding {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Add", action: add)
+                        .controlSize(.small)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            if let addResult { addResultLabel(addResult) }
+        }
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder private func addResultLabel(_ r: TokenTestResult) -> some View {
+        switch r {
+        case .success(let fh, let sd):
+            addLabel("checkmark.circle.fill", .green, "Added · \(Self.usage(fh, sd))")
+        case .alreadyTracked(let source, let fp):
+            addLabel("info.circle.fill", .gray, "Already tracking this — it's your \(Self.sourceName(source)) token (…\(String(fp.suffix(4)))).")
+        case .foreignAccount:
+            addLabel("person.crop.circle.badge.xmark", .purple, "That token is a different account — not added.")
+        case .failure(let reason):
+            addLabel("xmark.circle.fill", .red, reason)
+        case .unavailable:
+            addLabel("xmark.circle.fill", .red, "Pacer's poller isn't running — try again in a moment.")
+        }
+    }
+
+    private func addLabel(_ icon: String, _ color: Color, _ text: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).foregroundStyle(color).font(.system(size: 11))
+            Text(text).font(.caption).foregroundStyle(color).lineLimit(2)
+        }
+    }
+
+    private static func usage(_ fh: Double?, _ sd: Double?) -> String {
+        let f = fh.map { "5h \(Int($0.rounded()))%" } ?? "5h —"
+        let s = sd.map { "7d \(Int($0.rounded()))%" } ?? "7d —"
         return "\(f), \(s)"
     }
 
-    /// Run one OAuth request, mirroring whichever path the poller
-    /// itself would take right now:
-    ///   - draft non-empty: test the *draft*, with a broken keychain
-    ///     underneath so the result reflects the typed token alone.
-    ///   - draft empty: test the live keychain read, exactly as the
-    ///     production poller would do it. Useful for confirming a
-    ///     fresh `claude login` produced a working token before
-    ///     trusting Pacer's next poll.
-    private func runTest() {
-        let token = trimmedDraft
-        testInProgress = true
-        testResult = nil
-        Task { @MainActor in
-            let client: OAuthClient
-            if token.isEmpty {
-                // Production path: real keychain, no override.
-                client = OAuthClient(tokenOverride: { nil })
-            } else {
-                // Draft path: deliberately broken keychain so the
-                // result reflects the typed token alone.
-                let brokenKeychain = KeychainOAuth(rawReader: { .failure(.notFound) })
-                client = OAuthClient(
-                    keychain: brokenKeychain,
-                    tokenOverride: { token }
-                )
-            }
-            let result = await client.fetchUsage()
-            testInProgress = false
-            testResult = Self.classify(result)
+    private static func sourceName(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "Claude Code"
+        case .desktop:  return "Claude Desktop"
+        case .override: return "manually-added"
+        case .held:     return "saved"
         }
     }
 
-    /// Translate the typed OAuthClient outcome into a user-facing
-    /// result. We don't surface raw HTTP bodies — they're noisy and
-    /// usually point at the same actionable advice ("get a fresh token").
-    private static func classify(
-        _ result: Result<RateLimitSnapshot, OAuthClientError>
-    ) -> TestResult {
-        switch result {
-        case .success(let snapshot):
-            return .success(
-                fiveHourPct: snapshot.fiveHour?.usedPercentage,
-                sevenDayPct: snapshot.sevenDay?.usedPercentage
-            )
-        case .failure(.unauthorized):
-            return .failure(message: "Anthropic rejected this token (401). It may be expired or revoked — fetch a fresh one.")
-        case .failure(.rateLimited):
-            return .failure(message: "Rate-limited by Anthropic (429). Wait a moment and try again.")
-        case .failure(.transport):
-            return .failure(message: "Network error. Check your connection and retry.")
-        case .failure(.http(403, _)):
-            // 403 ≠ 401: Anthropic accepted the token as valid auth
-            // but won't honor it for /api/oauth/usage. Almost always
-            // means the token lacks the `user:sessions:claude_code`
-            // scope — i.e. it came from `claude setup-token` or a
-            // web-console API key rather than the interactive
-            // `claude login` flow.
-            return .failure(message: "Token rejected for this endpoint (403). Use a token from `claude logout && claude login`, not `claude setup-token` or a console API key.")
-        case .failure(.http(let status, _)):
-            return .failure(message: "Anthropic returned HTTP \(status).")
-        case .failure(.responseSchemaMismatch):
-            return .failure(message: "Anthropic's response didn't match Pacer's expected shape. Likely a server-side change.")
-        case .failure(.credentialsNotFound),
-             .failure(.keychainAccessDenied),
-             .failure(.keychainMalformed),
-             .failure(.keychainStatus),
-             .failure(.tokenExpired):
-            // The override path shouldn't reach any of these. Surface a
-            // generic message rather than crashing — keeps the UI honest
-            // if the client's failure modes ever expand.
-            return .failure(message: "Pacer hit an unexpected internal error while testing.")
+    private func add() {
+        let token = draft
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        adding = true
+        addResult = nil
+        Task { @MainActor in
+            let r = await TokenPoolStatus.shared.addManualToken(token)
+            adding = false
+            fieldFocused = false
+            addResult = r   // NB: don't clear `draft` — onChange would wipe this.
+            if case .alreadyTracked(_, let fp) = r {
+                highlightId = fp
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if highlightId == fp { highlightId = nil }
+                }
+            }
+        }
+    }
+}
+
+/// One row in the token pool. Manually-added rows carry a Remove button;
+/// auto-sourced rows don't (they'd just be rediscovered).
+private struct TokenLaneRow: View {
+    let lane: TokenLaneStatus
+    let highlighted: Bool
+    @State private var removing = false
+
+    var body: some View {
+        HStack(spacing: TokenCol.spacing) {
+            HStack(spacing: 7) {
+                Image(systemName: Self.icon(lane.source))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 15)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(Self.name(lane.source))
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Text("#\(lane.priority + 1) · \(lane.id)")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help("Token fingerprint \(lane.id)")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(lane.organizationId ?? "—")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(lane.organizationId ?? "")
+
+            statusPill
+                .frame(width: TokenCol.status, alignment: .leading)
+
+            Text(expiresText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: TokenCol.expires, alignment: .leading)
+
+            Text(updatedText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .frame(width: TokenCol.updated, alignment: .leading)
+
+            removeControl
+                .frame(width: TokenCol.trash, alignment: .trailing)
+        }
+        .padding(.vertical, 7)
+        .background(
+            // Bleed the highlight outward so it wraps the source icon and
+            // reaches the card edges, without shifting the row content.
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(highlighted ? Color.accentColor.opacity(0.16) : Color.clear)
+                .padding(.horizontal, -10)
+        )
+        .animation(.easeInOut(duration: 0.25), value: highlighted)
+    }
+
+    // Always occupies the trash column's width (even for auto rows with no
+    // button) so every row's columns line up with the header.
+    private var removeControl: some View {
+        Group {
+            if lane.source == .override {
+                Button { remove() } label: {
+                    Image(systemName: "trash").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .disabled(removing)
+                .help("Remove this manually-added token")
+            } else {
+                Color.clear.frame(width: 1, height: 1)
+            }
+        }
+    }
+
+    private func remove() {
+        removing = true
+        Task { @MainActor in
+            await TokenPoolStatus.shared.removeManualToken(id: lane.id)
+        }
+    }
+
+    private var statusPill: some View {
+        let info = statusInfo
+        return Text(info.0)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(info.1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(info.1.opacity(0.14)))
+    }
+
+    private var statusInfo: (String, Color) {
+        let now = Date()
+        if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
+        if lane.account == .foreign { return ("other acct", .purple) }
+        if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
+        if lane.account == .primary { return ("active", .green) }
+        return ("pending", .gray)
+    }
+
+    private var expiresText: String {
+        guard let exp = lane.expiresAt else { return "—" }
+        if exp < Date() { return "expired" }
+        return Self.relative.localizedString(for: exp, relativeTo: Date())
+    }
+
+    private var updatedText: String {
+        guard let last = lane.lastPolledAt else { return "never" }
+        if abs(Date().timeIntervalSince(last)) < 10 { return "just now" }
+        return Self.relative.localizedString(for: last, relativeTo: Date())
+    }
+
+    private static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    private static func name(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "Claude Code"
+        case .desktop:  return "Claude Desktop"
+        case .override: return "Manual"
+        case .held:     return "Saved by Pacer"
+        }
+    }
+
+    private static func icon(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "terminal"
+        case .desktop:  return "desktopcomputer"
+        case .override: return "key.fill"
+        case .held:     return "lock.fill"
         }
     }
 }
