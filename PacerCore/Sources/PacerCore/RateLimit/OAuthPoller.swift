@@ -381,7 +381,7 @@ public actor OAuthPoller {
             }
             if matches {
                 lanes[idx].state.account = .primary
-                await persist(snapshot)
+                await persist(snapshot, laneSource: lanes[idx].source)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
                     sevenDayPct: snapshot.sevenDay?.usedPercentage
@@ -506,17 +506,78 @@ public actor OAuthPoller {
         }
     }
 
+    // MARK: - Non-monotonic usage diagnostics
+
+    /// Most recent persisted OAuth sample for a window (or nil).
+    @MainActor
+    private static func latestSample(_ context: ModelContext, window: String) -> RateLimitSample? {
+        var d = FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.window == window && $0.source == "oauth" },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return (try? context.fetch(d))?.first
+    }
+
+    /// Log when a window's utilization *decreases* for a reason that
+    /// isn't one of the two resets we already recognize — i.e. a small
+    /// within-window wobble, the kind a lagging backend replica (possibly
+    /// surfaced by interleaving tokens) could produce. Purely diagnostic:
+    /// one grep-able line, no behavior change. We deliberately do NOT log:
+    ///   - a normal rollover — `resets_at` advanced past the prior anchor;
+    ///   - an off-schedule global reset — a collapse from a meaningful
+    ///     level to ~0 (handled by `GlobalRateLimitReset`).
+    @MainActor
+    private static func logIfUsageWentDown(
+        windowName: String,
+        prior: RateLimitSample?,
+        newUsed: Double,
+        newReset: Date?,
+        laneSource: CredentialCandidate.Source
+    ) {
+        guard let prior else { return }
+        let priorUsed = prior.usedPercentage
+        guard newUsed < priorUsed - 0.01 else { return }   // not a decrease
+
+        // Rollover: the window advanced to a later reset anchor.
+        let rolloverTolerance: TimeInterval = 10 * 60
+        if let pr = prior.resetsAt, let nr = newReset, nr.timeIntervalSince(pr) > rolloverTolerance {
+            return
+        }
+        // Off-schedule global reset: collapse to ~0 on an unchanged anchor.
+        if priorUsed > 5, newUsed < 1 { return }
+
+        let anchor: String
+        if let pr = prior.resetsAt, let nr = newReset {
+            let drift = Int(nr.timeIntervalSince(pr).rounded())
+            anchor = drift == 0 ? "resets_at unchanged" : "resets_at drift \(drift)s"
+        } else {
+            anchor = "resets_at nil"
+        }
+        Log.write("OAuthPoller", String(
+            format: "usage DECREASED (non-reset): %@ %.1f%%→%.1f%% via %@ token; %@ — likely backend replica lag",
+            windowName, priorUsed, newUsed, laneSource.rawValue, anchor
+        ))
+    }
+
     // MARK: - Persistence
 
     /// Write one row per present window. Hops to the main actor for
     /// SwiftData since `ModelContext` is `@MainActor` in our setup.
-    private func persist(_ snapshot: RateLimitSnapshot) async {
+    private func persist(_ snapshot: RateLimitSnapshot, laneSource: CredentialCandidate.Source) async {
         let container = self.container
         let captured = snapshot
         await MainActor.run {
             let context = ModelContext(container)
             var wroteAnyWindow = false
             if let window = captured.fiveHour {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.fiveHour,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
                 context.insert(RateLimitSample(
                     sampledAt: captured.sampledAt,
                     window: RateLimitWindowName.fiveHour,
@@ -527,6 +588,13 @@ public actor OAuthPoller {
                 wroteAnyWindow = true
             }
             if let window = captured.sevenDay {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.sevenDay,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
                 context.insert(RateLimitSample(
                     sampledAt: captured.sampledAt,
                     window: RateLimitWindowName.sevenDay,
