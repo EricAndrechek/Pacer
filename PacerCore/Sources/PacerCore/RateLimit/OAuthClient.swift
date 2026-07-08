@@ -280,8 +280,14 @@ public struct OAuthClient: Sendable {
             out.append(CredentialCandidate(credential: cred, source: source))
         }
 
+        // Order matters for the source LABEL of a token that appears in
+        // more than one place: a live source (Claude Code keychain /
+        // Claude Desktop) wins over our held copy, so a token is shown by
+        // where it actually lives. "Saved by Pacer" then surfaces only for
+        // a genuine survivor — a token we still hold that no live source
+        // has anymore (e.g. after logout) — which is exactly the case the
+        // held store exists to cover.
         if case .success(let c) = keychain.read() { add(c, .keychain) }
-        if let held = heldStore.load() { add(held, .held) }
         if desktopEnabled() {
             let fingerprint = desktop.cacheFingerprint()
             if desktopGate.shouldRead(fingerprint: fingerprint) {
@@ -291,6 +297,7 @@ public struct OAuthClient: Sendable {
                 }
             }
         }
+        if let held = heldStore.load() { add(held, .held) }
 
         // Freshest first (nil expiry sorts as "never expires" ⇒ leads);
         // ties broken by token so the ordering is deterministic.

@@ -22,8 +22,8 @@ import Foundation
 /// *effective* endpoint cadence when it matters:
 ///
 ///   - **Active** (recent Claude usage): the fastest *even* cadence the
-///     lanes can sustain — `max(activeInterval floor, perTokenMin/lanes)`.
-///     5 tokens → ~1 min, 2 → ~2.5 min, 1 → 5 min.
+///     lanes can sustain — `perTokenMin/lanes` (no floor by default).
+///     5 tokens → ~1 min, 10 → ~30s, 2 → ~2.5 min, 1 → 5 min.
 ///   - **Idle**: relax to `idleInterval` — nothing's moving, so be
 ///     polite and bank budget. Poll-on-wake (the poller nudging us when
 ///     usage resumes) makes the idle→active transition feel instant.
@@ -33,10 +33,11 @@ public struct OAuthPollScheduler: Sendable {
         /// The invariant. No single token is polled more often than this,
         /// ever — this is what keeps every lane off the ~30-min throttle.
         public var perTokenMinInterval: TimeInterval
-        /// Floor on the active endpoint cadence — the fastest we'll poll
-        /// even with many tokens (politeness to the shared endpoint). The
-        /// realized active interval is `max(this, perTokenMinInterval /
-        /// usableLanes)`, so more tokens poll faster, down to this floor.
+        /// Optional floor on the active endpoint cadence. Default 0 — no
+        /// floor, so more tokens poll strictly faster. The realized active
+        /// interval is `max(this, perTokenMinInterval / usableLanes)`; the
+        /// per-token invariant (each lane ≤ perTokenMinInterval) is what
+        /// actually keeps us off the throttle regardless of this value.
         public var activeInterval: TimeInterval
         /// Endpoint cadence when idle.
         public var idleInterval: TimeInterval
@@ -50,7 +51,7 @@ public struct OAuthPollScheduler: Sendable {
 
         public init(
             perTokenMinInterval: TimeInterval = 300,
-            activeInterval: TimeInterval = 60,
+            activeInterval: TimeInterval = 0,
             idleInterval: TimeInterval = 600,
             activeWindow: TimeInterval = 900,
             minWait: TimeInterval = 1

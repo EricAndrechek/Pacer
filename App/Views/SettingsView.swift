@@ -1367,13 +1367,13 @@ private struct TokensCard: View {
 
     private var columnHeader: some View {
         HStack(spacing: 10) {
-            Text("SOURCE").frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
-            Text("ACCOUNT").frame(minWidth: 70, maxWidth: .infinity, alignment: .leading)
-            Text("STATUS").frame(width: 74, alignment: .leading)
-            Text("EXPIRES").frame(width: 62, alignment: .leading)
-            Text("UPDATED").frame(width: 74, alignment: .leading)
+            Text("SOURCE").frame(width: 145, alignment: .leading)
+            Text("ACCOUNT").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
+            Text("STATUS").frame(width: 72, alignment: .leading)
+            Text("EXPIRES").frame(width: 58, alignment: .leading)
+            Text("UPDATED").frame(width: 66, alignment: .leading)
                 .help("When Pacer last fetched usage with this token")
-            Color.clear.frame(width: 56)   // aligns over the Test button
+            Color.clear.frame(width: 48)   // aligns over the Test button
         }
         .font(.system(size: 9, weight: .semibold))
         .tracking(0.5)
@@ -1408,32 +1408,33 @@ private struct TokenLaneRow: View {
                         .help("Token fingerprint \(lane.id)")
                 }
             }
-            .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+            .frame(width: 145, alignment: .leading)
 
-            // ACCOUNT — flexible; middle-truncates, hover for the full org id.
+            // ACCOUNT — the sole flexible column: fills the slack, shows the
+            // full org id, middle-truncates + hover only when too narrow.
             Text(accountText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(minWidth: 70, maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
                 .help(lane.organizationId ?? "")
 
             statusPill
-                .frame(width: 74, alignment: .leading)
+                .frame(width: 72, alignment: .leading)
 
             Text(expiresText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 62, alignment: .leading)
+                .frame(width: 58, alignment: .leading)
 
             Text(updatedText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 74, alignment: .leading)
+                .frame(width: 66, alignment: .leading)
 
             testControl
-                .frame(width: 56, alignment: .trailing)
+                .frame(width: 48, alignment: .trailing)
         }
         .padding(.vertical, 7)
     }
