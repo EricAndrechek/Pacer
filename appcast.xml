@@ -540,5 +540,25 @@
             type="application/octet-stream"
             sparkle:edSignature="hoMRj5MDVLVqoW9mwHqxZ7DJG4roSXOq32ohcTxb8EkZs36Hw8FHqyjHzpJup6NbhbKjuyiNFQUHbzQQAHKpCw==" />
     </item>
+            <item>
+        <title>Version 0.3.22</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>tooling: ship.sh verify waits for appcast propagation before judging it by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4819782377" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/118" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/118/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/118">EricAndrechek/Pacer#118</a></li>
+<li>fix(ui): derive sidebar min-width from measured label, not a magic 220 by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4837305148" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/119" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/119/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/119">EricAndrechek/Pacer#119</a></li>
+<li>Adaptive multi-token OAuth polling + Tokens settings UI by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4840943531" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/120" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/120/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/120">EricAndrechek/Pacer#120</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.21...v0.3.22">EricAndrechek/Pacer@<tt>v0.3.21...v0.3.22</tt></a></p>]]></description>
+        <pubDate>Wed, 08 Jul 2026 20:50:45 +0000</pubDate>
+        <sparkle:version>1783543622</sparkle:version>
+        <sparkle:shortVersionString>0.3.22</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.3.22/Pacer-0.3.22.dmg"
+            length="7552698"
+            type="application/octet-stream"
+            sparkle:edSignature="WANZ98vKIWAoMLTgpkaElWrJFhyqhcaQkQCWaN6JtxGG26Mi8E0y3OgqPp53n53vrZyKlE8iYyCweRirQO86Aw==" />
+    </item>
         </channel>
 </rss>
