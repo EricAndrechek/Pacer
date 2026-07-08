@@ -1234,7 +1234,16 @@ private struct TokensCard: View {
             cadenceHeader
         }, content: {
             VStack(alignment: .leading, spacing: 0) {
-                if pool.lanes.isEmpty {
+                if !pool.hasLoaded {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading tokens…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
+                } else if pool.lanes.isEmpty {
                     Text("No tokens yet — sign into Claude Code, enable Claude Desktop below, or add one manually.")
                         .font(.caption)
                         .foregroundStyle(.secondary)

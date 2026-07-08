@@ -85,6 +85,10 @@ public final class TokenPoolStatus {
     public static let shared = TokenPoolStatus()
 
     public private(set) var lanes: [TokenLaneStatus] = []
+    /// False until the poller publishes for the first time this launch. Lets
+    /// the Settings section show a brief "loading" state instead of a
+    /// misleading "no tokens yet" before the persisted pool is restored.
+    public private(set) var hasLoaded: Bool = false
     /// Whether the poller currently considers Claude usage "active"
     /// (recent) — drives the faster cadence.
     public private(set) var isActive: Bool = false
@@ -108,6 +112,7 @@ public final class TokenPoolStatus {
         self.isActive = isActive
         self.effectiveIntervalSeconds = effectiveIntervalSeconds
         self.lastUpdated = Date()
+        self.hasLoaded = true
     }
 
     public func testLane(id: String) async -> TokenTestResult {

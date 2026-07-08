@@ -439,16 +439,19 @@ public actor OAuthPoller: TokenPoolTesting {
     // MARK: - Loop
 
     private func loop() async {
+        // Restore persisted lane state and publish it *before* the startup
+        // delay, so the Tokens UI shows last-known status/account/expiry the
+        // instant the window opens instead of flashing "no tokens yet" while
+        // the delay elapses. This only reads the pool + cached metadata; the
+        // delay still gates the first live poll.
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        await publishStatus()
+
         if configuration.startupDelay > 0 {
             await nap(configuration.startupDelay)
             if stopping || Task.isCancelled { return }
         }
-
-        // Restore persisted lane state and publish it before the first poll
-        // so the Tokens UI shows last-known status/account/expiry on launch.
-        await loadPersistedMetaIfNeeded()
-        ensureLanes()
-        await publishStatus()
 
         while !stopping && !Task.isCancelled {
             ensureLanes()
