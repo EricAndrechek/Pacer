@@ -57,6 +57,22 @@ public enum OAuthClientError: Error, Sendable {
 /// cooperative-task-cancellable, and `KeychainOAuth.read()` is a fast
 /// synchronous SecItem call. The client is `Sendable` so the poller
 /// actor can hold and call it without isolation hops.
+/// One credential the poller could spend, tagged with where it came
+/// from. `source` lets the poller prefer a primary-account token
+/// (keychain / manual override) when deciding which lane establishes
+/// the account the whole pool is guarded against.
+public struct CredentialCandidate: Sendable, Equatable {
+    public enum Source: String, Sendable, Equatable {
+        case override, keychain, held, desktop
+    }
+    public let credential: OAuthCredential
+    public let source: Source
+    public init(credential: OAuthCredential, source: Source) {
+        self.credential = credential
+        self.source = source
+    }
+}
+
 public struct OAuthClient: Sendable {
 
     /// Anthropic's undocumented usage endpoint. Stable for ~a year;
@@ -144,15 +160,12 @@ public struct OAuthClient: Sendable {
         return (data, http)
     }
 
-    /// One round-trip against `/api/oauth/usage`. Returns the typed
-    /// snapshot or an `OAuthClientError`.
+    /// One round-trip against `/api/oauth/usage` using the auto-resolved
+    /// credential (manual override → keychain → held → opted-in Desktop,
+    /// freshest wins). Used by the Settings probe and any single-token
+    /// caller. The multi-token poller uses `candidateCredentials()` +
+    /// `fetchUsage(using:)` instead so it controls which budget it spends.
     public func fetchUsage() async -> Result<RateLimitSnapshot, OAuthClientError> {
-        // Step 1: resolve the access token. Manual override (Settings
-        // → Authentication) wins when present — we don't even read the
-        // keychain, since the override exists exactly for cases where
-        // the keychain copy is stale (#6). Otherwise: keychain read,
-        // mapping its errors to ours so the caller switches on one
-        // error type.
         let credential: OAuthCredential
         let fromHeldStore: Bool
         switch resolveCredential() {
@@ -162,8 +175,29 @@ public struct OAuthClient: Sendable {
         case .failure(let error):
             return .failure(error)
         }
+        let result = await performFetch(credential: credential)
+        // Preserve the single-token path's behavior: a 401 on the held
+        // copy drops it so the next poll re-derives from the sources.
+        if case .failure(.unauthorized) = result, fromHeldStore {
+            heldStore.clear()
+        }
+        return result
+    }
 
-        // Step 3: build request.
+    /// One round-trip using a SPECIFIC credential, bypassing resolution.
+    /// The multi-token poller calls this per lane so it controls exactly
+    /// which token — and thus which independent rate-limit budget — each
+    /// poll spends. A 401 rejects the token process-wide (so lane
+    /// selection won't re-pick it) but never touches the held store;
+    /// lane lifecycle is the poller's job.
+    public func fetchUsage(using credential: OAuthCredential) async -> Result<RateLimitSnapshot, OAuthClientError> {
+        await performFetch(credential: credential)
+    }
+
+    /// The shared HTTP round-trip: build → send → status-branch → decode.
+    /// On 401 it rejects the token; held-store cleanup is left to the
+    /// caller so the specific-token path doesn't disturb resolution state.
+    private func performFetch(credential: OAuthCredential) async -> Result<RateLimitSnapshot, OAuthClientError> {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "GET"
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
@@ -173,8 +207,8 @@ public struct OAuthClient: Sendable {
         // makes proxies and CDNs less likely to vary the response.
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        // Step 4: send. URLSession.data is task-cancellable so a
-        // poller stop propagates here cleanly.
+        // URLSession.data is task-cancellable so a poller stop
+        // propagates here cleanly.
         let data: Data
         let response: HTTPURLResponse
         do {
@@ -183,20 +217,14 @@ public struct OAuthClient: Sendable {
             return .failure(.transport(underlying: error))
         }
 
-        // Step 5: status branching.
         let body = String(data: data, encoding: .utf8) ?? "<non-UTF8 body, \(data.count) bytes>"
         switch response.statusCode {
         case 200..<300:
             break // fall through to decode
         case 401:
-            // This token is bad. Blocklist it so resolution falls through to
-            // the next-freshest candidate, and drop our held copy so the next
-            // poll re-derives from the sources. (`fromHeldStore` is logged
-            // intent; we clear regardless since the held copy may equal the
-            // rejected token.)
-            _ = fromHeldStore
+            // This token is bad. Blocklist it so resolution / lane
+            // selection falls through to the next candidate.
             rejected.reject(credential.accessToken)
-            heldStore.clear()
             return .failure(.unauthorized(body: truncate(body, max: 200)))
         case 429:
             return .failure(.rateLimited(
@@ -206,16 +234,71 @@ public struct OAuthClient: Sendable {
             return .failure(.http(status: response.statusCode, body: truncate(body, max: 200)))
         }
 
-        // Step 6: decode. We tolerate either window being missing/null
-        // and tolerate `resets_at: null`. Only a wholly-broken shape is
-        // a hard failure.
+        // Same-account guard input: the account this response belongs to.
+        let orgId = response.value(forHTTPHeaderField: "anthropic-organization-id")
+
+        // Decode. We tolerate either window being missing/null and
+        // tolerate `resets_at: null`. Only a wholly-broken shape is a
+        // hard failure.
         let snapshot: RateLimitSnapshot
         do {
-            snapshot = try decode(body: data, sampledAt: now())
+            snapshot = try decode(body: data, sampledAt: now(), organizationId: orgId)
         } catch {
             return .failure(.responseSchemaMismatch(error.localizedDescription))
         }
         return .success(snapshot)
+    }
+
+    /// All usable (non-expired, non-rejected) candidate credentials for
+    /// polling, de-duplicated by access token, freshest first, each
+    /// tagged with its source. The multi-token poller unions these into
+    /// its persistent lane set.
+    ///
+    /// Reads Claude Code's keychain (silent) and our held copy always;
+    /// reads opted-in Claude Desktop only when its token file changed
+    /// since the last read (the `DesktopReadGate`, to avoid re-prompting)
+    /// — so Desktop tokens surface on the first call and again on
+    /// rotation, and the poller keeps the lanes alive in between. A
+    /// manual override, when set, is returned as the sole candidate.
+    public func candidateCredentials() -> [CredentialCandidate] {
+        if let override = tokenOverride() {
+            return [CredentialCandidate(
+                credential: OAuthCredential(accessToken: override, expiresAt: nil, subscriptionType: nil),
+                source: .override
+            )]
+        }
+        let referenceNow = now()
+        let usable: (OAuthCredential) -> Bool = { [rejected] cred in
+            !rejected.isRejected(cred.accessToken)
+                && (cred.expiresAt == nil || cred.expiresAt! >= referenceNow)
+        }
+        var out: [CredentialCandidate] = []
+        var seen = Set<String>()
+        func add(_ cred: OAuthCredential, _ source: CredentialCandidate.Source) {
+            guard usable(cred), !seen.contains(cred.accessToken) else { return }
+            seen.insert(cred.accessToken)
+            out.append(CredentialCandidate(credential: cred, source: source))
+        }
+
+        if case .success(let c) = keychain.read() { add(c, .keychain) }
+        if let held = heldStore.load() { add(held, .held) }
+        if desktopEnabled() {
+            let fingerprint = desktop.cacheFingerprint()
+            if desktopGate.shouldRead(fingerprint: fingerprint) {
+                desktopGate.record(fingerprint: fingerprint)
+                if case .success(let creds) = desktop.readAll() {
+                    for c in creds { add(c, .desktop) }
+                }
+            }
+        }
+
+        // Freshest first (nil expiry sorts as "never expires" ⇒ leads);
+        // ties broken by token so the ordering is deterministic.
+        return out.sorted {
+            let a = $0.credential.expiresAt ?? .distantFuture
+            let b = $1.credential.expiresAt ?? .distantFuture
+            return a != b ? a > b : $0.credential.accessToken < $1.credential.accessToken
+        }
     }
 
     // MARK: - Credential resolution
@@ -313,7 +396,7 @@ public struct OAuthClient: Sendable {
 
     private struct DecodeError: Error { let detail: String }
 
-    private func decode(body: Data, sampledAt: Date) throws -> RateLimitSnapshot {
+    private func decode(body: Data, sampledAt: Date, organizationId: String? = nil) throws -> RateLimitSnapshot {
         guard let top = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             throw DecodeError(detail: "top level was not a JSON object")
         }
@@ -326,7 +409,8 @@ public struct OAuthClient: Sendable {
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
             sevenDay: decodeWindow(top["seven_day"]),
-            extraUsageCents: Self.decodeExtraUsage(top["extra_usage"])
+            extraUsageCents: Self.decodeExtraUsage(top["extra_usage"]),
+            organizationId: organizationId
         )
     }
 
