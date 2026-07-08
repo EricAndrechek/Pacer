@@ -306,6 +306,11 @@ public actor OAuthPoller: TokenPoolTesting {
     public func addManualToken(_ token: String) async -> TokenTestResult {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        // Offline format gate first — reject an obviously wrong paste
+        // instantly, without spending a network request on it.
+        if case .invalid(let reason) = TokenFormat.validate(trimmed) {
+            return .failure(reason: reason)
+        }
         ensureLanes()
         if lanes.contains(where: { $0.credential.accessToken == trimmed }) {
             return .alreadyTracked

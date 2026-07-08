@@ -138,6 +138,11 @@ import Testing
 
     // MARK: - Manual "Add token"
 
+    /// A well-formed OAuth token (passes the offline format gate), distinct per seed.
+    private static func validToken(_ seed: Character) -> String {
+        TokenFormat.oauthPrefix + String(repeating: seed, count: 50)
+    }
+
     private func makeContainer() throws -> ModelContainer {
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         return try ModelContainer(
@@ -165,12 +170,12 @@ import Testing
         let poller = OAuthPoller(client: successClient(orgs: ["orgA"]),
                                  container: container, configuration: .init(),
                                  clock: TestClock(), poolStore: pool)
-        let r = await poller.addManualToken("manual-tok-1")
+        let r = await poller.addManualToken(Self.validToken("1"))
         if case .success = r {} else { Issue.record("expected success, got \(r)") }
         #expect(await poller.snapshot().laneCount == 1)
-        #expect(pool.loadAll().contains { $0.credential.accessToken == "manual-tok-1" && $0.source == .override })
+        #expect(pool.loadAll().contains { $0.credential.accessToken == Self.validToken("1") && $0.source == .override })
         // Duplicate add is a no-op.
-        #expect(await poller.addManualToken("manual-tok-1") == .alreadyTracked)
+        #expect(await poller.addManualToken(Self.validToken("1")) == .alreadyTracked)
         #expect(await poller.snapshot().laneCount == 1)
     }
 
@@ -181,12 +186,34 @@ import Testing
         let poller = OAuthPoller(client: successClient(orgs: ["orgA", "orgB"]),
                                  container: container, configuration: .init(),
                                  clock: TestClock(), poolStore: pool)
-        _ = await poller.addManualToken("tok-A")           // primary
-        let r = await poller.addManualToken("tok-B")       // foreign
+        _ = await poller.addManualToken(Self.validToken("A"))           // primary
+        let r = await poller.addManualToken(Self.validToken("B"))       // foreign
         #expect(r == .foreignAccount(org: "orgB"))
         // Only the primary lane remains; foreign token not persisted.
         #expect(await poller.snapshot().laneCount == 1)
-        #expect(!pool.loadAll().contains { $0.credential.accessToken == "tok-B" })
+        #expect(!pool.loadAll().contains { $0.credential.accessToken == Self.validToken("B") })
+    }
+
+    @Test func tokenFormatGate() {
+        #expect(TokenFormat.validate(TokenFormat.oauthPrefix + String(repeating: "a", count: 50)) == .ok)
+        for bad in ["", "random garbage", "sk-ant-oat01-short",
+                    "sk-ant-api03-" + String(repeating: "a", count: 50),
+                    "sk-ant-sid01-" + String(repeating: "a", count: 50)] {
+            if case .invalid = TokenFormat.validate(bad) {} else {
+                Issue.record("expected invalid for \(bad.prefix(16))…")
+            }
+        }
+    }
+
+    @Test func addManualTokenRejectsBadFormatOffline() async throws {
+        let container = try makeContainer()
+        let pool = EphemeralTokenPoolStore()
+        let poller = OAuthPoller(client: successClient(orgs: ["orgA"]),
+                                 container: container, configuration: .init(),
+                                 clock: TestClock(), poolStore: pool)
+        let r = await poller.addManualToken("not-a-real-token")
+        if case .failure = r {} else { Issue.record("expected failure, got \(r)") }
+        #expect(await poller.snapshot().laneCount == 0)   // never added, never polled
     }
 
     @Test func removeManualTokenDropsFromLanesAndPool() async throws {
@@ -195,9 +222,9 @@ import Testing
         let poller = OAuthPoller(client: successClient(orgs: ["orgA"]),
                                  container: container, configuration: .init(),
                                  clock: TestClock(), poolStore: pool)
-        _ = await poller.addManualToken("manual-tok-1")
+        _ = await poller.addManualToken(Self.validToken("1"))
         #expect(await poller.snapshot().laneCount == 1)
-        await poller.removeManualToken(id: OAuthPoller.laneId("manual-tok-1"))
+        await poller.removeManualToken(id: OAuthPoller.laneId(Self.validToken("1")))
         #expect(await poller.snapshot().laneCount == 0)
         #expect(pool.loadAll().isEmpty)
     }

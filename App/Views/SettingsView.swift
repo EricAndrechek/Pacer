@@ -1103,6 +1103,46 @@ private struct DesktopCredentialsCard: View {
 /// each token comes from, which account it's tied to, when it expires,
 /// its health, and a Test that routes through the poller (so it persists
 /// and counts against that token's budget instead of racing it).
+/// A one-line shell command in monospace with a click-to-copy button that
+/// flips to a checkmark (+ a trackpad haptic) for feedback, so the user
+/// doesn't have to select the text by hand.
+private struct CopyableCommand: View {
+    let command: String
+    @State private var copied = false
+    init(_ command: String) { self.command = command }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(command)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: copy) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(copied ? Color.green : Color.secondary)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.borderless)
+            .help(copied ? "Copied!" : "Copy command")
+        }
+    }
+
+    private func copy() {
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        #endif
+        withAnimation { copied = true }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            withAnimation { copied = false }
+        }
+    }
+}
+
 private struct TokensCard: View {
     @State private var pool = TokenPoolStatus.shared
     @State private var draft: String = ""
@@ -1134,10 +1174,7 @@ private struct TokensCard: View {
                 Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit. Tokens are cycled by priority (top first).")
                 Text("Claude Code and (if enabled below) Claude Desktop are read automatically. Only *add* a token Pacer can't read here — e.g. from another Mac, where you'd run:")
                     .padding(.top, 2)
-                Text("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
+                CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
                 Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
                     .padding(.top, 2)
             }
@@ -1201,12 +1238,12 @@ private struct TokensCard: View {
         addResult = nil
         Task { @MainActor in
             let r = await TokenPoolStatus.shared.addManualToken(token)
-            addResult = r
             adding = false
-            switch r {
-            case .success, .alreadyTracked: draft = ""
-            default: break
-            }
+            // NB: do NOT clear `draft` here — that fires the field's
+            // onChange, which resets `addResult` and hides the result the
+            // user needs to see. Leave the token in place; editing it (or
+            // a new paste) clears the message via onChange.
+            addResult = r
         }
     }
 
@@ -1256,7 +1293,6 @@ private struct TokensCard: View {
 private struct TokenLaneRow: View {
     let lane: TokenLaneStatus
     @State private var testing = false
-    @State private var cooling = false
     @State private var removing = false
     @State private var result: TokenTestResult?
 
@@ -1336,12 +1372,20 @@ private struct TokenLaneRow: View {
             } else {
                 Button("Test") { runTest() }
                     .controlSize(.small)
-                    .disabled(cooling)
-                    .help(cooling
-                        ? "Just tested — give it a moment before testing again."
+                    .disabled(recentlyPolled)
+                    .help(recentlyPolled
+                        ? "Just fetched — its data is current; give it a moment."
                         : "Fetch usage with this token through the poller (persists + counts against its budget).")
             }
         }
+    }
+
+    /// True if this lane was polled (by a Test or the auto-cadence) within
+    /// the last 20s. Derived from the shared `lastPolledAt`, so the Test
+    /// cooldown survives tab switches — unlike a view-local flag would.
+    private var recentlyPolled: Bool {
+        guard let last = lane.lastPolledAt else { return false }
+        return Date().timeIntervalSince(last) < 20
     }
 
     private func runTest() {
@@ -1351,11 +1395,6 @@ private struct TokenLaneRow: View {
             let r = await TokenPoolStatus.shared.testLane(id: lane.id)
             result = r
             testing = false
-            // Brief cooldown so rapid re-clicks can't spend the token's
-            // budget into a 429.
-            cooling = true
-            try? await Task.sleep(nanoseconds: 20_000_000_000)
-            cooling = false
         }
     }
 
