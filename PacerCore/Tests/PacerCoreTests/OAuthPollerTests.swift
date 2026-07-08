@@ -17,6 +17,7 @@ import Testing
             RateLimitSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,
+            TokenLaneMeta.self,
             configurations: config
         )
     }

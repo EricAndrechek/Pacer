@@ -60,11 +60,11 @@ struct SettingsView: View {
             // the cards sit consistently flush with the sidebar.
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .topLeading)
-            // Click anywhere off a text field to dismiss its focus ring.
-            #if canImport(AppKit)
-            .background(FocusResignOnClick())
-            #endif
         }
+        // Click anywhere off a text field to dismiss its focus ring.
+        #if canImport(AppKit)
+        .modifier(DismissFocusOnOutsideClick())
+        #endif
     }
 }
 
@@ -1107,77 +1107,101 @@ private struct DesktopCredentialsCard: View {
 /// each token comes from, which account it's tied to, when it expires,
 /// its health, and a Test that routes through the poller (so it persists
 /// and counts against that token's budget instead of racing it).
-/// Fixed column widths shared by the Tokens header and rows so they line
-/// up exactly. SOURCE is the flexible column (fills the remainder).
+/// Column widths shared by the Tokens header and rows so they line up
+/// exactly. SOURCE and ACCOUNT are both flexible (they split the leftover
+/// evenly and are the first to truncate as the window narrows — hover to
+/// see them in full); STATUS/EXPIRES/UPDATED/trash are fixed and small.
 fileprivate enum TokenCol {
-    static let account: CGFloat = 244
-    static let status: CGFloat = 78
-    static let expires: CGFloat = 64
-    static let updated: CGFloat = 76
+    static let status: CGFloat = 76
+    static let expires: CGFloat = 58
+    static let updated: CGFloat = 72
     static let trash: CGFloat = 24
     static let spacing: CGFloat = 12
 }
 
 #if canImport(AppKit)
-/// Transparent click-catcher placed behind content: a click on empty space
-/// resigns the window's first responder (dismissing a TextField's focus
-/// ring), while clicks on real controls still reach them (they sit in
-/// front). Fixes "the paste field stays focused when I click elsewhere".
-private struct FocusResignOnClick: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { CatcherView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-    private final class CatcherView: NSView {
-        override func mouseDown(with event: NSEvent) {
-            window?.makeFirstResponder(nil)
-            super.mouseDown(with: event)
-        }
+/// Dismisses text-field focus when the user clicks anything that isn't a
+/// text field. SwiftUI on macOS keeps a `TextField` focused until another
+/// responder takes over, and a background click-catcher can't fix it —
+/// opaque SwiftUI views above it swallow the click. A window-level mouse
+/// monitor is the reliable route: on any left click, if the hit view
+/// isn't the field editor, resign first responder (which clears the
+/// SwiftUI `@FocusState` too). Clicking into an unfocused field still
+/// focuses it, since the click proceeds normally afterward.
+private struct DismissFocusOnOutsideClick: ViewModifier {
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+                    guard let window = event.window else { return event }
+                    let hit = window.contentView?.hitTest(event.locationInWindow)
+                    // The field editor of a focused NSTextField is an NSTextView.
+                    if !(hit is NSTextView) {
+                        window.makeFirstResponder(nil)
+                    }
+                    return event
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
     }
 }
 #endif
 
-/// A one-line shell command shown as a code block. The whole box is
-/// click-to-copy (button flips to a checkmark + trackpad haptic); the
-/// command scrolls horizontally with a right-edge fade so it's clear it
-/// continues past the copy button rather than being all there is.
+/// A one-line shell command shown as a code block. The entire box is a
+/// single click-to-copy button (flips to a checkmark + trackpad haptic).
+/// The command is clipped with a right-edge fade so it's clear it runs
+/// past the copy icon rather than being all there is; hover shows it in
+/// full. It's deliberately not text-selectable — a stray click-drag used
+/// to leave text stuck-highlighted, and copying is one click anyway.
 private struct CopyableCommand: View {
     let command: String
     @State private var copied = false
     init(_ command: String) { self.command = command }
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "terminal")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            ScrollView(.horizontal, showsIndicators: false) {
+        Button(action: copy) {
+            HStack(spacing: 14) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
                 Text(command)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
-                    .textSelection(.enabled)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .mask(
-                LinearGradient(
-                    stops: [.init(color: .black, location: 0),
-                            .init(color: .black, location: 0.88),
-                            .init(color: .clear, location: 1.0)],
-                    startPoint: .leading, endPoint: .trailing
-                )
-            )
-            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .fixedSize(horizontal: true, vertical: false)   // draw at full width…
+                    .frame(maxWidth: .infinity, alignment: .leading) // …clipped to the box
+                    .clipped()
+                    .mask(
+                        LinearGradient(
+                            stops: [.init(color: .black, location: 0),
+                                    .init(color: .black, location: 0.9),
+                                    .init(color: .clear, location: 1.0)],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                    )
+                ZStack {
+                    Image(systemName: "doc.on.doc").opacity(copied ? 0 : 1)
+                    Image(systemName: "checkmark").foregroundStyle(.green).opacity(copied ? 1 : 0)
+                }
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(copied ? Color.green : Color.secondary)
+                .foregroundStyle(.secondary)
                 .frame(width: 18, height: 16)   // fixed → the flip can't shift layout
-                .contentTransition(.symbolEffect(.replace))
+                .animation(.easeInOut(duration: 0.15), value: copied)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-        .contentShape(Rectangle())
-        .onTapGesture(perform: copy)
-        .help(copied ? "Copied!" : "Click to copy")
+        .buttonStyle(.plain)
+        .help(copied ? "Copied!" : command)
     }
 
     private func copy() {
@@ -1186,10 +1210,10 @@ private struct CopyableCommand: View {
         NSPasteboard.general.setString(command, forType: .string)
         NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
         #endif
-        withAnimation { copied = true }
+        copied = true
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_600_000_000)
-            withAnimation { copied = false }
+            copied = false
         }
     }
 }
@@ -1265,12 +1289,12 @@ private struct TokensCard: View {
     private var columnHeader: some View {
         HStack(spacing: TokenCol.spacing) {
             Text("SOURCE").frame(maxWidth: .infinity, alignment: .leading)
-            Text("ACCOUNT").frame(width: TokenCol.account, alignment: .leading)
+            Text("ACCOUNT").frame(maxWidth: .infinity, alignment: .leading)
             Text("STATUS").frame(width: TokenCol.status, alignment: .leading)
             Text("EXPIRES").frame(width: TokenCol.expires, alignment: .leading)
             Text("UPDATED").frame(width: TokenCol.updated, alignment: .leading)
                 .help("When Pacer last fetched usage with this token")
-            Color.clear.frame(width: TokenCol.trash)   // trash column (manual rows only)
+            Color.clear.frame(width: TokenCol.trash, height: 1)   // trash column (manual rows only)
         }
         .font(.system(size: 9, weight: .semibold))
         .tracking(0.5)
@@ -1392,7 +1416,7 @@ private struct TokenLaneRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: TokenCol.account, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .help(lane.organizationId ?? "")
 
             statusPill
@@ -1422,15 +1446,21 @@ private struct TokenLaneRow: View {
         .animation(.easeInOut(duration: 0.25), value: highlighted)
     }
 
-    @ViewBuilder private var removeControl: some View {
-        if lane.source == .override {
-            Button { remove() } label: {
-                Image(systemName: "trash").font(.system(size: 11))
+    // Always occupies the trash column's width (even for auto rows with no
+    // button) so every row's columns line up with the header.
+    private var removeControl: some View {
+        Group {
+            if lane.source == .override {
+                Button { remove() } label: {
+                    Image(systemName: "trash").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .disabled(removing)
+                .help("Remove this manually-added token")
+            } else {
+                Color.clear.frame(width: 1, height: 1)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .disabled(removing)
-            .help("Remove this manually-added token")
         }
     }
 

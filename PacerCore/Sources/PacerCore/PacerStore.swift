@@ -118,6 +118,7 @@ public enum PacerStore {
         ForecastModelOutcome.self,
         EngineEvalOutcome.self,
         PredictionSnapshot.self,
+        TokenLaneMeta.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

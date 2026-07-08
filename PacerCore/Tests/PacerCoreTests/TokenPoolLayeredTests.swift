@@ -147,7 +147,7 @@ import Testing
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         return try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
-            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, configurations: config
+            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self, configurations: config
         )
     }
 
@@ -240,7 +240,7 @@ import Testing
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         let container = try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
-            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, configurations: config
+            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self, configurations: config
         )
         let pool = EphemeralTokenPoolStore([
             StoredToken(
@@ -262,5 +262,52 @@ import Testing
         // the pool restored a lane without any source read.
         if case .transport = outcome {} else { Issue.record("expected transport from seeded lane, got \(outcome)") }
         #expect(await poller.snapshot().laneCount >= 1)
+    }
+
+    @Test func laneMetadataPersistsAcrossRestart() async throws {
+        let container = try makeContainer()   // includes TokenLaneMeta
+        let pool = EphemeralTokenPoolStore([
+            StoredToken(
+                credential: OAuthCredential(accessToken: Self.validToken("z"),
+                                            expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil),
+                source: .desktop
+            )
+        ])
+
+        // First launch: a successful poll learns the account + stamps the lane,
+        // which must be written to SwiftData.
+        let poller1 = OAuthPoller(client: successClient(orgs: ["orgZ"]),
+                                  container: container, configuration: .init(),
+                                  clock: TestClock(), poolStore: pool)
+        let out1 = await poller1.runOnce()
+        if case .success = out1 {} else { Issue.record("expected success, got \(out1)") }
+
+        // Extract plain values inside the MainActor hop — the @Model itself
+        // isn't Sendable and can't cross the boundary.
+        let meta = await MainActor.run { () -> (count: Int, account: String?, org: String?, polled: Bool) in
+            let ctx = ModelContext(container)
+            let rows = (try? ctx.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
+            return (rows.count, rows.first?.accountRaw, rows.first?.organizationId, rows.first?.lastPolledAt != nil)
+        }
+        #expect(meta.count == 1)
+        #expect(meta.account == "primary")
+        #expect(meta.org == "orgZ")
+        #expect(meta.polled)
+
+        // Second launch (fresh poller, same store): a transport that only ever
+        // throws — so the restored primary org / membership can ONLY come from
+        // the persisted metadata, not from anything this run polled.
+        struct StubError: Error {}
+        let client2 = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .failure(.notFound) }),
+            transport: { _ in throw StubError() },
+            desktopEnabled: { false }
+        )
+        let poller2 = OAuthPoller(client: client2, container: container, configuration: .init(),
+                                  clock: TestClock(), poolStore: pool)
+        _ = await poller2.runOnce()
+        let snap = await poller2.snapshot()
+        #expect(snap.primaryOrg == "orgZ")     // restored, not re-derived
+        #expect(snap.primaryLaneCount == 1)    // lane came back a confirmed member
     }
 }

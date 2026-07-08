@@ -137,6 +137,21 @@ public actor OAuthPoller: TokenPoolTesting {
         var resolvedOrg: String?
     }
 
+    /// Sendable carrier for a lane's persisted metadata — read from and
+    /// written to SwiftData (`TokenLaneMeta`) across the MainActor hop,
+    /// and cached in-memory so lane seeding/rediscovery can restore state
+    /// without a fetch. Keyed by the lane fingerprint (`id`).
+    private struct LaneMetaSnapshot: Sendable {
+        var id: String
+        var sourceRaw: String
+        var organizationId: String?
+        var account: OAuthPollScheduler.AccountStatus
+        var expiresAt: Date?
+        var lastPolledAt: Date?
+        var cooldownUntil: Date?
+        var consecutiveFailures: Int
+    }
+
     private let client: OAuthClient
     private let container: ModelContainer
     private let configuration: Configuration
@@ -161,6 +176,13 @@ public actor OAuthPoller: TokenPoolTesting {
     private let poolStore: TokenPoolStoring
     private var seeded = false
     private var lastSavedPoolTokens: Set<String> = []
+
+    /// Persisted lane metadata (account / cooldown / last-poll / org),
+    /// loaded once per launch so seeded + rediscovered lanes restore their
+    /// status without an immediate re-poll and the Tokens UI isn't blank
+    /// on boot. Written back after every poll and pool mutation.
+    private var persistedMeta: [String: LaneMetaSnapshot] = [:]
+    private var metaLoaded = false
 
     private var loopTask: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
@@ -221,6 +243,7 @@ public actor OAuthPoller: TokenPoolTesting {
     /// the categorized outcome. Does NOT loop or sleep.
     @discardableResult
     public func runOnce() async -> PollOutcome {
+        await loadPersistedMetaIfNeeded()
         ensureLanes()
         let now = clock.now()
         let idx = lanes.indices
@@ -261,6 +284,7 @@ public actor OAuthPoller: TokenPoolTesting {
     /// spends that token's budget through the same accounting as an auto
     /// poll, never a hidden extra request.
     public func testLane(id: String) async -> TokenTestResult {
+        await loadPersistedMetaIfNeeded()
         ensureLanes()
         guard let idx = lanes.firstIndex(where: { Self.laneId($0.credential.accessToken) == id }) else {
             return .failure(reason: "That token is no longer available.")
@@ -277,6 +301,7 @@ public actor OAuthPoller: TokenPoolTesting {
     public func testAdHoc(token: String) async -> TokenTestResult {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        await loadPersistedMetaIfNeeded()
         ensureLanes()
         if let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) {
             let outcome = await pollLane(idx)
@@ -311,6 +336,7 @@ public actor OAuthPoller: TokenPoolTesting {
         if case .invalid(let reason) = TokenFormat.validate(trimmed) {
             return .failure(reason: reason)
         }
+        await loadPersistedMetaIfNeeded()
         ensureLanes()
         if let existing = lanes.first(where: { $0.credential.accessToken == trimmed }) {
             return .alreadyTracked(source: existing.source, fingerprint: Self.laneId(existing.credential.accessToken))
@@ -337,6 +363,7 @@ public actor OAuthPoller: TokenPoolTesting {
         // Foreign account / 401 / invalid — don't keep it in the pool.
         let foreignOrg = lane?.resolvedOrg
         lanes.removeAll { $0.credential.accessToken == trimmed }
+        await saveAllLaneMeta()   // prune the rejected lane's metadata
         await publishStatus()
         if case .foreignAccount = outcome { return .foreignAccount(org: foreignOrg) }
         return Self.testResult(from: outcome)
@@ -350,6 +377,7 @@ public actor OAuthPoller: TokenPoolTesting {
         let primary = lanes.filter { $0.state.account == .primary }
         lastSavedPoolTokens = Set(primary.map { $0.credential.accessToken })
         poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+        await saveAllLaneMeta()   // prune the removed lane's metadata
         await publishStatus()
     }
 
@@ -416,6 +444,12 @@ public actor OAuthPoller: TokenPoolTesting {
             if stopping || Task.isCancelled { return }
         }
 
+        // Restore persisted lane state and publish it before the first poll
+        // so the Tokens UI shows last-known status/account/expiry on launch.
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        await publishStatus()
+
         while !stopping && !Task.isCancelled {
             ensureLanes()
             let activity = await activityProbe()
@@ -473,13 +507,15 @@ public actor OAuthPoller: TokenPoolTesting {
             for stored in poolStore.loadAll() {
                 if let exp = stored.credential.expiresAt, exp < now { continue }
                 if lanes.contains(where: { $0.credential.accessToken == stored.credential.accessToken }) { continue }
-                lanes.append(Lane(
+                var lane = Lane(
                     credential: stored.credential,
                     source: stored.source,
                     state: OAuthPollScheduler.LaneState(),
                     consecutiveFailures: 0,
                     resolvedOrg: nil
-                ))
+                )
+                applyPersistedMeta(to: &lane)   // restore last-known status
+                lanes.append(lane)
             }
         }
         let noUsable = !lanes.contains { $0.state.account != .foreign }
@@ -520,13 +556,15 @@ public actor OAuthPoller: TokenPoolTesting {
     private func mergeCandidates(_ candidates: [CredentialCandidate]) {
         var known = Set(lanes.map { $0.credential.accessToken })
         for candidate in candidates where !known.contains(candidate.credential.accessToken) {
-            lanes.append(Lane(
+            var lane = Lane(
                 credential: candidate.credential,
                 source: candidate.source,
                 state: OAuthPollScheduler.LaneState(),
                 consecutiveFailures: 0,
                 resolvedOrg: nil
-            ))
+            )
+            applyPersistedMeta(to: &lane)   // restore last-known status for a rediscovered token
+            lanes.append(lane)
             known.insert(candidate.credential.accessToken)
         }
     }
@@ -571,6 +609,9 @@ public actor OAuthPoller: TokenPoolTesting {
         if !Self.sameCategory(previous, outcome) {
             Log.write("OAuthPoller", Self.summarize(outcome: outcome, laneCount: lanes.count))
         }
+        // Persist the lane's freshly-learned state (account/org/last-poll/
+        // cooldown) so it survives a restart.
+        await saveAllLaneMeta()
         return outcome
     }
 
@@ -777,6 +818,112 @@ public actor OAuthPoller: TokenPoolTesting {
             format: "usage DECREASED (non-reset): %@ %.1f%%→%.1f%% via %@ token; %@ — likely backend replica lag",
             windowName, priorUsed, newUsed, laneSource.rawValue, anchor
         ))
+    }
+
+    // MARK: - Lane metadata persistence
+
+    /// Load persisted lane metadata once per launch (MainActor for
+    /// SwiftData). Restores the pool's primary org so the same-account
+    /// guard is intact immediately, and populates the cache that
+    /// `ensureLanes`/`mergeCandidates` read to rehydrate lanes.
+    private func loadPersistedMetaIfNeeded() async {
+        guard !metaLoaded else { return }
+        metaLoaded = true
+        let container = self.container
+        let loaded: ([String: LaneMetaSnapshot], String?) = await MainActor.run {
+            let context = ModelContext(container)
+            let rows = (try? context.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
+            var map: [String: LaneMetaSnapshot] = [:]
+            var primary: String?
+            for r in rows {
+                let account = OAuthPollScheduler.AccountStatus(rawValue: r.accountRaw)
+                map[r.id] = LaneMetaSnapshot(
+                    id: r.id,
+                    sourceRaw: r.sourceRaw,
+                    organizationId: r.organizationId,
+                    account: account,
+                    expiresAt: r.expiresAt,
+                    lastPolledAt: r.lastPolledAt,
+                    cooldownUntil: r.cooldownUntil,
+                    consecutiveFailures: r.consecutiveFailures
+                )
+                if account == .primary, primary == nil { primary = r.organizationId }
+            }
+            return (map, primary)
+        }
+        persistedMeta = loaded.0
+        if primaryOrg == nil { primaryOrg = loaded.1 }
+    }
+
+    /// Restore a freshly-seeded/discovered lane's learned state from the
+    /// persisted cache, so a known token doesn't show as blank/pending or
+    /// get needlessly re-polled right after launch.
+    private func applyPersistedMeta(to lane: inout Lane) {
+        guard let meta = persistedMeta[Self.laneId(lane.credential.accessToken)] else { return }
+        lane.state.account = meta.account
+        lane.state.lastPolledAt = meta.lastPolledAt
+        lane.state.cooldownUntil = meta.cooldownUntil
+        lane.resolvedOrg = meta.organizationId
+        lane.consecutiveFailures = meta.consecutiveFailures
+    }
+
+    private func laneMetaSnapshot(for lane: Lane) -> LaneMetaSnapshot {
+        LaneMetaSnapshot(
+            id: Self.laneId(lane.credential.accessToken),
+            sourceRaw: lane.source.rawValue,
+            organizationId: lane.resolvedOrg,
+            account: lane.state.account,
+            expiresAt: lane.credential.expiresAt,
+            lastPolledAt: lane.state.lastPolledAt,
+            cooldownUntil: lane.state.cooldownUntil,
+            consecutiveFailures: lane.consecutiveFailures
+        )
+    }
+
+    /// Persist all current lanes' metadata (upsert by fingerprint) and
+    /// prune rows for tokens no longer in the pool, so the Tokens table and
+    /// the scheduler restore real state on the next launch. Called after a
+    /// poll and after any pool mutation.
+    private func saveAllLaneMeta() async {
+        let rows = lanes.map { laneMetaSnapshot(for: $0) }
+        // Keep the in-memory cache in step with what we persist.
+        persistedMeta = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let keep = Set(rows.map { $0.id })
+        let now = clock.now()
+        let container = self.container
+        await MainActor.run {
+            let context = ModelContext(container)
+            let existing = (try? context.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
+            var byId: [String: TokenLaneMeta] = [:]
+            for e in existing { byId[e.id] = e }
+            for row in rows {
+                if let m = byId[row.id] {
+                    m.sourceRaw = row.sourceRaw
+                    m.organizationId = row.organizationId
+                    m.accountRaw = row.account.rawValue
+                    m.expiresAt = row.expiresAt
+                    m.lastPolledAt = row.lastPolledAt
+                    m.cooldownUntil = row.cooldownUntil
+                    m.consecutiveFailures = row.consecutiveFailures
+                    m.updatedAt = now
+                } else {
+                    context.insert(TokenLaneMeta(
+                        id: row.id,
+                        sourceRaw: row.sourceRaw,
+                        organizationId: row.organizationId,
+                        accountRaw: row.account.rawValue,
+                        expiresAt: row.expiresAt,
+                        lastPolledAt: row.lastPolledAt,
+                        cooldownUntil: row.cooldownUntil,
+                        consecutiveFailures: row.consecutiveFailures,
+                        updatedAt: now
+                    ))
+                }
+            }
+            for e in existing where !keep.contains(e.id) { context.delete(e) }
+            do { try context.save() }
+            catch { Log.write("OAuthPoller", "lane-meta persist failed: \(error)") }
+        }
     }
 
     // MARK: - Persistence
