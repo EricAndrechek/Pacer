@@ -252,7 +252,7 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Stable, non-reversible id for a token — 12 hex chars of its
     /// SHA-256. The lane's UI identity + test-routing key; never exposes
     /// token bytes.
-    private static func laneId(_ token: String) -> String {
+    static func laneId(_ token: String) -> String {
         SHA256.hash(data: Data(token.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -298,6 +298,54 @@ public actor OAuthPoller: TokenPoolTesting {
         case .failure(let error):
             return Self.testFailure(error)
         }
+    }
+
+    /// Add a manually-supplied token as an `.override` lane and poll it
+    /// once to confirm your account. Kept (and persisted) only if it's the
+    /// same account; a duplicate / foreign / invalid token isn't retained.
+    public func addManualToken(_ token: String) async -> TokenTestResult {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
+        ensureLanes()
+        if lanes.contains(where: { $0.credential.accessToken == trimmed }) {
+            return .alreadyTracked
+        }
+        // Unknown local expiry — the server 401s when it lapses.
+        lanes.append(Lane(
+            credential: OAuthCredential(accessToken: trimmed, expiresAt: nil, subscriptionType: nil),
+            source: .override,
+            state: OAuthPollScheduler.LaneState(),
+            consecutiveFailures: 0,
+            resolvedOrg: nil
+        ))
+        sortLanes()
+        guard let idx = lanes.firstIndex(where: { $0.credential.accessToken == trimmed }) else {
+            return .failure(reason: "Couldn't add the token.")
+        }
+        let outcome = await pollLane(idx)
+        let lane = lanes.first(where: { $0.credential.accessToken == trimmed })
+        if lane?.state.account == .primary {
+            savePool()
+            await publishStatus()
+            return Self.testResult(from: outcome)
+        }
+        // Foreign account / 401 / invalid — don't keep it in the pool.
+        let foreignOrg = lane?.resolvedOrg
+        lanes.removeAll { $0.credential.accessToken == trimmed }
+        await publishStatus()
+        if case .foreignAccount = outcome { return .foreignAccount(org: foreignOrg) }
+        return Self.testResult(from: outcome)
+    }
+
+    /// Remove a manually-added (`.override`) lane by its opaque id.
+    public func removeManualToken(id: String) async {
+        lanes.removeAll { $0.source == .override && Self.laneId($0.credential.accessToken) == id }
+        // Force-persist the removal (bypass savePool's "don't wipe" guard) so
+        // the removed token can't reappear from the pool on the next launch.
+        let primary = lanes.filter { $0.state.account == .primary }
+        lastSavedPoolTokens = Set(primary.map { $0.credential.accessToken })
+        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+        await publishStatus()
     }
 
     /// Publish a display-safe snapshot of the lane pool + effective

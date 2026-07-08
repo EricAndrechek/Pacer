@@ -136,6 +136,72 @@ import Testing
         #expect(store.load() == Self.testKey)
     }
 
+    // MARK: - Manual "Add token"
+
+    private func makeContainer() throws -> ModelContainer {
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        return try ModelContainer(
+            for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
+            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, configurations: config
+        )
+    }
+
+    private func successClient(orgs: [String]) -> OAuthClient {
+        let counter = AtomicCounter()
+        let outcomes = orgs.map {
+            HTTPOutcome.success(jsonBody: #"{"five_hour":{"utilization":5}}"#,
+                                headers: ["anthropic-organization-id": $0])
+        }
+        return OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .failure(.notFound) }),
+            transport: { _ in try outcomes[min(counter.next(), outcomes.count - 1)].materialize() },
+            desktopEnabled: { false }
+        )
+    }
+
+    @Test func addManualTokenJoinsPoolPersistsAndDedupes() async throws {
+        let container = try makeContainer()
+        let pool = EphemeralTokenPoolStore()
+        let poller = OAuthPoller(client: successClient(orgs: ["orgA"]),
+                                 container: container, configuration: .init(),
+                                 clock: TestClock(), poolStore: pool)
+        let r = await poller.addManualToken("manual-tok-1")
+        if case .success = r {} else { Issue.record("expected success, got \(r)") }
+        #expect(await poller.snapshot().laneCount == 1)
+        #expect(pool.loadAll().contains { $0.credential.accessToken == "manual-tok-1" && $0.source == .override })
+        // Duplicate add is a no-op.
+        #expect(await poller.addManualToken("manual-tok-1") == .alreadyTracked)
+        #expect(await poller.snapshot().laneCount == 1)
+    }
+
+    @Test func addManualTokenForeignAccountNotKept() async throws {
+        let container = try makeContainer()
+        let pool = EphemeralTokenPoolStore()
+        // First add establishes primary org A; second is org B (foreign).
+        let poller = OAuthPoller(client: successClient(orgs: ["orgA", "orgB"]),
+                                 container: container, configuration: .init(),
+                                 clock: TestClock(), poolStore: pool)
+        _ = await poller.addManualToken("tok-A")           // primary
+        let r = await poller.addManualToken("tok-B")       // foreign
+        #expect(r == .foreignAccount(org: "orgB"))
+        // Only the primary lane remains; foreign token not persisted.
+        #expect(await poller.snapshot().laneCount == 1)
+        #expect(!pool.loadAll().contains { $0.credential.accessToken == "tok-B" })
+    }
+
+    @Test func removeManualTokenDropsFromLanesAndPool() async throws {
+        let container = try makeContainer()
+        let pool = EphemeralTokenPoolStore()
+        let poller = OAuthPoller(client: successClient(orgs: ["orgA"]),
+                                 container: container, configuration: .init(),
+                                 clock: TestClock(), poolStore: pool)
+        _ = await poller.addManualToken("manual-tok-1")
+        #expect(await poller.snapshot().laneCount == 1)
+        await poller.removeManualToken(id: OAuthPoller.laneId("manual-tok-1"))
+        #expect(await poller.snapshot().laneCount == 0)
+        #expect(pool.loadAll().isEmpty)
+    }
+
     // MARK: - Poller seeds from the persisted pool on restart
 
     @Test func pollerSeedsLanesFromPersistedPool() async throws {

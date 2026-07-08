@@ -272,12 +272,10 @@ public struct OAuthClient: Sendable {
     ///   caller (the poller) already holds, used only to decide the Desktop
     ///   escalation.
     public func candidateCredentials(cachedDesktopTokens: [OAuthCredential] = []) -> [CredentialCandidate] {
-        if let override = tokenOverride() {
-            return [CredentialCandidate(
-                credential: OAuthCredential(accessToken: override, expiresAt: nil, subscriptionType: nil),
-                source: .override
-            )]
-        }
+        // Manually-added tokens are no longer a "sole override" that
+        // replaces auto-discovery — they live in the poller's pool as
+        // `.override` lanes and are seeded from there, so here we only
+        // gather the live sources and let them union into the pool.
         let referenceNow = now()
         let usable: (OAuthCredential) -> Bool = { [rejected] cred in
             !rejected.isRejected(cred.accessToken)

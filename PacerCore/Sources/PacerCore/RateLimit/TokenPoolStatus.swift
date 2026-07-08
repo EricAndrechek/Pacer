@@ -7,6 +7,8 @@ public enum TokenTestResult: Sendable, Equatable {
     case success(fiveHour: Double?, sevenDay: Double?)
     case foreignAccount(org: String?)
     case failure(reason: String)
+    /// Add-token only: the token is already in the pool — nothing added.
+    case alreadyTracked
     /// The poller isn't running (no background service) — nothing to route to.
     case unavailable
 }
@@ -57,9 +59,16 @@ public struct TokenLaneStatus: Sendable, Identifiable, Equatable {
 public protocol TokenPoolTesting: AnyObject, Sendable {
     /// Test an existing lane by its opaque `id` (from `TokenLaneStatus`).
     func testLane(id: String) async -> TokenTestResult
-    /// Test a raw token the UI holds (the manual-override draft). If it
-    /// matches a known lane, that lane is stamped too.
+    /// Test a raw token the UI holds. If it matches a known lane, that lane
+    /// is stamped too.
     func testAdHoc(token: String) async -> TokenTestResult
+    /// Add a manually-supplied token (e.g. from another Mac) to the pool as
+    /// a `.override` lane, polling it once to confirm the account. Returns
+    /// `.alreadyTracked` if it's already a lane, `.foreignAccount` /
+    /// `.failure` (and doesn't keep it) if it isn't your account / invalid.
+    func addManualToken(_ token: String) async -> TokenTestResult
+    /// Remove a manually-added (`.override`) lane by its opaque `id`.
+    func removeManualToken(id: String) async
 }
 
 /// Process-wide, MainActor-isolated snapshot of the OAuth token pool —
@@ -105,5 +114,13 @@ public final class TokenPoolStatus {
 
     public func testAdHoc(token: String) async -> TokenTestResult {
         await tester?.testAdHoc(token: token) ?? .unavailable
+    }
+
+    public func addManualToken(_ token: String) async -> TokenTestResult {
+        await tester?.addManualToken(token) ?? .unavailable
+    }
+
+    public func removeManualToken(id: String) async {
+        await tester?.removeManualToken(id: id)
     }
 }
