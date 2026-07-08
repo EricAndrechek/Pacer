@@ -174,8 +174,12 @@ import Testing
         if case .success = r {} else { Issue.record("expected success, got \(r)") }
         #expect(await poller.snapshot().laneCount == 1)
         #expect(pool.loadAll().contains { $0.credential.accessToken == Self.validToken("1") && $0.source == .override })
-        // Duplicate add is a no-op.
-        #expect(await poller.addManualToken(Self.validToken("1")) == .alreadyTracked)
+        // Duplicate add is a no-op and reports the matching source.
+        if case .alreadyTracked(let source, _) = await poller.addManualToken(Self.validToken("1")) {
+            #expect(source == .override)
+        } else {
+            Issue.record("expected alreadyTracked")
+        }
         #expect(await poller.snapshot().laneCount == 1)
     }
 

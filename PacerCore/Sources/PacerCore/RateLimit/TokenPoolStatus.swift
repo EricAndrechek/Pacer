@@ -8,7 +8,9 @@ public enum TokenTestResult: Sendable, Equatable {
     case foreignAccount(org: String?)
     case failure(reason: String)
     /// Add-token only: the token is already in the pool — nothing added.
-    case alreadyTracked
+    /// Carries the matching lane's source + fingerprint so the UI can say
+    /// *which* token it is (and highlight its row).
+    case alreadyTracked(source: CredentialCandidate.Source, fingerprint: String)
     /// The poller isn't running (no background service) — nothing to route to.
     case unavailable
 }

@@ -1103,30 +1103,48 @@ private struct DesktopCredentialsCard: View {
 /// each token comes from, which account it's tied to, when it expires,
 /// its health, and a Test that routes through the poller (so it persists
 /// and counts against that token's budget instead of racing it).
-/// A one-line shell command in monospace with a click-to-copy button that
-/// flips to a checkmark (+ a trackpad haptic) for feedback, so the user
-/// doesn't have to select the text by hand.
+/// A one-line shell command shown as a code block with a click-to-copy
+/// button that flips to a checkmark (+ a trackpad haptic). The button is
+/// fixed-width so the flip can't reflow the row; the command scrolls
+/// horizontally rather than wrapping.
 private struct CopyableCommand: View {
     let command: String
     @State private var copied = false
     init(_ command: String) { self.command = command }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(command)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 8) {
+            Image(systemName: "terminal")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(command)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
             Button(action: copy) {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(copied ? Color.green : Color.secondary)
+                    .frame(width: 16, height: 14)   // fixed → the flip can't shift layout
                     .contentTransition(.symbolEffect(.replace))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help(copied ? "Copied!" : "Copy command")
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
 
     private func copy() {
@@ -1143,11 +1161,17 @@ private struct CopyableCommand: View {
     }
 }
 
+/// Live view of the OAuth token pool the poller cycles through — where each
+/// token comes from, its account, expiry, health, and when it last polled;
+/// plus an inline "add a token" field. No per-row Test button (auto-polling
+/// keeps everything current; a newly-added token is validated on add).
 private struct TokensCard: View {
     @State private var pool = TokenPoolStatus.shared
     @State private var draft: String = ""
     @State private var adding = false
     @State private var addResult: TokenTestResult?
+    @State private var highlightId: String?
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         PacerCard("Tokens", trailing: {
@@ -1164,15 +1188,18 @@ private struct TokensCard: View {
                     columnHeader
                     ForEach(pool.lanes) { lane in
                         Divider().opacity(0.35)
-                        TokenLaneRow(lane: lane)
+                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
                     }
                 }
                 addTokenRow
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit. Tokens are cycled by priority (top first).")
-                Text("Claude Code and (if enabled below) Claude Desktop are read automatically. Only *add* a token Pacer can't read here — e.g. from another Mac, where you'd run:")
+                if let org = primaryOrg {
+                    Text("All tokens are for account \(org).")
+                }
+                Text("Pacer spreads usage polls across every token it can read for your account, so it refreshes more often while you're active without exceeding any single token's rate limit.")
+                Text("Claude Code and (if enabled below) Claude Desktop are read automatically. Only *add* a token Pacer can't read here — e.g. from another Mac, where you'd run this in Terminal:")
                     .padding(.top, 2)
                 CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
                 Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
@@ -1181,70 +1208,10 @@ private struct TokensCard: View {
         })
     }
 
-    private var addTokenRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Divider().opacity(0.35).padding(.top, 4)
-            HStack(spacing: 8) {
-                TextField("Paste a token to add (e.g. from another Mac)", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
-                    .onSubmit(add)
-                    .onChange(of: draft) { _, _ in addResult = nil }
-                if adding {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Button("Add", action: add)
-                        .controlSize(.small)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            if let addResult { addResultLabel(addResult) }
-        }
-        .padding(.top, 8)
-    }
-
-    @ViewBuilder private func addResultLabel(_ r: TokenTestResult) -> some View {
-        switch r {
-        case .success(let fh, let sd):
-            addLabel("checkmark.circle.fill", .green, "Added · \(Self.usage(fh, sd))")
-        case .alreadyTracked:
-            addLabel("info.circle.fill", .gray, "Already tracking this token — nothing added.")
-        case .foreignAccount:
-            addLabel("person.crop.circle.badge.xmark", .purple, "That token is a different account — not added.")
-        case .failure(let reason):
-            addLabel("xmark.circle.fill", .red, reason)
-        case .unavailable:
-            addLabel("xmark.circle.fill", .red, "Pacer's poller isn't running — try again in a moment.")
-        }
-    }
-
-    private func addLabel(_ icon: String, _ color: Color, _ text: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon).foregroundStyle(color).font(.system(size: 11))
-            Text(text).font(.caption).foregroundStyle(color).lineLimit(2)
-        }
-    }
-
-    private static func usage(_ fh: Double?, _ sd: Double?) -> String {
-        let f = fh.map { "5h \(Int($0.rounded()))%" } ?? "5h —"
-        let s = sd.map { "7d \(Int($0.rounded()))%" } ?? "7d —"
-        return "\(f), \(s)"
-    }
-
-    private func add() {
-        let token = draft
-        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        adding = true
-        addResult = nil
-        Task { @MainActor in
-            let r = await TokenPoolStatus.shared.addManualToken(token)
-            adding = false
-            // NB: do NOT clear `draft` here — that fires the field's
-            // onChange, which resets `addResult` and hides the result the
-            // user needs to see. Leave the token in place; editing it (or
-            // a new paste) clears the message via onChange.
-            addResult = r
-        }
+    /// The account all tokens belong to (shown once instead of on every row).
+    private var primaryOrg: String? {
+        pool.lanes.first(where: { $0.account == .primary })?.organizationId
+            ?? pool.lanes.first?.organizationId
     }
 
     private var cadenceHeader: some View {
@@ -1273,32 +1240,116 @@ private struct TokensCard: View {
     }
 
     private var columnHeader: some View {
-        HStack(spacing: 10) {
-            Text("SOURCE").frame(width: 145, alignment: .leading)
-            Text("ACCOUNT").frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-            Text("STATUS").frame(width: 72, alignment: .leading)
-            Text("EXPIRES").frame(width: 58, alignment: .leading)
-            Text("UPDATED").frame(width: 66, alignment: .leading)
+        HStack(spacing: 12) {
+            Text("SOURCE").frame(maxWidth: .infinity, alignment: .leading)
+            Text("STATUS").frame(width: 82, alignment: .leading)
+            Text("EXPIRES").frame(width: 72, alignment: .leading)
+            Text("UPDATED").frame(width: 82, alignment: .leading)
                 .help("When Pacer last fetched usage with this token")
-            Color.clear.frame(width: 78)   // aligns over the Remove/Test controls
+            Color.clear.frame(width: 24)   // trash column (manual rows only)
         }
         .font(.system(size: 9, weight: .semibold))
         .tracking(0.5)
         .foregroundStyle(.tertiary)
         .padding(.bottom, 6)
     }
+
+    private var addTokenRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().opacity(0.35).padding(.top, 4)
+            HStack(spacing: 8) {
+                TextField("Paste a token to add (e.g. from another Mac)", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .focused($fieldFocused)
+                    .onSubmit(add)
+                    .onChange(of: draft) { _, _ in addResult = nil }
+                if adding {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Add", action: add)
+                        .controlSize(.small)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            if let addResult { addResultLabel(addResult) }
+        }
+        .padding(.top, 8)
+        // Click anywhere in the card off the field to dismiss its focus ring.
+        .background(
+            Color.clear.contentShape(Rectangle()).onTapGesture { fieldFocused = false }
+        )
+    }
+
+    @ViewBuilder private func addResultLabel(_ r: TokenTestResult) -> some View {
+        switch r {
+        case .success(let fh, let sd):
+            addLabel("checkmark.circle.fill", .green, "Added · \(Self.usage(fh, sd))")
+        case .alreadyTracked(let source, let fp):
+            addLabel("info.circle.fill", .gray, "Already tracking this — it's your \(Self.sourceName(source)) token (…\(String(fp.suffix(4)))).")
+        case .foreignAccount:
+            addLabel("person.crop.circle.badge.xmark", .purple, "That token is a different account — not added.")
+        case .failure(let reason):
+            addLabel("xmark.circle.fill", .red, reason)
+        case .unavailable:
+            addLabel("xmark.circle.fill", .red, "Pacer's poller isn't running — try again in a moment.")
+        }
+    }
+
+    private func addLabel(_ icon: String, _ color: Color, _ text: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).foregroundStyle(color).font(.system(size: 11))
+            Text(text).font(.caption).foregroundStyle(color).lineLimit(2)
+        }
+    }
+
+    private static func usage(_ fh: Double?, _ sd: Double?) -> String {
+        let f = fh.map { "5h \(Int($0.rounded()))%" } ?? "5h —"
+        let s = sd.map { "7d \(Int($0.rounded()))%" } ?? "7d —"
+        return "\(f), \(s)"
+    }
+
+    private static func sourceName(_ s: CredentialCandidate.Source) -> String {
+        switch s {
+        case .keychain: return "Claude Code"
+        case .desktop:  return "Claude Desktop"
+        case .override: return "manually-added"
+        case .held:     return "saved"
+        }
+    }
+
+    private func add() {
+        let token = draft
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        adding = true
+        addResult = nil
+        Task { @MainActor in
+            let r = await TokenPoolStatus.shared.addManualToken(token)
+            adding = false
+            fieldFocused = false
+            // NB: don't clear `draft` — that fires onChange → wipes addResult.
+            addResult = r
+            // Flash the matching row when it's a duplicate.
+            if case .alreadyTracked(_, let fp) = r {
+                highlightId = fp
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if highlightId == fp { highlightId = nil }
+                }
+            }
+        }
+    }
 }
 
-/// One row in the token pool. Owns its own Test in-flight state.
+/// One row in the token pool. Manually-added rows carry a Remove button;
+/// auto-sourced rows don't (they'd just be rediscovered).
 private struct TokenLaneRow: View {
     let lane: TokenLaneStatus
-    @State private var testing = false
+    let highlighted: Bool
     @State private var removing = false
-    @State private var result: TokenTestResult?
 
     var body: some View {
-        HStack(spacing: 10) {
-            // SOURCE — flexible; the id sub-line truncates first when narrow.
+        HStack(spacing: 12) {
             HStack(spacing: 7) {
                 Image(systemName: Self.icon(lane.source))
                     .font(.system(size: 12))
@@ -1316,85 +1367,41 @@ private struct TokenLaneRow: View {
                         .help("Token fingerprint \(lane.id)")
                 }
             }
-            .frame(width: 145, alignment: .leading)
-
-            // ACCOUNT — the sole flexible column: fills the slack, shows the
-            // full org id, middle-truncates + hover only when too narrow.
-            Text(accountText)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(minWidth: 90, maxWidth: .infinity, alignment: .leading)
-                .help(lane.organizationId ?? "")
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             statusPill
-                .frame(width: 72, alignment: .leading)
+                .frame(width: 82, alignment: .leading)
 
             Text(expiresText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 58, alignment: .leading)
+                .frame(width: 72, alignment: .leading)
 
             Text(updatedText)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .frame(width: 66, alignment: .leading)
+                .frame(width: 82, alignment: .leading)
 
-            trailingControls
-                .frame(width: 78, alignment: .trailing)
+            removeControl
+                .frame(width: 24, alignment: .trailing)
         }
         .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(highlighted ? Color.accentColor.opacity(0.14) : Color.clear)
+        )
+        .animation(.easeInOut(duration: 0.25), value: highlighted)
     }
 
-    @ViewBuilder private var trailingControls: some View {
-        HStack(spacing: 6) {
-            // Manually-added tokens can be removed; auto-sourced ones can't
-            // (they'd just be rediscovered).
-            if lane.source == .override {
-                Button { remove() } label: {
-                    Image(systemName: "trash").font(.system(size: 11))
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .disabled(removing)
-                .help("Remove this manually-added token")
+    @ViewBuilder private var removeControl: some View {
+        if lane.source == .override {
+            Button { remove() } label: {
+                Image(systemName: "trash").font(.system(size: 11))
             }
-            testControl
-        }
-    }
-
-    @ViewBuilder private var testControl: some View {
-        HStack(spacing: 5) {
-            if let result, !testing { resultIcon(result) }
-            if testing {
-                ProgressView().controlSize(.small)
-            } else {
-                Button("Test") { runTest() }
-                    .controlSize(.small)
-                    .disabled(recentlyPolled)
-                    .help(recentlyPolled
-                        ? "Just fetched — its data is current; give it a moment."
-                        : "Fetch usage with this token through the poller (persists + counts against its budget).")
-            }
-        }
-    }
-
-    /// True if this lane was polled (by a Test or the auto-cadence) within
-    /// the last 20s. Derived from the shared `lastPolledAt`, so the Test
-    /// cooldown survives tab switches — unlike a view-local flag would.
-    private var recentlyPolled: Bool {
-        guard let last = lane.lastPolledAt else { return false }
-        return Date().timeIntervalSince(last) < 20
-    }
-
-    private func runTest() {
-        testing = true
-        result = nil
-        Task { @MainActor in
-            let r = await TokenPoolStatus.shared.testLane(id: lane.id)
-            result = r
-            testing = false
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .disabled(removing)
+            .help("Remove this manually-added token")
         }
     }
 
@@ -1403,21 +1410,6 @@ private struct TokenLaneRow: View {
         Task { @MainActor in
             await TokenPoolStatus.shared.removeManualToken(id: lane.id)
             // Lane vanishes from pool.lanes → this row is removed.
-        }
-    }
-
-    @ViewBuilder private func resultIcon(_ r: TokenTestResult) -> some View {
-        switch r {
-        case .success:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12)).help("Valid")
-        case .foreignAccount:
-            Image(systemName: "person.crop.circle.badge.xmark").foregroundStyle(.purple).font(.system(size: 12)).help("Different account")
-        case .failure(let reason):
-            Image(systemName: "xmark.circle.fill").foregroundStyle(.red).font(.system(size: 12)).help(reason)
-        case .alreadyTracked:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12)).help("Already tracked")
-        case .unavailable:
-            Image(systemName: "questionmark.circle").foregroundStyle(.secondary).font(.system(size: 12)).help("Poller not running")
         }
     }
 
@@ -1440,10 +1432,6 @@ private struct TokenLaneRow: View {
         return ("pending", .gray)
     }
 
-    private var accountText: String {
-        lane.organizationId ?? "—"
-    }
-
     private var expiresText: String {
         guard let exp = lane.expiresAt else { return "—" }
         if exp < Date() { return "expired" }
@@ -1452,7 +1440,6 @@ private struct TokenLaneRow: View {
 
     private var updatedText: String {
         guard let last = lane.lastPolledAt else { return "never" }
-        // A just-now poll can round to a spurious "in 0s"; clamp it.
         if abs(Date().timeIntervalSince(last)) < 10 { return "just now" }
         return Self.relative.localizedString(for: last, relativeTo: Date())
     }

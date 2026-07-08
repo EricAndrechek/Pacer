@@ -312,8 +312,8 @@ public actor OAuthPoller: TokenPoolTesting {
             return .failure(reason: reason)
         }
         ensureLanes()
-        if lanes.contains(where: { $0.credential.accessToken == trimmed }) {
-            return .alreadyTracked
+        if let existing = lanes.first(where: { $0.credential.accessToken == trimmed }) {
+            return .alreadyTracked(source: existing.source, fingerprint: Self.laneId(existing.credential.accessToken))
         }
         // Unknown local expiry — the server 401s when it lapses.
         lanes.append(Lane(
