@@ -7,8 +7,10 @@ model/parameter changes earn their way into the app — research in Python,
 ship in Swift.
 
 ```
-uv run pacer_replay.py            # score the shipping configuration
+uv run pacer_replay.py            # score the shipping configuration (fixed 5h/7d)
 uv run pacer_replay.py --conformal-mode cuts   # calibration experiments
+uv run pacer_replay.py --source usagelimit      # scoped per-model windows (ZUSAGELIMITSAMPLE)
+uv run pacer_replay.py --source usagelimit --identity "weekly_scoped|Fable|"
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
 uv run weekly_check.py            # the standing check (drift/promotions/sweep)
