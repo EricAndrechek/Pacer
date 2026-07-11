@@ -65,17 +65,19 @@ public final class TokenLaneMeta {
 extension OAuthPollScheduler.AccountStatus {
     public var rawValue: String {
         switch self {
-        case .unknown: return "unknown"
-        case .primary: return "primary"
-        case .foreign: return "foreign"
+        case .unknown:   return "unknown"
+        case .primary:   return "primary"
+        case .secondary: return "secondary"
         }
     }
 
     public init(rawValue: String) {
         switch rawValue {
-        case "primary": self = .primary
-        case "foreign": self = .foreign
-        default:        self = .unknown
+        case "primary":              self = .primary
+        // v0.3.22 persisted a different-account token as "foreign" (then
+        // dropped it). Multi-account tracks it instead, as a secondary.
+        case "secondary", "foreign": self = .secondary
+        default:                     self = .unknown
         }
     }
 }

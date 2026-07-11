@@ -49,19 +49,29 @@ public final class RateLimitSample {
     /// `"statusline"` or `"oauth"`. Lets the read path prefer one source
     /// over the other when both are fresh, and lets us debug-compare.
     public var source: String
+    /// Which account (`Account.id`) this sample belongs to. Optional +
+    /// additive: existing rows decode as nil, which every read treats as
+    /// "the active account" (they were all the single account's history).
+    /// The multi-account poller stamps this going forward, and the
+    /// active-account timeline swap (`OAuthPoller.setActiveAccount`) keeps
+    /// this table holding exactly the active account's rows — so no read
+    /// site has to filter on it. See `Account`.
+    public var accountId: String?
 
     public init(
         sampledAt: Date,
         window: String,
         usedPercentage: Double,
         resetsAt: Date?,
-        source: String
+        source: String,
+        accountId: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.window = window
         self.usedPercentage = usedPercentage
         self.resetsAt = resetsAt
         self.source = source
+        self.accountId = accountId
     }
 }
 
