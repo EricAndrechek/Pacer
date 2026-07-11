@@ -346,63 +346,12 @@ private struct PaceChartColumn: View {
     @ViewBuilder
     private var burnChipView: some View {
         if let latest, let outlook,
-           let chip = Self.burnChip(outlook: outlook, endEstimate: endEstimate,
-                                    duration: duration, usedPct: latest.usedPercentage) {
+           let chip = IntelligenceFormatting.burnChip(outlook: outlook, endEstimate: endEstimate,
+                                                      duration: duration, usedPct: latest.usedPercentage) {
             Chip(text: chip.text, systemImage: "flame.fill", tint: chip.tint, size: .compact)
                 .fixedSize()
                 .help(chip.help)
         }
-    }
-
-    /// Chip text + tint + tooltip for the burn outlook. nil when effectively
-    /// idle (chip hidden). Outcome language, not rate ratios: "at the limit"
-    /// (red) when the live reading is already at the cap, "limit in 7 hr"
-    /// (red) when a pre-reset hit is projected, "≈52% at reset" (colored by
-    /// burn health) otherwise, raw "+2.1%/hr" as the young-history fallback.
-    ///
-    /// `usedPct` is the LIVE reading the hero shows, deliberately separate from
-    /// `outlook.usedPct` (which is the engine's last-refit snapshot). When the
-    /// hero reads 100% we must never project a *future* crossing — the snapshot
-    /// can lag a percent or two behind and would otherwise say "limit in N min"
-    /// under a bold "100%".
-    private static func burnChip(
-        outlook: UsageIntelligenceEngine.BurnOutlook,
-        endEstimate: Estimate?,
-        duration: TimeInterval,
-        usedPct: Double
-    ) -> (text: String, tint: Color, help: String)? {
-        // At the cap as displayed (rounds to 100%, matching the hero): say so
-        // directly instead of projecting a crossing that's already behind us.
-        if usedPct.rounded() >= 100 {
-            return ("at the limit", .red,
-                    "You're at the top of this window — usage can't climb further until it resets.")
-        }
-        let ratio = IntelligenceFormatting.capPaceRatio(
-            slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
-        var help = IntelligenceFormatting.capPaceHelp(
-            slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
-        if outlook.willHitLimitBeforeReset,
-           let eta = IntelligenceFormatting.relativeCrossingPhrase(outlook) {
-            // The absolute crossing time complements the chip's relative
-            // form, demoted to hover so the same fact isn't printed twice.
-            if let phrase = IntelligenceFormatting.crossingPhrase(outlook) {
-                let when = phrase
-                    .replacingOccurrences(of: "→ may hit limit ", with: "")
-                    .replacingOccurrences(of: "→ limit ", with: "")
-                help += " Crossing projected \(when), at your typical rhythm."
-            }
-            return ("limit \(eta)", .red, help)
-        }
-        let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
-        if let e = endEstimate, !e.isInsufficient {
-            if let band = e.interval80 {
-                help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
-                               band.lowerBound, band.upperBound)
-            }
-            return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
-        }
-        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help)
     }
 
     /// One muted line of the user's own history with this window

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import PacerCore
 import PacerUI
 
@@ -246,5 +247,50 @@ enum IntelligenceFormatting {
     static func ordinal(_ n: Int) -> String {
         let f = NumberFormatter(); f.numberStyle = .ordinal
         return f.string(from: NSNumber(value: n)) ?? "\(n)th"
+    }
+
+    // MARK: - Burn chip (shared by the 5h/7d columns and the scoped tiles)
+
+    /// Chip text + tint + tooltip for a window's burn outlook — the single
+    /// source of truth for the "≈52% at reset" / "limit in 7 hr" / "at the
+    /// limit" verdict, used by both the fixed 5h/7d pace columns and the scoped
+    /// per-model tiles (extract-shared, don't copy). `nil` when effectively idle
+    /// (chip hidden). Outcome language, not rate ratios.
+    ///
+    /// `usedPct` is the LIVE reading the hero shows, deliberately separate from
+    /// `outlook.usedPct` (the engine's last-refit snapshot): when the hero reads
+    /// 100% we must never project a *future* crossing the lagging snapshot
+    /// implies.
+    static func burnChip(
+        outlook: UsageIntelligenceEngine.BurnOutlook,
+        endEstimate: Estimate?,
+        duration: TimeInterval,
+        usedPct: Double
+    ) -> (text: String, tint: Color, help: String)? {
+        if usedPct.rounded() >= 100 {
+            return ("at the limit", .red,
+                    "You're at the top of this window — usage can't climb further until it resets.")
+        }
+        let ratio = capPaceRatio(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        guard ratio >= 0.05 else { return nil }          // effectively idle — say nothing
+        var help = capPaceHelp(slopePercentPerHour: outlook.slopePercentPerHour, windowSeconds: duration)
+        if outlook.willHitLimitBeforeReset, let eta = relativeCrossingPhrase(outlook) {
+            if let phrase = crossingPhrase(outlook) {
+                let when = phrase
+                    .replacingOccurrences(of: "→ may hit limit ", with: "")
+                    .replacingOccurrences(of: "→ limit ", with: "")
+                help += " Crossing projected \(when), at your typical rhythm."
+            }
+            return ("limit \(eta)", .red, help)
+        }
+        let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
+        if let e = endEstimate, !e.isInsufficient {
+            if let band = e.interval80 {
+                help += String(format: " Calibrated range at reset: %.0f–%.0f%%.",
+                               band.lowerBound, band.upperBound)
+            }
+            return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
+        }
+        return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help)
     }
 }

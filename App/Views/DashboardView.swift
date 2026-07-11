@@ -49,9 +49,12 @@ struct DashboardView: View {
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
             })
-            // Scoped limits[] card — hides itself when the account has no
-            // limits[] data. See LimitsCard. (MERGE: added by feat/oauth-limits.)
-            LimitsCard()
+            // Scoped per-model pace tiles — hides itself when the account has
+            // no scoped limits[] data. Tapping a tile opens the same projection
+            // modal the 5h/7d columns use, keyed by the scoped identity.
+            LimitsCard(onCompare: { identity in
+                modalRoot = .projection(window: identity)
+            })
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
