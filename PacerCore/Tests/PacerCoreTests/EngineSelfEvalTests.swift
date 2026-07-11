@@ -173,7 +173,7 @@ struct EngineSelfEvalTests {
     @Test func burnOutlookFlagsAPreResetCrossingOnASteepCycle() {
         let f = steepFiveHourFeatures()
         let fit = UsageIntelligenceEngine.makeFit(f)
-        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, window: .fiveHour)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: "five_hour")
         #expect(outlook != nil)
         #expect(outlook!.slopePercentPerHour > 10)            // climbing hard
         #expect(outlook!.willHitLimitBeforeReset)             // crossing flagged
@@ -196,7 +196,7 @@ struct EngineSelfEvalTests {
         let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
                                      rate: rate, lastArrivalAt: nil)
         let fit = UsageIntelligenceEngine.makeFit(f)
-        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, window: .fiveHour)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: "five_hour")
         #expect(outlook != nil)
         #expect(!outlook!.willHitLimitBeforeReset)
         #expect(abs(outlook!.slopePercentPerHour) < 1)
@@ -205,7 +205,7 @@ struct EngineSelfEvalTests {
     @Test func trajectoriesSpanNowToResetAndFlagSelection() {
         let f = steepFiveHourFeatures()
         let fit = UsageIntelligenceEngine.makeFit(f)
-        let list = UsageIntelligenceEngine.rateLimitTrajectories(f, fit, window: .fiveHour, accuracy: nil)
+        let list = UsageIntelligenceEngine.rateLimitTrajectories(f, fit, windowKey: "five_hour", accuracy: nil)
         #expect(!list.isEmpty)
         #expect(list.filter { $0.isSelected }.count <= 1)
         for st in list {

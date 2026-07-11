@@ -29,6 +29,10 @@ public enum EngineQuestion: Sendable, Equatable {
     case projectedCost(CostHorizon)
     /// Projected final utilisation at the window's reset (percentage points).
     case rateLimitOutlook(RateLimitWindowKind)
+    /// Projected final utilisation for a SCOPED per-model window, keyed by its
+    /// `limits[]` identity (`kind|model|surface`). Same forecast/band treatment
+    /// as `rateLimitOutlook`; the generic sibling for windows the server invents.
+    case scopedOutlook(String)
     /// Today's projected spend as a percentile of the user's own daily norm.
     case pace
     /// Spend-so-far vs the user's typical spend **by this hour** on this kind
@@ -187,14 +191,17 @@ public actor UsageIntelligenceEngine {
 
         // Pick each rate-limit window's outlook model from its accumulated
         // record (the diurnal model now competes here on realized accuracy).
+        // Iterates the generic window SET — fixed 5h/7d plus any scoped
+        // per-model windows — each keyed by its own surface, so scoped windows
+        // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
-        for window in RateLimitWindowKind.allCases {
-            let surface = EngineSelfEval.rlSurface(window.rawValue)
+        for window in f.windows {
+            let surface = EngineSelfEval.rlSurface(window.key)
             let recs = records(surface)
             accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs)
-            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(window),
-                                                    provisionalMinPeriods: Self.rlShadowFloors(window)) {
-                rlSelection[window.rawValue] = pick
+            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
+                                                    provisionalMinPeriods: Self.rlShadowFloors(duration: window.duration)) {
+                rlSelection[window.key] = pick
             }
         }
 
@@ -241,8 +248,9 @@ public actor UsageIntelligenceEngine {
     }
 
     /// Roster complexities for a rate-limit window — so the persisted-scoreboard
-    /// pick can break near-ties toward the simpler model.
-    static func rlComplexities(_ window: RateLimitWindowKind) -> [String: Int] {
+    /// pick can break near-ties toward the simpler model. Window-agnostic (every
+    /// window shares the one roster), so it takes no window argument.
+    static func rlComplexities() -> [String: Int] {
         var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
         c["diurnal-rate"] = 3
         return c
@@ -251,14 +259,24 @@ public actor UsageIntelligenceEngine {
     /// The SHADOW candidates for a window and the promotion floor each must
     /// clear (completed periods in its scored record) before `bestMethod` may
     /// select it for display. Kalman is new everywhere; the diurnal model is
-    /// established on 7d but a shadow on 5h — the 2026-06 backtest measured a
-    /// null there (5h cycles rarely straddle a day/night boundary), and the
-    /// shadow record re-tests that assumption instead of trusting it forever.
-    public static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
+    /// established on weekly-cadence windows but a shadow on session-cadence
+    /// ones — the 2026-06 backtest measured a null on the 5h block (session
+    /// cycles rarely straddle a day/night boundary), and the shadow record
+    /// re-tests that assumption instead of trusting it forever. Keyed off the
+    /// window's *duration* (via `WindowSpec.isWeeklyScale`), so scoped per-model
+    /// windows get the same rule with no new code — a scoped weekly cap treats
+    /// diurnal as established, a scoped session cap as a shadow.
+    public static func rlShadowFloors(duration: TimeInterval) -> [String: Int] {
         let floor = EngineParams.current.shadowPromotionMinPeriods
         var floors = ["kalman-trend": floor]
-        if window == .fiveHour { floors["diurnal-rate"] = floor }
+        if !WindowSpec.isWeeklyScale(duration: duration) { floors["diurnal-rate"] = floor }
         return floors
+    }
+
+    /// Enum-typed adapter for the fixed windows — preserved for the widget/UI/
+    /// tests that ask by `RateLimitWindowKind`.
+    public static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
+        rlShadowFloors(duration: WindowSpec.fixed(window).duration)
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -279,7 +297,8 @@ public actor UsageIntelligenceEngine {
         switch question {
         case .projectedCost(.today):     return projectedCostToday(f, fit)
         case .projectedCost(.thisMonth): return MonthlyProjector.project(dailyCosts: f.dailyCosts, now: f.now, calendar: f.calendar)
-        case .rateLimitOutlook(let w):   return rateLimitOutlook(f, fit, window: w)
+        case .rateLimitOutlook(let w):   return rateLimitOutlook(f, fit, windowKey: w.rawValue)
+        case .scopedOutlook(let key):    return rateLimitOutlook(f, fit, windowKey: key)
         case .pace:                      return pace(f, fit)
         case .paceVsNow:                 return paceVsNow(f)
         case .typicalUsage:              return typicalUsage(fit, weekday: f.calendar.component(.weekday, from: f.now))
@@ -345,8 +364,7 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Rate-limit outlook
 
-    static func rateLimitOutlook(_ f: EngineFeatures, _ fit: Fit, window: RateLimitWindowKind) -> Estimate {
-        let key = window.rawValue
+    static func rateLimitOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String) -> Estimate {
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else {
             return .insufficient(method: "rate-limit", note: "no rate-limit history yet")
         }
@@ -429,18 +447,26 @@ public actor UsageIntelligenceEngine {
 
     public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
         guard let f = features else { return nil }
-        return Self.burnOutlook(f, fit, window: window)
+        return Self.burnOutlook(f, fit, windowKey: window.rawValue)
     }
 
-    static func burnOutlook(_ f: EngineFeatures, _ fit: Fit, window: RateLimitWindowKind) -> BurnOutlook? {
-        let key = window.rawValue
+    /// Generic sibling keyed by window identity — for scoped per-model windows.
+    public func burnOutlook(windowKey key: String) -> BurnOutlook? {
+        guard let f = features else { return nil }
+        return Self.burnOutlook(f, fit, windowKey: key)
+    }
+
+    static func burnOutlook(_ f: EngineFeatures, _ fit: Fit, windowKey key: String) -> BurnOutlook? {
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return nil }
         let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
         guard let current = currentOpt, current.resetsAt > f.now else { return nil }
 
         // Descriptive slope over the recent lookback (clamped to this cycle so
-        // a reset boundary can't produce a bogus negative).
-        let lookback: TimeInterval = window == .fiveHour ? 90 * 60 : 24 * 3600
+        // a reset boundary can't produce a bogus negative). Session-cadence
+        // windows read a 90-min lookback, weekly-cadence ones 24 h — derived
+        // from the window's duration so it's identical for the fixed 5h/7d
+        // blocks and correct for any scoped window.
+        let lookback: TimeInterval = WindowSpec.isWeeklyScale(duration: rf.duration) ? 24 * 3600 : 90 * 60
         let cutoff = max(current.cycleStart, f.now.addingTimeInterval(-lookback))
         let recent = current.samples.filter { $0.at >= cutoff }
         var slope = 0.0
@@ -520,9 +546,10 @@ public actor UsageIntelligenceEngine {
     /// already truncated at the crossing.
     public func snapshot() -> EngineSnapshot {
         func windowOutlook(_ window: RateLimitWindowKind) -> EngineSnapshot.WindowOutlook? {
-            guard let f = features, let o = Self.burnOutlook(f, fit, window: window) else { return nil }
-            let end = Self.rateLimitOutlook(f, fit, window: window)
-            let selected = Self.rateLimitTrajectories(f, fit, window: window, accuracy: nil, sampleCount: 24)
+            let key = window.rawValue
+            guard let f = features, let o = Self.burnOutlook(f, fit, windowKey: key) else { return nil }
+            let end = Self.rateLimitOutlook(f, fit, windowKey: key)
+            let selected = Self.rateLimitTrajectories(f, fit, windowKey: key, accuracy: nil, sampleCount: 24)
                 .first { $0.isSelected }
             return EngineSnapshot.WindowOutlook(
                 usedPct: o.usedPct,
@@ -563,16 +590,20 @@ public actor UsageIntelligenceEngine {
     /// chart's overlay (take the selected one) and the compare-models sheet
     /// (show them all).
     public func rateLimitTrajectories(window: RateLimitWindowKind) -> [BurnTrajectory.ScoredTrajectory] {
+        rateLimitTrajectories(windowKey: window.rawValue)
+    }
+
+    /// Generic sibling keyed by window identity — for scoped per-model windows.
+    public func rateLimitTrajectories(windowKey key: String) -> [BurnTrajectory.ScoredTrajectory] {
         guard let f = features else { return [] }
-        let accuracy = accuracyBySurface[EngineSelfEval.rlSurface(window.rawValue)]
-        return Self.rateLimitTrajectories(f, fit, window: window, accuracy: accuracy)
+        let accuracy = accuracyBySurface[EngineSelfEval.rlSurface(key)]
+        return Self.rateLimitTrajectories(f, fit, windowKey: key, accuracy: accuracy)
     }
 
     static func rateLimitTrajectories(
-        _ f: EngineFeatures, _ fit: Fit, window: RateLimitWindowKind,
+        _ f: EngineFeatures, _ fit: Fit, windowKey key: String,
         accuracy: EngineSelfEval.Accuracy?, sampleCount: Int = 48
     ) -> [BurnTrajectory.ScoredTrajectory] {
-        let key = window.rawValue
         guard let samples = f.rateLimit[key], let rf = fit.rl[key] else { return [] }
         let (currentOpt, _) = BurnTrajectory.segment(samples: samples, duration: rf.duration, now: f.now)
         guard let current = currentOpt else { return [] }
@@ -722,41 +753,46 @@ public actor UsageIntelligenceEngine {
         fit.normBands = normBands(prior)
         fit.anomaly = anomalyEstimate(prior)
 
-        // Rate-limit fits per window.
-        for window in RateLimitWindowKind.allCases {
-            guard let samples = f.rateLimit[window.rawValue], !samples.isEmpty,
-                  let duration = PaceMath.windowDuration(for: window.rawValue) else { continue }
+        // Rate-limit fits per window — the generic window SET (fixed 5h/7d plus
+        // any scoped per-model windows). Each spec carries its own `(key,
+        // duration)`; the pure math below is identical across windows.
+        for window in f.windows {
+            let key = window.key
+            let duration = window.duration
+            guard let samples = f.rateLimit[key], !samples.isEmpty else { continue }
             let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
 
-            // The diurnal model competes on both windows now: established on
-            // 7d (where the idle structure lives), a promotion-gated SHADOW
-            // on 5h — the 2026-06 "measured null" there gets re-tested by the
-            // accumulating record instead of trusted forever.
+            // The diurnal model competes on every window: established on
+            // weekly-cadence windows (where the idle structure lives), a
+            // promotion-gated SHADOW on session-cadence ones — the 2026-06
+            // "measured null" on the 5h block gets re-tested by the accumulating
+            // record instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
             let table = DiurnalBurnModel.rateTable(cycles: history, calendar: f.calendar, prior: f.activityGrid)
             roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
 
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default
-            // (diurnal for 7d — it works off the activity prior even with no
-            // completed cycles — recency-weighted for 5h). The cold backtest
-            // runs ONLY when the record can't pick: it scores every model over
-            // every cycle (for the diurnal model that's a forward integration
-            // per scored point), which is most of a refit's cost — paying it
-            // each tick when the record already decided was the 1.4s refit.
+            // (diurnal for weekly-cadence windows — it works off the activity
+            // prior even with no completed cycles — recency-weighted for
+            // session-cadence ones). The cold backtest runs ONLY when the record
+            // can't pick: it scores every model over every cycle (for the
+            // diurnal model that's a forward integration per scored point),
+            // which is most of a refit's cost — paying it each tick when the
+            // record already decided was the 1.4s refit.
             let selectedId: String
-            if let learned = rlSelection[window.rawValue] {
+            if let learned = rlSelection[key] {
                 selectedId = learned
             } else {
                 // Cold start never displays a shadow candidate — the whole
                 // point of the promotion floor is that new models earn
                 // display from the persisted record, not a cold backtest.
-                let shadowIds = Set(Self.rlShadowFloors(window).keys)
+                let shadowIds = Set(Self.rlShadowFloors(duration: duration).keys)
                 let scores = BurnTrajectory.score(models: roster.filter { !shadowIds.contains($0.id) },
                                                   cycles: history)
                 selectedId = ForecastSelector.select(
                     scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
-                    ?? (window == .sevenDay ? "diurnal-rate" : "recency-weighted")
+                    ?? (WindowSpec.isWeeklyScale(duration: duration) ? "diurnal-rate" : "recency-weighted")
             }
             let model = roster.first { $0.id == selectedId } ?? roster.first
 
@@ -769,7 +805,7 @@ public actor UsageIntelligenceEngine {
                 if peak >= 100 { hit100 += 1 }
             }
 
-            fit.rl[window.rawValue] = RateLimitFit(
+            fit.rl[key] = RateLimitFit(
                 roster: roster, selectedId: selectedId,
                 calibrators: model.map { stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar) } ?? [:],
                 duration: duration, historyCount: history.count,
@@ -1032,10 +1068,10 @@ public actor UsageIntelligenceEngine {
     /// the band-evidence facts (stratum, residual count) the views don't show.
     static func snapshotDrafts(_ f: EngineFeatures, _ fit: Fit) -> [SnapshotDraft] {
         var out: [SnapshotDraft] = []
-        for window in RateLimitWindowKind.allCases {
-            guard let o = burnOutlook(f, fit, window: window) else { continue }
-            let key = window.rawValue
-            let est = rateLimitOutlook(f, fit, window: window)
+        for window in f.windows {
+            let key = window.key
+            guard let o = burnOutlook(f, fit, windowKey: key) else { continue }
+            let est = rateLimitOutlook(f, fit, windowKey: key)
             var stratum: String?
             var residuals: Int?
             if let samples = f.rateLimit[key], let rf = fit.rl[key],
@@ -1182,14 +1218,13 @@ public actor UsageIntelligenceEngine {
     private func newRLOutcomes(features f: EngineFeatures, calendar: Calendar, now: Date,
                                existingKeys: Set<String>) -> [EngineSelfEval.NewOutcome] {
         var out: [EngineSelfEval.NewOutcome] = []
-        for window in RateLimitWindowKind.allCases {
-            guard let samples = f.rateLimit[window.rawValue], !samples.isEmpty,
-                  let duration = PaceMath.windowDuration(for: window.rawValue) else { continue }
-            let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: now)
+        for window in f.windows {
+            guard let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
+            let (_, history) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
             let completed = history.filter { $0.resetsAt <= now }
             guard !completed.isEmpty else { continue }
             out += EngineSelfEval.newOutcomesRL(
-                window: window.rawValue, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
+                window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
                 existingKeys: existingKeys,
                 includeDiurnal: true)
         }
