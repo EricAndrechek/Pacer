@@ -16,6 +16,7 @@ import Testing
             ProjectDailyAggregate.self,
             RateLimitSample.self,
             ExtraUsageSample.self,
+            UsageLimitSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,
             TokenLaneMeta.self,

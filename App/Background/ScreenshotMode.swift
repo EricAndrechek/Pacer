@@ -353,6 +353,7 @@ extension ScreenshotMode {
         seedPriorHourly(ctx, startOfToday: startOfToday, cal: cal)
         seedTodayHourly(ctx, today: TokenSample.formatDate(startOfToday), now: now, cal: cal)
         seedRateLimits(ctx, now: now)
+        seedUsageLimits(ctx, now: now)
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
@@ -610,6 +611,43 @@ extension ScreenshotMode {
             }
             t = t.addingTimeInterval(interval)
             i += 1
+        }
+    }
+
+    /// Seed one poll's worth of scoped `limits[]` rows for `LimitsCard`.
+    /// Fake data only — a session window, an account-wide weekly (the
+    /// binding one), and a few per-model weekly windows spanning every
+    /// color band, so the demo/screenshot render exercises the real
+    /// grouping + severity color path.
+    private static func seedUsageLimits(_ ctx: ModelContext, now: Date) {
+        let sessionReset = now.addingTimeInterval(2 * 3600 + 19 * 60)
+        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
+        // (kind, group, label, model, percent, active, reset)
+        let rows: [(String, String, String, String?, Double, Bool, Date)] = [
+            ("session",       "session", "All models", nil,      39, false, sessionReset),
+            ("weekly_all",    "weekly",  "All models", nil,      71, true,  weeklyReset),
+            ("weekly_scoped", "weekly",  "Haiku",      "Haiku",  93, false, weeklyReset),
+            ("weekly_scoped", "weekly",  "Opus",       "Opus",   84, false, weeklyReset),
+            ("weekly_scoped", "weekly",  "Fable",      "Fable",  49, false, weeklyReset),
+            ("weekly_scoped", "weekly",  "Sonnet",     "Sonnet", 22, false, weeklyReset),
+        ]
+        for (kind, group, label, model, pct, active, reset) in rows {
+            let identity = "\(kind)|\(model ?? "")|"
+            ctx.insert(UsageLimitSample(
+                sampledAt: now,
+                identity: identity,
+                kind: kind,
+                group: group,
+                label: label,
+                percent: pct,
+                resetsAt: reset,
+                severity: "normal",
+                isActive: active,
+                modelId: nil,
+                modelDisplayName: model,
+                surface: nil,
+                source: "oauth"
+            ))
         }
     }
 

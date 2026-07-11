@@ -43,18 +43,29 @@ public struct RateLimitSnapshot: Sendable, Equatable {
     /// surface it).
     public let organizationId: String?
 
+    /// The newer, scoped, extensible `limits[]` representation — a strict
+    /// superset of `fiveHour`/`sevenDay` that also carries per-model weekly
+    /// windows, `severity`, and the binding-limit flag. Empty when the
+    /// server omitted the array (older server) or every item was malformed;
+    /// each present item renders and persists generically, so a new model /
+    /// kind / group / surface flows through with no code change. Additive
+    /// and defaulted so existing callers/tests are untouched.
+    public let limits: [UsageLimit]
+
     public init(
         sampledAt: Date,
         fiveHour: RateLimitWindow?,
         sevenDay: RateLimitWindow?,
         extraUsageCents: Int? = nil,
-        organizationId: String? = nil
+        organizationId: String? = nil,
+        limits: [UsageLimit] = []
     ) {
         self.sampledAt = sampledAt
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.extraUsageCents = extraUsageCents
         self.organizationId = organizationId
+        self.limits = limits
     }
 }
 

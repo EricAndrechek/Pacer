@@ -148,7 +148,7 @@ import Testing
         return try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
             RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self,
-            Account.self, AccountUsageArchive.self, configurations: config
+            Account.self, AccountUsageArchive.self, UsageLimitSample.self, configurations: config
         )
     }
 
@@ -243,7 +243,7 @@ import Testing
         let container = try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
             RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self,
-            Account.self, AccountUsageArchive.self, configurations: config
+            Account.self, AccountUsageArchive.self, UsageLimitSample.self, configurations: config
         )
         let pool = EphemeralTokenPoolStore([
             StoredToken(
