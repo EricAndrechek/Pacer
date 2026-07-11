@@ -61,6 +61,11 @@ struct EngineFeatures: Sendable {
     /// gone quiet?" signal. `nil` when there's been no activity at all.
     let lastArrivalAt: Date?
 
+    /// Scoped window identities that were the *binding* limit in their group in
+    /// the latest poll — the "this is what's gating you right now" hint the
+    /// snapshot/widget surfaces. A pure display flag; it never enters a forecast.
+    let activeScopedIdentities: Set<String>
+
     // MARK: - Plain input rows (so `build` is SwiftData-free and testable)
 
     struct DailyRow: Sendable { let date: String; let cost: Double }
@@ -86,6 +91,8 @@ struct EngineFeatures: Sendable {
         /// only identities still present there get a live `WindowSpec`, so a
         /// vanished limit simply goes quiet (staleness guard).
         let inLatestBatch: Bool
+        /// The `is_active` binding flag as of this row (display hint only).
+        let isActive: Bool
     }
 
     /// Build the feature snapshot from store rows. Pure — no I/O, no clock
@@ -161,11 +168,16 @@ struct EngineFeatures: Sendable {
         var windows = WindowSpec.fixedWindows
         windows.append(contentsOf: scopedWindows(scoped))
 
+        // Binding scoped identities (latest batch, is_active) — the widget hint.
+        let activeScoped = Set(scoped.lazy
+            .filter { $0.inLatestBatch && $0.isActive && isModelScoped($0) }
+            .map { $0.identity })
+
         return EngineFeatures(
             now: now, calendar: calendar, todayStart: todayStart,
             dailyCosts: dailyCosts, dailyPeriods: dailyPeriods, todayElapsed: todayElapsed,
             rateLimit: rateLimit, windows: windows, activityGrid: activityGrid,
-            lastArrivalAt: lastArrivalAt)
+            lastArrivalAt: lastArrivalAt, activeScopedIdentities: activeScoped)
     }
 
     /// Resolve the scoped `WindowSpec` set from scoped rows: one spec per

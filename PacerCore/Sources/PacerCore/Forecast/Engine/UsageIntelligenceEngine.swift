@@ -137,7 +137,8 @@ public actor UsageIntelligenceEngine {
             daily: fetchDaily(),
             hourly: fetchHourly(),
             rate: fetchRate(now: now),
-            lastArrivalAt: fetchLastArrival())
+            lastArrivalAt: fetchLastArrival(),
+            scoped: fetchScopedLimits(now: now))
         self.features = f
 
         // Self-eval feedback loop: score newly-completed periods into the
@@ -216,6 +217,23 @@ public actor UsageIntelligenceEngine {
     /// Number of historical days the fit was trained on — for a future
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
+
+    /// The scoped per-model windows the engine is currently forecasting —
+    /// discovered dynamically from the latest poll's model/surface-scoped
+    /// `limits[]` rows. The `ScopedPaceTile` grid drives off this list and asks
+    /// `burnOutlook(windowKey:)` / `ask(.scopedOutlook(_:))` /
+    /// `rateLimitTrajectories(windowKey:)` per identity — the SAME forecast
+    /// surface the fixed 5h/7d hero cards use. Empty until the first recompute
+    /// or when the account has no scoped windows.
+    public func scopedWindows() -> [WindowSpec] {
+        (features?.windows ?? []).filter { $0.isScoped }
+    }
+
+    /// Whether a scoped identity is the binding limit in its group as of the
+    /// latest poll (the "gating you right now" hint).
+    public func isScopedWindowActive(_ identity: String) -> Bool {
+        features?.activeScopedIdentities.contains(identity) ?? false
+    }
 
     /// The evening track record — how close the engine's end-of-day answer has
     /// landed once most of the day is observed (cuts ≥ 0.75), as a
@@ -545,8 +563,7 @@ public actor UsageIntelligenceEngine {
     /// actor from their process). Trajectories downsampled to ≤24 points and
     /// already truncated at the crossing.
     public func snapshot() -> EngineSnapshot {
-        func windowOutlook(_ window: RateLimitWindowKind) -> EngineSnapshot.WindowOutlook? {
-            let key = window.rawValue
+        func windowOutlook(key: String) -> EngineSnapshot.WindowOutlook? {
             guard let f = features, let o = Self.burnOutlook(f, fit, windowKey: key) else { return nil }
             let end = Self.rateLimitOutlook(f, fit, windowKey: key)
             let selected = Self.rateLimitTrajectories(f, fit, windowKey: key, accuracy: nil, sampleCount: 24)
@@ -561,6 +578,20 @@ public actor UsageIntelligenceEngine {
                 trajectory: (selected?.trajectory.points ?? []).map {
                     .init(t: $0.at.timeIntervalSince1970, v: $0.usedPercentage)
                 })
+        }
+        // Scoped per-model windows: one outlook per discovered scoped spec that
+        // still has a live cycle, keyed by identity so a widget can match it to
+        // a live row. Same forecast bundle as the fixed windows.
+        func scopedOutlooks() -> [EngineSnapshot.ScopedWindowOutlook]? {
+            guard let f = features else { return nil }
+            let out: [EngineSnapshot.ScopedWindowOutlook] = f.windows.compactMap { spec in
+                guard case let .scoped(identity, group, _, _, _) = spec.origin,
+                      let o = windowOutlook(key: spec.key) else { return nil }
+                return EngineSnapshot.ScopedWindowOutlook(
+                    identity: identity, displayName: spec.displayName, group: group,
+                    isActive: f.activeScopedIdentities.contains(identity), outlook: o)
+            }
+            return out.isEmpty ? nil : out
         }
         func costOutlook() -> EngineSnapshot.CostOutlook? {
             guard let f = features else { return nil }
@@ -579,9 +610,10 @@ public actor UsageIntelligenceEngine {
         }
         return EngineSnapshot(
             generatedUnix: Date().timeIntervalSince1970,
-            fiveHour: windowOutlook(.fiveHour),
-            sevenDay: windowOutlook(.sevenDay),
-            cost: costOutlook())
+            fiveHour: windowOutlook(key: RateLimitWindowKind.fiveHour.rawValue),
+            sevenDay: windowOutlook(key: RateLimitWindowKind.sevenDay.rawValue),
+            cost: costOutlook(),
+            scoped: scopedOutlooks())
     }
 
     /// Every candidate model's forward trajectory for a window's current cycle,
@@ -1182,6 +1214,30 @@ public actor UsageIntelligenceEngine {
             sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
+    }
+
+    /// ~32 days of scoped `limits[]` samples (`UsageLimitSample`) mapped to the
+    /// engine's `ScopedRow` — the per-model weekly windows the driver forecasts
+    /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`. The poller keeps
+    /// this table holding only the active account's rows (the archive-swap
+    /// parity added in Decision D), so no accountId filter is applied here.
+    /// `inLatestBatch` marks the most-recent poll's rows (the staleness guard:
+    /// a limit that vanished from the latest response goes quiet).
+    private func fetchScopedLimits(now: Date) -> [EngineFeatures.ScopedRow] {
+        let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
+        let descriptor = FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate { $0.sampledAt >= cutoff },
+            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        let rows = (try? modelContext.fetch(descriptor)) ?? []
+        guard let newest = rows.map(\.sampledAt).max() else { return [] }
+        let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance
+        return rows.map { r in
+            EngineFeatures.ScopedRow(
+                identity: r.identity, group: r.group, label: r.label,
+                modelId: r.modelId, modelDisplayName: r.modelDisplayName, surface: r.surface,
+                at: r.sampledAt, usedPercentage: r.percent, resetsAt: r.resetsAt,
+                inLatestBatch: r.sampledAt >= batchCutoff, isActive: r.isActive)
+        }
     }
 
     private func fetchLastArrival() -> Date? {
