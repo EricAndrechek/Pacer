@@ -73,6 +73,15 @@ public final class UsageLimitSample {
     /// source can be distinguished.
     public var source: String
 
+    /// Which account (`Account.id`) this scoped sample belongs to. Optional +
+    /// additive: existing rows decode as nil (they were the single account's
+    /// history). The multi-account poller stamps this going forward, and the
+    /// active-account timeline swap (`OAuthPoller.swapActiveTimeline`) archives/
+    /// restores this table alongside `RateLimitSample`, so it holds exactly the
+    /// active account's scoped rows and two accounts that share a model identity
+    /// (e.g. both have a "Fable" weekly) never mix. See `Account`.
+    public var accountId: String?
+
     public init(
         sampledAt: Date,
         identity: String,
@@ -86,7 +95,8 @@ public final class UsageLimitSample {
         modelId: String? = nil,
         modelDisplayName: String? = nil,
         surface: String? = nil,
-        source: String
+        source: String,
+        accountId: String? = nil
     ) {
         self.sampledAt = sampledAt
         self.identity = identity
@@ -101,10 +111,11 @@ public final class UsageLimitSample {
         self.modelDisplayName = modelDisplayName
         self.surface = surface
         self.source = source
+        self.accountId = accountId
     }
 
     /// Build a persistable row from a parsed `UsageLimit`.
-    public convenience init(from limit: UsageLimit, sampledAt: Date, source: String) {
+    public convenience init(from limit: UsageLimit, sampledAt: Date, source: String, accountId: String? = nil) {
         self.init(
             sampledAt: sampledAt,
             identity: limit.identity,
@@ -118,7 +129,8 @@ public final class UsageLimitSample {
             modelId: limit.scope?.model?.id,
             modelDisplayName: limit.scope?.model?.displayName,
             surface: limit.scope?.surface,
-            source: source
+            source: source,
+            accountId: accountId
         )
     }
 

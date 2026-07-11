@@ -69,6 +69,18 @@ import Testing
         }
     }
 
+    /// Sendable scoped-limit summary for cross-actor assertions.
+    private static func fetchScopedSummaries(
+        in container: ModelContainer
+    ) async throws -> [(identity: String, percent: Double, accountId: String?)] {
+        try await MainActor.run {
+            let context = ModelContext(container)
+            return try context.fetch(FetchDescriptor<UsageLimitSample>()).map {
+                (identity: $0.identity, percent: $0.percent, accountId: $0.accountId)
+            }
+        }
+    }
+
     /// Sendable account summary for cross-actor assertions.
     struct AccountRow: Sendable { let id: String; let isActive: Bool; let latestFiveHourPct: Double? }
 
@@ -253,6 +265,63 @@ import Testing
         #expect(rows.contains { $0.usedPercentage == 10.0 })
         #expect(!rows.contains { $0.usedPercentage == 77.0 })   // B's rows aren't in A's timeline
         #expect(await poller.snapshot().activeAccountKey == "orgA")
+    }
+
+    /// Scoped `limits[]` history is per-account too (Decision D): a secondary
+    /// account's scoped rows never land in the live timeline, and switching
+    /// active accounts archives/restores the scoped rows alongside the fixed
+    /// windows — two accounts that share a model identity never mix.
+    @Test func scopedLimitsAreIsolatedPerAccountAcrossSwitch() async throws {
+        let container = try Self.makeContainer()
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
+        ))
+        let counter = AtomicCounter()
+        // Both accounts have a "Fable" weekly scoped window (SAME identity) at
+        // different utilisations — the exact mixing hazard Decision D closes.
+        func body(five: Int, fable: Int, org: String) -> HTTPOutcome {
+            .success(
+                jsonBody: """
+                {"five_hour":{"utilization":\(five)},"limits":[{"kind":"weekly_scoped","group":"weekly","percent":\(fable),"severity":"normal","resets_at":"2026-07-13T09:59:59+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":true}]}
+                """,
+                headers: ["anthropic-organization-id": org])
+        }
+        let outcomes = [body(five: 10, fable: 40, org: "orgA"),   // A active
+                        body(five: 99, fable: 88, org: "orgB"),   // B secondary
+                        body(five: 77, fable: 66, org: "orgB")]   // B active
+        let transport: OAuthClient.Transport = { _ in
+            try outcomes[min(counter.next(), outcomes.count - 1)].materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
+        let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()   // orgA active → writes Fable@40 stamped orgA
+        _ = await poller.runOnce()   // orgB secondary → must NOT write scoped rows
+
+        var scoped = try await Self.fetchScopedSummaries(in: container)
+        #expect(scoped.count == 1)                                  // only A's row
+        #expect(scoped.first?.percent == 40)
+        #expect(scoped.allSatisfy { $0.accountId == "orgA" })       // stamped + gated
+
+        // Switch to B: A's scoped rows archive out, live table empties.
+        await poller.setActiveAccount(id: "orgB")
+        scoped = try await Self.fetchScopedSummaries(in: container)
+        #expect(scoped.isEmpty)
+
+        // Poll B active → its Fable@66 lands, stamped orgB.
+        if case .success = await poller.testLane(id: OAuthPoller.laneId("tokB")) {} else {
+            Issue.record("expected success polling active org B")
+        }
+        scoped = try await Self.fetchScopedSummaries(in: container)
+        #expect(scoped.contains { $0.percent == 66 && $0.accountId == "orgB" })
+        #expect(!scoped.contains { $0.percent == 40 })              // A's row isn't mixed in
+
+        // Switch back to A: A's Fable@40 restored, B's gone.
+        await poller.setActiveAccount(id: "orgA")
+        scoped = try await Self.fetchScopedSummaries(in: container)
+        #expect(scoped.contains { $0.percent == 40 && $0.accountId == "orgA" })
+        #expect(!scoped.contains { $0.percent == 66 })
     }
 
     /// A single-account user with pre-existing (accountId == nil) history

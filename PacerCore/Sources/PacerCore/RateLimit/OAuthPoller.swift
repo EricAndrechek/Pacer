@@ -1223,15 +1223,18 @@ public actor OAuthPoller: TokenPoolTesting {
                 // them back as one "latest batch" — a limit dropped from the
                 // response simply stops appearing. Keyed by a stable composite
                 // identity, so new models/kinds persist with no schema change.
-                // Gated to the active account: `UsageLimitSample` isn't
-                // per-account-archived yet, so only the active account's limits
-                // land in the shared timeline — a secondary (non-active)
-                // account's limits must never pollute it.
+                // Gated to the active account, and stamped with `accountId` so
+                // the active-account timeline swap can archive/restore these
+                // rows alongside `RateLimitSample` — a secondary (non-active)
+                // account's limits never pollute the live timeline, and two
+                // accounts that share a model identity (e.g. both have a "Fable"
+                // weekly) keep separate scoped history.
                 for limit in captured.limits {
                     context.insert(UsageLimitSample(
                         from: limit,
                         sampledAt: captured.sampledAt,
-                        source: RateLimitSource.oauth
+                        source: RateLimitSource.oauth,
+                        accountId: key
                     ))
                     wroteAnyWindow = true
                 }
@@ -1283,6 +1286,27 @@ public actor OAuthPoller: TokenPoolTesting {
                     ))
                     context.delete(e)
                 }
+                let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>())) ?? []
+                for l in limits {
+                    context.insert(AccountUsageArchive(
+                        accountId: outgoing,
+                        kind: AccountUsageArchive.kindUsageLimit,
+                        sampledAt: l.sampledAt,
+                        usedPercentage: l.percent,
+                        resetsAt: l.resetsAt,
+                        source: l.source,
+                        identity: l.identity,
+                        limitKind: l.kind,
+                        group: l.group,
+                        label: l.label,
+                        severity: l.severity,
+                        isActive: l.isActive,
+                        modelId: l.modelId,
+                        modelDisplayName: l.modelDisplayName,
+                        surface: l.surface
+                    ))
+                    context.delete(l)
+                }
             }
 
             // 2. Restore the incoming account's archived rows (if any).
@@ -1290,7 +1314,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 predicate: #Predicate { $0.accountId == incoming }
             ))) ?? []
             for a in archived {
-                if a.kind == AccountUsageArchive.kindRateLimit {
+                switch a.kind {
+                case AccountUsageArchive.kindRateLimit:
                     context.insert(RateLimitSample(
                         sampledAt: a.sampledAt,
                         window: a.window ?? RateLimitWindowName.fiveHour,
@@ -1299,7 +1324,24 @@ public actor OAuthPoller: TokenPoolTesting {
                         source: a.source,
                         accountId: incoming
                     ))
-                } else {
+                case AccountUsageArchive.kindUsageLimit:
+                    context.insert(UsageLimitSample(
+                        sampledAt: a.sampledAt,
+                        identity: a.identity ?? "",
+                        kind: a.limitKind ?? "",
+                        group: a.group ?? "",
+                        label: a.label ?? "",
+                        percent: a.usedPercentage ?? 0,
+                        resetsAt: a.resetsAt,
+                        severity: a.severity ?? "",
+                        isActive: a.isActive ?? false,
+                        modelId: a.modelId,
+                        modelDisplayName: a.modelDisplayName,
+                        surface: a.surface,
+                        source: a.source,
+                        accountId: incoming
+                    ))
+                default:   // kindExtraUsage
                     context.insert(ExtraUsageSample(
                         sampledAt: a.sampledAt,
                         amountCents: a.amountCents ?? 0,
