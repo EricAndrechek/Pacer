@@ -106,6 +106,7 @@ public enum PacerStore {
         ProjectDailyAggregate.self,
         RateLimitSample.self,
         ExtraUsageSample.self,
+        UsageLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
         JSONLFileCursor.self,

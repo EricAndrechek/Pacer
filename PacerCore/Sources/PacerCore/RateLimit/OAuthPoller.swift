@@ -985,6 +985,20 @@ public actor OAuthPoller: TokenPoolTesting {
                 ))
                 wroteAnyWindow = true
             }
+            // The scoped `limits[]` representation (per-model weekly
+            // windows, severity, binding flag). One generic row per item,
+            // all stamped with the same `sampledAt` so the dashboard reads
+            // them back as one "latest batch" — a limit dropped from the
+            // response simply stops appearing. Keyed by a stable composite
+            // identity, so new models/kinds persist with no schema change.
+            for limit in captured.limits {
+                context.insert(UsageLimitSample(
+                    from: limit,
+                    sampledAt: captured.sampledAt,
+                    source: RateLimitSource.oauth
+                ))
+                wroteAnyWindow = true
+            }
             do {
                 try context.save()
                 if wroteAnyWindow {

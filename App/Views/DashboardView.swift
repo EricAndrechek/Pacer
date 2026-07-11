@@ -49,6 +49,9 @@ struct DashboardView: View {
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
             })
+            // Scoped limits[] card — hides itself when the account has no
+            // limits[] data. See LimitsCard. (MERGE: added by feat/oauth-limits.)
+            LimitsCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()
