@@ -213,6 +213,134 @@ def render_B(theme):
 
     return img.resize((W, H), Image.LANCZOS)
 
+# ---- Direction C: forecasted pace tiles (the model-pace feature) -----------
+# The headline change: scoped per-model windows are no longer a static ledger
+# but FIRST-CLASS pace items — each tile gets the same used%/pace hero, burn
+# verdict chip, and projection chart the 5h/7d hero cards have. Scoped-only
+# (account-wide session/weekly_all stay on the 5h/7d hero — Decision C).
+
+PACE_TILES = [
+    dict(label="Haiku",  pct=93, pace=88, sev="normal", binding=True,
+         burn="limit in 6h", burn_band="red",    reset="resets Mon · 10 AM",
+         actual=[.55, .69, .79, .87, .93], proj_to=1.00),
+    dict(label="Opus",   pct=84, pace=72, sev="normal", binding=False,
+         burn="≈97% at reset", burn_band="orange", reset="resets Mon · 10 AM",
+         actual=[.40, .55, .66, .76, .84], proj_to=0.97),
+    dict(label="Fable",  pct=49, pace=61, sev="normal", binding=False,
+         burn="≈58% at reset", burn_band="green",  reset="resets Mon · 10 AM",
+         actual=[.20, .30, .38, .44, .49], proj_to=0.58),
+    dict(label="Sonnet", pct=22, pace=44, sev="normal", binding=False,
+         burn="≈30% at reset", burn_band="green",  reset="resets Mon · 10 AM",
+         actual=[.06, .11, .16, .19, .22], proj_to=0.30),
+]
+
+def _dashed_line(d, pts, fill, width, dash=6, gap=5):
+    """Polyline drawn as dashes (PIL has no native dash)."""
+    import math
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if seg == 0:
+            continue
+        ux, uy = (x1 - x0) / seg, (y1 - y0) / seg
+        n = int(seg // (dash + gap)) + 1
+        for k in range(n):
+            s = k * (dash + gap)
+            e = min(s + dash, seg)
+            d.line([(x0 + ux * s, y0 + uy * s), (x0 + ux * e, y0 + uy * e)], fill=fill, width=width)
+
+def render_C(theme):
+    t = THEME[theme]
+    W, H = 720, 360
+    img = Image.new("RGBA", (W * SCALE, H * SCALE), t["page"])
+    d = ImageDraw.Draw(img, "RGBA")
+
+    pad = 20
+    cx0, cy0, cx1, cy1 = 24, 24, W - 24, H - 24
+    rr(d, [cx0 * SCALE, cy0 * SCALE, cx1 * SCALE, cy1 * SCALE], 14, fill=t["card"])
+    rr(d, [cx0 * SCALE, cy0 * SCALE, cx1 * SCALE, cy1 * SCALE], 14, outline=t["stroke"], width=SCALE)
+
+    x = cx0 + pad
+    y = cy0 + pad
+    text(d, (x, y), "Model rate limits", FR(17), t["primary"])
+    text(d, (cx1 - pad, y + 2), "Haiku binding", F(11), t["band"]["red"], anchor="ra")
+    y += 34
+
+    cols, gap = 2, 14
+    tile_w = (cx1 - pad - x - gap) / cols
+    tile_h = 118
+    for i, r in enumerate(PACE_TILES):
+        c, row = i % cols, i // cols
+        tx = x + c * (tile_w + gap)
+        ty = y + row * (tile_h + gap)
+        band = display_band(r["pct"], r["sev"])
+        col = t["band"][band]
+        burn_col = t["band"][r["burn_band"]]
+        # tile bg + binding outline
+        rr(d, [tx * SCALE, ty * SCALE, (tx + tile_w) * SCALE, (ty + tile_h) * SCALE], 12,
+           fill=blend(t["accent"], t["card"], 0.05) if r["binding"] else t["tile"])
+        if r["binding"]:
+            rr(d, [tx * SCALE, ty * SCALE, (tx + tile_w) * SCALE, (ty + tile_h) * SCALE],
+               12, outline=t["accent"], width=2 * SCALE)
+        ix = tx + 14
+        top = ty + 12
+        # header: binding dot + label + binding chip
+        lx = ix
+        if r["binding"]:
+            dot = 7
+            d.ellipse([ix * SCALE, (top + 4) * SCALE, (ix + dot) * SCALE, (top + 4 + dot) * SCALE], fill=col)
+            lx = ix + 13
+        text(d, (lx, top), r["label"], F(13.5), t["primary"])
+        if r["binding"]:
+            lw = measure(d, r["label"], F(13.5))[0]
+            chip_x = lx + lw + 8
+            cw = measure(d, "binding", F(9))[0]
+            rr(d, [chip_x * SCALE, (top + 1) * SCALE, (chip_x + cw + 12) * SCALE, (top + 15) * SCALE],
+               7, fill=blend(t["accent"], t["card"], 0.24))
+            text(d, (chip_x + 6, top + 2), "binding", F(9), t["accent"])
+        # hero: used% / pace%
+        hy = top + 20
+        text(d, (ix, hy), f"{r['pct']}%", FR(24), col)
+        uw = measure(d, f"{r['pct']}%", FR(24))[0]
+        text(d, (ix + uw + 6, hy + 8), f"/ {r['pace']}%", FR(13), t["secondary"])
+        # burn chip
+        chy = hy + 36
+        bt = f"🔥 {r['burn']}"
+        bw = measure(d, r["burn"], F(11))[0] + 22
+        rr(d, [ix * SCALE, chy * SCALE, (ix + bw) * SCALE, (chy + 18) * SCALE], 6,
+           fill=blend(burn_col, t["card"], 0.16))
+        text(d, (ix + 8, chy + 3), r["burn"], F(11), burn_col)
+        # mini projection chart (right of hero)
+        gx0 = ix + 120
+        gx1 = tx + tile_w - 14
+        gy0 = top + 6
+        gy1 = ty + tile_h - 30
+        gw, gh = gx1 - gx0, gy1 - gy0
+        if gw > 30:
+            # faint plot frame (theme-aware, subtly recessed from the tile)
+            plot_bg = (30, 30, 33) if theme == "dark" else (250, 250, 252)
+            rr(d, [gx0 * SCALE, gy0 * SCALE, gx1 * SCALE, gy1 * SCALE], 6, fill=plot_bg)
+            def P(fx, fy):  # frac x (0..1), frac height (0..1 = 100%)
+                return (gx0 + fx * gw, gy1 - fy * gh)
+            # pace diagonal (ideal 0->100 across the cycle)
+            _dashed_line(d, [P(0, 0), P(1, 1)], t["tertiary"], SCALE, dash=4, gap=4)
+            # actual line (solid, band color), over the elapsed portion
+            n = len(r["actual"]); elapsed = 0.45
+            act = [P(elapsed * k / (n - 1), v) for k, v in enumerate(r["actual"])]
+            d.line([(px * SCALE, py * SCALE) for px, py in act], fill=col, width=2 * SCALE, joint="curve")
+            # dashed projection from the actual tail to reset (x=1) at proj_to
+            _dashed_line(d, [act[-1], P(1.0, r["proj_to"])], col, 2 * SCALE, dash=6, gap=5)
+            # tail dot + crossing marker if it hits the cap
+            d.ellipse([(act[-1][0] - 2.5) * SCALE, (act[-1][1] - 2.5) * SCALE,
+                       (act[-1][0] + 2.5) * SCALE, (act[-1][1] + 2.5) * SCALE], fill=col)
+            if r["proj_to"] >= 0.999:
+                cxp, cyp = P(0.82, 1.0)
+                d.ellipse([(cxp - 3) * SCALE, (cyp - 3) * SCALE, (cxp + 3) * SCALE, (cyp + 3) * SCALE],
+                          outline=t["band"]["red"], width=2 * SCALE)
+        # reset caption
+        text(d, (ix, ty + tile_h - 20), r["reset"], F(10.5), t["tertiary"])
+
+    return img.resize((W, H), Image.LANCZOS)
+
 # ---- Emit ------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -221,4 +349,6 @@ if __name__ == "__main__":
     render_A("dark").save(f"{out}/limits-A-grouped-dark.png")
     render_A("light").save(f"{out}/limits-A-grouped-light.png")
     render_B("dark").save(f"{out}/limits-B-tiles-dark.png")
-    print("wrote limits-A-grouped-{dark,light}.png, limits-B-tiles-dark.png")
+    render_C("dark").save(f"{out}/model-pace-tiles-dark.png")
+    render_C("light").save(f"{out}/model-pace-tiles-light.png")
+    print("wrote limits mockups + model-pace-tiles-{dark,light}.png")
