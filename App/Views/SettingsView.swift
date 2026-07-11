@@ -1227,6 +1227,7 @@ private struct TokensCard: View {
     @State private var adding = false
     @State private var addResult: TokenTestResult?
     @State private var highlightId: String?
+    @State private var switchingId: String?
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -1250,11 +1251,12 @@ private struct TokensCard: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
                 } else {
-                    columnHeader
-                    ForEach(pool.lanes) { lane in
-                        Divider().opacity(0.35)
-                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    if pool.accounts.count > 1 {
+                        accountsSwitcher
+                        Divider().opacity(0.35).padding(.top, 8).padding(.bottom, 4)
                     }
+                    columnHeader
+                    groupedLanes
                 }
                 addTokenRow
             }
@@ -1265,7 +1267,7 @@ private struct TokensCard: View {
                     .padding(.top, 2)
                 CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
                     .padding(.vertical, 6)
-                Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
+                Text("…then paste the result above. It must be a `user:profile` token. A token for a *different* Anthropic account is kept too — tracked as a separate account you can switch to.")
             }
         })
     }
@@ -1283,7 +1285,9 @@ private struct TokensCard: View {
     }
 
     private var cadenceText: String {
-        let n = pool.lanes.filter { $0.account != .foreign }.count
+        // The cadence reflects the *active* account's fast pool (its own +
+        // not-yet-classified tokens); secondary accounts poll on a slow sweep.
+        let n = pool.lanes.filter { $0.account == .primary || $0.account == .unknown }.count
         let tokens = "\(n) token\(n == 1 ? "" : "s")"
         guard let seconds = pool.effectiveIntervalSeconds else { return tokens }
         return "Updating ~\(Self.formatInterval(seconds)) · \(tokens) · \(pool.isActive ? "active" : "idle")"
@@ -1309,6 +1313,86 @@ private struct TokensCard: View {
         .tracking(0.5)
         .foregroundStyle(.tertiary)
         .padding(.bottom, 6)
+    }
+
+    // MARK: - Accounts (multi-account)
+
+    /// The account switcher — one row per tracked account, showing its
+    /// current usage, which is active, and a Switch action. Only shown when
+    /// more than one account exists; a single-account user sees the flat
+    /// token list exactly as before.
+    private var accountsSwitcher: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ACCOUNTS")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+            ForEach(pool.accounts) { account in
+                AccountSwitchRow(
+                    account: account,
+                    switching: switchingId == account.id,
+                    onSwitch: { switchTo(account.id) }
+                )
+            }
+        }
+    }
+
+    /// Token rows, grouped under their account when more than one exists.
+    @ViewBuilder private var groupedLanes: some View {
+        if pool.accounts.count > 1 {
+            ForEach(pool.accounts) { account in
+                let rows = lanes(for: account.id)
+                if !rows.isEmpty {
+                    accountGroupLabel(account)
+                    ForEach(rows) { lane in
+                        Divider().opacity(0.35)
+                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    }
+                }
+            }
+            let pending = pool.lanes.filter { $0.accountKey == nil }
+            if !pending.isEmpty {
+                groupLabelText("CHECKING…")
+                ForEach(pending) { lane in
+                    Divider().opacity(0.35)
+                    TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                }
+            }
+        } else {
+            ForEach(pool.lanes) { lane in
+                Divider().opacity(0.35)
+                TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+            }
+        }
+    }
+
+    private func lanes(for accountKey: String) -> [TokenLaneStatus] {
+        pool.lanes.filter { $0.accountKey == accountKey }
+    }
+
+    private func accountGroupLabel(_ account: AccountStatusSummary) -> some View {
+        groupLabelText(account.isActive
+            ? "\(account.displayName.uppercased())  ·  ACTIVE"
+            : account.displayName.uppercased())
+    }
+
+    private func groupLabelText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .tracking(0.5)
+            .foregroundStyle(Color.accentColor.opacity(0.85))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+    }
+
+    private func switchTo(_ id: String) {
+        guard switchingId == nil else { return }
+        switchingId = id
+        Task { @MainActor in
+            await TokenPoolStatus.shared.setActiveAccount(id: id)
+            switchingId = nil
+        }
     }
 
     private var addTokenRow: some View {
@@ -1340,8 +1424,8 @@ private struct TokensCard: View {
             addLabel("checkmark.circle.fill", .green, "Added · \(Self.usage(fh, sd))")
         case .alreadyTracked(let source, let fp):
             addLabel("info.circle.fill", .gray, "Already tracking this — it's your \(Self.sourceName(source)) token (…\(String(fp.suffix(4)))).")
-        case .foreignAccount:
-            addLabel("person.crop.circle.badge.xmark", .purple, "That token is a different account — not added.")
+        case .otherAccount:
+            addLabel("person.2.circle.fill", .purple, "Added as a separate account — switch to it in Accounts above.")
         case .failure(let reason):
             addLabel("xmark.circle.fill", .red, reason)
         case .unavailable:
@@ -1389,6 +1473,95 @@ private struct TokensCard: View {
                 }
             }
         }
+    }
+}
+
+/// One account in the switcher: its name + plan, current 5h/7d usage, and
+/// either an "Active" badge or a "Switch" button. Switching makes this the
+/// account whose usage drives the menu bar, dashboard, and alerts.
+private struct AccountSwitchRow: View {
+    let account: AccountStatusSummary
+    let switching: Bool
+    let onSwitch: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(account.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if let plan = account.subscriptionType, !plan.isEmpty {
+                        Text(plan)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            usageReadout
+
+            if account.isActive {
+                Text("Active")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.green.opacity(0.16)))
+            } else if switching {
+                ProgressView().controlSize(.small).frame(width: 60)
+            } else {
+                Button("Switch", action: onSwitch)
+                    .controlSize(.small)
+                    .frame(width: 60)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(account.isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(account.isActive ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+                )
+        )
+    }
+
+    private var subtitle: String {
+        var parts: [String] = []
+        if let org = account.organizationId, !org.isEmpty { parts.append("org …\(String(org.suffix(4)))") }
+        parts.append("\(account.laneCount) token\(account.laneCount == 1 ? "" : "s")")
+        return parts.joined(separator: " · ")
+    }
+
+    private var usageReadout: some View {
+        HStack(spacing: 10) {
+            windowReadout("5h", account.fiveHourPct)
+            windowReadout("7d", account.sevenDayPct)
+        }
+    }
+
+    private func windowReadout(_ label: String, _ pct: Double?) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(pct.map(Self.color(forPct:)) ?? .secondary)
+                .monospacedDigit()
+        }
+        .frame(width: 52, alignment: .leading)
+    }
+
+    private static func color(forPct pct: Double) -> Color {
+        if pct >= 85 { return .red }
+        if pct >= 50 { return .orange }
+        return .green
     }
 }
 
@@ -1493,7 +1666,7 @@ private struct TokenLaneRow: View {
     private var statusInfo: (String, Color) {
         let now = Date()
         if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
-        if lane.account == .foreign { return ("other acct", .purple) }
+        if lane.account == .secondary { return ("tracked", .purple) }
         if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
         if lane.account == .primary { return ("active", .green) }
         return ("pending", .gray)

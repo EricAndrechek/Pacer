@@ -119,6 +119,8 @@ public enum PacerStore {
         EngineEvalOutcome.self,
         PredictionSnapshot.self,
         TokenLaneMeta.self,
+        Account.self,
+        AccountUsageArchive.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

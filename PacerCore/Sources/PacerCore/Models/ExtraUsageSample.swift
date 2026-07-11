@@ -23,11 +23,16 @@ public final class ExtraUsageSample {
     /// `"oauth"` for now — mirrors `RateLimitSample.source` so a
     /// future statusline/pushed source can be distinguished.
     public var source: String
+    /// Which account (`Account.id`) this sample belongs to. Optional +
+    /// additive, same contract as `RateLimitSample.accountId`: nil ⇒ the
+    /// active account. See `Account`.
+    public var accountId: String?
 
-    public init(sampledAt: Date, amountCents: Int, source: String) {
+    public init(sampledAt: Date, amountCents: Int, source: String, accountId: String? = nil) {
         self.sampledAt = sampledAt
         self.amountCents = amountCents
         self.source = source
+        self.accountId = accountId
     }
 
     public var amountUSD: Double {

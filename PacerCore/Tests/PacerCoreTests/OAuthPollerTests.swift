@@ -15,9 +15,12 @@ import Testing
             DailyAggregate.self,
             ProjectDailyAggregate.self,
             RateLimitSample.self,
+            ExtraUsageSample.self,
             SessionInfo.self,
             ClaudeCodeMeta.self,
             TokenLaneMeta.self,
+            Account.self,
+            AccountUsageArchive.self,
             configurations: config
         )
     }
@@ -61,6 +64,18 @@ import Testing
             let rows = try context.fetch(FetchDescriptor<RateLimitSample>())
             return rows.map {
                 (window: $0.window, usedPercentage: $0.usedPercentage, hasResetsAt: $0.resetsAt != nil, source: $0.source)
+            }
+        }
+    }
+
+    /// Sendable account summary for cross-actor assertions.
+    struct AccountRow: Sendable { let id: String; let isActive: Bool; let latestFiveHourPct: Double? }
+
+    private static func fetchAccounts(in container: ModelContainer) async throws -> [AccountRow] {
+        try await MainActor.run {
+            let context = ModelContext(container)
+            return try context.fetch(FetchDescriptor<Account>()).map {
+                AccountRow(id: $0.id, isActive: $0.isActive, latestFiveHourPct: $0.latestFiveHourPct)
             }
         }
     }
@@ -142,10 +157,12 @@ import Testing
         #expect(await poller.runOnce() == .credentialsNotFound)
     }
 
-    /// Two same-account tokens both persist; a token that resolves to a
-    /// different org is marked foreign, excluded, and never persisted —
-    /// so interleaving can never mix two accounts into one timeline.
-    @Test func foreignAccountTokenExcludedAndNotPersisted() async throws {
+    /// Two distinct orgs are BOTH tracked — neither dropped. The active
+    /// account (org A) writes the shared timeline; a different-account token
+    /// (org B) is a tracked *secondary* whose readings are cached on its
+    /// `Account` row but kept out of the active timeline, so interleaving
+    /// can never mix two accounts into one history.
+    @Test func secondaryAccountTrackedNotDroppedAndTimelineStaysActiveOnly() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
         let held = EphemeralCredentialStore(OAuthCredential(
@@ -164,19 +181,105 @@ import Testing
         let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
         let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
 
-        // Lane 0 (keychain, tokA) establishes primary org A and persists.
+        // Lane 0 (keychain, tokA) establishes the active account A and persists.
         let first = await poller.runOnce()
         if case .success = first {} else { Issue.record("expected success, got \(first)") }
-        // Lane 1 (held, tokB) resolves to org B → foreign, not persisted.
-        #expect(await poller.runOnce() == .foreignAccount)
+        // Lane 1 (held, tokB) resolves to org B → secondary, tracked, no history.
+        if case .secondaryAccount = await poller.runOnce() {} else {
+            Issue.record("expected secondaryAccount")
+        }
 
+        // The shared timeline holds ONLY the active account (org A).
         let rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.count == 1)                      // only org A's window
+        #expect(rows.count == 1)
         #expect(rows.first?.usedPercentage == 10.0)   // not org B's 99
 
+        // But BOTH accounts exist and org B's reading is cached on its row.
+        let accounts = try await Self.fetchAccounts(in: container)
+        #expect(accounts.count == 2)
+        #expect(accounts.first { $0.id == "orgA" }?.isActive == true)
+        let b = accounts.first { $0.id == "orgB" }
+        #expect(b?.isActive == false)
+        #expect(b?.latestFiveHourPct == 99.0)
+
         let snap = await poller.snapshot()
-        #expect(snap.primaryLaneCount == 1)
+        #expect(snap.primaryLaneCount == 1)          // only org A is primary
         #expect(snap.primaryOrg == "orgA")
+    }
+
+    /// Switching the active account swaps which timeline the shared tables
+    /// hold — org B's usage drives display afterward — and switching back
+    /// restores org A's timeline intact (neither is lost).
+    @Test func switchingActiveAccountSwapsTimelineWithoutLoss() async throws {
+        let container = try Self.makeContainer()
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
+        ))
+        let counter = AtomicCounter()
+        // A poll (orgA 10%), B poll (orgB 99%), then B is active and polled (orgB 77%).
+        let outcomes: [HTTPOutcome] = [
+            .success(jsonBody: #"{"five_hour":{"utilization":10}}"#, headers: ["anthropic-organization-id": "orgA"]),
+            .success(jsonBody: #"{"five_hour":{"utilization":99}}"#, headers: ["anthropic-organization-id": "orgB"]),
+            .success(jsonBody: #"{"five_hour":{"utilization":77}}"#, headers: ["anthropic-organization-id": "orgB"]),
+        ]
+        let transport: OAuthClient.Transport = { _ in
+            try outcomes[min(counter.next(), outcomes.count - 1)].materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
+        let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()   // orgA active, timeline = [A:10]
+        _ = await poller.runOnce()   // orgB secondary tracked
+        let laneBId = OAuthPoller.laneId("tokB")
+
+        // Switch to org B: A's timeline is archived, B's (empty) restored.
+        await poller.setActiveAccount(id: "orgB")
+        var rows = try await Self.fetchSampleSummaries(in: container)
+        #expect(rows.isEmpty)                                // A archived out, B has none yet
+        #expect(await poller.snapshot().activeAccountKey == "orgB")
+
+        // Poll B now that it's active → it writes the shared timeline.
+        if case .success = await poller.testLane(id: laneBId) {} else {
+            Issue.record("expected success polling active org B")
+        }
+        rows = try await Self.fetchSampleSummaries(in: container)
+        #expect(rows.contains { $0.usedPercentage == 77.0 })
+
+        // Switch back to org A: B archived, A restored (its 10% is back).
+        await poller.setActiveAccount(id: "orgA")
+        rows = try await Self.fetchSampleSummaries(in: container)
+        #expect(rows.contains { $0.usedPercentage == 10.0 })
+        #expect(!rows.contains { $0.usedPercentage == 77.0 })   // B's rows aren't in A's timeline
+        #expect(await poller.snapshot().activeAccountKey == "orgA")
+    }
+
+    /// A single-account user with pre-existing (accountId == nil) history
+    /// keeps working after the additive migration: the first poll adopts
+    /// those rows as the active account and appends to the same timeline.
+    @Test func existingSingleAccountDataStillResolvesAfterMigration() async throws {
+        let container = try Self.makeContainer()
+        // Seed a legacy row with no accountId, as an existing user would have.
+        try await MainActor.run {
+            let ctx = ModelContext(container)
+            ctx.insert(RateLimitSample(
+                sampledAt: Date(timeIntervalSince1970: 1_000),
+                window: "five_hour", usedPercentage: 33, resetsAt: nil, source: "oauth"
+            ))
+            try ctx.save()
+        }
+        let client = Self.sequencedClient([.success(
+            jsonBody: #"{"five_hour":{"utilization":44}}"#,
+            headers: ["anthropic-organization-id": "orgA"]
+        )])
+        let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
+
+        if case .success = await poller.runOnce() {} else { Issue.record("expected success") }
+        let rows = try await Self.fetchSampleSummaries(in: container)
+        // Legacy 33% row still present alongside the new 44% row — one
+        // continuous timeline, nothing reset or dropped.
+        #expect(rows.contains { $0.usedPercentage == 33.0 })
+        #expect(rows.contains { $0.usedPercentage == 44.0 })
     }
 
     // MARK: - Other failure paths

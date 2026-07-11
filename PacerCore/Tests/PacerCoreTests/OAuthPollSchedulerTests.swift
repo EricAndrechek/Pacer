@@ -19,7 +19,7 @@ import Testing
     }
 
     @Test func noUsableLanesWaitsIdle() {
-        let d = sched.decide(lanes: [Lane(account: .foreign)], lastActivityAt: at(0), now: t0)
+        let d = sched.decide(lanes: [Lane(account: .secondary)], lastActivityAt: at(0), now: t0)
         #expect(d == .wait(seconds: 600))
         let empty = sched.decide(lanes: [], lastActivityAt: nil, now: t0)
         #expect(empty == .wait(seconds: 600))
@@ -89,11 +89,13 @@ import Testing
         #expect(sched.decide(lanes: [a, b], lastActivityAt: t0, now: at(150)) == .poll(laneIndex: 1))
     }
 
-    @Test func foreignLaneNeverPicked() {
-        let foreign = Lane(lastPolledAt: nil, account: .foreign)
+    @Test func secondaryLaneNeverPicked() {
+        // A `.secondary` (non-active account) lane is not in the fast pool —
+        // the poller sweeps it separately, so the scheduler never picks it.
+        let secondary = Lane(lastPolledAt: nil, account: .secondary)
         let primary = Lane(lastPolledAt: nil, account: .primary)
-        // Even though foreign is index 0 and never polled, we pick primary.
-        #expect(sched.decide(lanes: [foreign, primary], lastActivityAt: t0, now: t0) == .poll(laneIndex: 1))
+        // Even though secondary is index 0 and never polled, we pick primary.
+        #expect(sched.decide(lanes: [secondary, primary], lastActivityAt: t0, now: t0) == .poll(laneIndex: 1))
     }
 
     @Test func unknownLaneIsEligibleForDiscovery() {

@@ -64,16 +64,22 @@ public struct OAuthPollScheduler: Sendable {
         }
     }
 
-    /// A lane's account relationship to the pool's primary account,
-    /// learned from the `anthropic-organization-id` of its responses.
+    /// A lane's account relationship to the pool, learned from the
+    /// `anthropic-organization-id` of its responses.
     public enum AccountStatus: Sendable, Equatable {
-        /// Not yet polled — eligible, so we poll it once to learn its org.
+        /// Not yet polled — eligible on the fast pool, so we poll it once
+        /// to learn its org (and classify it primary vs secondary).
         case unknown
-        /// Confirmed same account as the pool's primary — full member.
+        /// Belongs to the **active** account — a full member of the fast
+        /// pool, and the account whose samples drive the live timeline and
+        /// all display.
         case primary
-        /// A different account — excluded from selection and never
-        /// persisted, so interleaving can't mix two accounts' usage.
-        case foreign
+        /// Belongs to a tracked **non-active** account. Still polled, but on
+        /// the slow background sweep, and its samples are cached on the
+        /// `Account` row rather than written into the active timeline — so
+        /// interleaving can't mix two accounts' usage. (Legacy rows persist
+        /// this as `"foreign"`; it decodes here.)
+        case secondary
     }
 
     public struct LaneState: Sendable, Equatable {
@@ -105,8 +111,12 @@ public struct OAuthPollScheduler: Sendable {
     /// never-polled Desktop lane, letting the primary establish the
     /// account the pool is guarded against.
     public func decide(lanes: [LaneState], lastActivityAt: Date?, now: Date) -> Decision {
-        // Non-foreign lanes are the only ones we can ever poll.
-        let usableIdx = lanes.indices.filter { lanes[$0].account != .foreign }
+        // The *fast pool* the scheduler drives is the active account's lanes
+        // (`.primary`) plus not-yet-classified ones (`.unknown`, polled once
+        // to learn their org). `.secondary` lanes belong to non-active
+        // accounts and are swept separately by the poller on a slow cadence,
+        // so they never dilute the active account's freshness.
+        let usableIdx = lanes.indices.filter { lanes[$0].account == .primary || lanes[$0].account == .unknown }
         guard !usableIdx.isEmpty else { return .wait(seconds: tuning.idleInterval) }
 
         let active = lastActivityAt.map { now.timeIntervalSince($0) <= tuning.activeWindow } ?? false
