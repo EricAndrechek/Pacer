@@ -37,9 +37,14 @@ struct PaceChartEntry: TimelineEntry {
     /// alongside 5h/7d. Empty when the account has no scoped windows — in
     /// which case every layout is byte-for-byte unchanged.
     var scoped: [ScopedState] = []
-    /// User's chosen window from the widget's intent config. Drives the
-    /// view's branching (full-canvas single window vs side-by-side both).
-    let window: PaceWindowOption
+    /// The user's selected windows, already resolved by the provider to keys
+    /// that exist in this entry (fallback applied). `primaryKey` drives the
+    /// small canvas and the first medium column; `secondaryKey` the second
+    /// medium column. The large family shows every window and ignores both.
+    /// Default config resolves to `five_hour` / `seven_day`, reproducing the
+    /// old `both` behaviour byte-for-byte.
+    let primaryKey: String
+    let secondaryKey: String
 
     /// One window's worth of pace data, paired down to what the shared
     /// `PaceChartView` consumes plus the metadata the widget needs for
@@ -67,11 +72,44 @@ struct PaceChartEntry: TimelineEntry {
 
     /// One scoped per-model window — a `WindowState` plus the row label and the
     /// binding flag (the "currently in effect" hint). Same forecast bundle as
-    /// the fixed windows, keyed to a live `limits[]` identity.
+    /// the fixed windows, keyed to a live `limits[]` identity. `key` is that
+    /// identity, so a selection stored by the config intent matches back here.
     struct ScopedState {
+        let key: String
         let label: String
         let state: WindowState
         let isActive: Bool
+    }
+
+    /// A window resolved for rendering — its label, forecast state, idle
+    /// reading, cycle duration, and active flag, looked up by key. Fixed keys
+    /// map to the 5h/7d slots; a scoped key matches `scoped` by identity; an
+    /// unknown key (a selected window that vanished) falls back to 5-hour so a
+    /// stale selection never blanks.
+    struct Resolved {
+        let label: String
+        let state: WindowState?
+        let idle: Double?
+        let duration: TimeInterval
+        let isActive: Bool
+    }
+
+    func resolve(_ key: String) -> Resolved {
+        switch key {
+        case "five_hour":
+            return Resolved(label: "5-hour", state: fiveHour, idle: fiveHourIdle,
+                            duration: K.fiveHourSeconds, isActive: false)
+        case "seven_day":
+            return Resolved(label: "7-day", state: sevenDay, idle: sevenDayIdle,
+                            duration: K.sevenDaySeconds, isActive: false)
+        default:
+            if let s = scoped.first(where: { $0.key == key }) {
+                return Resolved(label: s.label, state: s.state, idle: nil,
+                                duration: s.state.chart.durationSeconds, isActive: s.isActive)
+            }
+            return Resolved(label: "5-hour", state: fiveHour, idle: fiveHourIdle,
+                            duration: K.fiveHourSeconds, isActive: false)
+        }
     }
 }
 
@@ -86,21 +124,36 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             date: Date(),
             fiveHour: Self.demoState(duration: K.fiveHourSeconds, usedPct: 38, sampleCount: 8),
             sevenDay: Self.demoState(duration: K.sevenDaySeconds, usedPct: 62, sampleCount: 12),
-            window: .both
+            primaryKey: "five_hour", secondaryKey: "seven_day"
         )
     }
 
     func snapshot(for configuration: PaceChartConfigurationIntent, in context: Context) async -> PaceChartEntry {
-        currentEntry(window: configuration.window)
+        currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
     }
 
     func timeline(for configuration: PaceChartConfigurationIntent, in context: Context) async -> Timeline<PaceChartEntry> {
-        let entry = currentEntry(window: configuration.window)
+        let entry = currentEntry(primary: configuration.primaryWindow, secondary: configuration.secondaryWindow)
         let next = Date().addingTimeInterval(K.refreshSeconds)
         return Timeline(entries: [entry], policy: .after(next))
     }
 
-    private func currentEntry(window: PaceWindowOption) -> PaceChartEntry {
+    /// Resolve the two selected windows to keys that exist in the just-built
+    /// entry, applying the graceful fallback (primary → 5h; secondary → the
+    /// other fixed window). Nil/absent selections reproduce today's 5h+7d.
+    private static func resolveKeys(
+        primary: PaceWindowEntity?, secondary: PaceWindowEntity?,
+        scoped: [PaceChartEntry.ScopedState]
+    ) -> (String, String) {
+        var available: Set<String> = ["five_hour", "seven_day"]
+        for s in scoped { available.insert(s.key) }
+        let p = PaceWindowResolver.resolveKey(primary?.id, available: available, fallback: "five_hour")
+        let secFallback = (p == "five_hour") ? "seven_day" : "five_hour"
+        let s = PaceWindowResolver.resolveKey(secondary?.id, available: available, fallback: secFallback)
+        return (p, s)
+    }
+
+    private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceChartEntry {
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -125,14 +178,18 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                                    outlook: snapshot?.fiveHour)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
                                     outlook: snapshot?.sevenDay)
+            let scoped = Self.scopedStates(context: context, snapshot: snapshot)
+            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceChartEntry(
                 date: Date(), fiveHour: five, sevenDay: seven,
                 fiveHourIdle: five == nil ? Self.idleUsedPct(rows: rows, key: "five_hour") : nil,
                 sevenDayIdle: seven == nil ? Self.idleUsedPct(rows: rows, key: "seven_day") : nil,
-                scoped: Self.scopedStates(context: context, snapshot: snapshot),
-                window: window)
+                scoped: scoped,
+                primaryKey: primaryKey, secondaryKey: secondaryKey)
         } catch {
-            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
+            let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: [])
+            return PaceChartEntry(date: Date(), fiveHour: nil, sevenDay: nil,
+                                  primaryKey: primaryKey, secondaryKey: secondaryKey)
         }
     }
 
@@ -286,6 +343,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             points: points, usedPct: row.percent,
             projection: projection, projectionCrossesFullAt: crossing)
         return PaceChartEntry.ScopedState(
+            key: row.identity,
             label: row.label,
             state: PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt),
             isActive: row.isActive)
@@ -370,26 +428,17 @@ struct PaceChartWidgetView: View {
         let isActive: Bool
     }
 
-    /// The ordered large-canvas rows: the configured fixed window(s) first, then
-    /// scoped windows (active/hottest first) filling the remaining capacity. When
-    /// there are no scoped windows this is exactly the old 1-or-2 fixed rows, so
-    /// the fixed-only large layout is unchanged.
+    /// The ordered large-canvas rows: always 5-hour + 7-day first, then scoped
+    /// windows (active/hottest first) filling the remaining capacity. Large is
+    /// the all-windows view — the small/medium window selection doesn't narrow
+    /// it. With no scoped windows this is the fixed 5h/7d pair, unchanged.
     private var largeWindows: [LargeWindow] {
-        var out: [LargeWindow] = []
-        switch entry.window {
-        case .both, .fiveHour:
-            out.append(.init(id: "five_hour", label: "5-hour",
-                             state: entry.fiveHour, idle: entry.fiveHourIdle, isActive: false))
-        case .sevenDay:
-            break
-        }
-        switch entry.window {
-        case .both, .sevenDay:
-            out.append(.init(id: "seven_day", label: "7-day",
-                             state: entry.sevenDay, idle: entry.sevenDayIdle, isActive: false))
-        case .fiveHour:
-            break
-        }
+        var out: [LargeWindow] = [
+            .init(id: "five_hour", label: "5-hour",
+                  state: entry.fiveHour, idle: entry.fiveHourIdle, isActive: false),
+            .init(id: "seven_day", label: "7-day",
+                  state: entry.sevenDay, idle: entry.sevenDayIdle, isActive: false),
+        ]
         for s in entry.scoped.prefix(max(0, Self.largeRowCap - out.count)) {
             out.append(.init(id: s.label, label: s.label,
                              state: s.state, idle: nil, isActive: s.isActive))
@@ -408,25 +457,16 @@ struct PaceChartWidgetView: View {
             .foregroundStyle(.secondary)
     }
 
-    /// Resolve the small canvas's single window. Small physically can't
-    /// fit two charts, so when the user picks `.both` we fall through
-    /// to 5-hour — that's the cycle people hit first and watch most.
-    private func smallTarget() -> (state: PaceChartEntry.WindowState?, idle: Double?, title: String, duration: TimeInterval) {
-        switch entry.window {
-        case .sevenDay:
-            return (entry.sevenDay, entry.sevenDayIdle, "7-DAY PACE", K.sevenDaySeconds)
-        case .fiveHour, .both:
-            return (entry.fiveHour, entry.fiveHourIdle, "5-HOUR PACE", K.fiveHourSeconds)
-        }
-    }
-
     @ViewBuilder
     private var small: some View {
-        let target = smallTarget()
+        // Small physically can't fit two charts, so it renders the single
+        // primary window. Default primary is 5-hour — the cycle people hit
+        // first and watch most — so the default small is unchanged.
+        let target = entry.resolve(entry.primaryKey)
         let awaiting = target.state?.isAwaiting == true
         VStack(alignment: .leading, spacing: 4) {
             WidgetTitleBar(
-                title: target.title,
+                title: "\(target.label.uppercased()) PACE",
                 dotColor: awaiting ? .secondary : target.state?.band.color
             ) {
                 if let s = target.state, !s.isAwaiting {
@@ -472,21 +512,15 @@ struct PaceChartWidgetView: View {
             if hasNoReadings {
                 WidgetEmptyState(message: "Waiting for the first rate-limit reading.")
             } else {
-                switch entry.window {
-                case .both:
-                    HStack(alignment: .top, spacing: 12) {
-                        column(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle, style: .compact)
-                        Divider()
-                        column(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle, style: .compact)
-                    }
-                case .fiveHour:
-                    // One window, full width — chart gets ~290pt instead
-                    // of ~148pt, so we promote to `.detailed` (axis ticks
-                    // + 0/50/100% labels) for a layout that mirrors the
-                    // dashboard pace card.
-                    column(label: "5-hour", state: entry.fiveHour, idle: entry.fiveHourIdle, style: .detailed)
-                case .sevenDay:
-                    column(label: "7-day", state: entry.sevenDay, idle: entry.sevenDayIdle, style: .detailed)
+                // Medium is the two-card layout: the primary and secondary
+                // windows side by side. Default (5h + 7d) is byte-unchanged;
+                // pick e.g. 5h + Fable to swap the second card.
+                let a = entry.resolve(entry.primaryKey)
+                let b = entry.resolve(entry.secondaryKey)
+                HStack(alignment: .top, spacing: 12) {
+                    column(label: a.label, state: a.state, idle: a.idle, style: .compact)
+                    Divider()
+                    column(label: b.label, state: b.state, idle: b.idle, style: .compact)
                 }
             }
         }
