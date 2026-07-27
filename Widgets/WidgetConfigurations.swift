@@ -186,21 +186,21 @@ enum PaceWindowResolver {
 struct PaceChartConfigurationIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Rate-limit pace"
     static let description = IntentDescription(
-        "Choose which usage windows the pace chart shows. Small shows the first window; medium shows both side by side; large shows every window.")
+        "Choose which usage windows the pace chart shows. The small widget shows the left window; medium shows left and right side by side; large shows every window.")
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Show \(\.$primaryWindow) and \(\.$secondaryWindow)")
+        Summary("Left \(\.$primaryWindow), right \(\.$secondaryWindow)")
     }
 
     @Parameter(
-        title: "First window",
-        description: "Shown on the small widget, and as the left chart on medium.",
+        title: "Left window",
+        description: "The left chart on the medium widget — and the only chart the small widget shows.",
         default: PaceWindowResolver.fixedDefault("five_hour"))
     var primaryWindow: PaceWindowEntity?
 
     @Parameter(
-        title: "Second window",
-        description: "The right chart on medium. Ignored on the small widget.",
+        title: "Right window",
+        description: "The right chart on the medium widget. Not shown on the small widget.",
         default: PaceWindowResolver.fixedDefault("seven_day"))
     var secondaryWindow: PaceWindowEntity?
 }
@@ -211,21 +211,21 @@ struct PaceChartConfigurationIntent: WidgetConfigurationIntent {
 struct PaceGaugesConfigurationIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Rate limits"
     static let description = IntentDescription(
-        "Choose which usage windows the gauges show. Small shows the first window; medium shows both side by side; large shows every window.")
+        "Choose which usage windows the gauges show. The small widget shows the left window; medium shows left and right side by side; large shows every window.")
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Show \(\.$primaryWindow) and \(\.$secondaryWindow)")
+        Summary("Left \(\.$primaryWindow), right \(\.$secondaryWindow)")
     }
 
     @Parameter(
-        title: "First window",
-        description: "Shown on the small widget, and as the left gauge on medium.",
+        title: "Left window",
+        description: "The left gauge on the medium widget — and the only gauge the small widget shows.",
         default: PaceWindowResolver.fixedDefault("five_hour"))
     var primaryWindow: PaceWindowEntity?
 
     @Parameter(
-        title: "Second window",
-        description: "The right gauge on medium. Ignored on the small widget.",
+        title: "Right window",
+        description: "The right gauge on the medium widget. Not shown on the small widget.",
         default: PaceWindowResolver.fixedDefault("seven_day"))
     var secondaryWindow: PaceWindowEntity?
 }
