@@ -73,6 +73,16 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the scoped-alerts work: render just the
+        // Rate-limit alerts settings card (5h + 7d + a couple scoped per-model
+        // windows + a dormant one) into docs/mockups and return. Run with
+        // PACER_SCREENSHOT_ALERTS_ONLY=1 and PACER_SCREENSHOT_DIR pointed there.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_ALERTS_ONLY"] == "1" {
+            await captureScopedAlertsScenes()
+            log("scoped-alerts screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -207,6 +217,71 @@ enum ScreenshotMode {
             } else {
                 log("⚠️ share-card: render failed for \(name)")
             }
+        }
+    }
+
+    // MARK: - Scoped-alerts proof scene
+
+    /// Render the Rate-limit alerts settings card with the fixed 5h/7d windows
+    /// plus a couple of scoped per-model windows (one configured, one dormant),
+    /// in light + dark. Seeds a fresh in-memory container (scoped
+    /// `UsageLimitSample` rows + `AlertRule` threshold rows) and temporarily
+    /// sets the notification prefs on the shared store, restoring them after so
+    /// the run never mutates the user's real settings.
+    private static func captureScopedAlertsScenes() async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ scoped-alerts: container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        // Scoped windows (Haiku/Opus/Fable/Sonnet weekly) as first-class rows.
+        seedUsageLimits(ctx, now: now)
+        // Configured scoped alerts: Haiku 80% + 95%, Fable 75%, plus a dormant
+        // "Cowork" window (has a rule but no live sample ⇒ paused).
+        let scopedRules: [(id: String, name: String, pcts: [Double])] = [
+            ("weekly_scoped|Haiku|",  "Haiku",  [80, 95]),
+            ("weekly_scoped|Fable|",  "Fable",  [75]),
+            ("weekly_scoped|Cowork|", "Cowork", [85]),   // dormant (not in poll)
+        ]
+        for r in scopedRules {
+            for pct in r.pcts {
+                ctx.insert(AlertRule(name: r.name, metric: AlertRuleMetric.rateLimitPct,
+                                     thresholdValue: pct, scopedWindow: r.id))
+            }
+        }
+        do { try ctx.save() } catch { log("⚠️ scoped-alerts: seed save failed: \(error)") }
+
+        // Temporarily present a healthy notification config on the shared store.
+        let store = PacerSettings.store
+        let saved: [String: Any?] = [
+            PacerSettings.Key.notificationsEnabled: store.object(forKey: PacerSettings.Key.notificationsEnabled),
+            PacerSettings.Key.fiveHourThresholdsCSV: store.object(forKey: PacerSettings.Key.fiveHourThresholdsCSV),
+            PacerSettings.Key.sevenDayThresholdsCSV: store.object(forKey: PacerSettings.Key.sevenDayThresholdsCSV),
+        ]
+        store.set(true, forKey: PacerSettings.Key.notificationsEnabled)
+        store.set("75", forKey: PacerSettings.Key.fiveHourThresholdsCSV)
+        store.set("50,80", forKey: PacerSettings.Key.sevenDayThresholdsCSV)
+
+        for scheme in [ColorScheme.light, .dark] {
+            let name = scheme == .dark ? "scoped-alerts-dark" : "scoped-alerts"
+            await capture(name, width: 620, height: nil, scheme: scheme,
+                          card: true, container: container) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("NOTIFICATIONS")
+                        .font(.system(size: 12, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                    RateLimitAlertsCard()
+                }
+                .padding(20)
+            }
+        }
+
+        // Restore the user's real prefs.
+        for (key, value) in saved {
+            if let value { store.set(value, forKey: key) }
+            else { store.removeObject(forKey: key) }
         }
     }
 

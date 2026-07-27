@@ -28,11 +28,26 @@ public final class AlertRule {
     public var enabled: Bool
     public var createdAt: Date
 
+    /// Optional scoped rate-limit window this rule targets, as a
+    /// `UsageLimitSample.identity` (`kind|model|surface`). Used by
+    /// `metric == AlertRuleMetric.rateLimitPct` rules to alert on a per-model /
+    /// per-surface window (e.g. a "Fable" weekly cap) exactly like the fixed
+    /// 5h/7d windows — one row per configured threshold. `nil` for the existing
+    /// account-wide cost/token rules, which don't target a window.
+    ///
+    /// Additive + optional ⇒ a SwiftData lightweight-migration-safe change: old
+    /// rows decode this as `nil` with no store reset (same pattern as
+    /// `UsageLimitSample.accountId`). When the targeted window disappears from
+    /// the poll the row is simply kept and not evaluated (dormant); it resumes
+    /// if the window returns. See `ScopedRateLimitAlerts`.
+    public var scopedWindow: String?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
         metric: String,
         thresholdValue: Double,
+        scopedWindow: String? = nil,
         enabled: Bool = true,
         createdAt: Date = Date()
     ) {
@@ -40,6 +55,7 @@ public final class AlertRule {
         self.name = name
         self.metric = metric
         self.thresholdValue = thresholdValue
+        self.scopedWindow = scopedWindow
         self.enabled = enabled
         self.createdAt = createdAt
     }
@@ -58,15 +74,28 @@ public enum AlertRuleMetric {
     /// Total tokens today (input + output + cache_read).
     public static let todayTokens = "today_tokens"
 
+    /// Rate-limit window utilization (0–100%). Unlike the cost/token metrics
+    /// above, a `rateLimitPct` rule targets a specific window via
+    /// `AlertRule.scopedWindow` and is evaluated against the latest
+    /// `UsageLimitSample` for that scoped identity — the scoped-window
+    /// equivalent of the fixed 5h/7d threshold alerts. Deliberately **not** in
+    /// `all`: it isn't a user-pickable "custom rule" metric (the Notifications
+    /// section auto-lists windows instead), and older builds silently skip it.
+    public static let rateLimitPct = "rate_limit_pct"
+
+    /// The user-pickable *custom* metrics (the Settings "Custom alerts" picker).
+    /// `rateLimitPct` is intentionally excluded — scoped-window alerts are added
+    /// per-window from the auto-listed rate-limit section, not here.
     public static let all: [String] = [todayCost, weeklyCost, todayTokens]
 
     /// Human-readable label for the Settings picker.
     public static func label(for metric: String) -> String {
         switch metric {
-        case todayCost:   return "Today's cost (USD)"
-        case weeklyCost:  return "Weekly cost (USD)"
-        case todayTokens: return "Today's tokens"
-        default:          return metric
+        case todayCost:    return "Today's cost (USD)"
+        case weeklyCost:   return "Weekly cost (USD)"
+        case todayTokens:  return "Today's tokens"
+        case rateLimitPct: return "Rate-limit usage (%)"
+        default:           return metric
         }
     }
 
