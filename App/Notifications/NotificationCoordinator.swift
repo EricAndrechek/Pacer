@@ -111,16 +111,61 @@ public final class NotificationCoordinator {
         let defaults = PacerSettings.store
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
         let thresholds = PacerSettings.thresholds(forWindow: window)
-        guard !thresholds.isEmpty else { return }
-        let previous = previousPct ?? 0
-        // Ascending iteration — banners arrive in the order the user
-        // crossed them (50% before 75% before 90%) when a single
-        // sample crosses multiple thresholds at once.
-        for threshold in thresholds {
-            let t = Double(threshold)
-            guard previous < t, currentPct >= t else { continue }
+        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        await postThresholdCrossings(
+            windowKey: window, label: label, thresholds: thresholds,
+            currentPct: currentPct, previousPct: previousPct,
+            resetsAt: resetsAt, context: context)
+    }
 
-            let cycleKey = "notif.\(window).\(threshold).\(resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset")"
+    /// Scoped per-model / per-surface window equivalent of
+    /// `handleRateLimitUpdate`. Fires the SAME threshold-crossing banners as the
+    /// fixed 5h/7d windows, driven by the latest `UsageLimitSample` for a scoped
+    /// `identity`. Thresholds come from the window's `AlertRule` rows (gathered
+    /// by the caller via `ScopedRateLimitAlerts.thresholds(forIdentity:in:)`) —
+    /// the scoped analogue of the fixed windows' CSV threshold list. `label` is
+    /// the window's human name for the banner (e.g. "Fable · weekly").
+    ///
+    /// Dormancy is handled upstream: the caller only invokes this for identities
+    /// present in the active account's latest poll, so a window that vanishes is
+    /// never evaluated (its rules are kept) and resumes when it returns.
+    public func handleScopedRateLimitUpdate(
+        identity: String,
+        label: String,
+        thresholds: [Int],
+        currentPct: Double,
+        previousPct: Double?,
+        resetsAt: Date?,
+        context: ModelContext
+    ) async {
+        let defaults = PacerSettings.store
+        guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
+        await postThresholdCrossings(
+            windowKey: identity, label: label, thresholds: thresholds,
+            currentPct: currentPct, previousPct: previousPct,
+            resetsAt: resetsAt, context: context)
+    }
+
+    /// The shared post path for both the fixed and scoped rate-limit threshold
+    /// banners — extracted so the two windows can't drift on wording, crossing
+    /// rule, or per-cycle dedup. `windowKey` namespaces the dedup key (a fixed
+    /// window name or a scoped identity); `label` is what the banner shows.
+    private func postThresholdCrossings(
+        windowKey: String,
+        label: String,
+        thresholds: [Int],
+        currentPct: Double,
+        previousPct: Double?,
+        resetsAt: Date?,
+        context: ModelContext
+    ) async {
+        // Ascending iteration — banners arrive in the order the user crossed
+        // them (50% before 75% before 90%) when one sample crosses several.
+        let crossed = RateLimitThresholdPolicy.crossedThresholds(
+            previous: previousPct, current: currentPct, thresholds: thresholds)
+        guard !crossed.isEmpty else { return }
+        for threshold in crossed {
+            let cycleKey = "notif.\(windowKey).\(threshold).\(resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "noreset")"
             if alreadyNotified(key: cycleKey, in: context) {
                 continue
             }
@@ -128,7 +173,6 @@ public final class NotificationCoordinator {
             await requestAuthorizationIfNeeded()
             let content = UNMutableNotificationContent()
             content.title = "Pacer rate-limit warning"
-            let label: String = window == "five_hour" ? "5-hour" : "7-day"
             content.body = "\(label) usage hit \(Int(currentPct.rounded()))% (threshold \(threshold)%)."
             content.sound = .default
             content.interruptionLevel = .timeSensitive
@@ -264,6 +308,7 @@ public final class NotificationCoordinator {
         previousPct: Double?,
         resetsAt: Date?,
         previousResetsAt: Date?,
+        labelOverride: String? = nil,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
@@ -286,7 +331,9 @@ public final class NotificationCoordinator {
 
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
-        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        // Scoped windows pass their human name; fixed windows fall back to the
+        // 5h/7d label derived from the key.
+        let label: String = labelOverride ?? (window == "five_hour" ? "5-hour" : "7-day")
         content.title = "Pacer \(label) limit reset"
         content.body = "You're back to \(Int(currentPct.rounded()))%. Next reset \(Self.formatRelative(resetsAt))."
         content.sound = nil  // informational — no need to startle

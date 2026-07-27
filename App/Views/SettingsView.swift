@@ -446,9 +446,48 @@ private extension PacerSettings.MenuBarChip {
 /// `PacerSettings` so the live `NotificationCoordinator` (also reading
 /// via `PacerSettings.thresholds(forWindow:)`) sees changes
 /// immediately.
-private struct RateLimitAlertsCard: View {
+struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
+
+    /// Latest-poll scoped `limits[]` rows (active account) so the card can
+    /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
+    /// so the query never scans the full append-only history.
+    @Query(RateLimitAlertsCard.scopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    /// All alert rules — filtered to this card's `rateLimitPct` scoped rules,
+    /// which back the per-window threshold lists and let a window that's gone
+    /// missing surface as dormant (rules kept, not deleted).
+    @Query private var alertRules: [AlertRule]
+
+    private static let scopedDescriptor: FetchDescriptor<UsageLimitSample> = {
+        var d = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 200
+        return d
+    }()
+
+    /// The per-model windows present in the latest poll, active-first then
+    /// hottest (the dashboard's `latestBatch` order), excluding the account-wide
+    /// rows the fixed 5h/7d subsections already own.
+    private var presentScoped: [UsageLimitSample] {
+        scopedSamples.latestBatch().filter { ScopedRateLimitAlerts.isModelOrSurfaceScoped($0) }
+    }
+
+    /// Configured scoped windows that aren't in the current poll — their rules
+    /// are dormant (kept). Listed after the live windows, marked inactive.
+    private var dormantIdentities: [String] {
+        ScopedRateLimitAlerts
+            .dormantIdentities(in: alertRules, present: Set(presentScoped.map(\.identity)))
+            .sorted()
+    }
+
+    /// Best display name for a dormant identity — the name stored on its rule
+    /// (set to the window label when it was live), falling back to the identity.
+    private func dormantTitle(_ identity: String) -> String {
+        alertRules.first { $0.metric == AlertRuleMetric.rateLimitPct && $0.scopedWindow == identity }?
+            .name ?? identity
+    }
 
     var body: some View {
         PacerCard("Rate-limit alerts", content: {
@@ -466,10 +505,37 @@ private struct RateLimitAlertsCard: View {
                 ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
                 Divider().opacity(0.4)
                 ThresholdSubsection(title: "7-day window", window: "seven_day", enabled: enabled)
+
+                // Scoped per-model windows — auto-listed from the latest poll,
+                // each defaulting to no alert. Same threshold UI as 5h/7d.
+                ForEach(presentScoped, id: \.identity) { row in
+                    Divider().opacity(0.4)
+                    ScopedThresholdSubsection(
+                        identity: row.identity,
+                        title: row.label,
+                        isActive: row.isActive,
+                        isPresent: true,
+                        enabled: enabled,
+                        rules: alertRules
+                    )
+                }
+                // Dormant windows: configured but absent from the current poll.
+                ForEach(dormantIdentities, id: \.self) { identity in
+                    Divider().opacity(0.4)
+                    ScopedThresholdSubsection(
+                        identity: identity,
+                        title: dormantTitle(identity),
+                        isActive: false,
+                        isPresent: false,
+                        enabled: enabled,
+                        rules: alertRules
+                    )
+                }
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
                 HStack(spacing: 8) {
                     Text("Not seeing banners?")
                     Button("Open System Settings → Notifications") {
@@ -625,6 +691,132 @@ private struct ThresholdRow: View {
     }
 }
 
+/// One scoped per-model window's threshold list, the scoped analogue of
+/// `ThresholdSubsection`. Instead of the fixed windows' CSV in `PacerSettings`,
+/// each threshold is an `AlertRule` row (`metric == rateLimitPct`,
+/// `scopedWindow == identity`) so the rows persist ("kept, not deleted") and a
+/// window that disappears from the poll simply shows as dormant.
+private struct ScopedThresholdSubsection: View {
+    @Environment(\.modelContext) private var context
+    let identity: String
+    let title: String
+    /// The window currently in effect for the account (server's binding limit).
+    let isActive: Bool
+    /// Present in the latest poll. `false` ⇒ dormant (alerts kept but paused).
+    let isPresent: Bool
+    /// Master `notificationsEnabled` — greys the controls when off.
+    let enabled: Bool
+    /// All alert rules; filtered to this identity's rate-limit rows below.
+    let rules: [AlertRule]
+
+    private var myRules: [AlertRule] {
+        rules
+            .filter { $0.metric == AlertRuleMetric.rateLimitPct && $0.scopedWindow == identity }
+            .sorted { $0.thresholdValue < $1.thresholdValue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Eyebrow(text: title)
+                if isActive {
+                    Text("in effect")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tint)
+                } else if !isPresent {
+                    Text("paused — not in current usage")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Button {
+                    addThreshold()
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .controlSize(.small)
+                .disabled(!enabled)
+            }
+            if myRules.isEmpty {
+                Text(isPresent
+                     ? "No alert — Pacer won't notify for this window."
+                     : "No alert.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 2)
+            } else {
+                ForEach(myRules, id: \.id) { rule in
+                    ScopedThresholdRow(
+                        rule: rule,
+                        enabled: enabled && isPresent,
+                        onRemove: { remove(rule) }
+                    )
+                }
+            }
+        }
+    }
+
+    private func addThreshold() {
+        let highest = myRules.map { Int($0.thresholdValue.rounded()) }.max()
+        let defaultValue = highest.map { min(99, ($0 + 99) / 2) } ?? 75
+        context.insert(AlertRule(
+            name: title,
+            metric: AlertRuleMetric.rateLimitPct,
+            thresholdValue: Double(defaultValue),
+            scopedWindow: identity
+        ))
+        try? context.save()
+    }
+
+    private func remove(_ rule: AlertRule) {
+        context.delete(rule)
+        try? context.save()
+    }
+}
+
+/// One scoped-window threshold row — a slider bound straight through to the
+/// backing `AlertRule`, with the value and a delete button trailing. Mirrors
+/// `ThresholdRow` but persists via SwiftData rather than the CSV store.
+private struct ScopedThresholdRow: View {
+    @Environment(\.modelContext) private var context
+    @Bindable var rule: AlertRule
+    let enabled: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { rule.thresholdValue },
+                    set: {
+                        rule.thresholdValue = max(1, min(99, $0.rounded()))
+                        try? context.save()
+                    }
+                ),
+                in: 1...99
+            )
+            .controlSize(.small)
+            .disabled(!enabled)
+            Text("\(Int(rule.thresholdValue))%")
+                .font(.callout)
+                .fontWeight(.semibold)
+                .fontDesign(.rounded)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+                .foregroundStyle(enabled ? .primary : .secondary)
+            Button(role: .destructive) {
+                onRemove()
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove threshold")
+        }
+    }
+}
+
 // MARK: - Daily cost alert
 
 private struct DailyCostAlertCard: View {
@@ -672,7 +864,10 @@ private struct CustomRulesCard: View {
     var body: some View {
         PacerCard("Custom alerts", content: {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(rules, id: \.id) { rule in
+                // Scoped rate-limit rules (metric == rateLimitPct) are owned by
+                // the auto-listed Rate-limit alerts card above — exclude them
+                // here so they don't read as broken custom rules.
+                ForEach(rules.filter { $0.metric != AlertRuleMetric.rateLimitPct }, id: \.id) { rule in
                     RuleRow(rule: rule) {
                         context.delete(rule)
                         try? context.save()
