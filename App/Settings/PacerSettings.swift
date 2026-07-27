@@ -58,54 +58,17 @@ public enum PacerSettings {
         }
     }
 
-    /// One chip in the menu bar status item. The user picks any subset
-    /// and orders them via Settings → Menu bar. Empty subset hides the
-    /// item entirely.
+    /// The menu-bar chip model lives in PacerCore so its pure parse/serialize
+    /// round trip (including scoped-window chips) is unit-testable. Re-exported
+    /// here so the long-standing `PacerSettings.MenuBarChip` /
+    /// `PacerSettings.MenuBarChipItem` spellings keep resolving unchanged.
     ///
-    /// Why a chip list rather than a fixed enum: the previous
-    /// `MenuBarStyle` (hidden / icon / percent / icon+percent) gave a
-    /// 4-way choice that couldn't surface today's cost, the 7-day
-    /// window, or the active model — all of which different users
-    /// want at-a-glance. A chip list scales to any future additions
-    /// without bloating the picker into a 12-way enum.
-    public enum MenuBarChip: String, CaseIterable, Identifiable, Sendable {
-        case icon          = "icon"
-        case fiveHourPct   = "five_hour_pct"
-        case sevenDayPct   = "seven_day_pct"
-        case todayCost     = "today_cost"
-        case todayTokens   = "today_tokens"
-        case activeModel   = "active_model"
-
-        public var id: String { rawValue }
-
-        public var label: String {
-            switch self {
-            case .icon:          return "Icon"
-            case .fiveHourPct:   return "5-hour %"
-            case .sevenDayPct:   return "7-day %"
-            case .todayCost:     return "Today's cost"
-            case .todayTokens:   return "Today's tokens"
-            case .activeModel:   return "Active model"
-            }
-        }
-
-        /// Short helper text shown under each row in Settings.
-        public var blurb: String {
-            switch self {
-            case .icon:          return "Gauge / ring / dot driven by 5-hour usage"
-            case .fiveHourPct:   return "Current 5-hour rate-limit utilization"
-            case .sevenDayPct:   return "Current 7-day rate-limit utilization"
-            case .todayCost:     return "Today's spend in USD"
-            case .todayTokens:   return "Today's token total (K / M / B)"
-            case .activeModel:   return "Most recently used Claude model"
-            }
-        }
-
-        public static let defaultOrder: [MenuBarChip] = [
-            .icon, .fiveHourPct, .sevenDayPct,
-            .todayCost, .todayTokens, .activeModel
-        ]
-    }
+    /// - `MenuBarChip`      — a built-in chip (icon / 5h% / 7d% / cost /
+    ///                        tokens / active model).
+    /// - `MenuBarChipItem`  — one entry in the ordered list: `.fixed(chip)` or
+    ///                        `.scoped(identity:)` for a per-model window chip.
+    public typealias MenuBarChip = PacerCore.MenuBarChip
+    public typealias MenuBarChipItem = PacerCore.MenuBarChipItem
 
     // MARK: - Storage keys
     //
@@ -264,12 +227,33 @@ public enum PacerSettings {
 
     /// Persist the chip list. Empty array stores `""` — read by the
     /// status item host to mean "tear down the NSStatusItem entirely."
+    ///
+    /// Fixed-only: a scoped-window chip already persisted in the CSV survives
+    /// only through `setMenuBarChipItems`. `setMenuBarChips` exists for the
+    /// legacy migration path (which only ever writes fixed chips).
     public static func setMenuBarChips(_ chips: [MenuBarChip]) {
         // De-dupe while preserving order.
         var seen = Set<MenuBarChip>()
         let unique = chips.filter { seen.insert($0).inserted }
         let csv = unique.map(\.rawValue).joined(separator: ",")
         store.set(csv, forKey: Key.menuBarChips)
+    }
+
+    /// Read the ordered chip list as `MenuBarChipItem`s — the full vocabulary,
+    /// including scoped per-model window chips (`.scoped(identity:)`). Unknown /
+    /// empty tokens are skipped and duplicates collapsed, order preserved. This
+    /// is the accessor the live menu bar and the Settings configurator use;
+    /// `menuBarChips()` is the fixed-only view kept for back-compat.
+    public static func menuBarChipItems() -> [MenuBarChipItem] {
+        MenuBarChipItem.parseList(store.string(forKey: Key.menuBarChips) ?? "")
+    }
+
+    /// Persist the full chip list (fixed + scoped). De-dupes by identity while
+    /// preserving order. Empty array stores `""` (tear the status item down).
+    public static func setMenuBarChipItems(_ items: [MenuBarChipItem]) {
+        var seen = Set<String>()
+        let unique = items.filter { seen.insert($0.id).inserted }
+        store.set(MenuBarChipItem.serializeList(unique), forKey: Key.menuBarChips)
     }
 
     /// The ordered activity-ring window keys (outer → inner), deduped and capped

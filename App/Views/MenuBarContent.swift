@@ -55,7 +55,7 @@ enum MenuBarWindowSource {
 }
 
 /// What renders in the menu bar status item. The displayed content is
-/// driven by `PacerSettings.menuBarChips()` — an ordered list the user
+/// driven by `PacerSettings.menuBarChipItems()` — an ordered list the user
 /// configures in Settings → Menu bar. Any combination of:
 ///
 ///   - `.icon`         — `MenuBarIconStyle`-driven SF Symbol; color
@@ -65,6 +65,10 @@ enum MenuBarWindowSource {
 ///   - `.todayCost`    — today's spend in USD.
 ///   - `.todayTokens`  — today's token total (K / M / B suffixed).
 ///   - `.activeModel`  — model name of the most recent TokenSample.
+///   - a scoped per-model window chip (`scoped_pct:<identity>`) — that
+///                       window's live utilization as "<name> <pct>%"
+///                       (e.g. "Fable 49%"); dormant (dropped) when the
+///                       window isn't in the account's latest poll.
 ///
 /// Empty chip list = host tears the NSStatusItem down (handled in
 /// `PacerAppDelegate.rebuildMenuBarForCurrentChips`).
@@ -134,20 +138,12 @@ struct MenuBarLabel: View {
 
     // MARK: - Derived state
 
-    private var chips: [PacerSettings.MenuBarChip] {
+    private var chipItems: [PacerSettings.MenuBarChipItem] {
         // Re-parse from the @AppStorage CSV so SwiftUI body-eval picks
-        // up changes immediately (PacerSettings.menuBarChips() reads
-        // the same store but isn't reactive on its own).
-        var seen = Set<PacerSettings.MenuBarChip>()
-        var ordered: [PacerSettings.MenuBarChip] = []
-        for token in chipsRaw.split(separator: ",") {
-            let trimmed = token.trimmingCharacters(in: .whitespaces)
-            guard let chip = PacerSettings.MenuBarChip(rawValue: trimmed),
-                  !seen.contains(chip) else { continue }
-            seen.insert(chip)
-            ordered.append(chip)
-        }
-        return ordered
+        // up changes immediately (PacerSettings.menuBarChipItems() reads
+        // the same store but isn't reactive on its own). Unknown/empty
+        // tokens skipped, duplicates collapsed, order preserved.
+        PacerSettings.MenuBarChipItem.parseList(chipsRaw)
     }
 
     private var fiveHour: RateLimitSample? {
@@ -242,10 +238,18 @@ struct MenuBarLabel: View {
     }
 
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
-    /// it's the only window chip on screen, the prefix is redundant;
-    /// when 7-day is also visible, the prefix removes ambiguity.
+    /// it's the only window chip on screen, the prefix is redundant; when
+    /// the 7-day chip or any scoped-window chip (each of which carries its
+    /// own name, e.g. "Fable 49%") is also visible, the "5h " prefix keeps
+    /// the bare percentage unambiguous.
     private var fiveHourNeedsPrefix: Bool {
-        chips.contains(.sevenDayPct)
+        chipItems.contains { item in
+            switch item {
+            case .fixed(.sevenDayPct): return true
+            case .scoped:              return true
+            default:                   return false
+            }
+        }
     }
 
     /// Tooltip shown on hover. Apple's Battery / Wi-Fi / Volume status
@@ -295,12 +299,18 @@ struct MenuBarLabel: View {
     /// value, and changes to values that aren't even on screen. Same
     /// remedy as the PR #102 toolbar pill.
     private var rendered: Render {
-        Render(items: chips.map(resolve), tooltip: tooltip)
+        // `compactMap`: a scoped chip whose window isn't in the latest poll
+        // resolves to nil and is dropped (dormant) — never drawn as a blank
+        // or a phantom 0%.
+        Render(items: chipItems.compactMap(resolve), tooltip: tooltip)
     }
 
-    private func resolve(_ chip: PacerSettings.MenuBarChip) -> Render.Item {
-        switch chip {
-        case .icon:
+    /// Resolve one chip item to its render payload, or `nil` when it should be
+    /// dropped from the label — a scoped-window chip whose window isn't in the
+    /// active account's latest poll (dormant). Fixed chips always resolve.
+    private func resolve(_ item: PacerSettings.MenuBarChipItem) -> Render.Item? {
+        switch item {
+        case .fixed(.icon):
             guard iconStyle == .activityRings else {
                 return .symbol(name: symbolName, band: band)
             }
@@ -309,17 +319,26 @@ struct MenuBarLabel: View {
             // then hand the render the ordered utilization for each ring.
             let rings = MenuBarWindows.resolveRingWindows(keys: ringWindowKeys, windows: windows)
             return .rings(rings.map { $0.usedPercentage ?? 0 })
-        case .fiveHourPct:
+        case .fixed(.fiveHourPct):
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
                             pct: fiveHour?.usedPercentage)
-        case .sevenDayPct:
+        case .fixed(.sevenDayPct):
             return .percent(prefix: "7d ", pct: sevenDay?.usedPercentage)
-        case .todayCost:
+        case .fixed(.todayCost):
             return .text(pacerCost(todayCost))
-        case .todayTokens:
+        case .fixed(.todayTokens):
             return .text(pacerTokens(todayTokens))
-        case .activeModel:
+        case .fixed(.activeModel):
             return .text(activeModel ?? "—")
+        case .scoped(let identity):
+            // Read the scoped window's live % from the same dynamic window set
+            // the dropdown / icon-driver use (active account's latest batch).
+            // Absent ⇒ dormant: return nil so the chip drops out.
+            guard let window = windows.first(where: { $0.key == identity }),
+                  let pct = window.usedPercentage else { return nil }
+            // Same "<name> <pct>%" shape + band coloring as the fixed % chips,
+            // e.g. "Fable 49%".
+            return .percent(prefix: "\(window.displayName) ", pct: pct)
         }
     }
 

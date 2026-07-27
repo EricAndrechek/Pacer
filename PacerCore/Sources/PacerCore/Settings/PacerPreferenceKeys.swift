@@ -29,10 +29,17 @@ public enum PacerPreferenceKeys {
     /// vanishes is skipped at render; an empty/all-vanished set falls back to
     /// the 5-hour window. See `MenuBarWindows.resolveRingWindows`.
     public static let menuBarRingWindows     = "pacer.menuBarRingWindows"
-    /// CSV of `MenuBarChip` ids in display order, e.g.
-    /// `"icon,five_hour_pct"`. Empty string = hide the status item
-    /// entirely (the user toggled every chip off). Absent key = run
-    /// the legacy-style migration on first launch with this build.
+    /// CSV of menu-bar chip tokens in display order. Each token is EITHER a
+    /// built-in `MenuBarChip` id (`icon`, `five_hour_pct`, …) OR a scoped
+    /// per-model window chip encoded `scoped_pct:<identity>`, where `<identity>`
+    /// is a `UsageLimit.identity` — so a saved list reads e.g.
+    /// `"icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|"`. The `scoped_pct:`
+    /// prefix is deliberately opaque to the fixed-chip parser, so an OLDER
+    /// client silently skips scoped chips it doesn't understand (no format
+    /// break, no migration). Empty string = hide the status item entirely (the
+    /// user toggled every chip off). Absent key = run the legacy-style migration
+    /// on first launch with this build. Parse/serialize round trip lives in
+    /// `MenuBarChipItem` (PacerCore).
     public static let menuBarChips           = "pacer.menuBarChips"
     public static let notificationsEnabled   = "pacer.notifications.enabled"
     /// Single-threshold legacy keys. Kept for migration only — new code

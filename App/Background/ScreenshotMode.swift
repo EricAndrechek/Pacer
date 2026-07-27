@@ -113,6 +113,18 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the scoped-menu-bar-CHIP work: the status-item
+        // label carrying a scoped per-model window chip ("5h 32%  Fable 49%"),
+        // and the Menu-bar settings card with a scoped chip enabled (plus a
+        // dormant one) and the live scoped windows offered in the Add list.
+        // Writes only the `menubar-chips-*` shots (run with PACER_SCREENSHOT_DIR
+        // → docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_CHIPS_ONLY"] == "1" {
+            await captureMenuBarChips(container: container)
+            log("menubar-chips screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -436,6 +448,68 @@ enum ScreenshotMode {
                       card: true, container: container) {
             MenuBarSettingsMock()
         }
+    }
+
+    // MARK: - Scoped menu-bar-chip proof scenes
+
+    /// Render the scoped-menu-bar-chip captures:
+    ///   - `menubar-chips-label` / `-dark`: the whole menu-bar experience with a
+    ///     scoped per-model window chip in the status-item label — the label
+    ///     reads "5h 32%  Fable 49%" (icon + 5-hour % + the "Fable" scoped
+    ///     window chip), with the dropdown beneath.
+    ///   - `menubar-chips-settings` / `-dark`: the Menu-bar settings card with a
+    ///     scoped chip enabled (Fable, live) plus a dormant one (Cowork, not in
+    ///     the current poll ⇒ "paused"), and the live scoped windows (Haiku /
+    ///     Opus / Sonnet) offered in the Add list.
+    ///
+    /// Snapshots and restores the touched prefs so nothing non-default is left
+    /// persisted in the shared suite.
+    private static func captureMenuBarChips(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        // Warm the engine so the dropdown's outlook captions render real
+        // answers, matching the live menu.
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        let store = PacerSettings.store
+        let keys = [
+            PacerSettings.Key.menuBarChips,
+            PacerSettings.Key.menuBarIconStyle,
+            PacerSettings.Key.menuBarIconDriver,
+        ]
+        let saved: [String: Any?] = Dictionary(uniqueKeysWithValues: keys.map { ($0, store.object(forKey: $0)) })
+        defer {
+            for (key, value) in saved {
+                if let value { store.set(value, forKey: key) } else { store.removeObject(forKey: key) }
+            }
+        }
+        // Gauge icon painted by the 5-hour window (the default driver).
+        store.set(PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set(MenuBarWindows.defaultDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+
+        // (1) Label with a scoped chip: icon + 5-hour % + the "Fable" scoped
+        // window chip ⇒ "5h 32%  Fable 49%" (5h prefixed because a named chip
+        // is alongside it).
+        store.set("icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|",
+                  forKey: PacerSettings.Key.menuBarChips)
+        await capture("menubar-chips-label", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("menubar-chips-label-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // (2) Settings card: Fable enabled (live) + Cowork enabled (dormant —
+        // not in the seeded poll ⇒ "paused"), the rest of the scoped windows in
+        // the Add list.
+        store.set("icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|,scoped_pct:weekly_scoped|Cowork|",
+                  forKey: PacerSettings.Key.menuBarChips)
+        await capture("menubar-chips-settings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) { MenuBarSettingsMock() }
+        await capture("menubar-chips-settings-dark", width: 620, height: nil, scheme: .dark,
+                      card: true, container: container) { MenuBarSettingsMock() }
     }
 
     // MARK: - Pace-layout proof scenes

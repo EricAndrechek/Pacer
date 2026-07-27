@@ -215,12 +215,12 @@ struct MenuBarCard: View {
             scoped: scopedSamples)
     }
 
-    /// Local mutable mirror of the persisted chip order. We re-derive
-    /// from the @AppStorage on every read and write back via
-    /// `PacerSettings.setMenuBarChips`. The local array is what the
-    /// `List`'s `onMove` mutates — binding directly to `chipsRaw`
-    /// would force CSV re-parsing on every drag delta.
-    @State private var enabledOrder: [PacerSettings.MenuBarChip] = []
+    /// Local mutable mirror of the persisted chip order (fixed + scoped). We
+    /// re-derive from the @AppStorage on every read and write back via
+    /// `PacerSettings.setMenuBarChipItems`. The local array is what the reorder
+    /// controls mutate — binding directly to `chipsRaw` would force CSV
+    /// re-parsing on every edit.
+    @State private var enabledOrder: [PacerSettings.MenuBarChipItem] = []
 
     /// Local mutable mirror of the persisted ring-window keys (outer → inner),
     /// edited by the ring picker and written back via
@@ -258,15 +258,58 @@ struct MenuBarCard: View {
         return windows.first(where: { $0.key == key })?.isScoped ?? false
     }
 
-    /// All chips not currently enabled, rendered as "Add" rows below.
-    private var disabledChips: [PacerSettings.MenuBarChip] {
-        let enabledSet = Set(enabledOrder)
+    /// Built-in chips not currently enabled — the fixed half of the "Add" list.
+    private var addableFixedChips: [PacerSettings.MenuBarChip] {
+        let enabled = Set(enabledOrder)
         return PacerSettings.MenuBarChip.defaultOrder
-            .filter { !enabledSet.contains($0) }
+            .filter { !enabled.contains(.fixed($0)) }
+    }
+
+    /// Live scoped per-model windows not already enabled — the dynamic half of
+    /// the "Add" list ("Fable %", "Haiku %", …). Drawn straight from the active
+    /// account's latest poll, so it's fully dynamic and account-scoped: no
+    /// model names are hardcoded and a window Anthropic adds appears here with
+    /// zero code change.
+    private var addableScopedWindows: [MenuBarWindowItem] {
+        let enabled = Set(enabledOrder)
+        return windows.filter {
+            $0.isScoped && !enabled.contains(.scoped(identity: $0.key))
+        }
+    }
+
+    /// Whether the "Add" section has anything to show.
+    private var hasAddableChips: Bool {
+        !addableFixedChips.isEmpty || !addableScopedWindows.isEmpty
     }
 
     private var iconIsEnabled: Bool {
-        enabledOrder.contains(.icon)
+        enabledOrder.contains(.fixed(.icon))
+    }
+
+    /// SF Symbol anchoring a scoped-window chip row (a per-model % window).
+    private static let scopedChipSymbol = "percent"
+
+    /// Resolved display data for one enabled chip row (fixed or scoped),
+    /// computed against the live window set so a scoped chip shows its name +
+    /// current %, or a "paused" note when its window isn't currently reported
+    /// (dormant — consistent with the scoped-alerts UI).
+    private func rowInfo(for item: PacerSettings.MenuBarChipItem) -> ChipRowInfo {
+        switch item {
+        case .fixed(let chip):
+            return ChipRowInfo(symbol: chip.symbolName, title: chip.label,
+                               subtitle: chip.blurb, isDormant: false)
+        case .scoped(let identity):
+            if let window = windows.first(where: { $0.key == identity }) {
+                let pct = window.usedPercentage.map { " · \(Int($0.rounded()))% used" } ?? ""
+                return ChipRowInfo(
+                    symbol: Self.scopedChipSymbol, title: "\(window.displayName) %",
+                    subtitle: "Scoped window\(pct)", isDormant: false)
+            }
+            let name = PacerSettings.MenuBarChipItem.scopedDisplayName(fromIdentity: identity)
+            return ChipRowInfo(
+                symbol: Self.scopedChipSymbol, title: "\(name) %",
+                subtitle: "Paused — not in current usage", isDormant: true)
+        }
     }
 
     /// Picker label for a driver option — the window's name plus its live
@@ -281,7 +324,7 @@ struct MenuBarCard: View {
         PacerCard("Menu bar", content: {
             VStack(alignment: .leading, spacing: 14) {
                 enabledList
-                if !disabledChips.isEmpty {
+                if hasAddableChips {
                     addList
                 }
                 Divider().opacity(0.4)
@@ -340,7 +383,7 @@ struct MenuBarCard: View {
             for: UserDefaults.didChangeNotification,
             object: PacerSettings.store
         )) { _ in
-            let fresh = PacerSettings.menuBarChips()
+            let fresh = PacerSettings.menuBarChipItems()
             if fresh != enabledOrder {
                 enabledOrder = fresh
             }
@@ -359,14 +402,14 @@ struct MenuBarCard: View {
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 6)
             } else {
-                ForEach(enabledOrder) { chip in
+                ForEach(enabledOrder) { item in
                     EnabledChipRow(
-                        chip: chip,
-                        onRemove: { remove(chip) },
-                        onMoveUp: index(of: chip).flatMap { idx in
+                        info: rowInfo(for: item),
+                        onRemove: { remove(item) },
+                        onMoveUp: index(of: item).flatMap { idx in
                             idx == 0 ? nil : { move(from: idx, to: idx - 1) }
                         },
-                        onMoveDown: index(of: chip).flatMap { idx in
+                        onMoveDown: index(of: item).flatMap { idx in
                             idx == enabledOrder.count - 1 ? nil : { move(from: idx, to: idx + 1) }
                         }
                     )
@@ -385,8 +428,15 @@ struct MenuBarCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
-            ForEach(disabledChips) { chip in
-                AddChipRow(chip: chip) { add(chip) }
+            // Built-in chips first, then the live scoped per-model windows
+            // ("Fable %", "Haiku %", …) so the Add list is fully dynamic.
+            ForEach(addableFixedChips) { chip in
+                let item = PacerSettings.MenuBarChipItem.fixed(chip)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
+            }
+            ForEach(addableScopedWindows) { window in
+                let item = PacerSettings.MenuBarChipItem.scoped(identity: window.key)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
             }
         }
     }
@@ -394,26 +444,26 @@ struct MenuBarCard: View {
     // MARK: - Mutation
 
     private func reload() {
-        enabledOrder = PacerSettings.menuBarChips()
+        enabledOrder = PacerSettings.menuBarChipItems()
         ringOrder = PacerSettings.menuBarRingWindowKeys()
     }
 
     private func persist() {
-        PacerSettings.setMenuBarChips(enabledOrder)
+        PacerSettings.setMenuBarChipItems(enabledOrder)
     }
 
-    private func index(of chip: PacerSettings.MenuBarChip) -> Int? {
-        enabledOrder.firstIndex(of: chip)
+    private func index(of item: PacerSettings.MenuBarChipItem) -> Int? {
+        enabledOrder.firstIndex(of: item)
     }
 
-    private func add(_ chip: PacerSettings.MenuBarChip) {
-        guard !enabledOrder.contains(chip) else { return }
-        enabledOrder.append(chip)
+    private func add(_ item: PacerSettings.MenuBarChipItem) {
+        guard !enabledOrder.contains(item) else { return }
+        enabledOrder.append(item)
         persist()
     }
 
-    private func remove(_ chip: PacerSettings.MenuBarChip) {
-        enabledOrder.removeAll { $0 == chip }
+    private func remove(_ item: PacerSettings.MenuBarChipItem) {
+        enabledOrder.removeAll { $0 == item }
         persist()
     }
 
@@ -501,12 +551,23 @@ struct MenuBarCard: View {
     }
 }
 
+/// Resolved display data for a menu-bar chip row — the same shape for a fixed
+/// chip and a scoped-window chip, so the row views stay chip-type-agnostic.
+private struct ChipRowInfo {
+    let symbol: String
+    let title: String
+    let subtitle: String
+    /// True for a configured scoped chip whose window isn't currently reported
+    /// — the row dims and its subtitle reads "paused".
+    let isDormant: Bool
+}
+
 /// One row in the enabled-chip list. Shows the chip's icon glyph,
 /// label, blurb, and up/down/remove controls. Hover reveals the
 /// reorder buttons; they stay visible-but-dim otherwise so first-time
 /// users discover them without hovering.
 private struct EnabledChipRow: View {
-    let chip: PacerSettings.MenuBarChip
+    let info: ChipRowInfo
     let onRemove: () -> Void
     /// `nil` when this is the first row — disables the "up" arrow.
     let onMoveUp: (() -> Void)?
@@ -517,15 +578,16 @@ private struct EnabledChipRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: chip.symbolName)
+            Image(systemName: info.symbol)
                 .frame(width: 18)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(info.isDormant ? HierarchicalShapeStyle.tertiary : HierarchicalShapeStyle.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(chip.label)
+                Text(info.title)
                     .font(.callout)
-                Text(chip.blurb)
+                    .foregroundStyle(info.isDormant ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
+                Text(info.subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(info.isDormant ? Color.orange : Color.secondary)
             }
             Spacer()
             HStack(spacing: 4) {
@@ -570,20 +632,20 @@ private struct EnabledChipRow: View {
 /// append to the end of the order; the user can then drag it into
 /// place with the arrow buttons.
 private struct AddChipRow: View {
-    let chip: PacerSettings.MenuBarChip
+    let info: ChipRowInfo
     let onAdd: () -> Void
     @State private var hovering: Bool = false
 
     var body: some View {
         Button(action: onAdd) {
             HStack(spacing: 10) {
-                Image(systemName: chip.symbolName)
+                Image(systemName: info.symbol)
                     .frame(width: 18)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(chip.label)
+                    Text(info.title)
                         .font(.callout)
-                    Text(chip.blurb)
+                    Text(info.subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
