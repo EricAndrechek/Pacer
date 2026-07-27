@@ -107,6 +107,18 @@ enum ScreenshotMode {
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
 
+        // Scoped windows as first-class pace items — the dashboard pace card
+        // with 5h + 7d + several per-model windows in the responsive N-column
+        // grid (light + dark), and the large widget families showing the same
+        // set. Captured for docs/mockups (run with PACER_SCREENSHOT_DIR pointed
+        // there); design polish pending sign-off.
+        await capture("scoped-firstclass-dashboard", width: 1180, height: nil, scheme: .light,
+                      card: true, container: container) { PaceChartCard() }
+        await capture("scoped-firstclass-dashboard-dark", width: 1180, height: nil, scheme: .dark,
+                      card: true, container: container) { PaceChartCard() }
+        await capture("scoped-firstclass-widget", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { ScopedFirstClassWidgetGallery() }
+
         // Projects ▸ Collections — the manager, the editor, and the
         // integrated Projects tab. Synthetic collections over synthetic
         // project rollups (see `seedCollections`).
@@ -614,40 +626,73 @@ extension ScreenshotMode {
         }
     }
 
-    /// Seed one poll's worth of scoped `limits[]` rows for `LimitsCard`.
-    /// Fake data only — a session window, an account-wide weekly (the
-    /// binding one), and a few per-model weekly windows spanning every
-    /// color band, so the demo/screenshot render exercises the real
-    /// grouping + severity color path.
+    /// Seed the scoped `limits[]` rows that become first-class pace columns.
+    /// Fake data only. The two account-wide windows (a session + a weekly "All
+    /// models") get a single latest-poll row — the fixed 5h/7d hero columns
+    /// already own those, so the scoped column set filters them out. The
+    /// per-model weekly windows each get a **full current-cycle history** (an
+    /// hourly climb to their target), so every scoped column shows a real
+    /// climbing actual line and the engine can forecast it — exactly like the
+    /// 5h/7d hero windows. The hottest (Haiku) is flagged as the window
+    /// currently in effect and carries an elevated severity, exercising the
+    /// active dot + severity chip. More than two scoped windows also drives the
+    /// N-column responsive grid.
     private static func seedUsageLimits(_ ctx: ModelContext, now: Date) {
         let sessionReset = now.addingTimeInterval(2 * 3600 + 19 * 60)
         let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
-        // (kind, group, label, model, percent, active, reset)
-        let rows: [(String, String, String, String?, Double, Bool, Date)] = [
-            ("session",       "session", "All models", nil,      39, false, sessionReset),
-            ("weekly_all",    "weekly",  "All models", nil,      71, true,  weeklyReset),
-            ("weekly_scoped", "weekly",  "Haiku",      "Haiku",  93, false, weeklyReset),
-            ("weekly_scoped", "weekly",  "Opus",       "Opus",   84, false, weeklyReset),
-            ("weekly_scoped", "weekly",  "Fable",      "Fable",  49, false, weeklyReset),
-            ("weekly_scoped", "weekly",  "Sonnet",     "Sonnet", 22, false, weeklyReset),
+        let weeklyDuration: TimeInterval = 7 * 86_400
+
+        // Account-wide windows — one latest-poll row each (excluded from the
+        // scoped columns; they duplicate the 5h/7d hero windows).
+        let accountWide: [(kind: String, group: String, pct: Double, reset: Date)] = [
+            ("session",    "session", 39, sessionReset),
+            ("weekly_all", "weekly",  71, weeklyReset),
         ]
-        for (kind, group, label, model, pct, active, reset) in rows {
-            let identity = "\(kind)|\(model ?? "")|"
+        for a in accountWide {
             ctx.insert(UsageLimitSample(
-                sampledAt: now,
-                identity: identity,
-                kind: kind,
-                group: group,
-                label: label,
-                percent: pct,
-                resetsAt: reset,
-                severity: "normal",
-                isActive: active,
-                modelId: nil,
-                modelDisplayName: model,
-                surface: nil,
-                source: "oauth"
-            ))
+                sampledAt: now, identity: "\(a.kind)||", kind: a.kind, group: a.group,
+                label: "All models", percent: a.pct, resetsAt: a.reset,
+                severity: "normal", isActive: false,
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+        }
+
+        // Scoped per-model weekly windows — the first-class pace columns.
+        // (model, target%, active/in-effect, severity)
+        let scoped: [(model: String, target: Double, active: Bool, severity: String)] = [
+            ("Haiku",  93, true,  "warning"),
+            ("Opus",   84, false, "normal"),
+            ("Fable",  49, false, "normal"),
+            ("Sonnet", 22, false, "normal"),
+        ]
+        let cycleStart = weeklyReset.addingTimeInterval(-weeklyDuration)
+        let elapsed = now.timeIntervalSince(cycleStart)
+        let interval: TimeInterval = 3600
+        for (idx, s) in scoped.enumerated() {
+            let identity = "weekly_scoped|\(s.model)|"
+            func insert(at t: Date, pct: Double) {
+                ctx.insert(UsageLimitSample(
+                    sampledAt: t, identity: identity, kind: "weekly_scoped", group: "weekly",
+                    label: s.model, percent: pct, resetsAt: weeklyReset,
+                    severity: s.severity, isActive: s.active,
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+            }
+            var t = cycleStart
+            var i = 0
+            var last = 0.0
+            while t < now {
+                let frac = max(0, min(1, t.timeIntervalSince(cycleStart) / elapsed))
+                // Mild concave ramp toward the target, monotonic, small jitter.
+                var pct = s.target * (frac * (1.08 - 0.08 * frac))
+                if frac > 0.02, frac < 0.98 { pct += noise(i &* 13 &+ idx &* 7) * 1.2 }
+                pct = max(last, min(s.target, pct))
+                last = pct
+                insert(at: t, pct: pct)
+                t = t.addingTimeInterval(interval)
+                i += 1
+            }
+            // Final sample pinned to exactly `now` at the target — the
+            // latest-batch anchor so the column/engine see this identity.
+            insert(at: now, pct: s.target)
         }
     }
 
@@ -921,6 +966,39 @@ private struct WidgetGallery: View {
     }
 }
 
+/// The two large widget families showing scoped per-model windows as
+/// first-class rows / gauges alongside 5h and 7d — the widget half of the
+/// "scoped windows are treated identically to 5h/7d" story. Hand-built entries
+/// (the widget provider reads the real store, which is empty here).
+private struct ScopedFirstClassWidgetGallery: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 24) {
+            tile(w: 340, h: 384) {
+                PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
+                                    forcedFamily: .systemLarge)
+            }
+            tile(w: 340, h: 384) {
+                PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
+                                     forcedFamily: .systemLarge)
+            }
+        }
+        .padding(28)
+    }
+
+    @ViewBuilder
+    private func tile(w: CGFloat, h: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
+        content()
+            .frame(width: w, height: h)
+            .background(PacerDesign.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
+    }
+}
+
 /// Deterministic fake `TimelineEntry` values for the widget gallery —
 /// kept consistent with the dashboard seed (Opus-heavy, cache-dominated,
 /// 5h ≈32% / 7d ≈62%, ~$124 today).
@@ -939,6 +1017,69 @@ private enum ScreenshotEntries {
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
             window: .both
         )
+    }
+
+    /// Large pace-chart widget with scoped per-model windows as first-class
+    /// rows below 5h/7d.
+    static var paceChartScopedLarge: PaceChartEntry {
+        PaceChartEntry(
+            date: now,
+            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
+            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            scoped: [
+                .init(label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
+                .init(label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
+            ],
+            window: .both
+        )
+    }
+
+    /// Large gauges widget with scoped per-model windows as ring gauges.
+    static var paceGaugesScopedLarge: PaceGaugesEntry {
+        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
+        let weeklyDur: TimeInterval = 7 * 86_400
+        return PaceGaugesEntry(
+            date: now,
+            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
+            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            scoped: [
+                .init(label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
+                .init(label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+            ],
+            window: .both
+        )
+    }
+
+    /// A climbing actual line with a dashed linear projection to `projectTo` at
+    /// reset — the shape a real window shows. `~62%` elapsed so the dashed
+    /// segment is visible.
+    private static func chartWindow(duration: TimeInterval, usedPct: Double, projectTo: Double) -> PaceChartEntry.WindowState {
+        let resets = now.addingTimeInterval(duration * 0.38)
+        let cycleStart = resets.addingTimeInterval(-duration)
+        let elapsed = now.timeIntervalSince(cycleStart)
+        let n = 12
+        let points = (0..<n).map { i -> PaceChartView.Data.Point in
+            let f = Double(i) / Double(n - 1)
+            return .init(time: cycleStart.addingTimeInterval(elapsed * f),
+                         value: usedPct * (f * (1.06 - 0.06 * f)))
+        }
+        let steps = 6
+        let projection = (0...steps).map { i -> PaceChartView.Data.Point in
+            let f = Double(i) / Double(steps)
+            return .init(time: now.addingTimeInterval(resets.timeIntervalSince(now) * f),
+                         value: min(100, usedPct + (projectTo - usedPct) * f))
+        }
+        let crossing: Date? = (projectTo > usedPct && projectTo >= 100)
+            ? now.addingTimeInterval(resets.timeIntervalSince(now) * ((100 - usedPct) / (projectTo - usedPct)))
+            : nil
+        return PaceChartEntry.WindowState(
+            chart: PaceChartView.Data(
+                cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
+                points: points, usedPct: usedPct,
+                projection: projection, projectionCrossesFullAt: crossing),
+            resetsAt: resets)
     }
 
     static var liveSession: LiveSessionEntry {

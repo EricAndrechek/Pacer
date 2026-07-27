@@ -16,6 +16,10 @@ struct PaceGaugesEntry: TimelineEntry {
     let date: Date
     let fiveHour: WindowState?
     let sevenDay: WindowState?
+    /// Scoped per-model windows (`limits[]`), active-first then hottest — the
+    /// large family renders them as ring gauges alongside 5h/7d. Empty when the
+    /// account has none, so small/medium are unchanged.
+    var scoped: [ScopedGauge] = []
     /// Window pick from the widget intent — same enum the pace chart
     /// widget uses, kept in lockstep so a user who chose "5-hour only"
     /// for one widget gets the same option set on the other.
@@ -24,6 +28,16 @@ struct PaceGaugesEntry: TimelineEntry {
     struct WindowState {
         let usedPct: Double
         let resetsAt: Date?
+    }
+
+    /// One scoped per-model window's gauge: label + used% + reset, plus its
+    /// group-derived duration (for the reset caption) and the binding flag.
+    struct ScopedGauge {
+        let label: String
+        let usedPct: Double
+        let resetsAt: Date?
+        let durationSeconds: TimeInterval
+        let isActive: Bool
     }
 }
 
@@ -65,23 +79,125 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
                 date: Date(),
                 fiveHour: five.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
                 sevenDay: seven.map { .init(usedPct: $0.usedPercentage, resetsAt: $0.resetsAt) },
+                scoped: Self.scopedGauges(context: context),
                 window: window
             )
         } catch {
             return PaceGaugesEntry(date: Date(), fiveHour: nil, sevenDay: nil, window: window)
         }
     }
+
+    /// The scoped per-model windows as gauges, active-first then hottest. Reads
+    /// the latest poll's model/surface-scoped `limits[]` rows — fully dynamic,
+    /// empty when the account has none.
+    private static func scopedGauges(context: ModelContext) -> [PaceGaugesEntry.ScopedGauge] {
+        var descriptor = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        descriptor.fetchLimit = 200
+        let rows = (try? context.fetch(descriptor)) ?? []
+        return rows.latestBatch()
+            .filter {
+                ($0.modelId?.isEmpty == false)
+                    || ($0.modelDisplayName?.isEmpty == false)
+                    || ($0.surface?.isEmpty == false)
+            }
+            .map {
+                PaceGaugesEntry.ScopedGauge(
+                    label: $0.label, usedPct: $0.percent, resetsAt: $0.resetsAt,
+                    durationSeconds: WindowSpec.scopedDuration(group: $0.group),
+                    isActive: $0.isActive)
+            }
+    }
 }
 
 struct PaceGaugesWidgetView: View {
     var entry: PaceGaugesEntry
+    /// Screenshot/preview override — `widgetFamily` is read-only at runtime, so
+    /// the headless capture harness can't inject a family. nil in the real
+    /// widget, where the environment drives the layout.
+    var forcedFamily: WidgetFamily? = nil
     @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        switch family {
+        switch forcedFamily ?? family {
         case .systemSmall: small
+        case .systemLarge: large
         default:           medium
         }
+    }
+
+    /// The full window set as ring gauges: 5h, 7d, then each scoped per-model
+    /// window (active/hottest first). This is where scoped windows become
+    /// first-class gauges — the small/medium canvases can't hold more than the
+    /// fixed pair legibly, so the large family owns the dynamic N-window grid.
+    struct GaugeCell: Identifiable {
+        let id: String
+        let label: String
+        let usedPct: Double?
+        let resetsAt: Date?
+        let durationSeconds: TimeInterval
+        let isActive: Bool
+    }
+
+    /// Ordered gauge cells for the large grid, capped so the rings stay legible.
+    private var largeCells: [GaugeCell] {
+        var cells: [GaugeCell] = [
+            GaugeCell(id: "five_hour", label: "5-hour", usedPct: entry.fiveHour?.usedPct,
+                      resetsAt: entry.fiveHour?.resetsAt, durationSeconds: 5 * 3600, isActive: false),
+            GaugeCell(id: "seven_day", label: "7-day", usedPct: entry.sevenDay?.usedPct,
+                      resetsAt: entry.sevenDay?.resetsAt, durationSeconds: 7 * 86_400, isActive: false),
+        ]
+        // Up to four scoped gauges → six total, a clean 3×2 grid at most.
+        for s in entry.scoped.prefix(4) {
+            cells.append(GaugeCell(id: s.label, label: s.label, usedPct: s.usedPct,
+                                   resetsAt: s.resetsAt, durationSeconds: s.durationSeconds,
+                                   isActive: s.isActive))
+        }
+        return cells
+    }
+
+    @ViewBuilder
+    private var large: some View {
+        let cells = largeCells
+        VStack(alignment: .leading, spacing: 10) {
+            WidgetTitleBar(title: "RATE LIMITS")
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 92, maximum: .infinity), spacing: 12)],
+                alignment: .leading, spacing: 14
+            ) {
+                ForEach(cells) { gaugeCell($0) }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+        }
+        .padding(WidgetStyle.largePad)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .containerBackground(widgetCardBackground, for: .widget)
+    }
+
+    @ViewBuilder
+    private func gaugeCell(_ cell: GaugeCell) -> some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 4) {
+                // Accent dot marks the scoped window currently in effect; fixed
+                // rows fall back to the band color. No jargon label.
+                Circle()
+                    .fill(cell.isActive ? Color.accentColor
+                          : (cell.usedPct.map { UsageBand(percentage: $0).color } ?? .secondary))
+                    .frame(width: 6, height: 6)
+                Text(cell.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
+                      lineWidth: 8, labelSize: 20)
+                .frame(width: 74, height: 74)
+            Text(resetText(cell.resetsAt, durationSeconds: cell.durationSeconds))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// Resolve the small canvas's single window. `.both` collapses to
@@ -238,8 +354,8 @@ struct PaceGaugesWidget: Widget {
             PaceGaugesWidgetView(entry: entry)
         }
         .configurationDisplayName("Rate limits")
-        .description("5-hour and 7-day Claude Code rate-limit usage.")
-        .supportedFamilies([.systemSmall, .systemMedium])
+        .description("Claude Code rate-limit usage — the 5-hour and 7-day windows, plus any per-model windows in the large size.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
         .contentMarginsDisabled()
     }
 }

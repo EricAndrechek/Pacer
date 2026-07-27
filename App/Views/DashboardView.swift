@@ -46,14 +46,13 @@ struct DashboardView: View {
                     modalRoot = .session(sessionId: sessionId, projectDisplayName: displayName)
                 }
             )
+            // Pace charts for EVERY rate-limit window — the fixed 5h/7d blocks
+            // and each scoped per-model window (e.g. a "Fable" weekly cap) as
+            // first-class, identically-treated columns. `window` is the fixed
+            // window name or the scoped `limits[]` identity; the projection
+            // modal accepts both.
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
-            })
-            // Scoped per-model pace tiles — hides itself when the account has
-            // no scoped limits[] data. Tapping a tile opens the same projection
-            // modal the 5h/7d columns use, keyed by the scoped identity.
-            LimitsCard(onCompare: { identity in
-                modalRoot = .projection(window: identity)
             })
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)

@@ -220,11 +220,11 @@ public actor UsageIntelligenceEngine {
 
     /// The scoped per-model windows the engine is currently forecasting —
     /// discovered dynamically from the latest poll's model/surface-scoped
-    /// `limits[]` rows. The `ScopedPaceTile` grid drives off this list and asks
-    /// `burnOutlook(windowKey:)` / `ask(.scopedOutlook(_:))` /
-    /// `rateLimitTrajectories(windowKey:)` per identity — the SAME forecast
-    /// surface the fixed 5h/7d hero cards use. Empty until the first recompute
-    /// or when the account has no scoped windows.
+    /// `limits[]` rows. The dashboard's pace card renders one first-class
+    /// `PaceColumn` per identity, asking `burnOutlook(windowKey:)` /
+    /// `ask(.scopedOutlook(_:))` / `rateLimitTrajectories(windowKey:)` — the
+    /// SAME forecast surface the fixed 5h/7d hero columns use. Empty until the
+    /// first recompute or when the account has no scoped windows.
     public func scopedWindows() -> [WindowSpec] {
         (features?.windows ?? []).filter { $0.isScoped }
     }
