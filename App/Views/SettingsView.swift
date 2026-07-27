@@ -181,6 +181,32 @@ private struct MenuBarCard: View {
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
+    /// Which window's utilization drives the status-item icon. Empty = "Auto"
+    /// (follows the 5-hour window). See `MenuBarWindows.resolveDriver`.
+    @AppStorage(PacerSettings.Key.menuBarIconDriver, store: PacerSettings.store)
+    private var iconDriverRaw: String = MenuBarWindows.autoDriverKey
+
+    /// Recent samples so the driver picker can offer the live window set —
+    /// 5h / 7d plus every scoped per-model window currently reported.
+    @Query(MenuBarCard.recentRateDescriptor) private var rateSamples: [RateLimitSample]
+    @Query(MenuBarWindowSource.recentScopedDescriptor) private var scopedSamples: [UsageLimitSample]
+
+    private static let recentRateDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
+
+    /// The live window set the picker chooses from (ordered like the dashboard).
+    private var windows: [MenuBarWindowItem] {
+        MenuBarWindowSource.items(
+            fiveHour: rateSamples.first { $0.window == RateLimitWindowName.fiveHour },
+            sevenDay: rateSamples.first { $0.window == RateLimitWindowName.sevenDay },
+            scoped: scopedSamples)
+    }
+
     /// Local mutable mirror of the persisted chip order. We re-derive
     /// from the @AppStorage on every read and write back via
     /// `PacerSettings.setMenuBarChips`. The local array is what the
@@ -199,6 +225,14 @@ private struct MenuBarCard: View {
         enabledOrder.contains(.icon)
     }
 
+    /// Picker label for a driver option — the window's name plus its live
+    /// utilization when known, so the user can tell "Fable · 49%" apart from
+    /// "Opus · 84%" at a glance.
+    private func driverOptionLabel(_ window: MenuBarWindowItem) -> String {
+        guard let pct = window.usedPercentage else { return window.displayName }
+        return "\(window.displayName) · \(Int(pct.rounded()))%"
+    }
+
     var body: some View {
         PacerCard("Menu bar", content: {
             VStack(alignment: .leading, spacing: 14) {
@@ -215,6 +249,27 @@ private struct MenuBarCard: View {
                     }
                     .labelsHidden()
                     .disabled(!iconIsEnabled)
+                }
+                LabeledControlRow(label: "Icon driver") {
+                    Picker("Icon driver", selection: $iconDriverRaw) {
+                        Text("Auto (window in effect)").tag(MenuBarWindows.autoDriverKey)
+                        ForEach(windows) { window in
+                            Text(driverOptionLabel(window)).tag(window.key)
+                        }
+                        // A previously-chosen window that's no longer reported:
+                        // keep the row so the selection stays visible and the
+                        // "falling back to Auto" state reads clearly.
+                        if !MenuBarWindows.driverIsResolvable(key: iconDriverRaw, windows: windows) {
+                            Text("Unavailable — using Auto").tag(iconDriverRaw)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(!iconIsEnabled)
+                }
+                if iconDriverRaw != MenuBarWindows.autoDriverKey {
+                    Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }, footer: {
