@@ -118,6 +118,7 @@ public enum PacerSettings {
         public static let menuBarStyle           = PacerPreferenceKeys.menuBarStyle
         public static let menuBarIconStyle       = PacerPreferenceKeys.menuBarIconStyle
         public static let menuBarIconDriver      = PacerPreferenceKeys.menuBarIconDriver
+        public static let menuBarRingWindows     = PacerPreferenceKeys.menuBarRingWindows
         public static let menuBarChips           = PacerPreferenceKeys.menuBarChips
         public static let notificationsEnabled   = PacerPreferenceKeys.notificationsEnabled
         public static let fiveHourThresholdPct   = PacerPreferenceKeys.fiveHourThresholdPct
@@ -150,9 +151,12 @@ public enum PacerSettings {
     nonisolated(unsafe) public static let defaults: [String: Any] = [
         Key.menuBarStyle:          MenuBarStyle.iconAndPercent.rawValue,
         Key.menuBarIconStyle:      MenuBarIconStyle.gaugeNeedle.rawValue,
-        // Empty = "Auto (window in effect)" — the icon follows the 5-hour
-        // window, exactly as it did before the driver picker existed.
-        Key.menuBarIconDriver:     MenuBarWindows.autoDriverKey,
+        // Explicit default: the 5-hour window paints the icon. (A legacy stored
+        // "" — the old "Auto" — still resolves to 5-hour via resolveDriver.)
+        Key.menuBarIconDriver:     MenuBarWindows.defaultDriverKey,
+        // Activity-rings icon: the fixed 2-ring set (outer 5-hour, inner 7-day)
+        // so an existing user's rings icon is unchanged. Configurable up to 3.
+        Key.menuBarRingWindows:    MenuBarWindows.defaultRingWindowKeys.joined(separator: ","),
         // Default: icon + 5-hour %. Matches the previous default
         // `iconAndPercent`, just expressed in the chip vocabulary so
         // a fresh-install user sees the same thing returning users do
@@ -266,6 +270,35 @@ public enum PacerSettings {
         let unique = chips.filter { seen.insert($0).inserted }
         let csv = unique.map(\.rawValue).joined(separator: ",")
         store.set(csv, forKey: Key.menuBarChips)
+    }
+
+    /// The ordered activity-ring window keys (outer → inner), deduped and capped
+    /// at `MenuBarWindows.maxRingWindows` (3). An empty/absent value yields the
+    /// default 2-ring set (5-hour + 7-day) so the rings icon is never blank.
+    /// Resolution against the live window set — skipping vanished windows — is
+    /// `MenuBarWindows.resolveRingWindows`.
+    public static func menuBarRingWindowKeys() -> [String] {
+        let raw = store.string(forKey: Key.menuBarRingWindows) ?? ""
+        let keys = normalizedRingKeys(
+            raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+        return keys.isEmpty ? MenuBarWindows.defaultRingWindowKeys : keys
+    }
+
+    /// Persist the activity-ring window keys — deduped, empties dropped, capped
+    /// at 3. Order is meaningful (outer → inner).
+    public static func setMenuBarRingWindowKeys(_ keys: [String]) {
+        store.set(normalizedRingKeys(keys).joined(separator: ","), forKey: Key.menuBarRingWindows)
+    }
+
+    /// Dedupe (preserving order), drop empties, cap at `maxRingWindows`.
+    private static func normalizedRingKeys(_ keys: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for key in keys where !key.isEmpty && seen.insert(key).inserted {
+            out.append(key)
+            if out.count == MenuBarWindows.maxRingWindows { break }
+        }
+        return out
     }
 
     /// One-time migration from the legacy single-Int threshold keys to

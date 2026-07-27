@@ -85,10 +85,26 @@ public enum MenuBarWindows {
     public static let fiveHourDuration: TimeInterval = 5 * 3600
     public static let sevenDayDuration: TimeInterval = 7 * 86_400
 
-    /// Stored icon-driver value meaning "auto / the window in effect" — the
-    /// default that preserves today's behaviour (the 5-hour window paints the
-    /// icon). An absent or unrecognised preference resolves the same way.
+    /// Legacy stored icon-driver value (empty string) that historically meant
+    /// "auto / the window in effect", resolving to the 5-hour window. The driver
+    /// is now chosen **explicitly** (the picker offers no "Auto" row; the default
+    /// is the 5-hour window's key), but this legacy value must keep resolving to
+    /// the 5-hour window so existing installs don't break — see `resolveDriver`.
     public static let autoDriverKey = ""
+
+    /// The explicit default icon-driver: the 5-hour window. New installs store
+    /// this; a legacy `autoDriverKey` ("") resolves to the same window.
+    public static let defaultDriverKey = RateLimitWindowName.fiveHour
+
+    /// Hard cap on the number of concentric activity rings the menu-bar icon
+    /// draws (Apple-Watch style). Three is the most that stays legible at
+    /// menu-bar size.
+    public static let maxRingWindows = 3
+
+    /// Default activity-ring window set: outer 5-hour, inner 7-day — the two
+    /// rings the `.activityRings` icon drew before the set became configurable,
+    /// so existing users' 2-ring icon is unchanged.
+    public static let defaultRingWindowKeys = [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay]
 
     /// Order like the dashboard: scoped **session**-side windows, then **5h**,
     /// then **7d**, then scoped **weekly**-side windows, then any longer/other
@@ -110,8 +126,8 @@ public enum MenuBarWindows {
     /// The window whose utilization should drive the status-item icon.
     ///
     /// - A specific `key` that is present in the current window set wins.
-    /// - `autoDriverKey` (the default), or a specific key whose window has
-    ///   *disappeared* since it was chosen, both fall back to the default
+    /// - A legacy `autoDriverKey` ("") — or a specific key whose window has
+    ///   *disappeared* since it was chosen — both fall back to the default
     ///   anchor: the 5-hour block, else the 7-day block, else the first window.
     ///
     /// Returns `nil` only when there are no windows at all — the icon then keeps
@@ -130,5 +146,36 @@ public enum MenuBarWindows {
     /// settings picker uses this to flag a chosen-but-vanished window.
     public static func driverIsResolvable(key: String, windows: [MenuBarWindowItem]) -> Bool {
         key.isEmpty || windows.contains { $0.key == key }
+    }
+
+    /// The ordered set of windows the `.activityRings` icon draws — one ring per
+    /// key, **outer → inner** in the stored order.
+    ///
+    /// - Each key maps to its live window; a key whose window has **disappeared**
+    ///   from the latest poll is skipped (that ring drops out), and duplicate
+    ///   keys are collapsed.
+    /// - The result is capped at `maxRingWindows` (3); extra keys are ignored.
+    /// - If nothing resolves (every configured window vanished, or the list was
+    ///   empty), it falls back to the single default anchor — the 5-hour block,
+    ///   else 7-day, else the first window — so the icon is never empty.
+    ///
+    /// Returns `[]` only when there are no windows at all (the genuine cold
+    /// start, before any sample or fixed block exists).
+    public static func resolveRingWindows(keys: [String], windows: [MenuBarWindowItem]) -> [MenuBarWindowItem] {
+        var seen = Set<String>()
+        var resolved: [MenuBarWindowItem] = []
+        for key in keys where !key.isEmpty {
+            guard seen.insert(key).inserted,
+                  let match = windows.first(where: { $0.key == key }) else { continue }
+            resolved.append(match)
+            if resolved.count == maxRingWindows { break }
+        }
+        if resolved.isEmpty,
+           let anchor = windows.first(where: { $0.key == RateLimitWindowName.fiveHour })
+               ?? windows.first(where: { $0.key == RateLimitWindowName.sevenDay })
+               ?? windows.first {
+            resolved.append(anchor)
+        }
+        return resolved
     }
 }

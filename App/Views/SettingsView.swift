@@ -174,17 +174,25 @@ private struct StartupCard: View {
 /// today's cost, the 7-day window, or the active model. The chip list
 /// scales to future additions and lets users build the exact at-a-
 /// glance summary they want.
-private struct MenuBarCard: View {
+// Internal (not private) so the screenshot harness can render this card in
+// isolation for the menu-bar-polish mockups.
+struct MenuBarCard: View {
     @AppStorage(PacerSettings.Key.menuBarChips, store: PacerSettings.store)
     private var chipsRaw: String = "icon,five_hour_pct"
 
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
-    /// Which window's utilization drives the status-item icon. Empty = "Auto"
-    /// (follows the 5-hour window). See `MenuBarWindows.resolveDriver`.
+    /// Which window's utilization drives the single-glyph icon. Chosen
+    /// explicitly; default is the 5-hour window. A legacy "" still resolves to
+    /// 5-hour. See `MenuBarWindows.resolveDriver`.
     @AppStorage(PacerSettings.Key.menuBarIconDriver, store: PacerSettings.store)
-    private var iconDriverRaw: String = MenuBarWindows.autoDriverKey
+    private var iconDriverRaw: String = MenuBarWindows.defaultDriverKey
+
+    /// The activity-rings window set (outer → inner). Mirrored into `ringOrder`
+    /// for editing; the CSV is the source of truth.
+    @AppStorage(PacerSettings.Key.menuBarRingWindows, store: PacerSettings.store)
+    private var ringWindowsRaw: String = "five_hour,seven_day"
 
     /// Recent samples so the driver picker can offer the live window set —
     /// 5h / 7d plus every scoped per-model window currently reported.
@@ -213,6 +221,42 @@ private struct MenuBarCard: View {
     /// `List`'s `onMove` mutates — binding directly to `chipsRaw`
     /// would force CSV re-parsing on every drag delta.
     @State private var enabledOrder: [PacerSettings.MenuBarChip] = []
+
+    /// Local mutable mirror of the persisted ring-window keys (outer → inner),
+    /// edited by the ring picker and written back via
+    /// `PacerSettings.setMenuBarRingWindowKeys`.
+    @State private var ringOrder: [String] = []
+
+    private var iconStyle: PacerSettings.MenuBarIconStyle {
+        PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
+    }
+
+    /// Windows still available to add as a ring (not already selected, and only
+    /// while under the 3-ring cap).
+    private var addableRingWindows: [MenuBarWindowItem] {
+        guard ringOrder.count < MenuBarWindows.maxRingWindows else { return [] }
+        let chosen = Set(ringOrder)
+        return windows.filter { !chosen.contains($0.key) }
+    }
+
+    /// Driver-picker selection. Maps a legacy stored "" (old "Auto") onto the
+    /// explicit 5-hour key so the picker shows a real row (there is no "Auto"
+    /// row anymore); writing back stores the chosen window key.
+    private var driverSelection: Binding<String> {
+        Binding(
+            get: { iconDriverRaw.isEmpty ? MenuBarWindows.defaultDriverKey : iconDriverRaw },
+            set: { iconDriverRaw = $0 }
+        )
+    }
+
+    /// Whether to show the "…falls back to the 5-hour window" note: only when
+    /// the chosen driver is a scoped per-model window (the one kind that can
+    /// disappear) or has already vanished. The fixed 5h/7d never drop out.
+    private var showsDriverFallbackNote: Bool {
+        let key = driverSelection.wrappedValue
+        if !MenuBarWindows.driverIsResolvable(key: key, windows: windows) { return true }
+        return windows.first(where: { $0.key == key })?.isScoped ?? false
+    }
 
     /// All chips not currently enabled, rendered as "Add" rows below.
     private var disabledChips: [PacerSettings.MenuBarChip] {
@@ -250,26 +294,33 @@ private struct MenuBarCard: View {
                     .labelsHidden()
                     .disabled(!iconIsEnabled)
                 }
-                LabeledControlRow(label: "Icon driver") {
-                    Picker("Icon driver", selection: $iconDriverRaw) {
-                        Text("Auto (window in effect)").tag(MenuBarWindows.autoDriverKey)
-                        ForEach(windows) { window in
-                            Text(driverOptionLabel(window)).tag(window.key)
+                // Single-glyph styles (gauge / ring-fill / dot) are painted by
+                // one window's usage — the "driver". The activity-rings style
+                // draws its own configurable ring set, so swap the driver picker
+                // for the ring picker when that style is chosen.
+                if iconStyle == .activityRings {
+                    ringWindowPicker
+                } else {
+                    LabeledControlRow(label: "Icon driver") {
+                        Picker("Icon driver", selection: driverSelection) {
+                            ForEach(windows) { window in
+                                Text(driverOptionLabel(window)).tag(window.key)
+                            }
+                            // A previously-chosen window that's no longer
+                            // reported: keep the row so the selection stays
+                            // visible and the fallback reads clearly.
+                            if !MenuBarWindows.driverIsResolvable(key: driverSelection.wrappedValue, windows: windows) {
+                                Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
+                            }
                         }
-                        // A previously-chosen window that's no longer reported:
-                        // keep the row so the selection stays visible and the
-                        // "falling back to Auto" state reads clearly.
-                        if !MenuBarWindows.driverIsResolvable(key: iconDriverRaw, windows: windows) {
-                            Text("Unavailable — using Auto").tag(iconDriverRaw)
-                        }
+                        .labelsHidden()
+                        .disabled(!iconIsEnabled)
                     }
-                    .labelsHidden()
-                    .disabled(!iconIsEnabled)
-                }
-                if iconDriverRaw != MenuBarWindows.autoDriverKey {
-                    Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if showsDriverFallbackNote {
+                        Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }, footer: {
@@ -292,6 +343,10 @@ private struct MenuBarCard: View {
             let fresh = PacerSettings.menuBarChips()
             if fresh != enabledOrder {
                 enabledOrder = fresh
+            }
+            let freshRings = PacerSettings.menuBarRingWindowKeys()
+            if freshRings != ringOrder {
+                ringOrder = freshRings
             }
         }
     }
@@ -340,6 +395,7 @@ private struct MenuBarCard: View {
 
     private func reload() {
         enabledOrder = PacerSettings.menuBarChips()
+        ringOrder = PacerSettings.menuBarRingWindowKeys()
     }
 
     private func persist() {
@@ -369,6 +425,79 @@ private struct MenuBarCard: View {
         let clamped = max(0, min(enabledOrder.count, to))
         enabledOrder.insert(chip, at: clamped)
         persist()
+    }
+
+    // MARK: - Activity-ring window picker
+
+    /// Shown in place of the driver picker when the icon style is Activity
+    /// rings: pick up to 3 windows (5h / 7d / any scoped), ordered outer →
+    /// inner. Reuses the same live window enumeration the driver picker offers.
+    @ViewBuilder private var ringWindowPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledControlRow(label: "Rings") {
+                Text("Outer → inner, up to 3")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            ForEach(Array(ringOrder.enumerated()), id: \.element) { idx, key in
+                ringRow(key: key, index: idx)
+            }
+            if !addableRingWindows.isEmpty {
+                Text("Add")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                ForEach(addableRingWindows) { window in
+                    AddRingRow(label: driverOptionLabel(window)) { addRing(window.key) }
+                }
+            }
+            Text("Each ring shows one window's usage, colored by its band. The default is 5-hour + 7-day.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+        }
+        .disabled(!iconIsEnabled)
+    }
+
+    @ViewBuilder
+    private func ringRow(key: String, index: Int) -> some View {
+        let window = windows.first(where: { $0.key == key })
+        RingWindowRow(
+            label: window.map(driverOptionLabel) ?? key,
+            ringIndex: index + 1,
+            isUnavailable: window == nil,
+            onRemove: ringOrder.count > 1 ? { removeRing(key) } : nil,
+            onMoveUp: index == 0 ? nil : { moveRing(from: index, to: index - 1) },
+            onMoveDown: index == ringOrder.count - 1 ? nil : { moveRing(from: index, to: index + 1) }
+        )
+    }
+
+    private func persistRings() {
+        PacerSettings.setMenuBarRingWindowKeys(ringOrder)
+    }
+
+    private func addRing(_ key: String) {
+        guard ringOrder.count < MenuBarWindows.maxRingWindows,
+              !ringOrder.contains(key) else { return }
+        ringOrder.append(key)
+        persistRings()
+    }
+
+    private func removeRing(_ key: String) {
+        // Never remove the last ring — the icon must draw at least one.
+        guard ringOrder.count > 1 else { return }
+        ringOrder.removeAll { $0 == key }
+        persistRings()
+    }
+
+    private func moveRing(from: Int, to: Int) {
+        guard ringOrder.indices.contains(from),
+              (0..<ringOrder.count).contains(to),
+              from != to else { return }
+        let key = ringOrder.remove(at: from)
+        ringOrder.insert(key, at: to)
+        persistRings()
     }
 }
 
@@ -458,6 +587,108 @@ private struct AddChipRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.tint)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// One selected activity-ring window. Shows the ring's position (1 = outer),
+/// its window label + live %, an "unavailable" flag if the window has vanished,
+/// and up/down/remove controls. The remove button is nil for the last ring (the
+/// icon must always draw at least one).
+private struct RingWindowRow: View {
+    let label: String
+    let ringIndex: Int
+    let isUnavailable: Bool
+    let onRemove: (() -> Void)?
+    let onMoveUp: (() -> Void)?
+    let onMoveDown: (() -> Void)?
+
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // A concentric-rings glyph anchors the row; the number reads out
+            // this ring's outer→inner position.
+            Image(systemName: "circle.circle")
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+            Text("Ring \(ringIndex)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            Text(label)
+                .font(.callout)
+                .lineLimit(1)
+            if isUnavailable {
+                Text("unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+            HStack(spacing: 4) {
+                arrowButton(systemImage: "chevron.up", action: onMoveUp)
+                arrowButton(systemImage: "chevron.down", action: onMoveDown)
+            }
+            .opacity(hovering ? 1.0 : 0.55)
+            Button(role: .destructive) { onRemove?() } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(onRemove == nil)
+            .help(onRemove == nil ? "At least one ring is required" : "Remove ring")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder
+    private func arrowButton(systemImage: String, action: (() -> Void)?) -> some View {
+        Button { action?() } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .disabled(action == nil)
+    }
+}
+
+/// "Add this window as a ring" row shown below the selected rings while under
+/// the 3-ring cap. Single-tap appends it as the innermost ring.
+private struct AddRingRow: View {
+    let label: String
+    let onAdd: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        Button(action: onAdd) {
+            HStack(spacing: 10) {
+                Image(systemName: "circle.circle")
+                    .frame(width: 18)
+                    .foregroundStyle(.secondary)
+                Text(label)
+                    .font(.callout)
+                    .lineLimit(1)
                 Spacer()
                 Image(systemName: "plus.circle")
                     .font(.system(size: 13, weight: .medium))
