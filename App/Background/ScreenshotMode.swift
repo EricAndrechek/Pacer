@@ -73,6 +73,15 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the dynamic widget window-picker work: render
+        // only the `widget-picker-*` scenes and return, so `docs/mockups` gets
+        // just those without the README scenes.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_WIDGET_PICKER_ONLY"] == "1" {
+            await captureWidgetPickerScenes()
+            log("widget-picker screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -275,6 +284,60 @@ enum ScreenshotMode {
         await capture(name, width: width, height: nil, scheme: .light,
                       card: true, container: container) { PaceChartCard() }
         screenshotEngine = previous
+    }
+
+    // MARK: - Widget window-picker proof scenes
+
+    /// Render the `widget-picker-*` mockups for the dynamic window-selection
+    /// work: the small family showing a single scoped window (Fable), the
+    /// medium family showing 5h+7d and 5h+Fable (the unchanged two-card layout
+    /// with a swappable second card), and the large family (unchanged
+    /// all-windows view). Entries are hand-built with the primary/secondary
+    /// keys the "Edit Widget" sheet would store, since the headless harness
+    /// can't drive the App-Intents configuration sheet directly.
+    private static func captureWidgetPickerScenes() async {
+        await captureWidgetTile("widget-picker-small-scoped", w: 158, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: ScreenshotEntries.fableKey, secondaryKey: "seven_day"),
+                forcedFamily: .systemSmall)
+        }
+        await captureWidgetTile("widget-picker-medium-5h-7d", w: 348, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
+                forcedFamily: .systemMedium)
+        }
+        await captureWidgetTile("widget-picker-medium-5h-fable", w: 348, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: ScreenshotEntries.fableKey),
+                forcedFamily: .systemMedium)
+        }
+        await captureWidgetTile("widget-picker-large", w: 340, h: 384) {
+            PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge, forcedFamily: .systemLarge)
+        }
+    }
+
+    /// Frame a single widget view like the desktop (card fill, rounded corners,
+    /// soft shadow on a transparent margin) and capture it at native size. The
+    /// widget views take hand-built entries and never read the store, so any
+    /// in-memory container satisfies the `capture` driver's `.modelContainer`.
+    private static func captureWidgetTile(
+        _ name: String, w: CGFloat, h: CGFloat,
+        @ViewBuilder _ content: () -> some View
+    ) async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ \(name): container creation failed"); return
+        }
+        let tile = content()
+            .frame(width: w, height: h)
+            .background(PacerDesign.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
+        await capture(name, width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { tile }
     }
 
     /// Seed a full current-cycle history (a monotone concave climb to `pct`)
@@ -1132,9 +1195,13 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            window: .both
+            primaryKey: "five_hour", secondaryKey: "seven_day"
         )
     }
+
+    /// Synthetic identity for the "Fable" scoped weekly window used by the
+    /// widget-picker mockups — the stable key a config-stored selection uses.
+    static let fableKey = "weekly_scoped|Fable|"
 
     /// Large pace-chart widget with scoped per-model windows as first-class
     /// rows below 5h/7d.
@@ -1144,11 +1211,27 @@ private enum ScreenshotEntries {
             fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
             sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
             scoped: [
-                .init(label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
-                .init(label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
+                .init(key: "weekly_scoped|Haiku|", label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
+                .init(key: "weekly_scoped|Opus|",  label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
             ],
-            window: .both
+            primaryKey: "five_hour", secondaryKey: "seven_day"
         )
+    }
+
+    /// A pace-chart entry with 5h, 7d, and a scoped "Fable" weekly window, for
+    /// the widget-picker mockups. `primaryKey`/`secondaryKey` pick which windows
+    /// the small/medium canvases render — exactly what the Edit-Widget sheet
+    /// stores. (Large ignores them and shows every window.)
+    static func paceChartPicker(primaryKey: String, secondaryKey: String) -> PaceChartEntry {
+        PaceChartEntry(
+            date: now,
+            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
+            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            scoped: [
+                .init(key: fableKey, label: "Fable",
+                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71), isActive: true),
+            ],
+            primaryKey: primaryKey, secondaryKey: secondaryKey)
     }
 
     /// Large gauges widget with scoped per-model windows as ring gauges.
@@ -1160,12 +1243,12 @@ private enum ScreenshotEntries {
             fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
             scoped: [
-                .init(label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
-                .init(label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: "weekly_scoped|Haiku|",  label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
+                .init(key: "weekly_scoped|Opus|",   label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: "weekly_scoped|Fable|",  label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: "weekly_scoped|Sonnet|", label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
             ],
-            window: .both
+            primaryKey: "five_hour", secondaryKey: "seven_day"
         )
     }
 
