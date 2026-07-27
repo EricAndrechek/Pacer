@@ -53,6 +53,12 @@ struct PaceChartCard: View {
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
     @State private var endEstimates: [String: Estimate] = [:]
 
+    /// Measured content width of the multi-window grid, fed by a background
+    /// `GeometryReader`, so the balanced column count adapts to the pane. 0
+    /// until the first layout pass resolves it (the grid falls back to a
+    /// single column for that first frame, then corrects).
+    @State private var gridWidth: CGFloat = 0
+
     struct WindowProjection: Equatable, Sendable {
         /// The selected model's raw forward trajectory (origin = the engine's
         /// last-refit snapshot). Re-anchored onto the live actual tail at
@@ -190,27 +196,52 @@ struct PaceChartCard: View {
         }
     }
 
-    /// The full ordered column set: fixed 5h, fixed 7d, then each scoped window.
+    /// Fixed 5-hour / 7-day durations — the anchors both the sort (which side a
+    /// scoped window snaps to) and the fixed columns share.
+    private static let fiveHourDuration: TimeInterval = 5 * 3600
+    private static let sevenDayDuration: TimeInterval = 7 * 86400
+
+    /// The full ordered column set, arranged by a single comparator so the two
+    /// account-wide heroes stay glued together: scoped **session**-side windows,
+    /// then **5h**, then **7d**, then scoped **weekly**-side windows, then any
+    /// longer/other scoped window — sorting on `(side, duration, displayName)`.
+    /// A scoped window can never land between 5h and 7d because its `side` is
+    /// always outside the adjacent `.fiveHour`/`.sevenDay` ranks
+    /// (`PaceColumnLayout.scopedSide`). With no scoped rows this yields exactly
+    /// `[5h, 7d]`, unchanged.
     private func columns(_ b: Bucketed, now: Date) -> [Column] {
-        var cols: [Column] = [
-            fixedColumn(title: "5-hour", key: RateLimitWindowName.fiveHour,
-                        duration: 5 * 3600, samples: b.fiveHour, now: now),
-            fixedColumn(title: "7-day", key: RateLimitWindowName.sevenDay,
-                        duration: 7 * 86400, samples: b.sevenDay, now: now),
+        typealias Side = PaceColumnLayout.Side
+        var tagged: [(side: Side, col: Column)] = [
+            (.fiveHour, fixedColumn(title: "5-hour", key: RateLimitWindowName.fiveHour,
+                                    duration: Self.fiveHourDuration, samples: b.fiveHour, now: now)),
+            (.sevenDay, fixedColumn(title: "7-day", key: RateLimitWindowName.sevenDay,
+                                    duration: Self.sevenDayDuration, samples: b.sevenDay, now: now)),
         ]
         for row in scopedRows {
             let duration = WindowSpec.scopedDuration(group: row.group)
             let severity: Column.SeverityTag? = row.severityValue.isElevated
                 ? .init(text: row.severity.lowercased(), band: row.displayBand)
                 : nil
-            cols.append(Column(
+            let side = PaceColumnLayout.scopedSide(
+                group: row.group, duration: duration,
+                fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
+            tagged.append((side, Column(
                 id: row.identity, title: row.label, duration: duration,
                 usedPct: row.percent, resetsAt: row.resetsAt,
                 baseChart: Self.scopedBaseChart(row: row, history: scopedSamples,
                                                 duration: duration, now: now),
-                isActive: row.isActive, severity: severity, isScoped: true))
+                isActive: row.isActive, severity: severity, isScoped: true)))
         }
-        return cols
+        return tagged
+            .sorted { lhs, rhs in
+                if lhs.side != rhs.side { return lhs.side < rhs.side }
+                if lhs.col.duration != rhs.col.duration { return lhs.col.duration < rhs.col.duration }
+                if lhs.col.title != rhs.col.title {
+                    return lhs.col.title.localizedCaseInsensitiveCompare(rhs.col.title) == .orderedAscending
+                }
+                return lhs.col.id < rhs.col.id
+            }
+            .map(\.col)
     }
 
     private func fixedColumn(title: String, key: String, duration: TimeInterval,
@@ -291,15 +322,28 @@ struct PaceChartCard: View {
                     column(cols[1])
                 }
             } else {
-                // N windows — a responsive grid that wraps to rows and never
-                // clips. Adaptive columns claim as many per row as fit at a
-                // legible min width; the last row is left-aligned.
+                // N windows (> 2) — a balanced, width-aware grid. The column
+                // count is computed from the measured content width so rows
+                // stay even (4→2+2, 5→3+2, 6→3+3) and drop to fewer columns as
+                // the pane narrows (6→2+2+2) instead of crushing 4+ windows
+                // into a too-narrow row. The last row is left-aligned.
+                let colCount = PaceColumnLayout.columnCount(
+                    itemCount: cols.count, availableWidth: Double(gridWidth),
+                    minItemWidth: 250, spacing: 24)
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 250), spacing: 24, alignment: .top)],
+                    columns: Array(
+                        repeating: GridItem(.flexible(), spacing: 24, alignment: .top),
+                        count: colCount),
                     alignment: .leading, spacing: 22
                 ) {
                     ForEach(cols) { column($0) }
                 }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: PaceGridWidthKey.self, value: geo.size.width)
+                    }
+                )
+                .onPreferenceChange(PaceGridWidthKey.self) { gridWidth = $0 }
             }
         } footer: {
             if hasScoped {
@@ -338,6 +382,17 @@ struct PaceChartCard: View {
             Spacer()
         }
         .frame(minHeight: 96, alignment: .topLeading)
+    }
+}
+
+/// Carries the multi-window grid's measured content width up to the card so the
+/// balanced column count (`PaceColumnLayout.columnCount`) can react to the pane
+/// resizing. The grid always fills the available width regardless of its column
+/// count, so measuring it introduces no layout feedback loop.
+private struct PaceGridWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -64,6 +64,15 @@ enum ScreenshotMode {
         )
         log("writing screenshots to \(outDir.path)")
 
+        // Focused proof run for the pace-card layout work: render only the
+        // `pace-layout-*` scenes (each over its own tiny seeded container) and
+        // return, so `docs/mockups` gets just those without the README scenes.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_LAYOUT_ONLY"] == "1" {
+            await captureLayoutScenes()
+            log("layout screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -198,6 +207,114 @@ enum ScreenshotMode {
             } else {
                 log("⚠️ share-card: render failed for \(name)")
             }
+        }
+    }
+
+    // MARK: - Pace-layout proof scenes
+
+    /// One scoped window to seed for a layout scene.
+    private struct LayoutScoped {
+        let model: String
+        let group: String     // "session" / "weekly" (drives the ordering side)
+        let pct: Double
+        let active: Bool
+        let severity: String
+    }
+
+    /// Render the `pace-layout-*` proof captures for the pace-card layout work:
+    /// the two-window (unchanged 5h/7d) case, the session-vs-weekly sort with
+    /// the heroes glued in the middle, the 4/5/6-window balancing (2+2 / 3+2 /
+    /// 3+3 at a width that fits three across), and a narrow-width capture that
+    /// drops to two columns (2+2+2). Each scene seeds its own tiny in-memory
+    /// container so the window count is controlled independent of the shared
+    /// marketing seed. Widths are chosen against the card's 20pt padding so the
+    /// grid's content width lands three-across at 940 and two-across at 640.
+    private static func captureLayoutScenes() async {
+        // Weekly-only ladders for the balance proofs (hottest first, one active
+        // + elevated to exercise the dot + severity chip).
+        let w4: [LayoutScoped] = [
+            .init(model: "Haiku", group: "weekly", pct: 93, active: true,  severity: "warning"),
+            .init(model: "Opus",  group: "weekly", pct: 84, active: false, severity: "normal"),
+        ]
+        let w5 = w4 + [.init(model: "Fable",  group: "weekly", pct: 49, active: false, severity: "normal")]
+        let w6 = w5 + [.init(model: "Sonnet", group: "weekly", pct: 22, active: false, severity: "normal")]
+
+        // (a) exactly 5h + 7d — the unchanged two-column HStack.
+        await captureLayoutScene("pace-layout-2-fixed", width: 940, scoped: [])
+        // (b) sort: one session-scoped + one weekly-scoped ⇒ [Fable, 5h, 7d, Opus].
+        await captureLayoutScene("pace-layout-sort", width: 940, scoped: [
+            .init(model: "Fable", group: "session", pct: 44, active: false, severity: "normal"),
+            .init(model: "Opus",  group: "weekly",  pct: 68, active: true,  severity: "warning"),
+        ])
+        // (c) balance at a width that fits three across: 4→2+2, 5→3+2, 6→3+3.
+        await captureLayoutScene("pace-layout-4", width: 940, scoped: w4)
+        await captureLayoutScene("pace-layout-5", width: 940, scoped: w5)
+        await captureLayoutScene("pace-layout-6", width: 940, scoped: w6)
+        // (d) narrow width — same six windows drop to two columns (2+2+2).
+        await captureLayoutScene("pace-layout-narrow", width: 640, scoped: w6)
+    }
+
+    /// Seed a fresh in-memory container with the fixed 5h/7d trail plus the
+    /// given scoped windows, warm an engine over it, and capture `PaceChartCard`
+    /// at `width`. Swaps `screenshotEngine` to this scene's engine for the
+    /// capture so the columns forecast against their own data.
+    private static func captureLayoutScene(_ name: String, width: CGFloat, scoped: [LayoutScoped]) async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ \(name): container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        seedRateLimits(ctx, now: now)
+        seedLayoutScoped(ctx, now: now, scoped: scoped)
+        do { try ctx.save() } catch { log("⚠️ \(name): seed save failed: \(error)") }
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: now)
+        let previous = screenshotEngine
+        screenshotEngine = engine
+        await capture(name, width: width, height: nil, scheme: .light,
+                      card: true, container: container) { PaceChartCard() }
+        screenshotEngine = previous
+    }
+
+    /// Seed a full current-cycle history (a monotone concave climb to `pct`)
+    /// for each scoped window, plus a `now`-anchored latest-batch row, mirroring
+    /// `seedUsageLimits` but for an arbitrary session/weekly set.
+    private static func seedLayoutScoped(_ ctx: ModelContext, now: Date, scoped: [LayoutScoped]) {
+        for (idx, s) in scoped.enumerated() {
+            // Fully qualified: a private `ScreenshotMode.WindowSpec` shadows the
+            // PacerCore type inside this file.
+            let duration = PacerCore.WindowSpec.scopedDuration(group: s.group)
+            // Reset offsets: session +2h19m (8_340s), weekly +2d4h (187_200s).
+            let isSession = s.group.lowercased() == "session"
+            let resetOffset: TimeInterval = isSession ? 8_340 : 187_200
+            let reset = now.addingTimeInterval(resetOffset)
+            let kind = "\(s.group)_scoped"
+            let identity = "\(kind)|\(s.model)|"
+            let cycleStart = reset.addingTimeInterval(-duration)
+            let elapsed = max(1, now.timeIntervalSince(cycleStart))
+            let interval = duration / 60
+            func insert(at t: Date, pct: Double) {
+                ctx.insert(UsageLimitSample(
+                    sampledAt: t, identity: identity, kind: kind, group: s.group,
+                    label: s.model, percent: pct, resetsAt: reset,
+                    severity: s.severity, isActive: s.active,
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+            }
+            var t = cycleStart
+            var i = 0
+            var last = 0.0
+            while t < now {
+                let frac = max(0, min(1, t.timeIntervalSince(cycleStart) / elapsed))
+                var pct = s.pct * (frac * (1.08 - 0.08 * frac))
+                if frac > 0.02, frac < 0.98 { pct += noise(i &* 13 &+ idx &* 7) * 1.2 }
+                pct = max(last, min(s.pct, pct))
+                last = pct
+                insert(at: t, pct: pct)
+                t = t.addingTimeInterval(interval)
+                i += 1
+            }
+            insert(at: now, pct: s.pct)
         }
     }
 
