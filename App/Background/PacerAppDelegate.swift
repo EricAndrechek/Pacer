@@ -34,7 +34,7 @@ import PacerCore
 /// `.accessory`, so a login-at-startup launch shows nothing in the
 /// Dock until the user explicitly opens a window.
 @MainActor
-final class PacerAppDelegate: NSObject, NSApplicationDelegate {
+final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// One-shot destination hint set by status-menu actions before
     /// opening the main window. `ContentView.onAppear` consumes (and
@@ -673,6 +673,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
     /// menu-bar interaction.
     private func buildStatusMenu() -> NSMenu {
         let menu = NSMenu()
+        // Re-measure the custom content view's height each time the menu opens
+        // (see `menuWillOpen`) so dynamically-discovered scoped rows never clip.
+        menu.delegate = self
         // Don't validate menu items via responder chain — we hard-wire
         // their `target` so they're always enabled. Without this the
         // pace/today custom-view item disables itself (no action) and
@@ -740,6 +743,24 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         return menu
+    }
+
+    /// NSMenuDelegate — just before the status menu drops, re-measure the
+    /// SwiftUI content item's height. `NSMenuItem.view` is sized once at attach
+    /// time (`buildStatusMenu`), so a scoped per-model window discovered *after*
+    /// the menu was built would otherwise render into a too-short frame and clip
+    /// its lower rows. Re-reading `fittingSize` here — after SwiftUI has laid the
+    /// current window set out (its @Query stays live while the menu is closed) —
+    /// keeps the drop-down tall enough for however many windows are in play.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let view = statusMenuContentController?.view else { return }
+        view.layoutSubtreeIfNeeded()
+        let fitting = view.fittingSize
+        let width = max(280, fitting.width)
+        let height = max(120, fitting.height)
+        if abs(view.frame.width - width) > 0.5 || abs(view.frame.height - height) > 0.5 {
+            view.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        }
     }
 
     /// Ensure the main `Window("Pacer", id: "main")` scene is on

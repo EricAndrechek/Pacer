@@ -3,6 +3,57 @@ import SwiftData
 import PacerCore
 import PacerUI
 
+/// Builds the ordered menu-bar window set from live samples: the fixed 5-hour
+/// and 7-day blocks (always present, even before the first sample lands) plus
+/// every scoped per-model window in the latest poll (a "Fable" weekly cap and
+/// the like). Shared by the status-item label (icon-driver resolution), the
+/// dropdown (row listing), and Settings' driver picker so all three agree on
+/// the exact same dynamic set. Fully dynamic — no window is named or counted
+/// here; a scoped window Anthropic adds appears with zero code change and one
+/// that vanishes drops out of the next `latestBatch`.
+enum MenuBarWindowSource {
+    static func items(
+        fiveHour: RateLimitSample?,
+        sevenDay: RateLimitSample?,
+        scoped: [UsageLimitSample]
+    ) -> [MenuBarWindowItem] {
+        var items: [MenuBarWindowItem] = [
+            MenuBarWindowItem(
+                key: RateLimitWindowName.fiveHour, displayName: "5-hour",
+                usedPercentage: fiveHour?.usedPercentage, resetsAt: fiveHour?.resetsAt,
+                duration: MenuBarWindows.fiveHourDuration, group: "",
+                isScoped: false, isActive: false),
+            MenuBarWindowItem(
+                key: RateLimitWindowName.sevenDay, displayName: "7-day",
+                usedPercentage: sevenDay?.usedPercentage, resetsAt: sevenDay?.resetsAt,
+                duration: MenuBarWindows.sevenDayDuration, group: "",
+                isScoped: false, isActive: false),
+        ]
+        // Model/surface-scoped rows from the latest poll only — account-wide
+        // `session`/`weekly_all` rows are excluded (they duplicate 5h/7d).
+        for row in scoped.latestBatch().modelScoped() {
+            items.append(MenuBarWindowItem(
+                key: row.identity, displayName: row.label,
+                usedPercentage: row.percent, resetsAt: row.resetsAt,
+                duration: WindowSpec.scopedDuration(group: row.group), group: row.group,
+                isScoped: true, isActive: row.isActive))
+        }
+        return MenuBarWindows.ordered(items)
+    }
+
+    /// Bounded newest-first fetch for the scoped `limits[]` history — enough to
+    /// resolve the latest poll's batch without scanning the append-only table.
+    /// One poll writes a handful of scoped rows; 64 covers far more scoped
+    /// windows than an account realistically has.
+    static let recentScopedDescriptor: FetchDescriptor<UsageLimitSample> = {
+        var d = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 64
+        return d
+    }()
+}
+
 /// What renders in the menu bar status item. The displayed content is
 /// driven by `PacerSettings.menuBarChips()` — an ordered list the user
 /// configures in Settings → Menu bar. Any combination of:
@@ -33,6 +84,12 @@ struct MenuBarLabel: View {
     @Query(MenuBarLabel.recentTokenSampleDescriptor)
     private var recentSamples: [TokenSample]
 
+    /// Recent scoped `limits[]` rows — the source of the per-model windows the
+    /// icon driver can point at. Bounded so this always-visible label never
+    /// scans the append-only scoped history.
+    @Query(MenuBarWindowSource.recentScopedDescriptor)
+    private var scopedSamples: [UsageLimitSample]
+
     init() {
         let today = TokenSample.formatDate(Date())
         _todayAggregates = Query(
@@ -61,6 +118,12 @@ struct MenuBarLabel: View {
 
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
+
+    /// Which window's utilization paints the icon. Empty = "auto" (follows the
+    /// 5-hour window, the pre-picker behaviour). A scoped identity when the user
+    /// picked a per-model window; falls back to auto if that window vanishes.
+    @AppStorage(PacerSettings.Key.menuBarIconDriver, store: PacerSettings.store)
+    private var iconDriverRaw: String = MenuBarWindows.autoDriverKey
 
     // MARK: - Derived state
 
@@ -92,8 +155,23 @@ struct MenuBarLabel: View {
         PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
     }
 
+    /// Every rate-limit window currently in play (5h, 7d, each scoped) — the
+    /// candidate set the icon driver picks from.
+    private var windows: [MenuBarWindowItem] {
+        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
+    }
+
+    /// The window whose utilization drives the icon: the user's pick when it's
+    /// present, else the auto anchor (5-hour). `nil` only with no windows at all.
+    private var driverWindow: MenuBarWindowItem? {
+        MenuBarWindows.resolveDriver(key: iconDriverRaw, windows: windows)
+    }
+
+    /// Icon band from the driver window's utilization. Auto (the default)
+    /// resolves to the 5-hour window, so the icon looks exactly as it did
+    /// before the driver picker existed.
     private var band: UsageBand? {
-        fiveHour.map { UsageBand(percentage: $0.usedPercentage) }
+        driverWindow?.usedPercentage.map { UsageBand(percentage: $0) }
     }
 
     private var symbolName: String {
@@ -152,12 +230,18 @@ struct MenuBarLabel: View {
     /// We dump whatever the chips don't already show so the user can
     /// hover for the "everything else."
     private var tooltip: String {
+        // Every window's used% (5h / 7d / each scoped), short-labelled. With no
+        // scoped windows this reproduces the prior "5h: X% • 7d: Y%" line.
         var parts: [String] = []
-        if let f = fiveHour {
-            parts.append("5h: \(Int(f.usedPercentage.rounded()))%")
-        }
-        if let s = sevenDay {
-            parts.append("7d: \(Int(s.usedPercentage.rounded()))%")
+        for w in windows {
+            guard let pct = w.usedPercentage else { continue }
+            let label: String
+            switch w.key {
+            case RateLimitWindowName.fiveHour: label = "5h"
+            case RateLimitWindowName.sevenDay: label = "7d"
+            default: label = w.displayName
+            }
+            parts.append("\(label): \(Int(pct.rounded()))%")
         }
         // Tooltip's reset hint reads from the 5-hour sample. When that
         // sample's cycle has already ended (Pacer hasn't ingested a fresh
@@ -332,6 +416,11 @@ struct MenuStatusContent: View {
     private var rateLimits: [RateLimitSample]
     @Query private var todayAggregates: [DailyAggregate]
 
+    /// Recent scoped `limits[]` rows — the source of the dynamic per-model
+    /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
+    @Query(MenuBarWindowSource.recentScopedDescriptor)
+    private var scopedSamples: [UsageLimitSample]
+
     /// Engine answers for the outlook touches: per-window crossing (the
     /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
     /// projected) and the fixed Outlook row (projection once actionable,
@@ -342,11 +431,16 @@ struct MenuStatusContent: View {
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
 
-    private func refreshEngine() async {
+    private func refreshEngine(scopedIdentities: [String]) async {
         guard let engine else { return }
         var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         for w in RateLimitWindowKind.allCases {
             if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+        }
+        // Scoped per-model windows ask the SAME forecast surface, keyed by
+        // identity — so each dynamic row gets the same "limit in N hr" caption.
+        for id in scopedIdentities {
+            if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
         }
         outlooks = next
         todayEOD = await engine.ask(.projectedCost(.today))
@@ -372,6 +466,12 @@ struct MenuStatusContent: View {
     private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
     private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
 
+    /// Every window the dropdown lists: 5h, 7d, then each scoped per-model
+    /// window in the latest poll, in the dashboard's glued-heroes order.
+    private var windows: [MenuBarWindowItem] {
+        MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
+    }
+
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
@@ -389,11 +489,17 @@ struct MenuStatusContent: View {
         // for "pace 50% · resets in 2 hr." without truncating and
         // matches typical Apple status menu widths (Wi-Fi ~280pt,
         // Battery ~260pt).
-        VStack(alignment: .leading, spacing: 4) {
-            paceRow(label: "5-HOUR", sample: fiveHour, duration: 5 * 3600,
-                    outlook: outlooks[RateLimitWindowName.fiveHour])
-            paceRow(label: "7-DAY", sample: sevenDay, duration: 7 * 86400,
-                    outlook: outlooks[RateLimitWindowName.sevenDay])
+        let windows = self.windows
+        let scopedIds = windows.filter(\.isScoped).map(\.key)
+        // Stable key so `.task(id:)` re-asks the engine when the window SET
+        // changes (a scoped window appears / disappears), not on every save.
+        let windowKey = windows.map(\.key).joined(separator: ",")
+        return VStack(alignment: .leading, spacing: 4) {
+            // One pace row per window — 5h, 7d, then each scoped per-model
+            // window. Fully dynamic: rows appear/vanish with the latest poll.
+            ForEach(windows) { window in
+                paceRow(window: window, outlook: outlooks[window.key])
+            }
             // Native NSMenu items don't have inset separators; ours
             // here is a SwiftUI Divider that runs the content width —
             // close enough that the eye doesn't catch it as "off."
@@ -406,9 +512,12 @@ struct MenuStatusContent: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .frame(width: 280, alignment: .leading)
-        .task { await refreshEngine() }
+        // Re-ask when the window set changes (scoped windows discovered) so a
+        // freshly-appeared row gets its outlook caption without waiting for the
+        // next engine recompute.
+        .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshEngine() }
+            Task { await refreshEngine(scopedIdentities: scopedIds) }
         }
     }
 
@@ -441,23 +550,35 @@ struct MenuStatusContent: View {
     }
 
     @ViewBuilder
-    private func paceRow(label: String, sample: RateLimitSample?, duration: TimeInterval,
+    private func paceRow(window: MenuBarWindowItem,
                          outlook: UsageIntelligenceEngine.BurnOutlook? = nil) -> some View {
         HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .tracking(0.5)
-                .frame(width: 48, alignment: .leading)
+            // Label column, fixed width so every row's gauge stays aligned. A
+            // small accent dot marks the scoped window currently *in effect*.
+            HStack(spacing: 3) {
+                if window.isActive {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 5, height: 5)
+                        .help("Currently in effect")
+                }
+                Text(window.displayName.uppercased())
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.5)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(width: 54, alignment: .leading)
 
-            if let s = sample, let resets = s.resetsAt {
-                let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
+            if let pct = window.usedPercentage, let resets = window.resetsAt {
+                let cycle = DisplayCycle.resolve(resetsAt: resets, duration: window.duration)
                 if cycle.isAwaiting {
                     // Stale cycle (Pacer hasn't polled a fresh one yet).
                     // Show a muted "awaiting" line — no pace math from
                     // prior-cycle numbers.
                     CircularGauge(
-                        percentage: s.usedPercentage,
+                        percentage: pct,
                         lineWidth: 3,
                         labelFont: .system(size: 8, weight: .bold, design: .rounded)
                     )
@@ -476,16 +597,16 @@ struct MenuStatusContent: View {
                     Spacer(minLength: 0)
                 } else {
                     let pacePct = cycle.paceFraction * 100
-                    let band = PaceBand(usedPct: s.usedPercentage, paceEndPct: pacePct)
+                    let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
 
                     CircularGauge(
-                        percentage: s.usedPercentage,
+                        percentage: pct,
                         lineWidth: 3,
                         labelFont: .system(size: 8, weight: .bold, design: .rounded)
                     )
                     .frame(width: 22, height: 22)
 
-                    Text("\(Int(s.usedPercentage.rounded()))%")
+                    Text("\(Int(pct.rounded()))%")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         .frame(width: 32, alignment: .trailing)
 
@@ -499,7 +620,7 @@ struct MenuStatusContent: View {
                     // The trailing caption escalates to the projected cap hit
                     // when the engine sees one coming — same answer the
                     // dashboard tiles and the notification share.
-                    if s.usedPercentage.rounded() >= 100 {
+                    if pct.rounded() >= 100 {
                         // Already at the cap (as displayed): say so, never a
                         // future crossing. The outlook's last-refit snapshot can
                         // lag a point behind the live reading and would

@@ -117,6 +117,7 @@ public enum PacerSettings {
     public enum Key {
         public static let menuBarStyle           = PacerPreferenceKeys.menuBarStyle
         public static let menuBarIconStyle       = PacerPreferenceKeys.menuBarIconStyle
+        public static let menuBarIconDriver      = PacerPreferenceKeys.menuBarIconDriver
         public static let menuBarChips           = PacerPreferenceKeys.menuBarChips
         public static let notificationsEnabled   = PacerPreferenceKeys.notificationsEnabled
         public static let fiveHourThresholdPct   = PacerPreferenceKeys.fiveHourThresholdPct
@@ -149,6 +150,9 @@ public enum PacerSettings {
     nonisolated(unsafe) public static let defaults: [String: Any] = [
         Key.menuBarStyle:          MenuBarStyle.iconAndPercent.rawValue,
         Key.menuBarIconStyle:      MenuBarIconStyle.gaugeNeedle.rawValue,
+        // Empty = "Auto (window in effect)" — the icon follows the 5-hour
+        // window, exactly as it did before the driver picker existed.
+        Key.menuBarIconDriver:     MenuBarWindows.autoDriverKey,
         // Default: icon + 5-hour %. Matches the previous default
         // `iconAndPercent`, just expressed in the chip vocabulary so
         // a fresh-install user sees the same thing returning users do

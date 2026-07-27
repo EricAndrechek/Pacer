@@ -73,6 +73,16 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the scoped-menu-bar work: the dropdown listing
+        // every window (5h / 7d / each scoped) and the pickable icon driver
+        // pointed at a scoped window. Writes only the `scoped-menubar-*` shots
+        // (run with PACER_SCREENSHOT_DIR → docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_ONLY"] == "1" {
+            await captureScopedMenuBar(container: container)
+            log("scoped-menubar screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -208,6 +218,51 @@ enum ScreenshotMode {
                 log("⚠️ share-card: render failed for \(name)")
             }
         }
+    }
+
+    // MARK: - Scoped menu-bar proof scenes
+
+    /// Render the scoped-menu-bar captures: the dropdown listing every current
+    /// window (5h, 7d, and each scoped per-model window from the seed) and the
+    /// pickable icon driver pointed at a scoped window (so the status glyph
+    /// itself reflects that window's usage instead of the 5-hour default). The
+    /// menu-bar chips + icon-driver preference are toggled per shot and restored
+    /// to the default afterward so nothing non-default is left persisted.
+    private static func captureScopedMenuBar(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        // Warm the engine so the dropdown's outlook captions ("limit in N hr")
+        // render real answers, matching the live menu.
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        // Bar readout: icon + both fixed percents so the glyph and numbers read
+        // together above the dropdown.
+        PacerSettings.store.set(
+            "icon,five_hour_pct,seven_day_pct",
+            forKey: PacerSettings.Key.menuBarChips)
+
+        // (1) Dropdown listing every window — icon on Auto (the 5-hour window).
+        PacerSettings.store.set(
+            MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("scoped-menubar-dropdown", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("scoped-menubar-dropdown-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // (2) Pickable icon driver — point the icon at the hottest scoped window
+        // (Haiku, 93%, in effect) so the status glyph reflects that window.
+        PacerSettings.store.set(
+            "weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("scoped-menubar-icon-driver", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // Never leave a non-default driver persisted in the shared suite.
+        PacerSettings.store.set(
+            MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
     }
 
     // MARK: - Pace-layout proof scenes

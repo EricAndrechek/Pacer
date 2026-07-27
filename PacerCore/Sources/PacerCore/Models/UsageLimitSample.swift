@@ -178,4 +178,18 @@ public extension Sequence where Element == UsageLimitSample {
                 return a.percent > b.percent
             }
     }
+
+    /// Rows that carry a *genuine* per-model / per-surface scope — i.e. a real
+    /// scoped window (a "Fable" weekly cap) rather than an account-wide
+    /// `session`/`weekly_all` row that merely duplicates the fixed 5h/7d hero
+    /// windows. Same predicate the dashboard's pace card and the engine's
+    /// `isModelScoped` use, factored here so every surface (pace card, menu bar)
+    /// filters identically. Preserves the receiver's order.
+    func modelScoped() -> [UsageLimitSample] {
+        filter {
+            ($0.modelId?.isEmpty == false)
+                || ($0.modelDisplayName?.isEmpty == false)
+                || ($0.surface?.isEmpty == false)
+        }
+    }
 }
