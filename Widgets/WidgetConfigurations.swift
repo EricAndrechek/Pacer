@@ -26,12 +26,21 @@ import PacerUI
 struct PaceWindowEntity: AppEntity, Identifiable {
     let id: String           // WindowSpec key / limit identity — stable
     let displayName: String  // "5-hour", "7-day", "Fable", …
+    /// A *stable* one-line descriptor for the option row — the window's scope
+    /// and cadence ("Weekly limit · all models", "Per-model · weekly"), never
+    /// a live percentage. The config sheet is edited rarely, so a number that
+    /// changes every poll would only read as noise here. `nil` when the window
+    /// can't be classified (best-effort re-hydrate of a briefly-absent id).
+    var subtitle: String? = nil
 
-    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Rate-limit window"
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Usage window"
     static let defaultQuery = PaceWindowQuery()
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: "\(displayName)")
+        if let subtitle {
+            return DisplayRepresentation(title: "\(displayName)", subtitle: "\(subtitle)")
+        }
+        return DisplayRepresentation(title: "\(displayName)")
     }
 }
 
@@ -49,7 +58,7 @@ struct PaceWindowQuery: EntityQuery {
         // Keep every requested id resolvable — fall back to a best-effort
         // label so a momentarily-absent scoped selection stays configured.
         return identifiers.map { id in
-            live[id] ?? PaceWindowEntity(id: id, displayName: PaceWindowResolver.name(for: id))
+            live[id] ?? PaceWindowResolver.absentEntity(for: id)
         }
     }
 
@@ -70,7 +79,9 @@ enum PaceWindowResolver {
         var seen = Set<String>()
         var out: [PaceWindowEntity] = []
         for spec in WindowSpec.fixedWindows where seen.insert(spec.key).inserted {
-            out.append(PaceWindowEntity(id: spec.key, displayName: spec.displayName))
+            out.append(PaceWindowEntity(
+                id: spec.key, displayName: spec.displayName,
+                subtitle: fixedSubtitle(spec.key)))
         }
         for e in scopedEntities() where seen.insert(e.id).inserted {
             out.append(e)
@@ -94,23 +105,59 @@ enum PaceWindowResolver {
                     || ($0.modelDisplayName?.isEmpty == false)
                     || ($0.surface?.isEmpty == false)
             }
-            .map { PaceWindowEntity(id: $0.identity, displayName: $0.label) }
+            .map { PaceWindowEntity(id: $0.identity, displayName: $0.label,
+                                    subtitle: scopedSubtitle(group: $0.group)) }
     }
 
-    /// Best-effort display name for a stored id that isn't currently live —
-    /// keeps a briefly-absent scoped selection labeled instead of blank.
-    static func name(for id: String) -> String {
+    /// Best-effort re-hydrate of a stored id that isn't currently in the live
+    /// set — keeps a briefly-absent selection fully labeled (name + subtitle)
+    /// instead of blank. Fixed ids resolve locally; a scoped id is looked up in
+    /// its last-seen row.
+    static func absentEntity(for id: String) -> PaceWindowEntity {
         switch id {
-        case "five_hour": return "5-hour"
-        case "seven_day": return "7-day"
+        case "five_hour":
+            return PaceWindowEntity(id: id, displayName: "5-hour", subtitle: fixedSubtitle(id))
+        case "seven_day":
+            return PaceWindowEntity(id: id, displayName: "7-day", subtitle: fixedSubtitle(id))
         default:
-            guard let container = try? PacerStore.sharedModelContainer() else { return id }
+            guard let container = try? PacerStore.sharedModelContainer() else {
+                return PaceWindowEntity(id: id, displayName: id)
+            }
             let context = ModelContext(container)
             var d = FetchDescriptor<UsageLimitSample>(
                 predicate: #Predicate<UsageLimitSample> { $0.identity == id },
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
             d.fetchLimit = 1
-            return (try? context.fetch(d))?.first?.label ?? id
+            if let row = (try? context.fetch(d))?.first {
+                return PaceWindowEntity(id: id, displayName: row.label,
+                                        subtitle: scopedSubtitle(group: row.group))
+            }
+            return PaceWindowEntity(id: id, displayName: id)
+        }
+    }
+
+    /// The concrete entity a config slot defaults to, so the Edit sheet shows a
+    /// real selection (5-hour / 7-day) instead of "None". Pulls the label from
+    /// `WindowSpec.fixedWindows` so it stays in lockstep with the option list.
+    static func fixedDefault(_ key: String) -> PaceWindowEntity {
+        let name = WindowSpec.fixedWindows.first { $0.key == key }?.displayName
+            ?? (key == "five_hour" ? "5-hour" : "7-day")
+        return PaceWindowEntity(id: key, displayName: name, subtitle: fixedSubtitle(key))
+    }
+
+    /// Stable subtitle for a fixed account-wide window. States the scope the
+    /// title's cadence ("5-hour"/"7-day") doesn't — that these cover every model.
+    static func fixedSubtitle(_ key: String) -> String {
+        key == "five_hour" ? "Session limit · all models" : "Weekly limit · all models"
+    }
+
+    /// Stable subtitle for a scoped per-model window. The title is the model
+    /// name, so the subtitle carries the cadence and that it's a per-model cap.
+    static func scopedSubtitle(group: String) -> String {
+        switch group.lowercased() {
+        case "session": return "Per-model · session"
+        case "weekly":  return "Per-model · weekly"
+        default:        return "Per-model window"
         }
     }
 
@@ -125,32 +172,61 @@ enum PaceWindowResolver {
 
 /// Configuration for the pace-chart widget. Two window slots so the medium
 /// family can show any pair (5h+7d, 5h+Fable, …); small uses only the first;
-/// large shows every window regardless. Both optional — an unset slot falls
-/// back to today's defaults (5h primary, 7d secondary), so a placed widget
-/// with no explicit configuration renders exactly as it did before.
+/// large shows every window regardless.
+///
+/// Both slots carry a real default (`primaryWindow` = 5-hour, `secondaryWindow`
+/// = 7-day) via the non-deprecated macOS-15 `@Parameter(default:)` entity init,
+/// so the Edit sheet opens on a concrete pair rather than "None". The params
+/// stay optional so the on-disk config shape is unchanged: a legacy widget
+/// placed before this (nil slots) still decodes and, like an unset default,
+/// resolves to 5h primary / 7d secondary in the provider — the rendered output
+/// is byte-for-byte identical either way. A user's explicit pick is stored by
+/// id and re-hydrated by `PaceWindowQuery`, so it's never replaced by the
+/// default even when a scoped window is briefly absent between polls.
 struct PaceChartConfigurationIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Rate-limit pace"
     static let description = IntentDescription(
-        "Pick the rate-limit window(s) to show. Small shows the first window; medium shows both; large shows every window.")
+        "Choose which usage windows the pace chart shows. Small shows the first window; medium shows both side by side; large shows every window.")
 
-    @Parameter(title: "Window")
+    static var parameterSummary: some ParameterSummary {
+        Summary("Show \(\.$primaryWindow) and \(\.$secondaryWindow)")
+    }
+
+    @Parameter(
+        title: "First window",
+        description: "Shown on the small widget, and as the left chart on medium.",
+        default: PaceWindowResolver.fixedDefault("five_hour"))
     var primaryWindow: PaceWindowEntity?
 
-    @Parameter(title: "Second window (medium)")
+    @Parameter(
+        title: "Second window",
+        description: "The right chart on medium. Ignored on the small widget.",
+        default: PaceWindowResolver.fixedDefault("seven_day"))
     var secondaryWindow: PaceWindowEntity?
 }
 
 /// Configuration for the pace-gauges widget — same two-slot window picker as
-/// the chart, kept in lockstep so a user sees the same option set on both.
+/// the chart (same defaults, same optional-but-pre-filled behaviour), kept in
+/// lockstep so a user sees the same options and defaults on both.
 struct PaceGaugesConfigurationIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Rate limits"
     static let description = IntentDescription(
-        "Pick the rate-limit window(s) to show. Small shows the first window; medium shows both; large shows every window.")
+        "Choose which usage windows the gauges show. Small shows the first window; medium shows both side by side; large shows every window.")
 
-    @Parameter(title: "Window")
+    static var parameterSummary: some ParameterSummary {
+        Summary("Show \(\.$primaryWindow) and \(\.$secondaryWindow)")
+    }
+
+    @Parameter(
+        title: "First window",
+        description: "Shown on the small widget, and as the left gauge on medium.",
+        default: PaceWindowResolver.fixedDefault("five_hour"))
     var primaryWindow: PaceWindowEntity?
 
-    @Parameter(title: "Second window (medium)")
+    @Parameter(
+        title: "Second window",
+        description: "The right gauge on medium. Ignored on the small widget.",
+        default: PaceWindowResolver.fixedDefault("seven_day"))
     var secondaryWindow: PaceWindowEntity?
 }
 
