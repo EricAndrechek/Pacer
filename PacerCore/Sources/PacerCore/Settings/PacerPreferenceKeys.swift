@@ -17,11 +17,18 @@ public enum PacerPreferenceKeys {
     /// Which rate-limit window's utilization drives the status-item icon's
     /// band color + gauge level. Stored as a window key: `"five_hour"` /
     /// `"seven_day"` for the fixed blocks, or a scoped `limits[]` identity for
-    /// a per-model window. Empty string (the default) = "auto", which follows
-    /// the 5-hour window — preserving the pre-picker behaviour. When the chosen
-    /// window disappears from the latest poll the icon falls back to the same
-    /// auto anchor. See `MenuBarWindows.resolveDriver`.
+    /// a per-model window. Chosen **explicitly** — the default is the 5-hour
+    /// window's key (`"five_hour"`). A legacy empty string ("auto") still
+    /// resolves to the 5-hour window for back-compat. When the chosen window
+    /// disappears from the latest poll the icon falls back to the 5-hour window.
+    /// See `MenuBarWindows.resolveDriver`.
     public static let menuBarIconDriver      = "pacer.menuBarIconDriver"
+    /// CSV of up to 3 window keys, **outer → inner**, drawn as concentric
+    /// activity rings when the icon style is `.activityRings`. Default
+    /// `"five_hour,seven_day"` (the fixed 2-ring icon). A key whose window
+    /// vanishes is skipped at render; an empty/all-vanished set falls back to
+    /// the 5-hour window. See `MenuBarWindows.resolveRingWindows`.
+    public static let menuBarRingWindows     = "pacer.menuBarRingWindows"
     /// CSV of `MenuBarChip` ids in display order, e.g.
     /// `"icon,five_hour_pct"`. Empty string = hide the status item
     /// entirely (the user toggled every chip off). Absent key = run

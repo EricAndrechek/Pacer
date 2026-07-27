@@ -93,6 +93,17 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the menu-bar-polish work: the activity-rings
+        // icon with 2 vs 3 windows, and the Menu-bar settings card showing the
+        // explicit driver picker (no "Auto") and the ring-window picker. Writes
+        // only the `menubar-polish-*` shots (run with PACER_SCREENSHOT_DIR →
+        // docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_POLISH_ONLY"] == "1" {
+            await captureMenuBarPolish(container: container)
+            log("menubar-polish screenshots complete")
+            return
+        }
+
         // Focused proof run for the dynamic widget window-picker work: render
         // only the `widget-picker-*` scenes and return, so `docs/mockups` gets
         // just those without the README scenes.
@@ -347,6 +358,84 @@ enum ScreenshotMode {
         // Never leave a non-default driver persisted in the shared suite.
         PacerSettings.store.set(
             MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+    }
+
+    // MARK: - Menu-bar-polish proof scenes
+
+    /// Render the menu-bar-polish captures:
+    ///   - `menubar-polish-rings-2` / `-3`: the `.activityRings` icon with a
+    ///     2-window (5h+7d, the default) and a 3-window (5h+7d+Haiku) set —
+    ///     the real `MenuBarLabel` at status-item size plus an enlarged swatch
+    ///     and per-ring legend.
+    ///   - `menubar-polish-settings-driver`: the Menu-bar settings card with a
+    ///     single-glyph style, so the explicit driver picker shows (no "Auto"),
+    ///     pointed at a scoped window (fallback note visible).
+    ///   - `menubar-polish-settings-rings`: the same card with the Activity-rings
+    ///     style, so the ring-window picker shows (2 selected + add affordance).
+    ///
+    /// Snapshots and restores the touched prefs so nothing non-default is left
+    /// persisted in the shared suite.
+    private static func captureMenuBarPolish(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        let store = PacerSettings.store
+        let keys = [
+            PacerSettings.Key.menuBarChips,
+            PacerSettings.Key.menuBarIconStyle,
+            PacerSettings.Key.menuBarIconDriver,
+            PacerSettings.Key.menuBarRingWindows,
+        ]
+        let saved: [String: Any?] = Dictionary(uniqueKeysWithValues: keys.map { ($0, store.object(forKey: $0)) })
+        defer {
+            for (key, value) in saved {
+                if let value { store.set(value, forKey: key) } else { store.removeObject(forKey: key) }
+            }
+        }
+
+        // The rings icon reads the store: activity-rings style, icon chip on.
+        store.set("icon", forKey: PacerSettings.Key.menuBarChips)
+        store.set(PacerSettings.MenuBarIconStyle.activityRings.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+
+        // (1) Two-ring default (outer 5h ≈32%, inner 7d ≈62%).
+        store.set("five_hour,seven_day", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-rings-2", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            RingIconMock(title: "Activity rings — 2 windows",
+                         windows: [("5-hour", 32), ("7-day", 62)])
+        }
+
+        // (2) Three-ring set (adds the hottest scoped window, Haiku 93%).
+        store.set("five_hour,seven_day,weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-rings-3", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            RingIconMock(title: "Activity rings — 3 windows",
+                         windows: [("5-hour", 32), ("7-day", 62), ("Haiku", 93)])
+        }
+
+        // (3) Settings card — explicit driver picker (single-glyph style), driver
+        // pointed at a scoped window so the fallback note shows.
+        store.set("icon,five_hour_pct", forKey: PacerSettings.Key.menuBarChips)
+        store.set(PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set("weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("menubar-polish-settings-driver", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) {
+            MenuBarSettingsMock()
+        }
+
+        // (4) Settings card — ring-window picker (activity-rings style), 2 rings
+        // selected so the add affordance is visible too.
+        store.set(PacerSettings.MenuBarIconStyle.activityRings.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set("five_hour,seven_day", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-settings-rings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) {
+            MenuBarSettingsMock()
+        }
     }
 
     // MARK: - Pace-layout proof scenes
@@ -1228,6 +1317,75 @@ private struct MenuBarExperience: View {
                 .shadow(color: .black.opacity(0.28), radius: 18, x: 0, y: 10)
                 .padding(.trailing, 6)
         }
+    }
+}
+
+/// A menu-bar-polish mock for the activity-rings icon: the real `MenuBarLabel`
+/// at status-item size on a dark bar slice (reading the seeded store + the
+/// ring-window pref this scene set), an enlarged copy of the same rings for
+/// legibility, and a per-ring legend (outer → inner) with each window's
+/// band-colored dot and live %.
+private struct RingIconMock: View {
+    let title: String
+    /// Outer → inner. (label, usedPercentage 0–100.)
+    let windows: [(label: String, pct: Double)]
+
+    private var rings: [ActivityRings.Ring] {
+        windows.map { ActivityRings.Ring(progress: $0.pct / 100,
+                                         color: UsageBand(percentage: $0.pct).color) }
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 44) {
+                VStack(spacing: 8) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.black.opacity(0.88))
+                            .frame(width: 64, height: 30)
+                        MenuBarLabel()
+                            .environment(\.colorScheme, .dark)
+                    }
+                    Text("actual size").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                VStack(spacing: 8) {
+                    ActivityRings(rings: rings).frame(width: 120, height: 120)
+                    Text("enlarged").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(Array(windows.enumerated()), id: \.offset) { idx, w in
+                    HStack(spacing: 8) {
+                        Circle().fill(UsageBand(percentage: w.pct).color).frame(width: 10, height: 10)
+                        Text("Ring \(idx + 1) · \(w.label)").font(.system(size: 13))
+                        Spacer()
+                        Text("\(Int(w.pct))%").font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    }
+                }
+            }
+            .frame(width: 220)
+        }
+        .padding(28)
+    }
+}
+
+/// The Menu-bar settings card rendered in isolation for the polish mockups —
+/// the explicit driver picker (single-glyph style) or the ring-window picker
+/// (activity-rings style), depending on the prefs this scene set.
+private struct MenuBarSettingsMock: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("GENERAL")
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+            MenuBarCard()
+        }
+        .padding(20)
     }
 }
 

@@ -111,4 +111,74 @@ struct MenuBarWindowsTests {
             fable.key,
         ])
     }
+
+    // MARK: - Legacy driver back-compat
+
+    @Test func legacyEmptyDriverResolvesToFiveHour() {
+        // An install that persisted the old "" ("Auto") must keep painting the
+        // icon from the 5-hour window even though the picker no longer offers it.
+        let resolved = MenuBarWindows.resolveDriver(key: "", windows: [fiveHour, sevenDay, fable])
+        #expect(resolved?.key == RateLimitWindowName.fiveHour)
+        #expect(MenuBarWindows.defaultDriverKey == RateLimitWindowName.fiveHour)
+    }
+
+    // MARK: - Activity-ring window resolution
+
+    @Test func defaultRingWindowsAreFiveAndSeven() {
+        // The out-of-the-box 2-ring icon: outer 5-hour, inner 7-day, in order.
+        #expect(MenuBarWindows.defaultRingWindowKeys == [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay])
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: MenuBarWindows.defaultRingWindowKeys, windows: [fiveHour, sevenDay])
+        #expect(resolved.map(\.key) == [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay])
+    }
+
+    @Test func ringPreservesConfiguredOrder() {
+        // Order is meaningful (outer → inner) and is honored as configured.
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: [fable.key, RateLimitWindowName.fiveHour], windows: [fiveHour, sevenDay, fable])
+        #expect(resolved.map(\.key) == [fable.key, RateLimitWindowName.fiveHour])
+    }
+
+    @Test func missingRingWindowIsSkipped() {
+        // A configured window that's no longer reported drops out; the rest keep
+        // their order.
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: [RateLimitWindowName.fiveHour, "weekly_scoped|Fable|", RateLimitWindowName.sevenDay],
+            windows: [fiveHour, sevenDay])
+        #expect(resolved.map(\.key) == [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay])
+    }
+
+    @Test func ringWindowsCappedAtThree() {
+        // Never more than three rings — extra keys past the cap are ignored.
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: [coworkSession.key, RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay, fable.key],
+            windows: [coworkSession, fiveHour, sevenDay, fable])
+        #expect(resolved.count == 3)
+        #expect(resolved.map(\.key) == [coworkSession.key, RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay])
+    }
+
+    @Test func duplicateRingKeysCollapse() {
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: [RateLimitWindowName.fiveHour, RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay],
+            windows: [fiveHour, sevenDay])
+        #expect(resolved.map(\.key) == [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay])
+    }
+
+    @Test func emptyRingSetFallsBackToFiveHour() {
+        // Every configured window vanished — never render an empty icon: fall
+        // back to the single 5-hour anchor.
+        let resolved = MenuBarWindows.resolveRingWindows(
+            keys: ["gone_a", "gone_b"], windows: [fiveHour, sevenDay])
+        #expect(resolved.map(\.key) == [RateLimitWindowName.fiveHour])
+    }
+
+    @Test func emptyKeysFallBackToFiveHour() {
+        let resolved = MenuBarWindows.resolveRingWindows(keys: [], windows: [sevenDay, fiveHour])
+        #expect(resolved.map(\.key) == [RateLimitWindowName.fiveHour])
+    }
+
+    @Test func noWindowsResolvesEmptyRings() {
+        // The genuine cold start (no fixed blocks, no samples) — nothing to draw.
+        #expect(MenuBarWindows.resolveRingWindows(keys: MenuBarWindows.defaultRingWindowKeys, windows: []).isEmpty)
+    }
 }

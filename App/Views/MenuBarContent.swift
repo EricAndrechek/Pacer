@@ -119,11 +119,18 @@ struct MenuBarLabel: View {
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
-    /// Which window's utilization paints the icon. Empty = "auto" (follows the
-    /// 5-hour window, the pre-picker behaviour). A scoped identity when the user
-    /// picked a per-model window; falls back to auto if that window vanishes.
+    /// Which window's utilization paints the single-glyph icon (gauge / ring /
+    /// dot). Chosen explicitly; default is the 5-hour window's key. A scoped
+    /// identity when the user picked a per-model window; falls back to the
+    /// 5-hour window if that window vanishes. (A legacy "" still resolves to
+    /// 5-hour.) Unused by the `.activityRings` style, which draws `ringWindowKeys`.
     @AppStorage(PacerSettings.Key.menuBarIconDriver, store: PacerSettings.store)
-    private var iconDriverRaw: String = MenuBarWindows.autoDriverKey
+    private var iconDriverRaw: String = MenuBarWindows.defaultDriverKey
+
+    /// Ordered CSV of up to 3 window keys the `.activityRings` icon draws as
+    /// concentric rings (outer → inner). Default is the fixed 5h+7d pair.
+    @AppStorage(PacerSettings.Key.menuBarRingWindows, store: PacerSettings.store)
+    private var ringWindowsRaw: String = "five_hour,seven_day"
 
     // MARK: - Derived state
 
@@ -162,9 +169,25 @@ struct MenuBarLabel: View {
     }
 
     /// The window whose utilization drives the icon: the user's pick when it's
-    /// present, else the auto anchor (5-hour). `nil` only with no windows at all.
+    /// present, else the 5-hour anchor. `nil` only with no windows at all.
     private var driverWindow: MenuBarWindowItem? {
         MenuBarWindows.resolveDriver(key: iconDriverRaw, windows: windows)
+    }
+
+    /// Ordered ring-window keys parsed from the @AppStorage CSV (reactive on
+    /// body-eval, unlike `PacerSettings.menuBarRingWindowKeys()`). Deduped, cap
+    /// at 3; resolution against `windows` (skipping vanished ones) happens in
+    /// `MenuBarWindows.resolveRingWindows`.
+    private var ringWindowKeys: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for token in ringWindowsRaw.split(separator: ",") {
+            let key = token.trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            out.append(key)
+            if out.count == MenuBarWindows.maxRingWindows { break }
+        }
+        return out
     }
 
     /// Icon band from the driver window's utilization. Auto (the default)
@@ -278,10 +301,14 @@ struct MenuBarLabel: View {
     private func resolve(_ chip: PacerSettings.MenuBarChip) -> Render.Item {
         switch chip {
         case .icon:
-            return iconStyle == .activityRings
-                ? .rings(five: fiveHour?.usedPercentage ?? 0,
-                         seven: sevenDay?.usedPercentage ?? 0)
-                : .symbol(name: symbolName, band: band)
+            guard iconStyle == .activityRings else {
+                return .symbol(name: symbolName, band: band)
+            }
+            // Resolve the configured ring windows against the live set (vanished
+            // windows skipped, capped at 3, 5-hour fallback so it's never empty),
+            // then hand the render the ordered utilization for each ring.
+            let rings = MenuBarWindows.resolveRingWindows(keys: ringWindowKeys, windows: windows)
+            return .rings(rings.map { $0.usedPercentage ?? 0 })
         case .fiveHourPct:
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
                             pct: fiveHour?.usedPercentage)
@@ -310,9 +337,10 @@ struct MenuBarLabel: View {
         enum Item: Equatable {
             /// SF Symbol icon (gauge / ring-fill / dot styles); `band` tints it.
             case symbol(name: String, band: UsageBand?)
-            /// Dual activity-ring icon (outer 5h, inner 7d). Raw percentages
-            /// drive both ring fill and per-ring band color.
-            case rings(five: Double, seven: Double)
+            /// Activity-ring icon: 1–3 concentric rings, outer → inner. Each
+            /// element is that ring's window utilization (0–100), which drives
+            /// both the ring fill and its per-ring band color.
+            case rings([Double])
             /// Window utilization chip; nil pct renders "—". `prefix` is the
             /// "5h " / "7d " disambiguator.
             case percent(prefix: String?, pct: Double?)
@@ -357,15 +385,18 @@ private struct MenuBarLabelContent: View, Equatable {
             Image(systemName: name)
                 .symbolRenderingMode(.monochrome)
                 .foregroundStyle(Self.bandColor(band))
-        case let .rings(five, seven):
-            // Apple Watch-style dual-ring icon. Outer = 5h, inner = 7d.
-            ActivityRings(rings: [
-                ActivityRings.Ring(progress: five / 100,
-                                   color: UsageBand(percentage: five).color),
-                ActivityRings.Ring(progress: seven / 100,
-                                   color: UsageBand(percentage: seven).color)
-            ])
-            .frame(width: 14, height: 14)
+        case let .rings(percents):
+            // Apple Watch-style concentric rings (outer → inner), one per
+            // configured window. Each ring's fill + color come from its window's
+            // utilization band. Three rings get a slightly larger frame so the
+            // innermost stays legible; two rings keep the original 14pt so the
+            // default icon is pixel-identical to before.
+            ActivityRings(rings: percents.map { pct in
+                ActivityRings.Ring(progress: pct / 100,
+                                   color: UsageBand(percentage: pct).color)
+            })
+            .frame(width: percents.count >= 3 ? 17 : 14,
+                   height: percents.count >= 3 ? 17 : 14)
         case let .percent(prefix, pct):
             // Percent text warms to red only at the red band — yellow /
             // orange stay primary (colored text reads poorly in the menu
