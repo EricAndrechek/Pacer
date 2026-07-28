@@ -137,10 +137,12 @@ enum ScreenshotMode {
         // directly, so other windows are irrelevant to the output.
         for window in NSApp.windows { window.orderOut(nil) }
 
-        // A richer menu-bar readout for the status-bar shot than the
-        // default (icon + 5-hour %).
+        // A richer menu-bar readout for the status-bar shot than the default
+        // (icon + 5-hour %): the icon, both fixed windows, and the seeded
+        // per-model "Fable" scoped window — so the label showcases a scoped
+        // chip alongside 5h/7d (the popover lists the same window automatically).
         PacerSettings.store.set(
-            "icon,five_hour_pct,seven_day_pct,today_cost",
+            "icon,five_hour_pct,seven_day_pct,scoped_pct:weekly_scoped|Fable|",
             forKey: PacerSettings.Key.menuBarChips
         )
 
@@ -838,7 +840,12 @@ extension ScreenshotMode {
         seedPriorHourly(ctx, startOfToday: startOfToday, cal: cal)
         seedTodayHourly(ctx, today: TokenSample.formatDate(startOfToday), now: now, cal: cal)
         seedRateLimits(ctx, now: now)
-        seedUsageLimits(ctx, now: now)
+        // One tasteful scoped per-model window for the README dashboard / menu-bar
+        // / widgets: a weekly "Fable" cap sitting at a healthy ~52% alongside the
+        // fixed 5h/7d heroes, so the pace grid shows a scoped column without
+        // crowding. (The richer multi-window set stays the default for the gated
+        // design-mockup scenes.)
+        seedUsageLimits(ctx, now: now, scoped: [("Fable", 52, false, "normal")])
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
@@ -1110,7 +1117,23 @@ extension ScreenshotMode {
     /// currently in effect and carries an elevated severity, exercising the
     /// active dot + severity chip. More than two scoped windows also drives the
     /// N-column responsive grid.
-    private static func seedUsageLimits(_ ctx: ModelContext, now: Date) {
+    /// The full scoped per-model weekly set used by the richer design-mockup
+    /// scenes (scoped-alerts / menu-bar chips / polish), which want several
+    /// windows in play. (model, target%, active/in-effect, severity.) The
+    /// default README seed opts into just one of these (a single "Fable" cap)
+    /// so the dashboard pace grid reads uncluttered — see `seed(into:)`.
+    private static let mockupScopedWindows:
+        [(model: String, target: Double, active: Bool, severity: String)] = [
+            ("Haiku",  93, true,  "warning"),
+            ("Opus",   84, false, "normal"),
+            ("Fable",  49, false, "normal"),
+            ("Sonnet", 22, false, "normal"),
+        ]
+
+    private static func seedUsageLimits(
+        _ ctx: ModelContext, now: Date,
+        scoped: [(model: String, target: Double, active: Bool, severity: String)] = mockupScopedWindows
+    ) {
         let sessionReset = now.addingTimeInterval(2 * 3600 + 19 * 60)
         let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
         let weeklyDuration: TimeInterval = 7 * 86_400
@@ -1131,12 +1154,6 @@ extension ScreenshotMode {
 
         // Scoped per-model weekly windows — the first-class pace columns.
         // (model, target%, active/in-effect, severity)
-        let scoped: [(model: String, target: Double, active: Bool, severity: String)] = [
-            ("Haiku",  93, true,  "warning"),
-            ("Opus",   84, false, "normal"),
-            ("Fable",  49, false, "normal"),
-            ("Sonnet", 22, false, "normal"),
-        ]
         let cycleStart = weeklyReset.addingTimeInterval(-weeklyDuration)
         let elapsed = now.timeIntervalSince(cycleStart)
         let interval: TimeInterval = 3600
