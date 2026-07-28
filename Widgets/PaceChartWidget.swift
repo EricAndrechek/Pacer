@@ -199,22 +199,45 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     /// ones (Decision C), and layers the engine's exported per-identity
     /// projection. Empty (⇒ every layout unchanged) when the account has none.
     private static func scopedStates(context: ModelContext, snapshot: EngineSnapshot?) -> [PaceChartEntry.ScopedState] {
-        // Recent scoped rows, newest first, bounded. Covers the latest batch
-        // (the column set) plus a short actual-line tail per identity.
-        var descriptor = FetchDescriptor<UsageLimitSample>(
+        // The latest poll's rows decide the column set — a small cap is all
+        // that's needed, since `latestBatch` only reads one poll's worth.
+        var latest = FetchDescriptor<UsageLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        descriptor.fetchLimit = 600
-        guard let history = try? context.fetch(descriptor) else { return [] }
-        let batch = history.latestBatch().filter {
+        latest.fetchLimit = 120
+        guard let newest = try? context.fetch(latest) else { return [] }
+        let batch = newest.latestBatch().filter {
             ($0.modelId?.isEmpty == false)
                 || ($0.modelDisplayName?.isEmpty == false)
                 || ($0.surface?.isEmpty == false)
         }
         let outlookByIdentity = Dictionary(
             (snapshot?.scoped ?? []).map { ($0.identity, $0) }, uniquingKeysWith: { a, _ in a })
-        return batch.compactMap {
-            Self.scopedWindow(history: history, row: $0, outlook: outlookByIdentity[$0.identity])
+        // Then one bounded history fetch PER charted identity. Fetching a flat
+        // slice of the shared table instead (the old shape) spends the budget
+        // on whichever limits happen to be newest — with ~1 poll/min and a row
+        // per limit, 600 rows was about three hours of a seven-day window, so
+        // the line drew as a stub. Scoping by identity + cycle start bounds it
+        // by what's actually plotted.
+        return batch.compactMap { row in
+            Self.scopedWindow(
+                history: Self.scopedHistory(context: context, row: row),
+                row: row, outlook: outlookByIdentity[row.identity])
         }
+    }
+
+    /// One scoped identity's rows back to its cycle start, columnar — the four
+    /// scalars the actual line plots. `fetchLimit` is a burst backstop (a
+    /// stuck poller or a backfill shouldn't blow up widget memory), not a
+    /// coverage limit: at the real cadence a 7-day cycle holds ~11k rows.
+    private static func scopedHistory(context: ModelContext, row: UsageLimitSample) -> [UsageLimitSample] {
+        guard let resetsAt = row.resetsAt else { return [] }
+        let cutoff = resetsAt.addingTimeInterval(-WindowSpec.scopedDuration(group: row.group))
+        var d = FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
+        d.fetchLimit = 20000
+        return (try? context.fetch(d)) ?? []
     }
 
     /// Used % for a window whose most-recent sample has no reset time —
@@ -251,18 +274,12 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         guard let latest = windowRows.first, let resetsAt = latest.resetsAt else { return nil }
         let cycleStart = resetsAt.addingTimeInterval(-duration)
         let now = Date()
-        var points = windowRows
-            .inCycle(resetting: resetsAt, duration: duration)
-            .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
-            .sorted { $0.sampledAt < $1.sampledAt }
-            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
-        // Clamp the synthesized tail to the cycle: once `now > resetsAt`
-        // (cycle ended, no fresh sample yet), a tail at `now` falls
-        // outside `chartXScale`'s domain.
+        guard let base = PaceChartView.Data.cycle(
+            fixed: windowRows, duration: duration, now: now) else { return nil }
+        // The synthesized tail is clamped to the cycle: once `now > resetsAt`
+        // (cycle ended, no fresh sample yet), a tail at `now` falls outside
+        // `chartXScale`'s domain.
         let tailTime = min(now, resetsAt)
-        if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: latest.usedPercentage))
-        }
         // Attach the engine's trajectory only when it belongs to THIS cycle
         // (same reset, ±2 min) — a snapshot from a previous cycle would draw
         // a nonsense overlay — and clip it to the chart's domain.
@@ -288,15 +305,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 }
             }
         }
-        let chart = PaceChartView.Data(
-            cycleStart: cycleStart,
-            resetsAt: resetsAt,
-            durationSeconds: duration,
-            points: points,
-            usedPct: latest.usedPercentage,
-            projection: projection,
-            projectionCrossesFullAt: crossing
-        )
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
         return PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt)
     }
 
@@ -314,16 +323,9 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         let duration = WindowSpec.scopedDuration(group: row.group)
         let cycleStart = resetsAt.addingTimeInterval(-duration)
         let now = Date()
-        var points = history
-            .filter { $0.identity == row.identity && $0.resetsAt == resetsAt
-                   && $0.sampledAt >= cycleStart && $0.sampledAt <= now }
-            .sorted { $0.sampledAt < $1.sampledAt }
-            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.percent) }
+        guard let base = PaceChartView.Data.cycle(
+            scoped: row, history: history, duration: duration, now: now) else { return nil }
         let tailTime = min(now, resetsAt)
-        if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: row.percent))
-        }
-        guard !points.isEmpty else { return nil }
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
         if let o = outlook?.outlook, abs(o.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
@@ -338,10 +340,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt }
             }
         }
-        let chart = PaceChartView.Data(
-            cycleStart: cycleStart, resetsAt: resetsAt, durationSeconds: duration,
-            points: points, usedPct: row.percent,
-            projection: projection, projectionCrossesFullAt: crossing)
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
         return PaceChartEntry.ScopedState(
             key: row.identity,
             label: row.label,
