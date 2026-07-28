@@ -560,5 +560,23 @@
             type="application/octet-stream"
             sparkle:edSignature="WANZ98vKIWAoMLTgpkaElWrJFhyqhcaQkQCWaN6JtxGG26Mi8E0y3OgqPp53n53vrZyKlE8iYyCweRirQO86Aw==" />
     </item>
+            <item>
+        <title>Version 0.4.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Per-model rate limits, multi-account, and window-aware everything by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="4998511175" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/121" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/121/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/121">EricAndrechek/Pacer#121</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.3.22...v0.4.0">EricAndrechek/Pacer@<tt>v0.3.22...v0.4.0</tt></a></p>]]></description>
+        <pubDate>Tue, 28 Jul 2026 12:35:50 +0000</pubDate>
+        <sparkle:version>1785241868</sparkle:version>
+        <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.0/Pacer-0.4.0.dmg"
+            length="8098763"
+            type="application/octet-stream"
+            sparkle:edSignature="3/9wmJZRYUCUBe33Wi2G4iDw5NgA4QipIEplhbym8cLUoCjnsv2CSR77bDqP/ZbMXAjhkn4PQ5yoPAcjy5KxDQ==" />
+    </item>
         </channel>
 </rss>
