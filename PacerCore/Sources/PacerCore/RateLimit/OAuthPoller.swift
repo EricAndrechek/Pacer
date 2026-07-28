@@ -39,7 +39,8 @@ public struct SystemPollerClock: PollerClock {
     }
 }
 
-/// Polls `/api/oauth/usage` with an **adaptive, multi-token cadence**.
+/// Polls `/api/oauth/usage` with an **adaptive, multi-token, multi-account
+/// cadence**.
 ///
 /// The endpoint computes usage live per request but rate-limits to ~1
 /// poll / 5 min / token with no budget headers (over-poll ⇒ ~30-min
@@ -52,11 +53,31 @@ public struct SystemPollerClock: PollerClock {
 /// min** — the invariant that keeps every lane off the throttle. With
 /// one token it degrades cleanly to single-lane activity-gating.
 ///
+/// ## Multiple accounts
+///
+/// A person can be signed into more than one Anthropic account. Each
+/// distinct org (from the `anthropic-organization-id` response header)
+/// becomes an `Account`, and exactly one is **active**:
+///   - The active account's lanes are the **fast pool** — the scheduler
+///     drives them at the interleaved cadence above, and their samples are
+///     persisted into `RateLimitSample` / `ExtraUsageSample` (stamped with
+///     the account id), which is what the whole app reads. So the active
+///     account is what the menu bar, dashboard, and alerts reflect.
+///   - Non-active accounts' lanes are the **slow sweep** — polled no more
+///     often than once per idle interval each (still ≤ 1×/5min/token), and
+///     their latest readings are cached on the `Account` row for the Tokens
+///     switcher rather than written into the shared timeline. This is what
+///     keeps two accounts from ever mixing into one history.
+///
+/// Switching the active account (`setActiveAccount`) swaps which account's
+/// timeline the live sample tables hold (archiving the outgoing account's
+/// rows and restoring the incoming account's from `AccountUsageArchive`),
+/// so no read site needs to know about accounts and no timeline is
+/// corrupted.
+///
 /// Safety rails:
-///   - **Same-account guard.** The first successful poll sets the pool's
-///     primary account (from `anthropic-organization-id`); a lane that
-///     resolves to a different org is marked foreign — never selected,
-///     never persisted — so interleaving can't mix two accounts.
+///   - **Per-token invariant.** No lane polled > 1×/5min, active or not —
+///     multi-account never raises any token's poll rate.
 ///   - **Per-lane cooldown.** A 429/transport/5xx cools *that lane*
 ///     (exponential, capped); other lanes keep the timeline fresh.
 ///   - **Poll-on-wake.** `notifyActivity()` (called by the coordinator
@@ -97,12 +118,24 @@ public actor OAuthPoller: TokenPoolTesting {
             self.laneCooldownMax = laneCooldownMax
             self.laneRediscoverInterval = laneRediscoverInterval
         }
+
+        /// Per-lane floor for the non-active accounts' slow sweep. Each
+        /// secondary lane is polled no more often than this (and never
+        /// below the per-token invariant). Wide enough to keep the switcher
+        /// fresh without background chatter.
+        var secondarySweepInterval: TimeInterval {
+            max(scheduler.idleInterval, scheduler.perTokenMinInterval)
+        }
     }
 
     /// Categorized outcome of one poll, surfaced for tests and debug UI.
     public enum PollOutcome: Sendable, Equatable {
         case success(fiveHourPct: Double?, sevenDayPct: Double?)
-        case foreignAccount            // succeeded but a different org — dropped
+        /// Succeeded, but the token resolved to a *different* account than
+        /// the active one — tracked as a secondary account, not persisted
+        /// into the active timeline. (Was `.foreignAccount`, which dropped
+        /// it entirely.)
+        case secondaryAccount(org: String?)
         case credentialsNotFound       // no usable token / lane at all
         case keychainAccessDenied
         case keychainMalformed
@@ -122,6 +155,8 @@ public actor OAuthPoller: TokenPoolTesting {
         public let nextPollAt: Date?
         public let lastPollAt: Date?
         public let primaryOrg: String?
+        /// The active account's id (org key), if one has been established.
+        public let activeAccountKey: String?
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -135,6 +170,11 @@ public actor OAuthPoller: TokenPoolTesting {
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
+
+        /// The account key this lane belongs to once classified, or nil.
+        var accountKey: String? {
+            state.account == .unknown ? nil : Account.key(forOrg: resolvedOrg)
+        }
     }
 
     /// Sendable carrier for a lane's persisted metadata — read from and
@@ -161,7 +201,12 @@ public actor OAuthPoller: TokenPoolTesting {
     private let random: RandomSource
 
     private var lanes: [Lane] = []
+    /// The active account's org (nil when the header was absent). Kept for
+    /// the same-account classification and the snapshot/debug surface.
     private var primaryOrg: String?
+    /// The active account's key (`Account.id`). nil until the first
+    /// successful poll (or a restore from persisted `Account.isActive`).
+    private var activeAccountKey: String?
     private var lastDiscoveryAt: Date?
     /// Most recent activity time seen by the loop, cached so status
     /// publishes can report active/idle without another probe.
@@ -172,7 +217,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// Pacer's persistent token pool (its own keychain). Seeded into lanes
     /// once per launch so tokens survive a restart without reading Claude's
-    /// stores; re-saved when the confirmed-primary token set changes.
+    /// stores; re-saved when the confirmed token set changes.
     private let poolStore: TokenPoolStoring
     private var seeded = false
     private var lastSavedPoolTokens: Set<String> = []
@@ -238,9 +283,10 @@ public actor OAuthPoller: TokenPoolTesting {
         sleeper?.cancel()
     }
 
-    /// Test entry — discover lanes and poll the best eligible one once,
-    /// ignoring the cadence gate (but honoring foreign/cooldown). Returns
-    /// the categorized outcome. Does NOT loop or sleep.
+    /// Test entry — discover lanes and poll the best eligible fast-pool
+    /// lane once, ignoring the cadence gate (but honoring cooldown). Polls
+    /// `.unknown`/`.primary` lanes (so a never-polled token is classified);
+    /// `.secondary` lanes are reached via `testLane`. Does NOT loop.
     @discardableResult
     public func runOnce() async -> PollOutcome {
         await loadPersistedMetaIfNeeded()
@@ -248,7 +294,7 @@ public actor OAuthPoller: TokenPoolTesting {
         let now = clock.now()
         let idx = lanes.indices
             .filter {
-                lanes[$0].state.account != .foreign
+                lanes[$0].state.account != .secondary
                     && (lanes[$0].state.cooldownUntil.map { now >= $0 } ?? true)
             }
             .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
@@ -266,7 +312,8 @@ public actor OAuthPoller: TokenPoolTesting {
             primaryLaneCount: lanes.filter { $0.state.account == .primary }.count,
             nextPollAt: nextPollAt,
             lastPollAt: lastPollAt,
-            primaryOrg: primaryOrg
+            primaryOrg: primaryOrg,
+            activeAccountKey: activeAccountKey
         )
     }
 
@@ -296,8 +343,8 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// Test a raw token the UI holds (an unsaved override draft). If it's
     /// already a lane, route through it (stamped/counted); otherwise poll
-    /// once and persist when it's the same account, so the reading isn't
-    /// thrown away.
+    /// once. A different-account token reports `.otherAccount` (it isn't
+    /// added by this path — use `addManualToken` to keep it).
     public func testAdHoc(token: String) async -> TokenTestResult {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
@@ -312,22 +359,25 @@ public actor OAuthPoller: TokenPoolTesting {
         switch await client.fetchUsage(using: cred) {
         case .success(let snap):
             let org = snap.organizationId
-            let matches: Bool
-            if let primary = primaryOrg { matches = (org == nil || org == primary) }
-            else { primaryOrg = org; matches = true }
-            if matches {
-                await persist(snap, laneSource: .override)
+            let isActive = classifyIsActive(org: org)
+            if isActive {
+                let key = activeAccountKey ?? Account.key(forOrg: org)
+                await recordPoll(snap, accountKey: key, organizationId: org,
+                                 subscriptionType: cred.subscriptionType, isActive: true,
+                                 laneSource: .override)
                 return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
             }
-            return .foreignAccount(org: org)
+            return .otherAccount(org: org)
         case .failure(let error):
             return Self.testFailure(error)
         }
     }
 
     /// Add a manually-supplied token as an `.override` lane and poll it
-    /// once to confirm your account. Kept (and persisted) only if it's the
-    /// same account; a duplicate / foreign / invalid token isn't retained.
+    /// once to classify its account. Kept and persisted whether it's your
+    /// active account (`.success`) or a *different* account (`.otherAccount`
+    /// — now tracked as a separate account you can switch to). A duplicate
+    /// / invalid token isn't retained.
     public func addManualToken(_ token: String) async -> TokenTestResult {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failure(reason: "Empty token.") }
@@ -355,18 +405,23 @@ public actor OAuthPoller: TokenPoolTesting {
         }
         let outcome = await pollLane(idx)
         let lane = lanes.first(where: { $0.credential.accessToken == trimmed })
-        if lane?.state.account == .primary {
+        switch lane?.state.account {
+        case .primary:
             savePool()
+            await publishStatus()
+            return Self.testResult(from: outcome)   // .success
+        case .secondary:
+            // A different account — keep it, tracked as a separate account.
+            savePool()
+            await publishStatus()
+            return .otherAccount(org: lane?.resolvedOrg)
+        default:
+            // Unclassified (401 / invalid / transport) — don't keep it.
+            lanes.removeAll { $0.credential.accessToken == trimmed }
+            await saveAllLaneMeta()
             await publishStatus()
             return Self.testResult(from: outcome)
         }
-        // Foreign account / 401 / invalid — don't keep it in the pool.
-        let foreignOrg = lane?.resolvedOrg
-        lanes.removeAll { $0.credential.accessToken == trimmed }
-        await saveAllLaneMeta()   // prune the rejected lane's metadata
-        await publishStatus()
-        if case .foreignAccount = outcome { return .foreignAccount(org: foreignOrg) }
-        return Self.testResult(from: outcome)
     }
 
     /// Remove a manually-added (`.override`) lane by its opaque id.
@@ -374,21 +429,43 @@ public actor OAuthPoller: TokenPoolTesting {
         lanes.removeAll { $0.source == .override && Self.laneId($0.credential.accessToken) == id }
         // Force-persist the removal (bypass savePool's "don't wipe" guard) so
         // the removed token can't reappear from the pool on the next launch.
-        let primary = lanes.filter { $0.state.account == .primary }
-        lastSavedPoolTokens = Set(primary.map { $0.credential.accessToken })
-        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+        let confirmed = lanes.filter { $0.state.account != .unknown }
+        lastSavedPoolTokens = Set(confirmed.map { $0.credential.accessToken })
+        poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
         await saveAllLaneMeta()   // prune the removed lane's metadata
         await publishStatus()
     }
 
-    /// Publish a display-safe snapshot of the lane pool + effective
-    /// cadence to `TokenPoolStatus.shared` for the Settings section.
+    /// Make `id` the active account. Swaps the live sample timeline to that
+    /// account's, reclassifies lanes, and flips `Account.isActive`. No-op if
+    /// already active or the account isn't known.
+    public func setActiveAccount(id: String) async {
+        await loadPersistedMetaIfNeeded()
+        ensureLanes()
+        guard id != activeAccountKey else { return }
+        let outgoing = activeAccountKey
+        let newOrg = await swapActiveTimeline(from: outgoing, to: id)
+        activeAccountKey = id
+        primaryOrg = newOrg
+        // Reclassify every confirmed lane against the new active account.
+        for i in lanes.indices where lanes[i].state.account != .unknown {
+            let belongsToActive = (lanes[i].resolvedOrg == nil) || (Account.key(forOrg: lanes[i].resolvedOrg) == id)
+            lanes[i].state.account = belongsToActive ? .primary : .secondary
+        }
+        await saveAllLaneMeta()
+        await publishStatus()
+    }
+
+    /// Publish a display-safe snapshot of the lane pool + accounts +
+    /// effective cadence to `TokenPoolStatus.shared` for the Settings
+    /// section.
     private func publishStatus() async {
         let tuning = configuration.scheduler
-        let usable = lanes.filter { $0.state.account != .foreign }.count
+        // Fast-pool lanes (active account + unclassified) set the cadence.
+        let fast = lanes.filter { $0.state.account == .primary || $0.state.account == .unknown }.count
         let active = lastActivityAt.map { clock.now().timeIntervalSince($0) <= tuning.activeWindow } ?? false
-        let realizedActive = max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usable, 1)))
-        let effective: TimeInterval? = usable == 0 ? nil : (active ? realizedActive : tuning.idleInterval)
+        let realizedActive = max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(fast, 1)))
+        let effective: TimeInterval? = fast == 0 ? nil : (active ? realizedActive : tuning.idleInterval)
         let statuses = lanes.enumerated().map { i, lane in
             TokenLaneStatus(
                 id: Self.laneId(lane.credential.accessToken),
@@ -399,18 +476,59 @@ public actor OAuthPoller: TokenPoolTesting {
                 lastPolledAt: lane.state.lastPolledAt,
                 cooldownUntil: lane.state.cooldownUntil,
                 consecutiveFailures: lane.consecutiveFailures,
-                priority: i
+                priority: i,
+                accountKey: lane.accountKey
             )
         }
+        // Lane counts per account, for the switcher.
+        var laneCounts: [String: Int] = [:]
+        for lane in lanes where lane.state.account != .unknown {
+            laneCounts[Account.key(forOrg: lane.resolvedOrg), default: 0] += 1
+        }
+        let accounts = await accountSummaries(laneCounts: laneCounts)
         await MainActor.run {
-            TokenPoolStatus.shared.publish(lanes: statuses, isActive: active, effectiveIntervalSeconds: effective)
+            TokenPoolStatus.shared.publish(
+                lanes: statuses, accounts: accounts,
+                isActive: active, effectiveIntervalSeconds: effective
+            )
+        }
+    }
+
+    /// Build the switcher's account summaries from the persisted `Account`
+    /// rows (MainActor for SwiftData).
+    private func accountSummaries(laneCounts: [String: Int]) async -> [AccountStatusSummary] {
+        let container = self.container
+        let activeKey = activeAccountKey
+        return await MainActor.run {
+            let context = ModelContext(container)
+            let rows = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            return rows
+                .map { a in
+                    AccountStatusSummary(
+                        id: a.id,
+                        organizationId: a.organizationId,
+                        displayName: a.displayName,
+                        isActive: a.isActive || a.id == activeKey,
+                        subscriptionType: a.subscriptionType,
+                        fiveHourPct: a.latestFiveHourPct,
+                        sevenDayPct: a.latestSevenDayPct,
+                        extraUsageCents: a.latestExtraUsageCents,
+                        lastPolledAt: a.latestPolledAt,
+                        laneCount: laneCounts[a.id] ?? 0
+                    )
+                }
+                // Active first, then most-recently-polled.
+                .sorted { l, r in
+                    if l.isActive != r.isActive { return l.isActive }
+                    return (l.lastPolledAt ?? .distantPast) > (r.lastPolledAt ?? .distantPast)
+                }
         }
     }
 
     private static func testResult(from outcome: PollOutcome) -> TokenTestResult {
         switch outcome {
         case .success(let fh, let sd):   return .success(fiveHour: fh, sevenDay: sd)
-        case .foreignAccount:            return .foreignAccount(org: nil)
+        case .secondaryAccount(let org): return .otherAccount(org: org)
         case .rateLimited:               return .failure(reason: "Rate-limited (429). This token is cooling down.")
         case .unauthorized:              return .failure(reason: "Anthropic rejected this token (401).")
         case .tokenExpired:              return .failure(reason: "This token is expired.")
@@ -458,30 +576,67 @@ public actor OAuthPoller: TokenPoolTesting {
             let activity = await activityProbe()
             lastActivityAt = activity
 
-            if lanes.allSatisfy({ $0.state.account == .foreign }) || lanes.isEmpty {
+            if lanes.isEmpty {
                 // Nothing usable — record it once and idle until rediscovery.
-                if lanes.isEmpty { lastOutcome = .credentialsNotFound }
+                lastOutcome = .credentialsNotFound
                 await publishStatus()
                 nextPollAt = clock.now().addingTimeInterval(configuration.scheduler.idleInterval)
                 await nap(configuration.scheduler.idleInterval)
                 continue
             }
 
+            let now = clock.now()
             let decision = scheduler.decide(
                 lanes: lanes.map(\.state),
                 lastActivityAt: activity,
-                now: clock.now()
+                now: now
             )
             switch decision {
             case .poll(let idx):
                 _ = await pollLane(idx)
                 await publishStatus()
-            case .wait(let seconds):
-                nextPollAt = clock.now().addingTimeInterval(seconds)
+            case .wait(let fastWait):
+                // A secondary (non-active) account may be due for its slow
+                // sweep even while the fast pool waits. Poll one if so; each
+                // secondary lane is still gated to ≤ 1×/5min.
+                if let sIdx = dueSecondaryLaneIndex(now: now) {
+                    _ = await pollLane(sIdx)
+                    await publishStatus()
+                    continue
+                }
+                let secWait = nextSecondaryWait(now: now)
+                let wait = [fastWait, secWait].compactMap { $0 }.min() ?? fastWait
+                nextPollAt = now.addingTimeInterval(wait)
                 await publishStatus()
-                await nap(seconds)
+                await nap(wait)
             }
         }
+    }
+
+    /// The least-recently-polled secondary lane that's due for its slow
+    /// sweep now (past its per-lane interval and not cooling), or nil.
+    private func dueSecondaryLaneIndex(now: Date) -> Int? {
+        let interval = configuration.secondarySweepInterval
+        return lanes.indices
+            .filter { i in
+                lanes[i].state.account == .secondary
+                    && (lanes[i].state.cooldownUntil.map { now >= $0 } ?? true)
+                    && ((lanes[i].state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast) <= now)
+            }
+            .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
+    }
+
+    /// Seconds until the earliest secondary lane becomes due, or nil if
+    /// there are no secondary lanes.
+    private func nextSecondaryWait(now: Date) -> TimeInterval? {
+        let interval = configuration.secondarySweepInterval
+        let readyTimes = lanes.filter { $0.state.account == .secondary }.map { lane -> Date in
+            let byInterval = lane.state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
+            let byCooldown = lane.state.cooldownUntil ?? .distantPast
+            return max(byInterval, byCooldown)
+        }
+        guard let earliest = readyTimes.min() else { return nil }
+        return max(configuration.scheduler.minWait, earliest.timeIntervalSince(now))
     }
 
     /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
@@ -521,7 +676,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 lanes.append(lane)
             }
         }
-        let noUsable = !lanes.contains { $0.state.account != .foreign }
+        let noUsable = lanes.isEmpty
         let stale = lastDiscoveryAt.map { now.timeIntervalSince($0) >= configuration.laneRediscoverInterval } ?? true
         if stale || noUsable {
             // Hand the client our Desktop-origin tokens so its layered read
@@ -539,17 +694,17 @@ public actor OAuthPoller: TokenPoolTesting {
         savePool()
     }
 
-    /// Persist the confirmed same-account tokens to Pacer's keychain so
-    /// they survive a restart. Only `.primary` lanes — never a foreign
-    /// (different-account) or not-yet-confirmed token — and only when the
-    /// token set actually changed, to avoid a keychain write every poll.
+    /// Persist the confirmed tokens (any account) to Pacer's keychain so
+    /// they survive a restart. Only confirmed lanes (`.primary`/`.secondary`
+    /// — never a not-yet-classified one), and only when the token set
+    /// actually changed, to avoid a keychain write every poll.
     private func savePool() {
-        let primary = lanes.filter { $0.state.account == .primary }
-        guard !primary.isEmpty else { return }   // don't wipe the pool pre-confirmation
-        let tokenSet = Set(primary.map { $0.credential.accessToken })
+        let confirmed = lanes.filter { $0.state.account != .unknown }
+        guard !confirmed.isEmpty else { return }   // don't wipe the pool pre-confirmation
+        let tokenSet = Set(confirmed.map { $0.credential.accessToken })
         guard tokenSet != lastSavedPoolTokens else { return }
         lastSavedPoolTokens = tokenSet
-        poolStore.saveAll(primary.map { StoredToken(credential: $0.credential, source: $0.source) })
+        poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
     }
 
     /// Union new candidate tokens into the lane set, preserving the state
@@ -574,7 +729,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// Order primary-eligible sources first so the scheduler's index
     /// tie-break polls a Claude Code / override token before a Desktop
-    /// one — letting the primary account establish the org guard.
+    /// one — letting the active account establish the org guard.
     private func sortLanes() {
         func rank(_ s: CredentialCandidate.Source) -> Int {
             switch s {
@@ -618,6 +773,24 @@ public actor OAuthPoller: TokenPoolTesting {
         return outcome
     }
 
+    /// Is a poll whose org resolved to `org` part of the active account?
+    /// A nil org (server omitted the header) is treated as the active
+    /// account — you can't split accounts the server never names. The first
+    /// ever classification establishes the active account.
+    private func classifyIsActive(org: String?) -> Bool {
+        if let active = activeAccountKey {
+            // A header-less active account (`default` sentinel) can't be
+            // split — the server never names accounts for us, so every poll
+            // is treated as that one account.
+            if active == Account.defaultKey { return true }
+            return org == nil || Account.key(forOrg: org) == active
+        }
+        // First classification — this becomes the active account.
+        activeAccountKey = Account.key(forOrg: org)
+        primaryOrg = org
+        return true
+    }
+
     /// Apply one poll's result to lane state + persistence, return outcome.
     private func apply(
         result: Result<RateLimitSnapshot, OAuthClientError>,
@@ -628,30 +801,29 @@ public actor OAuthPoller: TokenPoolTesting {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
             lanes[idx].state.cooldownUntil = nil
-            // Same-account guard. First success sets the primary org
-            // (even if the header was absent → nil); a lane whose org
-            // differs is marked foreign and never persisted. A missing
-            // header on a later poll is tolerated as a match rather than
-            // dropping a lane over a transient omission.
             let org = snapshot.organizationId
-            let matches: Bool
-            if let primary = primaryOrg {
-                matches = (org == nil || org == primary)
-            } else {
-                primaryOrg = org
-                matches = true
-            }
+            let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
-            if matches {
+            let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
+            let sub = lanes[idx].credential.subscriptionType
+            if isActive {
                 lanes[idx].state.account = .primary
-                await persist(snapshot, laneSource: lanes[idx].source)
+                await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
+                                 subscriptionType: sub, isActive: true,
+                                 laneSource: lanes[idx].source)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
                     sevenDayPct: snapshot.sevenDay?.usedPercentage
                 )
             } else {
-                lanes[idx].state.account = .foreign
-                return .foreignAccount
+                // A different account — track it (create/update its Account
+                // row + cached snapshot) but keep it out of the active
+                // timeline so two accounts never mix.
+                lanes[idx].state.account = .secondary
+                await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
+                                 subscriptionType: sub, isActive: false,
+                                 laneSource: lanes[idx].source)
+                return .secondaryAccount(org: org)
             }
 
         case .failure(.unauthorized):
@@ -719,8 +891,8 @@ public actor OAuthPoller: TokenPoolTesting {
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"
             let s = sd.map { String(format: "%.1f%%", $0) } ?? "nil"
             return "ok 5h=\(f) 7d=\(s); \(lanes)"
-        case .foreignAccount:
-            return "token is a different account — excluded; \(lanes)"
+        case .secondaryAccount:
+            return "token is another account — tracked as secondary; \(lanes)"
         case .credentialsNotFound:
             return "no usable token — sign into Claude Code; \(lanes)"
         case .keychainAccessDenied:
@@ -825,19 +997,25 @@ public actor OAuthPoller: TokenPoolTesting {
 
     // MARK: - Lane metadata persistence
 
-    /// Load persisted lane metadata once per launch (MainActor for
-    /// SwiftData). Restores the pool's primary org so the same-account
-    /// guard is intact immediately, and populates the cache that
+    /// Load persisted lane metadata + the active account once per launch
+    /// (MainActor for SwiftData). Restores the active account's org so the
+    /// classification is intact immediately, and populates the cache that
     /// `ensureLanes`/`mergeCandidates` read to rehydrate lanes.
     private func loadPersistedMetaIfNeeded() async {
         guard !metaLoaded else { return }
         metaLoaded = true
         let container = self.container
-        let loaded: ([String: LaneMetaSnapshot], String?) = await MainActor.run {
+        struct Loaded: Sendable {
+            var meta: [String: LaneMetaSnapshot]
+            var activeKey: String?
+            var activeOrg: String?
+            var metaPrimaryOrg: String?
+        }
+        let loaded: Loaded = await MainActor.run {
             let context = ModelContext(container)
             let rows = (try? context.fetch(FetchDescriptor<TokenLaneMeta>())) ?? []
             var map: [String: LaneMetaSnapshot] = [:]
-            var primary: String?
+            var metaPrimary: String?
             for r in rows {
                 let account = OAuthPollScheduler.AccountStatus(rawValue: r.accountRaw)
                 map[r.id] = LaneMetaSnapshot(
@@ -850,12 +1028,16 @@ public actor OAuthPoller: TokenPoolTesting {
                     cooldownUntil: r.cooldownUntil,
                     consecutiveFailures: r.consecutiveFailures
                 )
-                if account == .primary, primary == nil { primary = r.organizationId }
+                if account == .primary, metaPrimary == nil { metaPrimary = r.organizationId }
             }
-            return (map, primary)
+            // The active account is the source of truth for `activeAccountKey`.
+            let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            let active = accounts.first { $0.isActive }
+            return Loaded(meta: map, activeKey: active?.id, activeOrg: active?.organizationId, metaPrimaryOrg: metaPrimary)
         }
-        persistedMeta = loaded.0
-        if primaryOrg == nil { primaryOrg = loaded.1 }
+        persistedMeta = loaded.meta
+        if activeAccountKey == nil { activeAccountKey = loaded.activeKey }
+        if primaryOrg == nil { primaryOrg = loaded.activeOrg ?? loaded.metaPrimaryOrg }
     }
 
     /// Restore a freshly-seeded/discovered lane's learned state from the
@@ -929,61 +1111,133 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    // MARK: - Persistence
+    // MARK: - Account persistence
 
-    /// Write one row per present window. Hops to the main actor for
-    /// SwiftData since `ModelContext` is `@MainActor` in our setup.
-    private func persist(_ snapshot: RateLimitSnapshot, laneSource: CredentialCandidate.Source) async {
+    /// Record one poll: upsert the `Account` row (identity + cached latest
+    /// readings for the switcher), and — only for the **active** account —
+    /// write the window/extra-usage history into the shared timeline tables
+    /// stamped with the account id. Hops to the main actor for SwiftData.
+    private func recordPoll(
+        _ snapshot: RateLimitSnapshot,
+        accountKey: String,
+        organizationId: String?,
+        subscriptionType: String?,
+        isActive: Bool,
+        laneSource: CredentialCandidate.Source
+    ) async {
         let container = self.container
         let captured = snapshot
         await MainActor.run {
             let context = ModelContext(container)
+
+            // --- Upsert the account + its cached latest readings ---
+            let key = accountKey
+            let accounts = (try? context.fetch(
+                FetchDescriptor<Account>(predicate: #Predicate { $0.id == key })
+            )) ?? []
+            let account: Account
+            if let existing = accounts.first {
+                account = existing
+            } else {
+                account = Account(
+                    id: key,
+                    organizationId: organizationId,
+                    displayName: Account.defaultName(forOrg: organizationId, subscriptionType: subscriptionType),
+                    isActive: isActive,
+                    firstSeenAt: captured.sampledAt,
+                    lastSeenAt: captured.sampledAt,
+                    subscriptionType: subscriptionType
+                )
+                context.insert(account)
+            }
+            account.lastSeenAt = captured.sampledAt
+            if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
+            if let subscriptionType { account.subscriptionType = subscriptionType }
+            if isActive { account.isActive = true }
+            if let w = captured.fiveHour {
+                account.latestFiveHourPct = w.usedPercentage
+                account.latestFiveHourResetsAt = w.resetsAt
+            }
+            if let w = captured.sevenDay {
+                account.latestSevenDayPct = w.usedPercentage
+                account.latestSevenDayResetsAt = w.resetsAt
+            }
+            if let cents = captured.extraUsageCents { account.latestExtraUsageCents = cents }
+            account.latestPolledAt = captured.sampledAt
+
+            // --- History rows: active account only ---
             var wroteAnyWindow = false
-            if let window = captured.fiveHour {
-                Self.logIfUsageWentDown(
-                    windowName: RateLimitWindowName.fiveHour,
-                    prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
-                    newUsed: window.usedPercentage,
-                    newReset: window.resetsAt,
-                    laneSource: laneSource
-                )
-                context.insert(RateLimitSample(
-                    sampledAt: captured.sampledAt,
-                    window: RateLimitWindowName.fiveHour,
-                    usedPercentage: window.usedPercentage,
-                    resetsAt: window.resetsAt,
-                    source: RateLimitSource.oauth
-                ))
-                wroteAnyWindow = true
-            }
-            if let window = captured.sevenDay {
-                Self.logIfUsageWentDown(
-                    windowName: RateLimitWindowName.sevenDay,
-                    prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
-                    newUsed: window.usedPercentage,
-                    newReset: window.resetsAt,
-                    laneSource: laneSource
-                )
-                context.insert(RateLimitSample(
-                    sampledAt: captured.sampledAt,
-                    window: RateLimitWindowName.sevenDay,
-                    usedPercentage: window.usedPercentage,
-                    resetsAt: window.resetsAt,
-                    source: RateLimitSource.oauth
-                ))
-                wroteAnyWindow = true
-            }
-            // Extra-usage is account-level (not per-window); write at most
-            // one row per snapshot when present. nil means the field was
-            // omitted — leave the prior row rather than overwrite with a
-            // phantom zero.
-            if let cents = captured.extraUsageCents {
-                context.insert(ExtraUsageSample(
-                    sampledAt: captured.sampledAt,
-                    amountCents: cents,
-                    source: RateLimitSource.oauth
-                ))
-                wroteAnyWindow = true
+            if isActive {
+                if let window = captured.fiveHour {
+                    Self.logIfUsageWentDown(
+                        windowName: RateLimitWindowName.fiveHour,
+                        prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
+                        newUsed: window.usedPercentage,
+                        newReset: window.resetsAt,
+                        laneSource: laneSource
+                    )
+                    context.insert(RateLimitSample(
+                        sampledAt: captured.sampledAt,
+                        window: RateLimitWindowName.fiveHour,
+                        usedPercentage: window.usedPercentage,
+                        resetsAt: window.resetsAt,
+                        source: RateLimitSource.oauth,
+                        accountId: key
+                    ))
+                    wroteAnyWindow = true
+                }
+                if let window = captured.sevenDay {
+                    Self.logIfUsageWentDown(
+                        windowName: RateLimitWindowName.sevenDay,
+                        prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
+                        newUsed: window.usedPercentage,
+                        newReset: window.resetsAt,
+                        laneSource: laneSource
+                    )
+                    context.insert(RateLimitSample(
+                        sampledAt: captured.sampledAt,
+                        window: RateLimitWindowName.sevenDay,
+                        usedPercentage: window.usedPercentage,
+                        resetsAt: window.resetsAt,
+                        source: RateLimitSource.oauth,
+                        accountId: key
+                    ))
+                    wroteAnyWindow = true
+                }
+                // Extra-usage is account-level (not per-window); write at
+                // most one row per snapshot when present. nil means the
+                // field was omitted — leave the prior row rather than
+                // overwrite with a phantom zero.
+                if let cents = captured.extraUsageCents {
+                    context.insert(ExtraUsageSample(
+                        sampledAt: captured.sampledAt,
+                        amountCents: cents,
+                        source: RateLimitSource.oauth,
+                        accountId: key
+                    ))
+                    wroteAnyWindow = true
+                }
+                // The scoped `limits[]` representation (per-model weekly
+                // windows, severity, binding flag). One generic row per item,
+                // all stamped with the same `sampledAt` so the dashboard reads
+                // them back as one "latest batch" — a limit dropped from the
+                // response simply stops appearing. Keyed by a stable composite
+                // identity, so new models/kinds persist with no schema change.
+                // Gated to the active account, and stamped with `accountId` so
+                // the active-account timeline swap can archive/restore these
+                // rows alongside `RateLimitSample` — a secondary (non-active)
+                // account's limits never pollute the live timeline, and two
+                // accounts that share a model identity (e.g. both have a "Fable"
+                // weekly) keep separate scoped history.
+                for limit in captured.limits {
+                    context.insert(UsageLimitSample(
+                        from: limit,
+                        sampledAt: captured.sampledAt,
+                        source: RateLimitSource.oauth,
+                        accountId: key
+                    ))
+                    wroteAnyWindow = true
+                }
             }
             do {
                 try context.save()
@@ -993,6 +1247,129 @@ public actor OAuthPoller: TokenPoolTesting {
             } catch {
                 Log.write("OAuthPoller", "persist failed: \(error)")
             }
+        }
+    }
+
+    /// Swap which account's timeline the live sample tables hold: archive
+    /// the outgoing active account's rows into `AccountUsageArchive`, then
+    /// restore the incoming account's archived rows into the live tables,
+    /// and flip `Account.isActive`. Returns the incoming account's org so
+    /// the caller can update `primaryOrg`. Runs on the main actor.
+    private func swapActiveTimeline(from outgoing: String?, to incoming: String) async -> String? {
+        let container = self.container
+        return await MainActor.run {
+            let context = ModelContext(container)
+
+            // 1. Archive the outgoing active account's live rows.
+            if let outgoing {
+                let rls = (try? context.fetch(FetchDescriptor<RateLimitSample>())) ?? []
+                for r in rls {
+                    context.insert(AccountUsageArchive(
+                        accountId: outgoing,
+                        kind: AccountUsageArchive.kindRateLimit,
+                        sampledAt: r.sampledAt,
+                        window: r.window,
+                        usedPercentage: r.usedPercentage,
+                        resetsAt: r.resetsAt,
+                        source: r.source
+                    ))
+                    context.delete(r)
+                }
+                let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>())) ?? []
+                for e in extras {
+                    context.insert(AccountUsageArchive(
+                        accountId: outgoing,
+                        kind: AccountUsageArchive.kindExtraUsage,
+                        sampledAt: e.sampledAt,
+                        amountCents: e.amountCents,
+                        source: e.source
+                    ))
+                    context.delete(e)
+                }
+                let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>())) ?? []
+                for l in limits {
+                    context.insert(AccountUsageArchive(
+                        accountId: outgoing,
+                        kind: AccountUsageArchive.kindUsageLimit,
+                        sampledAt: l.sampledAt,
+                        usedPercentage: l.percent,
+                        resetsAt: l.resetsAt,
+                        source: l.source,
+                        identity: l.identity,
+                        limitKind: l.kind,
+                        group: l.group,
+                        label: l.label,
+                        severity: l.severity,
+                        isActive: l.isActive,
+                        modelId: l.modelId,
+                        modelDisplayName: l.modelDisplayName,
+                        surface: l.surface
+                    ))
+                    context.delete(l)
+                }
+            }
+
+            // 2. Restore the incoming account's archived rows (if any).
+            let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
+                predicate: #Predicate { $0.accountId == incoming }
+            ))) ?? []
+            for a in archived {
+                switch a.kind {
+                case AccountUsageArchive.kindRateLimit:
+                    context.insert(RateLimitSample(
+                        sampledAt: a.sampledAt,
+                        window: a.window ?? RateLimitWindowName.fiveHour,
+                        usedPercentage: a.usedPercentage ?? 0,
+                        resetsAt: a.resetsAt,
+                        source: a.source,
+                        accountId: incoming
+                    ))
+                case AccountUsageArchive.kindUsageLimit:
+                    context.insert(UsageLimitSample(
+                        sampledAt: a.sampledAt,
+                        identity: a.identity ?? "",
+                        kind: a.limitKind ?? "",
+                        group: a.group ?? "",
+                        label: a.label ?? "",
+                        percent: a.usedPercentage ?? 0,
+                        resetsAt: a.resetsAt,
+                        severity: a.severity ?? "",
+                        isActive: a.isActive ?? false,
+                        modelId: a.modelId,
+                        modelDisplayName: a.modelDisplayName,
+                        surface: a.surface,
+                        source: a.source,
+                        accountId: incoming
+                    ))
+                default:   // kindExtraUsage
+                    context.insert(ExtraUsageSample(
+                        sampledAt: a.sampledAt,
+                        amountCents: a.amountCents ?? 0,
+                        source: a.source,
+                        accountId: incoming
+                    ))
+                }
+                context.delete(a)
+            }
+
+            // 3. Flip active flags.
+            let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            var incomingOrg: String?
+            for acc in allAccounts {
+                acc.isActive = (acc.id == incoming)
+                if acc.id == incoming { incomingOrg = acc.organizationId }
+            }
+
+            do {
+                try context.save()
+                // Nudge every @Query consumer to refresh against the swapped
+                // timeline (they auto-refresh on save, but this also drives
+                // the coordination summary the rest of the app listens on).
+                postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
+            } catch {
+                Log.write("OAuthPoller", "account timeline swap failed: \(error)")
+            }
+            return incomingOrg
         }
     }
 }

@@ -446,6 +446,14 @@ public struct OAuthClient: Sendable {
 
     private struct DecodeError: Error { let detail: String }
 
+    /// Test hook onto the otherwise-private decode: lets a raw endpoint
+    /// body be exercised end-to-end (windows + `limits[]`) without a
+    /// keychain/transport round-trip. No instance state is consulted by
+    /// `decode`, so a throwaway client is fine.
+    static func decodeForTesting(body: Data, sampledAt: Date, organizationId: String? = nil) throws -> RateLimitSnapshot {
+        try OAuthClient().decode(body: body, sampledAt: sampledAt, organizationId: organizationId)
+    }
+
     private func decode(body: Data, sampledAt: Date, organizationId: String? = nil) throws -> RateLimitSnapshot {
         guard let top = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             throw DecodeError(detail: "top level was not a JSON object")
@@ -455,12 +463,18 @@ public struct OAuthClient: Sendable {
         // ignore. `extra_usage` is the one extra field worth surfacing
         // — Max-plan users can exceed quota at metered rates and want
         // to see that spend.
+        // `limits[]` is the newer scoped/extensible window representation
+        // (per-model weekly windows, severity, is_active). Parsed fully
+        // dynamically — see `UsageLimit.parse` — so new models/kinds/groups
+        // flow through with no code change. Tolerant: a bad item is
+        // dropped, never fails the whole decode.
         return RateLimitSnapshot(
             sampledAt: sampledAt,
             fiveHour: decodeWindow(top["five_hour"]),
             sevenDay: decodeWindow(top["seven_day"]),
             extraUsageCents: Self.decodeExtraUsage(top["extra_usage"]),
-            organizationId: organizationId
+            organizationId: organizationId,
+            limits: UsageLimit.parse(top["limits"])
         )
     }
 

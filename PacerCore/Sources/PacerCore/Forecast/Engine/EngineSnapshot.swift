@@ -46,6 +46,27 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
         public var resetsDate: Date { Date(timeIntervalSince1970: resetsUnix) }
     }
 
+    /// One scoped per-model window's outlook, exported so out-of-process
+    /// readers (widgets) can surface the same projected-fill/crossing the
+    /// dashboard tiles show, keyed by the `limits[]` identity so a reader can
+    /// match it to a live row. `isActive` flags the binding limit in its group.
+    public struct ScopedWindowOutlook: Codable, Sendable, Equatable {
+        public let identity: String
+        public let displayName: String
+        public let group: String
+        public let isActive: Bool
+        public let outlook: WindowOutlook
+
+        public init(identity: String, displayName: String, group: String,
+                    isActive: Bool, outlook: WindowOutlook) {
+            self.identity = identity
+            self.displayName = displayName
+            self.group = group
+            self.isActive = isActive
+            self.outlook = outlook
+        }
+    }
+
     /// The engine's cost projection + pace read, exported so out-of-process
     /// readers (widgets, the Shortcuts intents) can surface the same
     /// projected-spend and "running hot / quieter than usual" the dashboard
@@ -87,13 +108,17 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
     /// Optional so snapshots written before this field existed still decode
     /// (a missing key → `nil` via the synthesized `decodeIfPresent`).
     public let cost: CostOutlook?
+    /// Scoped per-model windows' outlooks (empty/nil when none). Optional +
+    /// defaulted so snapshots written before this field existed still decode.
+    public let scoped: [ScopedWindowOutlook]?
 
     public init(generatedUnix: Double, fiveHour: WindowOutlook?, sevenDay: WindowOutlook?,
-                cost: CostOutlook? = nil) {
+                cost: CostOutlook? = nil, scoped: [ScopedWindowOutlook]? = nil) {
         self.generatedUnix = generatedUnix
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
         self.cost = cost
+        self.scoped = scoped
     }
 
     /// `ClaudeCodeMeta` key the snapshot is stored under.

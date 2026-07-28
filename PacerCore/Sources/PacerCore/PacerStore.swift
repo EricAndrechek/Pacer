@@ -106,6 +106,7 @@ public enum PacerStore {
         ProjectDailyAggregate.self,
         RateLimitSample.self,
         ExtraUsageSample.self,
+        UsageLimitSample.self,
         SessionInfo.self,
         ClaudeCodeMeta.self,
         JSONLFileCursor.self,
@@ -119,6 +120,8 @@ public enum PacerStore {
         EngineEvalOutcome.self,
         PredictionSnapshot.self,
         TokenLaneMeta.self,
+        Account.self,
+        AccountUsageArchive.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

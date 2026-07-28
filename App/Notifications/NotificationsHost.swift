@@ -21,6 +21,13 @@ struct NotificationsHost: View {
     @Query(NotificationsHost.recentRateLimitDescriptor)
     private var samples: [RateLimitSample]
 
+    /// Recent scoped `limits[]` rows (active account only — the table holds the
+    /// active account's rows after the OAuth poller's timeline swap), newest
+    /// first, bounded. Drives the scoped per-model threshold alerts through the
+    /// same crossing logic as the fixed 5h/7d windows.
+    @Query(NotificationsHost.recentScopedDescriptor)
+    private var scopedSamples: [UsageLimitSample]
+
     @Query private var todayAggregates: [DailyAggregate]
     /// Per-project rollups for the last 7 days — covers both the
     /// daily-budget check (today's slice) and weekly-budget check
@@ -59,11 +66,32 @@ struct NotificationsHost: View {
     @State private var lastConsideredFiveHourId: PersistentIdentifier?
     @State private var lastConsideredSevenDayId: PersistentIdentifier?
 
+    /// Per-scoped-identity change tracking, mirroring the fixed-window
+    /// `lastSeen*` state but keyed by `UsageLimitSample.identity`. Seeded from
+    /// the latest batch in `.task` so launching while already over a threshold
+    /// doesn't fire.
+    @State private var lastSeenScoped: [String: Double] = [:]
+    @State private var lastSeenScopedResetsAt: [String: Date] = [:]
+    /// Newest scoped-sample id already evaluated — short-circuits `onChange`
+    /// re-fires that resolve to the same poll.
+    @State private var lastConsideredScopedId: PersistentIdentifier?
+
     private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
         var d = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         d.fetchLimit = 8
+        return d
+    }()
+
+    /// Bounded scoped-sample window — enough to resolve the latest poll's batch
+    /// (all rows share a `sampledAt`) plus a little history, without scanning
+    /// the full append-only table on every save (same pattern as PaceChartCard).
+    private static let recentScopedDescriptor: FetchDescriptor<UsageLimitSample> = {
+        var d = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 200
         return d
     }()
 
@@ -97,6 +125,11 @@ struct NotificationsHost: View {
     private var sevenDayFingerprint: PersistentIdentifier? {
         samples.first { $0.window == "seven_day" }?.persistentModelID
     }
+    /// Newest scoped row's id — changes exactly when a new poll lands, at which
+    /// point `handleScoped` re-evaluates every scoped identity in that batch.
+    private var scopedFingerprint: PersistentIdentifier? {
+        scopedSamples.first?.persistentModelID
+    }
     private var todayCostFingerprint: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
@@ -114,6 +147,7 @@ struct NotificationsHost: View {
             .frame(width: 0, height: 0)
             .onChange(of: fiveHourFingerprint) { handleFiveHour() }
             .onChange(of: sevenDayFingerprint) { handleSevenDay() }
+            .onChange(of: scopedFingerprint) { handleScoped() }
             .onChange(of: todayCostFingerprint) { handleDailyCost() }
             .onChange(of: projectWindowFingerprint) { handleProjectBudgets() }
             .onChange(of: weekCostFingerprint) { handleCustomRules() }
@@ -129,6 +163,14 @@ struct NotificationsHost: View {
                     lastSeenSevenDay = s.usedPercentage
                     lastSeenSevenDayResetsAt = s.resetsAt
                 }
+                // Seed scoped windows from the latest batch so an
+                // already-over-threshold window at launch doesn't fire.
+                for row in scopedSamples.latestBatch()
+                    where ScopedRateLimitAlerts.isModelOrSurfaceScoped(row) {
+                    lastSeenScoped[row.identity] = row.percent
+                    lastSeenScopedResetsAt[row.identity] = row.resetsAt
+                }
+                lastConsideredScopedId = scopedSamples.first?.persistentModelID
                 lastSeenDailyCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
                 await NotificationCoordinator.shared.requestAuthorizationIfNeeded()
                 // Daily-summary watchdog: tick every five minutes and
@@ -200,6 +242,58 @@ struct NotificationsHost: View {
                 previousResetsAt: prevResetsAt,
                 context: context
             )
+        }
+    }
+
+    /// Evaluate every scoped per-model window present in the active account's
+    /// latest poll against its configured `AlertRule` thresholds, and dispatch
+    /// threshold + reset banners through the same coordinator path as 5h/7d.
+    ///
+    /// Dormancy falls out naturally: only identities in the current batch are
+    /// looped, so a window that vanished isn't evaluated (its rules are kept in
+    /// the store, untouched) and resumes the moment it reappears.
+    private func handleScoped() {
+        let batch = scopedSamples.latestBatch()
+        guard let newestId = batch.first?.persistentModelID else { return }
+        // Short-circuit an onChange re-fire that resolves to the same poll.
+        if newestId == lastConsideredScopedId { return }
+        lastConsideredScopedId = newestId
+
+        for row in batch where ScopedRateLimitAlerts.isModelOrSurfaceScoped(row) {
+            let identity = row.identity
+            let thresholds = ScopedRateLimitAlerts.thresholds(forIdentity: identity, in: rules)
+            let prevPct = lastSeenScoped[identity]
+            let prevResetsAt = lastSeenScopedResetsAt[identity]
+            lastSeenScoped[identity] = row.percent
+            lastSeenScopedResetsAt[identity] = row.resetsAt
+
+            // Skip the coordinator round-trip when this window has no alert
+            // (the default) — nothing to fire, and reset alerts still need a
+            // configured window to be meaningful here.
+            guard !thresholds.isEmpty else { continue }
+            let label = row.label
+            let pct = row.percent
+            let resetsAt = row.resetsAt
+            Task { @MainActor [context] in
+                await NotificationCoordinator.shared.handleScopedRateLimitUpdate(
+                    identity: identity,
+                    label: label,
+                    thresholds: thresholds,
+                    currentPct: pct,
+                    previousPct: prevPct,
+                    resetsAt: resetsAt,
+                    context: context
+                )
+                await NotificationCoordinator.shared.handleRateLimitReset(
+                    window: identity,
+                    currentPct: pct,
+                    previousPct: prevPct,
+                    resetsAt: resetsAt,
+                    previousResetsAt: prevResetsAt,
+                    labelOverride: label,
+                    context: context
+                )
+            }
         }
     }
 

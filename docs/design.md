@@ -108,8 +108,8 @@ stdout. Else emit Pacer's own minimal status text.
 
 ### Tier 3 — OAuth `/api/oauth/usage` (rate-limit windows)
 
-- Primary source for 5h and 7d rate-limit windows. Always-on when CC is
-  installed and credentials are present.
+- Primary source for the 5h, 7d, and per-model (scoped `limits[]`) rate-limit
+  windows. Always-on when CC is installed and credentials are present.
 - During active statusline sessions, can defer polling because
   statusline pushes the same data sub-second. Without statusline,
   this is the only rate-limit source.

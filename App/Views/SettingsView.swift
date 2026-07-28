@@ -174,36 +174,157 @@ private struct StartupCard: View {
 /// today's cost, the 7-day window, or the active model. The chip list
 /// scales to future additions and lets users build the exact at-a-
 /// glance summary they want.
-private struct MenuBarCard: View {
+// Internal (not private) so the screenshot harness can render this card in
+// isolation for the menu-bar-polish mockups.
+struct MenuBarCard: View {
     @AppStorage(PacerSettings.Key.menuBarChips, store: PacerSettings.store)
     private var chipsRaw: String = "icon,five_hour_pct"
 
     @AppStorage(PacerSettings.Key.menuBarIconStyle, store: PacerSettings.store)
     private var iconRaw: String = PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue
 
-    /// Local mutable mirror of the persisted chip order. We re-derive
-    /// from the @AppStorage on every read and write back via
-    /// `PacerSettings.setMenuBarChips`. The local array is what the
-    /// `List`'s `onMove` mutates — binding directly to `chipsRaw`
-    /// would force CSV re-parsing on every drag delta.
-    @State private var enabledOrder: [PacerSettings.MenuBarChip] = []
+    /// Which window's utilization drives the single-glyph icon. Chosen
+    /// explicitly; default is the 5-hour window. A legacy "" still resolves to
+    /// 5-hour. See `MenuBarWindows.resolveDriver`.
+    @AppStorage(PacerSettings.Key.menuBarIconDriver, store: PacerSettings.store)
+    private var iconDriverRaw: String = MenuBarWindows.defaultDriverKey
 
-    /// All chips not currently enabled, rendered as "Add" rows below.
-    private var disabledChips: [PacerSettings.MenuBarChip] {
-        let enabledSet = Set(enabledOrder)
+    /// The activity-rings window set (outer → inner). Mirrored into `ringOrder`
+    /// for editing; the CSV is the source of truth.
+    @AppStorage(PacerSettings.Key.menuBarRingWindows, store: PacerSettings.store)
+    private var ringWindowsRaw: String = "five_hour,seven_day"
+
+    /// Recent samples so the driver picker can offer the live window set —
+    /// 5h / 7d plus every scoped per-model window currently reported.
+    @Query(MenuBarCard.recentRateDescriptor) private var rateSamples: [RateLimitSample]
+    @Query(MenuBarWindowSource.recentScopedDescriptor) private var scopedSamples: [UsageLimitSample]
+
+    private static let recentRateDescriptor: FetchDescriptor<RateLimitSample> = {
+        var d = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 8
+        return d
+    }()
+
+    /// The live window set the picker chooses from (ordered like the dashboard).
+    private var windows: [MenuBarWindowItem] {
+        MenuBarWindowSource.items(
+            fiveHour: rateSamples.first { $0.window == RateLimitWindowName.fiveHour },
+            sevenDay: rateSamples.first { $0.window == RateLimitWindowName.sevenDay },
+            scoped: scopedSamples)
+    }
+
+    /// Local mutable mirror of the persisted chip order (fixed + scoped). We
+    /// re-derive from the @AppStorage on every read and write back via
+    /// `PacerSettings.setMenuBarChipItems`. The local array is what the reorder
+    /// controls mutate — binding directly to `chipsRaw` would force CSV
+    /// re-parsing on every edit.
+    @State private var enabledOrder: [PacerSettings.MenuBarChipItem] = []
+
+    /// Local mutable mirror of the persisted ring-window keys (outer → inner),
+    /// edited by the ring picker and written back via
+    /// `PacerSettings.setMenuBarRingWindowKeys`.
+    @State private var ringOrder: [String] = []
+
+    private var iconStyle: PacerSettings.MenuBarIconStyle {
+        PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
+    }
+
+    /// Windows still available to add as a ring (not already selected, and only
+    /// while under the 3-ring cap).
+    private var addableRingWindows: [MenuBarWindowItem] {
+        guard ringOrder.count < MenuBarWindows.maxRingWindows else { return [] }
+        let chosen = Set(ringOrder)
+        return windows.filter { !chosen.contains($0.key) }
+    }
+
+    /// Driver-picker selection. Maps a legacy stored "" (old "Auto") onto the
+    /// explicit 5-hour key so the picker shows a real row (there is no "Auto"
+    /// row anymore); writing back stores the chosen window key.
+    private var driverSelection: Binding<String> {
+        Binding(
+            get: { iconDriverRaw.isEmpty ? MenuBarWindows.defaultDriverKey : iconDriverRaw },
+            set: { iconDriverRaw = $0 }
+        )
+    }
+
+    /// Whether to show the "…falls back to the 5-hour window" note: only when
+    /// the chosen driver is a scoped per-model window (the one kind that can
+    /// disappear) or has already vanished. The fixed 5h/7d never drop out.
+    private var showsDriverFallbackNote: Bool {
+        let key = driverSelection.wrappedValue
+        if !MenuBarWindows.driverIsResolvable(key: key, windows: windows) { return true }
+        return windows.first(where: { $0.key == key })?.isScoped ?? false
+    }
+
+    /// Built-in chips not currently enabled — the fixed half of the "Add" list.
+    private var addableFixedChips: [PacerSettings.MenuBarChip] {
+        let enabled = Set(enabledOrder)
         return PacerSettings.MenuBarChip.defaultOrder
-            .filter { !enabledSet.contains($0) }
+            .filter { !enabled.contains(.fixed($0)) }
+    }
+
+    /// Live scoped per-model windows not already enabled — the dynamic half of
+    /// the "Add" list ("Fable %", "Haiku %", …). Drawn straight from the active
+    /// account's latest poll, so it's fully dynamic and account-scoped: no
+    /// model names are hardcoded and a window Anthropic adds appears here with
+    /// zero code change.
+    private var addableScopedWindows: [MenuBarWindowItem] {
+        let enabled = Set(enabledOrder)
+        return windows.filter {
+            $0.isScoped && !enabled.contains(.scoped(identity: $0.key))
+        }
+    }
+
+    /// Whether the "Add" section has anything to show.
+    private var hasAddableChips: Bool {
+        !addableFixedChips.isEmpty || !addableScopedWindows.isEmpty
     }
 
     private var iconIsEnabled: Bool {
-        enabledOrder.contains(.icon)
+        enabledOrder.contains(.fixed(.icon))
+    }
+
+    /// SF Symbol anchoring a scoped-window chip row (a per-model % window).
+    private static let scopedChipSymbol = "percent"
+
+    /// Resolved display data for one enabled chip row (fixed or scoped),
+    /// computed against the live window set so a scoped chip shows its name +
+    /// current %, or a "paused" note when its window isn't currently reported
+    /// (dormant — consistent with the scoped-alerts UI).
+    private func rowInfo(for item: PacerSettings.MenuBarChipItem) -> ChipRowInfo {
+        switch item {
+        case .fixed(let chip):
+            return ChipRowInfo(symbol: chip.symbolName, title: chip.label,
+                               subtitle: chip.blurb, isDormant: false)
+        case .scoped(let identity):
+            if let window = windows.first(where: { $0.key == identity }) {
+                let pct = window.usedPercentage.map { " · \(Int($0.rounded()))% used" } ?? ""
+                return ChipRowInfo(
+                    symbol: Self.scopedChipSymbol, title: "\(window.displayName) %",
+                    subtitle: "Scoped window\(pct)", isDormant: false)
+            }
+            let name = PacerSettings.MenuBarChipItem.scopedDisplayName(fromIdentity: identity)
+            return ChipRowInfo(
+                symbol: Self.scopedChipSymbol, title: "\(name) %",
+                subtitle: "Paused — not in current usage", isDormant: true)
+        }
+    }
+
+    /// Picker label for a driver option — the window's name plus its live
+    /// utilization when known, so the user can tell "Fable · 49%" apart from
+    /// "Opus · 84%" at a glance.
+    private func driverOptionLabel(_ window: MenuBarWindowItem) -> String {
+        guard let pct = window.usedPercentage else { return window.displayName }
+        return "\(window.displayName) · \(Int(pct.rounded()))%"
     }
 
     var body: some View {
         PacerCard("Menu bar", content: {
             VStack(alignment: .leading, spacing: 14) {
                 enabledList
-                if !disabledChips.isEmpty {
+                if hasAddableChips {
                     addList
                 }
                 Divider().opacity(0.4)
@@ -215,6 +336,34 @@ private struct MenuBarCard: View {
                     }
                     .labelsHidden()
                     .disabled(!iconIsEnabled)
+                }
+                // Single-glyph styles (gauge / ring-fill / dot) are painted by
+                // one window's usage — the "driver". The activity-rings style
+                // draws its own configurable ring set, so swap the driver picker
+                // for the ring picker when that style is chosen.
+                if iconStyle == .activityRings {
+                    ringWindowPicker
+                } else {
+                    LabeledControlRow(label: "Icon driver") {
+                        Picker("Icon driver", selection: driverSelection) {
+                            ForEach(windows) { window in
+                                Text(driverOptionLabel(window)).tag(window.key)
+                            }
+                            // A previously-chosen window that's no longer
+                            // reported: keep the row so the selection stays
+                            // visible and the fallback reads clearly.
+                            if !MenuBarWindows.driverIsResolvable(key: driverSelection.wrappedValue, windows: windows) {
+                                Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .disabled(!iconIsEnabled)
+                    }
+                    if showsDriverFallbackNote {
+                        Text("The menu-bar icon reflects this window's usage. If it stops being reported, the icon falls back to the 5-hour window.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }, footer: {
@@ -234,9 +383,13 @@ private struct MenuBarCard: View {
             for: UserDefaults.didChangeNotification,
             object: PacerSettings.store
         )) { _ in
-            let fresh = PacerSettings.menuBarChips()
+            let fresh = PacerSettings.menuBarChipItems()
             if fresh != enabledOrder {
                 enabledOrder = fresh
+            }
+            let freshRings = PacerSettings.menuBarRingWindowKeys()
+            if freshRings != ringOrder {
+                ringOrder = freshRings
             }
         }
     }
@@ -249,14 +402,14 @@ private struct MenuBarCard: View {
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 6)
             } else {
-                ForEach(enabledOrder) { chip in
+                ForEach(enabledOrder) { item in
                     EnabledChipRow(
-                        chip: chip,
-                        onRemove: { remove(chip) },
-                        onMoveUp: index(of: chip).flatMap { idx in
+                        info: rowInfo(for: item),
+                        onRemove: { remove(item) },
+                        onMoveUp: index(of: item).flatMap { idx in
                             idx == 0 ? nil : { move(from: idx, to: idx - 1) }
                         },
-                        onMoveDown: index(of: chip).flatMap { idx in
+                        onMoveDown: index(of: item).flatMap { idx in
                             idx == enabledOrder.count - 1 ? nil : { move(from: idx, to: idx + 1) }
                         }
                     )
@@ -275,8 +428,15 @@ private struct MenuBarCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
-            ForEach(disabledChips) { chip in
-                AddChipRow(chip: chip) { add(chip) }
+            // Built-in chips first, then the live scoped per-model windows
+            // ("Fable %", "Haiku %", …) so the Add list is fully dynamic.
+            ForEach(addableFixedChips) { chip in
+                let item = PacerSettings.MenuBarChipItem.fixed(chip)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
+            }
+            ForEach(addableScopedWindows) { window in
+                let item = PacerSettings.MenuBarChipItem.scoped(identity: window.key)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
             }
         }
     }
@@ -284,25 +444,26 @@ private struct MenuBarCard: View {
     // MARK: - Mutation
 
     private func reload() {
-        enabledOrder = PacerSettings.menuBarChips()
+        enabledOrder = PacerSettings.menuBarChipItems()
+        ringOrder = PacerSettings.menuBarRingWindowKeys()
     }
 
     private func persist() {
-        PacerSettings.setMenuBarChips(enabledOrder)
+        PacerSettings.setMenuBarChipItems(enabledOrder)
     }
 
-    private func index(of chip: PacerSettings.MenuBarChip) -> Int? {
-        enabledOrder.firstIndex(of: chip)
+    private func index(of item: PacerSettings.MenuBarChipItem) -> Int? {
+        enabledOrder.firstIndex(of: item)
     }
 
-    private func add(_ chip: PacerSettings.MenuBarChip) {
-        guard !enabledOrder.contains(chip) else { return }
-        enabledOrder.append(chip)
+    private func add(_ item: PacerSettings.MenuBarChipItem) {
+        guard !enabledOrder.contains(item) else { return }
+        enabledOrder.append(item)
         persist()
     }
 
-    private func remove(_ chip: PacerSettings.MenuBarChip) {
-        enabledOrder.removeAll { $0 == chip }
+    private func remove(_ item: PacerSettings.MenuBarChipItem) {
+        enabledOrder.removeAll { $0 == item }
         persist()
     }
 
@@ -315,6 +476,90 @@ private struct MenuBarCard: View {
         enabledOrder.insert(chip, at: clamped)
         persist()
     }
+
+    // MARK: - Activity-ring window picker
+
+    /// Shown in place of the driver picker when the icon style is Activity
+    /// rings: pick up to 3 windows (5h / 7d / any scoped), ordered outer →
+    /// inner. Reuses the same live window enumeration the driver picker offers.
+    @ViewBuilder private var ringWindowPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledControlRow(label: "Rings") {
+                Text("Outer → inner, up to 3")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            ForEach(Array(ringOrder.enumerated()), id: \.element) { idx, key in
+                ringRow(key: key, index: idx)
+            }
+            if !addableRingWindows.isEmpty {
+                Text("Add")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                ForEach(addableRingWindows) { window in
+                    AddRingRow(label: driverOptionLabel(window)) { addRing(window.key) }
+                }
+            }
+            Text("Each ring shows one window's usage, colored by its band. The default is 5-hour + 7-day.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+        }
+        .disabled(!iconIsEnabled)
+    }
+
+    @ViewBuilder
+    private func ringRow(key: String, index: Int) -> some View {
+        let window = windows.first(where: { $0.key == key })
+        RingWindowRow(
+            label: window.map(driverOptionLabel) ?? key,
+            ringIndex: index + 1,
+            isUnavailable: window == nil,
+            onRemove: ringOrder.count > 1 ? { removeRing(key) } : nil,
+            onMoveUp: index == 0 ? nil : { moveRing(from: index, to: index - 1) },
+            onMoveDown: index == ringOrder.count - 1 ? nil : { moveRing(from: index, to: index + 1) }
+        )
+    }
+
+    private func persistRings() {
+        PacerSettings.setMenuBarRingWindowKeys(ringOrder)
+    }
+
+    private func addRing(_ key: String) {
+        guard ringOrder.count < MenuBarWindows.maxRingWindows,
+              !ringOrder.contains(key) else { return }
+        ringOrder.append(key)
+        persistRings()
+    }
+
+    private func removeRing(_ key: String) {
+        // Never remove the last ring — the icon must draw at least one.
+        guard ringOrder.count > 1 else { return }
+        ringOrder.removeAll { $0 == key }
+        persistRings()
+    }
+
+    private func moveRing(from: Int, to: Int) {
+        guard ringOrder.indices.contains(from),
+              (0..<ringOrder.count).contains(to),
+              from != to else { return }
+        let key = ringOrder.remove(at: from)
+        ringOrder.insert(key, at: to)
+        persistRings()
+    }
+}
+
+/// Resolved display data for a menu-bar chip row — the same shape for a fixed
+/// chip and a scoped-window chip, so the row views stay chip-type-agnostic.
+private struct ChipRowInfo {
+    let symbol: String
+    let title: String
+    let subtitle: String
+    /// True for a configured scoped chip whose window isn't currently reported
+    /// — the row dims and its subtitle reads "paused".
+    let isDormant: Bool
 }
 
 /// One row in the enabled-chip list. Shows the chip's icon glyph,
@@ -322,7 +567,7 @@ private struct MenuBarCard: View {
 /// reorder buttons; they stay visible-but-dim otherwise so first-time
 /// users discover them without hovering.
 private struct EnabledChipRow: View {
-    let chip: PacerSettings.MenuBarChip
+    let info: ChipRowInfo
     let onRemove: () -> Void
     /// `nil` when this is the first row — disables the "up" arrow.
     let onMoveUp: (() -> Void)?
@@ -333,15 +578,16 @@ private struct EnabledChipRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: chip.symbolName)
+            Image(systemName: info.symbol)
                 .frame(width: 18)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(info.isDormant ? HierarchicalShapeStyle.tertiary : HierarchicalShapeStyle.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(chip.label)
+                Text(info.title)
                     .font(.callout)
-                Text(chip.blurb)
+                    .foregroundStyle(info.isDormant ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
+                Text(info.subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(info.isDormant ? Color.orange : Color.secondary)
             }
             Spacer()
             HStack(spacing: 4) {
@@ -386,23 +632,125 @@ private struct EnabledChipRow: View {
 /// append to the end of the order; the user can then drag it into
 /// place with the arrow buttons.
 private struct AddChipRow: View {
-    let chip: PacerSettings.MenuBarChip
+    let info: ChipRowInfo
     let onAdd: () -> Void
     @State private var hovering: Bool = false
 
     var body: some View {
         Button(action: onAdd) {
             HStack(spacing: 10) {
-                Image(systemName: chip.symbolName)
+                Image(systemName: info.symbol)
                     .frame(width: 18)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(chip.label)
+                    Text(info.title)
                         .font(.callout)
-                    Text(chip.blurb)
+                    Text(info.subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.tint)
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// One selected activity-ring window. Shows the ring's position (1 = outer),
+/// its window label + live %, an "unavailable" flag if the window has vanished,
+/// and up/down/remove controls. The remove button is nil for the last ring (the
+/// icon must always draw at least one).
+private struct RingWindowRow: View {
+    let label: String
+    let ringIndex: Int
+    let isUnavailable: Bool
+    let onRemove: (() -> Void)?
+    let onMoveUp: (() -> Void)?
+    let onMoveDown: (() -> Void)?
+
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // A concentric-rings glyph anchors the row; the number reads out
+            // this ring's outer→inner position.
+            Image(systemName: "circle.circle")
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+            Text("Ring \(ringIndex)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .leading)
+            Text(label)
+                .font(.callout)
+                .lineLimit(1)
+            if isUnavailable {
+                Text("unavailable")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+            HStack(spacing: 4) {
+                arrowButton(systemImage: "chevron.up", action: onMoveUp)
+                arrowButton(systemImage: "chevron.down", action: onMoveDown)
+            }
+            .opacity(hovering ? 1.0 : 0.55)
+            Button(role: .destructive) { onRemove?() } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(onRemove == nil)
+            .help(onRemove == nil ? "At least one ring is required" : "Remove ring")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(0.05) : Color.clear)
+        )
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder
+    private func arrowButton(systemImage: String, action: (() -> Void)?) -> some View {
+        Button { action?() } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .disabled(action == nil)
+    }
+}
+
+/// "Add this window as a ring" row shown below the selected rings while under
+/// the 3-ring cap. Single-tap appends it as the innermost ring.
+private struct AddRingRow: View {
+    let label: String
+    let onAdd: () -> Void
+    @State private var hovering: Bool = false
+
+    var body: some View {
+        Button(action: onAdd) {
+            HStack(spacing: 10) {
+                Image(systemName: "circle.circle")
+                    .frame(width: 18)
+                    .foregroundStyle(.secondary)
+                Text(label)
+                    .font(.callout)
+                    .lineLimit(1)
                 Spacer()
                 Image(systemName: "plus.circle")
                     .font(.system(size: 13, weight: .medium))
@@ -446,9 +794,48 @@ private extension PacerSettings.MenuBarChip {
 /// `PacerSettings` so the live `NotificationCoordinator` (also reading
 /// via `PacerSettings.thresholds(forWindow:)`) sees changes
 /// immediately.
-private struct RateLimitAlertsCard: View {
+struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
+
+    /// Latest-poll scoped `limits[]` rows (active account) so the card can
+    /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
+    /// so the query never scans the full append-only history.
+    @Query(RateLimitAlertsCard.scopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    /// All alert rules — filtered to this card's `rateLimitPct` scoped rules,
+    /// which back the per-window threshold lists and let a window that's gone
+    /// missing surface as dormant (rules kept, not deleted).
+    @Query private var alertRules: [AlertRule]
+
+    private static let scopedDescriptor: FetchDescriptor<UsageLimitSample> = {
+        var d = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        d.fetchLimit = 200
+        return d
+    }()
+
+    /// The per-model windows present in the latest poll, active-first then
+    /// hottest (the dashboard's `latestBatch` order), excluding the account-wide
+    /// rows the fixed 5h/7d subsections already own.
+    private var presentScoped: [UsageLimitSample] {
+        scopedSamples.latestBatch().filter { ScopedRateLimitAlerts.isModelOrSurfaceScoped($0) }
+    }
+
+    /// Configured scoped windows that aren't in the current poll — their rules
+    /// are dormant (kept). Listed after the live windows, marked inactive.
+    private var dormantIdentities: [String] {
+        ScopedRateLimitAlerts
+            .dormantIdentities(in: alertRules, present: Set(presentScoped.map(\.identity)))
+            .sorted()
+    }
+
+    /// Best display name for a dormant identity — the name stored on its rule
+    /// (set to the window label when it was live), falling back to the identity.
+    private func dormantTitle(_ identity: String) -> String {
+        alertRules.first { $0.metric == AlertRuleMetric.rateLimitPct && $0.scopedWindow == identity }?
+            .name ?? identity
+    }
 
     var body: some View {
         PacerCard("Rate-limit alerts", content: {
@@ -466,10 +853,37 @@ private struct RateLimitAlertsCard: View {
                 ThresholdSubsection(title: "5-hour window", window: "five_hour", enabled: enabled)
                 Divider().opacity(0.4)
                 ThresholdSubsection(title: "7-day window", window: "seven_day", enabled: enabled)
+
+                // Scoped per-model windows — auto-listed from the latest poll,
+                // each defaulting to no alert. Same threshold UI as 5h/7d.
+                ForEach(presentScoped, id: \.identity) { row in
+                    Divider().opacity(0.4)
+                    ScopedThresholdSubsection(
+                        identity: row.identity,
+                        title: row.label,
+                        isActive: row.isActive,
+                        isPresent: true,
+                        enabled: enabled,
+                        rules: alertRules
+                    )
+                }
+                // Dormant windows: configured but absent from the current poll.
+                ForEach(dormantIdentities, id: \.self) { identity in
+                    Divider().opacity(0.4)
+                    ScopedThresholdSubsection(
+                        identity: identity,
+                        title: dormantTitle(identity),
+                        isActive: false,
+                        isPresent: false,
+                        enabled: enabled,
+                        rules: alertRules
+                    )
+                }
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
+                Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
                 HStack(spacing: 8) {
                     Text("Not seeing banners?")
                     Button("Open System Settings → Notifications") {
@@ -625,6 +1039,132 @@ private struct ThresholdRow: View {
     }
 }
 
+/// One scoped per-model window's threshold list, the scoped analogue of
+/// `ThresholdSubsection`. Instead of the fixed windows' CSV in `PacerSettings`,
+/// each threshold is an `AlertRule` row (`metric == rateLimitPct`,
+/// `scopedWindow == identity`) so the rows persist ("kept, not deleted") and a
+/// window that disappears from the poll simply shows as dormant.
+private struct ScopedThresholdSubsection: View {
+    @Environment(\.modelContext) private var context
+    let identity: String
+    let title: String
+    /// The window currently in effect for the account (server's binding limit).
+    let isActive: Bool
+    /// Present in the latest poll. `false` ⇒ dormant (alerts kept but paused).
+    let isPresent: Bool
+    /// Master `notificationsEnabled` — greys the controls when off.
+    let enabled: Bool
+    /// All alert rules; filtered to this identity's rate-limit rows below.
+    let rules: [AlertRule]
+
+    private var myRules: [AlertRule] {
+        rules
+            .filter { $0.metric == AlertRuleMetric.rateLimitPct && $0.scopedWindow == identity }
+            .sorted { $0.thresholdValue < $1.thresholdValue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Eyebrow(text: title)
+                if isActive {
+                    Text("in effect")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tint)
+                } else if !isPresent {
+                    Text("paused — not in current usage")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Button {
+                    addThreshold()
+                } label: {
+                    Label("Add threshold", systemImage: "plus.circle.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+                .controlSize(.small)
+                .disabled(!enabled)
+            }
+            if myRules.isEmpty {
+                Text(isPresent
+                     ? "No alert — Pacer won't notify for this window."
+                     : "No alert.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.vertical, 2)
+            } else {
+                ForEach(myRules, id: \.id) { rule in
+                    ScopedThresholdRow(
+                        rule: rule,
+                        enabled: enabled && isPresent,
+                        onRemove: { remove(rule) }
+                    )
+                }
+            }
+        }
+    }
+
+    private func addThreshold() {
+        let highest = myRules.map { Int($0.thresholdValue.rounded()) }.max()
+        let defaultValue = highest.map { min(99, ($0 + 99) / 2) } ?? 75
+        context.insert(AlertRule(
+            name: title,
+            metric: AlertRuleMetric.rateLimitPct,
+            thresholdValue: Double(defaultValue),
+            scopedWindow: identity
+        ))
+        try? context.save()
+    }
+
+    private func remove(_ rule: AlertRule) {
+        context.delete(rule)
+        try? context.save()
+    }
+}
+
+/// One scoped-window threshold row — a slider bound straight through to the
+/// backing `AlertRule`, with the value and a delete button trailing. Mirrors
+/// `ThresholdRow` but persists via SwiftData rather than the CSV store.
+private struct ScopedThresholdRow: View {
+    @Environment(\.modelContext) private var context
+    @Bindable var rule: AlertRule
+    let enabled: Bool
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Slider(
+                value: Binding(
+                    get: { rule.thresholdValue },
+                    set: {
+                        rule.thresholdValue = max(1, min(99, $0.rounded()))
+                        try? context.save()
+                    }
+                ),
+                in: 1...99
+            )
+            .controlSize(.small)
+            .disabled(!enabled)
+            Text("\(Int(rule.thresholdValue))%")
+                .font(.callout)
+                .fontWeight(.semibold)
+                .fontDesign(.rounded)
+                .monospacedDigit()
+                .frame(width: 44, alignment: .trailing)
+                .foregroundStyle(enabled ? .primary : .secondary)
+            Button(role: .destructive) {
+                onRemove()
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove threshold")
+        }
+    }
+}
+
 // MARK: - Daily cost alert
 
 private struct DailyCostAlertCard: View {
@@ -672,7 +1212,10 @@ private struct CustomRulesCard: View {
     var body: some View {
         PacerCard("Custom alerts", content: {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(rules, id: \.id) { rule in
+                // Scoped rate-limit rules (metric == rateLimitPct) are owned by
+                // the auto-listed Rate-limit alerts card above — exclude them
+                // here so they don't read as broken custom rules.
+                ForEach(rules.filter { $0.metric != AlertRuleMetric.rateLimitPct }, id: \.id) { rule in
                     RuleRow(rule: rule) {
                         context.delete(rule)
                         try? context.save()
@@ -784,7 +1327,7 @@ private struct BurnRateAlertCard: View {
         PacerCard("Burn-rate warning", content: {
             Toggle("Warn when my usage pace will hit a limit before it resets", isOn: $enabled)
         }, footer: {
-            Text("Pacer projects each window forward along your own daily rhythm and warns you ahead of time if you're on track to hit a limit before it resets — with a follow-up only if the situation gets meaningfully worse. Fires only once you're past 50% used.")
+            Text("Pacer projects each window forward along your own daily rhythm and warns you ahead of time if you're on track to hit a limit before it resets — with a follow-up only if the situation gets meaningfully worse. Fires only once you're past 50% used. Per-model windows get the same warning wherever you've set a threshold alert for them below — once Pacer has watched that window reset a few times.")
         })
     }
 }
@@ -1227,6 +1770,7 @@ private struct TokensCard: View {
     @State private var adding = false
     @State private var addResult: TokenTestResult?
     @State private var highlightId: String?
+    @State private var switchingId: String?
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
@@ -1250,11 +1794,12 @@ private struct TokensCard: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
                 } else {
-                    columnHeader
-                    ForEach(pool.lanes) { lane in
-                        Divider().opacity(0.35)
-                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    if pool.accounts.count > 1 {
+                        accountsSwitcher
+                        Divider().opacity(0.35).padding(.top, 8).padding(.bottom, 4)
                     }
+                    columnHeader
+                    groupedLanes
                 }
                 addTokenRow
             }
@@ -1265,7 +1810,7 @@ private struct TokensCard: View {
                     .padding(.top, 2)
                 CopyableCommand("security find-generic-password -s 'Claude Code-credentials' -w | jq -r .claudeAiOauth.accessToken")
                     .padding(.vertical, 6)
-                Text("…then paste the result above. It must be a `user:profile` token, and only tokens for this same account are kept.")
+                Text("…then paste the result above. It must be a `user:profile` token. A token for a *different* Anthropic account is kept too — tracked as a separate account you can switch to.")
             }
         })
     }
@@ -1283,7 +1828,9 @@ private struct TokensCard: View {
     }
 
     private var cadenceText: String {
-        let n = pool.lanes.filter { $0.account != .foreign }.count
+        // The cadence reflects the *active* account's fast pool (its own +
+        // not-yet-classified tokens); secondary accounts poll on a slow sweep.
+        let n = pool.lanes.filter { $0.account == .primary || $0.account == .unknown }.count
         let tokens = "\(n) token\(n == 1 ? "" : "s")"
         guard let seconds = pool.effectiveIntervalSeconds else { return tokens }
         return "Updating ~\(Self.formatInterval(seconds)) · \(tokens) · \(pool.isActive ? "active" : "idle")"
@@ -1309,6 +1856,86 @@ private struct TokensCard: View {
         .tracking(0.5)
         .foregroundStyle(.tertiary)
         .padding(.bottom, 6)
+    }
+
+    // MARK: - Accounts (multi-account)
+
+    /// The account switcher — one row per tracked account, showing its
+    /// current usage, which is active, and a Switch action. Only shown when
+    /// more than one account exists; a single-account user sees the flat
+    /// token list exactly as before.
+    private var accountsSwitcher: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ACCOUNTS")
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.tertiary)
+            ForEach(pool.accounts) { account in
+                AccountSwitchRow(
+                    account: account,
+                    switching: switchingId == account.id,
+                    onSwitch: { switchTo(account.id) }
+                )
+            }
+        }
+    }
+
+    /// Token rows, grouped under their account when more than one exists.
+    @ViewBuilder private var groupedLanes: some View {
+        if pool.accounts.count > 1 {
+            ForEach(pool.accounts) { account in
+                let rows = lanes(for: account.id)
+                if !rows.isEmpty {
+                    accountGroupLabel(account)
+                    ForEach(rows) { lane in
+                        Divider().opacity(0.35)
+                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    }
+                }
+            }
+            let pending = pool.lanes.filter { $0.accountKey == nil }
+            if !pending.isEmpty {
+                groupLabelText("CHECKING…")
+                ForEach(pending) { lane in
+                    Divider().opacity(0.35)
+                    TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                }
+            }
+        } else {
+            ForEach(pool.lanes) { lane in
+                Divider().opacity(0.35)
+                TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+            }
+        }
+    }
+
+    private func lanes(for accountKey: String) -> [TokenLaneStatus] {
+        pool.lanes.filter { $0.accountKey == accountKey }
+    }
+
+    private func accountGroupLabel(_ account: AccountStatusSummary) -> some View {
+        groupLabelText(account.isActive
+            ? "\(account.displayName.uppercased())  ·  ACTIVE"
+            : account.displayName.uppercased())
+    }
+
+    private func groupLabelText(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .tracking(0.5)
+            .foregroundStyle(Color.accentColor.opacity(0.85))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+    }
+
+    private func switchTo(_ id: String) {
+        guard switchingId == nil else { return }
+        switchingId = id
+        Task { @MainActor in
+            await TokenPoolStatus.shared.setActiveAccount(id: id)
+            switchingId = nil
+        }
     }
 
     private var addTokenRow: some View {
@@ -1340,8 +1967,8 @@ private struct TokensCard: View {
             addLabel("checkmark.circle.fill", .green, "Added · \(Self.usage(fh, sd))")
         case .alreadyTracked(let source, let fp):
             addLabel("info.circle.fill", .gray, "Already tracking this — it's your \(Self.sourceName(source)) token (…\(String(fp.suffix(4)))).")
-        case .foreignAccount:
-            addLabel("person.crop.circle.badge.xmark", .purple, "That token is a different account — not added.")
+        case .otherAccount:
+            addLabel("person.2.circle.fill", .purple, "Added as a separate account — switch to it in Accounts above.")
         case .failure(let reason):
             addLabel("xmark.circle.fill", .red, reason)
         case .unavailable:
@@ -1389,6 +2016,95 @@ private struct TokensCard: View {
                 }
             }
         }
+    }
+}
+
+/// One account in the switcher: its name + plan, current 5h/7d usage, and
+/// either an "Active" badge or a "Switch" button. Switching makes this the
+/// account whose usage drives the menu bar, dashboard, and alerts.
+private struct AccountSwitchRow: View {
+    let account: AccountStatusSummary
+    let switching: Bool
+    let onSwitch: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(account.displayName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    if let plan = account.subscriptionType, !plan.isEmpty {
+                        Text(plan)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            usageReadout
+
+            if account.isActive {
+                Text("Active")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.green.opacity(0.16)))
+            } else if switching {
+                ProgressView().controlSize(.small).frame(width: 60)
+            } else {
+                Button("Switch", action: onSwitch)
+                    .controlSize(.small)
+                    .frame(width: 60)
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(account.isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(account.isActive ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
+                )
+        )
+    }
+
+    private var subtitle: String {
+        var parts: [String] = []
+        if let org = account.organizationId, !org.isEmpty { parts.append("org …\(String(org.suffix(4)))") }
+        parts.append("\(account.laneCount) token\(account.laneCount == 1 ? "" : "s")")
+        return parts.joined(separator: " · ")
+    }
+
+    private var usageReadout: some View {
+        HStack(spacing: 10) {
+            windowReadout("5h", account.fiveHourPct)
+            windowReadout("7d", account.sevenDayPct)
+        }
+    }
+
+    private func windowReadout(_ label: String, _ pct: Double?) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
+            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(pct.map(Self.color(forPct:)) ?? .secondary)
+                .monospacedDigit()
+        }
+        .frame(width: 52, alignment: .leading)
+    }
+
+    private static func color(forPct pct: Double) -> Color {
+        if pct >= 85 { return .red }
+        if pct >= 50 { return .orange }
+        return .green
     }
 }
 
@@ -1493,7 +2209,7 @@ private struct TokenLaneRow: View {
     private var statusInfo: (String, Color) {
         let now = Date()
         if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
-        if lane.account == .foreign { return ("other acct", .purple) }
+        if lane.account == .secondary { return ("tracked", .purple) }
         if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
         if lane.account == .primary { return ("active", .green) }
         return ("pending", .gray)

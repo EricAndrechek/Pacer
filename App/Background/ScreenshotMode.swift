@@ -64,6 +64,67 @@ enum ScreenshotMode {
         )
         log("writing screenshots to \(outDir.path)")
 
+        // Focused proof run for the pace-card layout work: render only the
+        // `pace-layout-*` scenes (each over its own tiny seeded container) and
+        // return, so `docs/mockups` gets just those without the README scenes.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_LAYOUT_ONLY"] == "1" {
+            await captureLayoutScenes()
+            log("layout screenshots complete")
+            return
+        }
+
+        // Focused proof run for the scoped-alerts work: render just the
+        // Rate-limit alerts settings card (5h + 7d + a couple scoped per-model
+        // windows + a dormant one) into docs/mockups and return. Run with
+        // PACER_SCREENSHOT_ALERTS_ONLY=1 and PACER_SCREENSHOT_DIR pointed there.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_ALERTS_ONLY"] == "1" {
+            await captureScopedAlertsScenes()
+            log("scoped-alerts screenshots complete")
+            return
+        }
+
+        // Focused proof run for the scoped-menu-bar work: the dropdown listing
+        // every window (5h / 7d / each scoped) and the pickable icon driver
+        // pointed at a scoped window. Writes only the `scoped-menubar-*` shots
+        // (run with PACER_SCREENSHOT_DIR → docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_ONLY"] == "1" {
+            await captureScopedMenuBar(container: container)
+            log("scoped-menubar screenshots complete")
+            return
+        }
+
+        // Focused proof run for the menu-bar-polish work: the activity-rings
+        // icon with 2 vs 3 windows, and the Menu-bar settings card showing the
+        // explicit driver picker (no "Auto") and the ring-window picker. Writes
+        // only the `menubar-polish-*` shots (run with PACER_SCREENSHOT_DIR →
+        // docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_POLISH_ONLY"] == "1" {
+            await captureMenuBarPolish(container: container)
+            log("menubar-polish screenshots complete")
+            return
+        }
+
+        // Focused proof run for the dynamic widget window-picker work: render
+        // only the `widget-picker-*` scenes and return, so `docs/mockups` gets
+        // just those without the README scenes.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_WIDGET_PICKER_ONLY"] == "1" {
+            await captureWidgetPickerScenes()
+            log("widget-picker screenshots complete")
+            return
+        }
+
+        // Focused proof run for the scoped-menu-bar-CHIP work: the status-item
+        // label carrying a scoped per-model window chip ("5h 32%  Fable 49%"),
+        // and the Menu-bar settings card with a scoped chip enabled (plus a
+        // dormant one) and the live scoped windows offered in the Add list.
+        // Writes only the `menubar-chips-*` shots (run with PACER_SCREENSHOT_DIR
+        // → docs/mockups).
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_CHIPS_ONLY"] == "1" {
+            await captureMenuBarChips(container: container)
+            log("menubar-chips screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -76,10 +137,12 @@ enum ScreenshotMode {
         // directly, so other windows are irrelevant to the output.
         for window in NSApp.windows { window.orderOut(nil) }
 
-        // A richer menu-bar readout for the status-bar shot than the
-        // default (icon + 5-hour %).
+        // A richer menu-bar readout for the status-bar shot than the default
+        // (icon + 5-hour %): the icon, both fixed windows, and the seeded
+        // per-model "Fable" scoped window — so the label showcases a scoped
+        // chip alongside 5h/7d (the popover lists the same window automatically).
         PacerSettings.store.set(
-            "icon,five_hour_pct,seven_day_pct,today_cost",
+            "icon,five_hour_pct,seven_day_pct,scoped_pct:weekly_scoped|Fable|",
             forKey: PacerSettings.Key.menuBarChips
         )
 
@@ -106,6 +169,18 @@ enum ScreenshotMode {
         // The home-screen widget family.
         await capture("widgets", width: nil, height: nil, scheme: .light,
                       card: false, container: container) { WidgetGallery() }
+
+        // Scoped windows as first-class pace items — the dashboard pace card
+        // with 5h + 7d + several per-model windows in the responsive N-column
+        // grid (light + dark), and the large widget families showing the same
+        // set. Captured for docs/mockups (run with PACER_SCREENSHOT_DIR pointed
+        // there); design polish pending sign-off.
+        await capture("scoped-firstclass-dashboard", width: 1180, height: nil, scheme: .light,
+                      card: true, container: container) { PaceChartCard() }
+        await capture("scoped-firstclass-dashboard-dark", width: 1180, height: nil, scheme: .dark,
+                      card: true, container: container) { PaceChartCard() }
+        await capture("scoped-firstclass-widget", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { ScopedFirstClassWidgetGallery() }
 
         // Projects ▸ Collections — the manager, the editor, and the
         // integrated Projects tab. Synthetic collections over synthetic
@@ -186,6 +261,418 @@ enum ScreenshotMode {
             } else {
                 log("⚠️ share-card: render failed for \(name)")
             }
+        }
+    }
+
+    // MARK: - Scoped-alerts proof scene
+
+    /// Render the Rate-limit alerts settings card with the fixed 5h/7d windows
+    /// plus a couple of scoped per-model windows (one configured, one dormant),
+    /// in light + dark. Seeds a fresh in-memory container (scoped
+    /// `UsageLimitSample` rows + `AlertRule` threshold rows) and temporarily
+    /// sets the notification prefs on the shared store, restoring them after so
+    /// the run never mutates the user's real settings.
+    private static func captureScopedAlertsScenes() async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ scoped-alerts: container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        // Scoped windows (Haiku/Opus/Fable/Sonnet weekly) as first-class rows.
+        seedUsageLimits(ctx, now: now)
+        // Configured scoped alerts: Haiku 80% + 95%, Fable 75%, plus a dormant
+        // "Cowork" window (has a rule but no live sample ⇒ paused).
+        let scopedRules: [(id: String, name: String, pcts: [Double])] = [
+            ("weekly_scoped|Haiku|",  "Haiku",  [80, 95]),
+            ("weekly_scoped|Fable|",  "Fable",  [75]),
+            ("weekly_scoped|Cowork|", "Cowork", [85]),   // dormant (not in poll)
+        ]
+        for r in scopedRules {
+            for pct in r.pcts {
+                ctx.insert(AlertRule(name: r.name, metric: AlertRuleMetric.rateLimitPct,
+                                     thresholdValue: pct, scopedWindow: r.id))
+            }
+        }
+        do { try ctx.save() } catch { log("⚠️ scoped-alerts: seed save failed: \(error)") }
+
+        // Temporarily present a healthy notification config on the shared store.
+        let store = PacerSettings.store
+        let saved: [String: Any?] = [
+            PacerSettings.Key.notificationsEnabled: store.object(forKey: PacerSettings.Key.notificationsEnabled),
+            PacerSettings.Key.fiveHourThresholdsCSV: store.object(forKey: PacerSettings.Key.fiveHourThresholdsCSV),
+            PacerSettings.Key.sevenDayThresholdsCSV: store.object(forKey: PacerSettings.Key.sevenDayThresholdsCSV),
+        ]
+        store.set(true, forKey: PacerSettings.Key.notificationsEnabled)
+        store.set("75", forKey: PacerSettings.Key.fiveHourThresholdsCSV)
+        store.set("50,80", forKey: PacerSettings.Key.sevenDayThresholdsCSV)
+
+        for scheme in [ColorScheme.light, .dark] {
+            let name = scheme == .dark ? "scoped-alerts-dark" : "scoped-alerts"
+            await capture(name, width: 620, height: nil, scheme: scheme,
+                          card: true, container: container) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("NOTIFICATIONS")
+                        .font(.system(size: 12, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                    RateLimitAlertsCard()
+                }
+                .padding(20)
+            }
+        }
+
+        // Restore the user's real prefs.
+        for (key, value) in saved {
+            if let value { store.set(value, forKey: key) }
+            else { store.removeObject(forKey: key) }
+        }
+    }
+
+    // MARK: - Scoped menu-bar proof scenes
+
+    /// Render the scoped-menu-bar captures: the dropdown listing every current
+    /// window (5h, 7d, and each scoped per-model window from the seed) and the
+    /// pickable icon driver pointed at a scoped window (so the status glyph
+    /// itself reflects that window's usage instead of the 5-hour default). The
+    /// menu-bar chips + icon-driver preference are toggled per shot and restored
+    /// to the default afterward so nothing non-default is left persisted.
+    private static func captureScopedMenuBar(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        // Warm the engine so the dropdown's outlook captions ("limit in N hr")
+        // render real answers, matching the live menu.
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        // Bar readout: icon + both fixed percents so the glyph and numbers read
+        // together above the dropdown.
+        PacerSettings.store.set(
+            "icon,five_hour_pct,seven_day_pct",
+            forKey: PacerSettings.Key.menuBarChips)
+
+        // (1) Dropdown listing every window — icon on Auto (the 5-hour window).
+        PacerSettings.store.set(
+            MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("scoped-menubar-dropdown", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("scoped-menubar-dropdown-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // (2) Pickable icon driver — point the icon at the hottest scoped window
+        // (Haiku, 93%, in effect) so the status glyph reflects that window.
+        PacerSettings.store.set(
+            "weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("scoped-menubar-icon-driver", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // Never leave a non-default driver persisted in the shared suite.
+        PacerSettings.store.set(
+            MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+    }
+
+    // MARK: - Menu-bar-polish proof scenes
+
+    /// Render the menu-bar-polish captures:
+    ///   - `menubar-polish-rings-2` / `-3`: the `.activityRings` icon with a
+    ///     2-window (5h+7d, the default) and a 3-window (5h+7d+Haiku) set —
+    ///     the real `MenuBarLabel` at status-item size plus an enlarged swatch
+    ///     and per-ring legend.
+    ///   - `menubar-polish-settings-driver`: the Menu-bar settings card with a
+    ///     single-glyph style, so the explicit driver picker shows (no "Auto"),
+    ///     pointed at a scoped window (fallback note visible).
+    ///   - `menubar-polish-settings-rings`: the same card with the Activity-rings
+    ///     style, so the ring-window picker shows (2 selected + add affordance).
+    ///
+    /// Snapshots and restores the touched prefs so nothing non-default is left
+    /// persisted in the shared suite.
+    private static func captureMenuBarPolish(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        let store = PacerSettings.store
+        let keys = [
+            PacerSettings.Key.menuBarChips,
+            PacerSettings.Key.menuBarIconStyle,
+            PacerSettings.Key.menuBarIconDriver,
+            PacerSettings.Key.menuBarRingWindows,
+        ]
+        let saved: [String: Any?] = Dictionary(uniqueKeysWithValues: keys.map { ($0, store.object(forKey: $0)) })
+        defer {
+            for (key, value) in saved {
+                if let value { store.set(value, forKey: key) } else { store.removeObject(forKey: key) }
+            }
+        }
+
+        // The rings icon reads the store: activity-rings style, icon chip on.
+        store.set("icon", forKey: PacerSettings.Key.menuBarChips)
+        store.set(PacerSettings.MenuBarIconStyle.activityRings.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+
+        // (1) Two-ring default (outer 5h ≈32%, inner 7d ≈62%).
+        store.set("five_hour,seven_day", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-rings-2", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            RingIconMock(title: "Activity rings — 2 windows",
+                         windows: [("5-hour", 32), ("7-day", 62)])
+        }
+
+        // (2) Three-ring set (adds the hottest scoped window, Haiku 93%).
+        store.set("five_hour,seven_day,weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-rings-3", width: nil, height: nil, scheme: .light,
+                      card: true, container: container) {
+            RingIconMock(title: "Activity rings — 3 windows",
+                         windows: [("5-hour", 32), ("7-day", 62), ("Haiku", 93)])
+        }
+
+        // (3) Settings card — explicit driver picker (single-glyph style), driver
+        // pointed at a scoped window so the fallback note shows.
+        store.set("icon,five_hour_pct", forKey: PacerSettings.Key.menuBarChips)
+        store.set(PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set("weekly_scoped|Haiku|", forKey: PacerSettings.Key.menuBarIconDriver)
+        await capture("menubar-polish-settings-driver", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) {
+            MenuBarSettingsMock()
+        }
+
+        // (4) Settings card — ring-window picker (activity-rings style), 2 rings
+        // selected so the add affordance is visible too.
+        store.set(PacerSettings.MenuBarIconStyle.activityRings.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set("five_hour,seven_day", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("menubar-polish-settings-rings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) {
+            MenuBarSettingsMock()
+        }
+    }
+
+    // MARK: - Scoped menu-bar-chip proof scenes
+
+    /// Render the scoped-menu-bar-chip captures:
+    ///   - `menubar-chips-label` / `-dark`: the whole menu-bar experience with a
+    ///     scoped per-model window chip in the status-item label — the label
+    ///     reads "5h 32%  Fable 49%" (icon + 5-hour % + the "Fable" scoped
+    ///     window chip), with the dropdown beneath.
+    ///   - `menubar-chips-settings` / `-dark`: the Menu-bar settings card with a
+    ///     scoped chip enabled (Fable, live) plus a dormant one (Cowork, not in
+    ///     the current poll ⇒ "paused"), and the live scoped windows (Haiku /
+    ///     Opus / Sonnet) offered in the Add list.
+    ///
+    /// Snapshots and restores the touched prefs so nothing non-default is left
+    /// persisted in the shared suite.
+    private static func captureMenuBarChips(container: ModelContainer) async {
+        try? FileManager.default.createDirectory(
+            at: outputDirectory, withIntermediateDirectories: true)
+
+        // Warm the engine so the dropdown's outlook captions render real
+        // answers, matching the live menu.
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: Date())
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        let store = PacerSettings.store
+        let keys = [
+            PacerSettings.Key.menuBarChips,
+            PacerSettings.Key.menuBarIconStyle,
+            PacerSettings.Key.menuBarIconDriver,
+        ]
+        let saved: [String: Any?] = Dictionary(uniqueKeysWithValues: keys.map { ($0, store.object(forKey: $0)) })
+        defer {
+            for (key, value) in saved {
+                if let value { store.set(value, forKey: key) } else { store.removeObject(forKey: key) }
+            }
+        }
+        // Gauge icon painted by the 5-hour window (the default driver).
+        store.set(PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue, forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set(MenuBarWindows.defaultDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+
+        // (1) Label with a scoped chip: icon + 5-hour % + the "Fable" scoped
+        // window chip ⇒ "5h 32%  Fable 49%" (5h prefixed because a named chip
+        // is alongside it).
+        store.set("icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|",
+                  forKey: PacerSettings.Key.menuBarChips)
+        await capture("menubar-chips-label", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("menubar-chips-label-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+
+        // (2) Settings card: Fable enabled (live) + Cowork enabled (dormant —
+        // not in the seeded poll ⇒ "paused"), the rest of the scoped windows in
+        // the Add list.
+        store.set("icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|,scoped_pct:weekly_scoped|Cowork|",
+                  forKey: PacerSettings.Key.menuBarChips)
+        await capture("menubar-chips-settings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) { MenuBarSettingsMock() }
+        await capture("menubar-chips-settings-dark", width: 620, height: nil, scheme: .dark,
+                      card: true, container: container) { MenuBarSettingsMock() }
+    }
+
+    // MARK: - Pace-layout proof scenes
+
+    /// One scoped window to seed for a layout scene.
+    private struct LayoutScoped {
+        let model: String
+        let group: String     // "session" / "weekly" (drives the ordering side)
+        let pct: Double
+        let active: Bool
+        let severity: String
+    }
+
+    /// Render the `pace-layout-*` proof captures for the pace-card layout work:
+    /// the two-window (unchanged 5h/7d) case, the session-vs-weekly sort with
+    /// the heroes glued in the middle, the 4/5/6-window balancing (2+2 / 3+2 /
+    /// 3+3 at a width that fits three across), and a narrow-width capture that
+    /// drops to two columns (2+2+2). Each scene seeds its own tiny in-memory
+    /// container so the window count is controlled independent of the shared
+    /// marketing seed. Widths are chosen against the card's 20pt padding so the
+    /// grid's content width lands three-across at 940 and two-across at 640.
+    private static func captureLayoutScenes() async {
+        // Weekly-only ladders for the balance proofs (hottest first, one active
+        // + elevated to exercise the dot + severity chip).
+        let w4: [LayoutScoped] = [
+            .init(model: "Haiku", group: "weekly", pct: 93, active: true,  severity: "warning"),
+            .init(model: "Opus",  group: "weekly", pct: 84, active: false, severity: "normal"),
+        ]
+        let w5 = w4 + [.init(model: "Fable",  group: "weekly", pct: 49, active: false, severity: "normal")]
+        let w6 = w5 + [.init(model: "Sonnet", group: "weekly", pct: 22, active: false, severity: "normal")]
+
+        // (a) exactly 5h + 7d — the unchanged two-column HStack.
+        await captureLayoutScene("pace-layout-2-fixed", width: 940, scoped: [])
+        // (b) sort: one session-scoped + one weekly-scoped ⇒ [Fable, 5h, 7d, Opus].
+        await captureLayoutScene("pace-layout-sort", width: 940, scoped: [
+            .init(model: "Fable", group: "session", pct: 44, active: false, severity: "normal"),
+            .init(model: "Opus",  group: "weekly",  pct: 68, active: true,  severity: "warning"),
+        ])
+        // (c) balance at a width that fits three across: 4→2+2, 5→3+2, 6→3+3.
+        await captureLayoutScene("pace-layout-4", width: 940, scoped: w4)
+        await captureLayoutScene("pace-layout-5", width: 940, scoped: w5)
+        await captureLayoutScene("pace-layout-6", width: 940, scoped: w6)
+        // (d) narrow width — same six windows drop to two columns (2+2+2).
+        await captureLayoutScene("pace-layout-narrow", width: 640, scoped: w6)
+    }
+
+    /// Seed a fresh in-memory container with the fixed 5h/7d trail plus the
+    /// given scoped windows, warm an engine over it, and capture `PaceChartCard`
+    /// at `width`. Swaps `screenshotEngine` to this scene's engine for the
+    /// capture so the columns forecast against their own data.
+    private static func captureLayoutScene(_ name: String, width: CGFloat, scoped: [LayoutScoped]) async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ \(name): container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        seedRateLimits(ctx, now: now)
+        seedLayoutScoped(ctx, now: now, scoped: scoped)
+        do { try ctx.save() } catch { log("⚠️ \(name): seed save failed: \(error)") }
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: now)
+        let previous = screenshotEngine
+        screenshotEngine = engine
+        await capture(name, width: width, height: nil, scheme: .light,
+                      card: true, container: container) { PaceChartCard() }
+        screenshotEngine = previous
+    }
+
+    // MARK: - Widget window-picker proof scenes
+
+    /// Render the `widget-picker-*` mockups for the dynamic window-selection
+    /// work: the small family showing a single scoped window (Fable), the
+    /// medium family showing 5h+7d and 5h+Fable (the unchanged two-card layout
+    /// with a swappable second card), and the large family (unchanged
+    /// all-windows view). Entries are hand-built with the primary/secondary
+    /// keys the "Edit Widget" sheet would store, since the headless harness
+    /// can't drive the App-Intents configuration sheet directly.
+    private static func captureWidgetPickerScenes() async {
+        await captureWidgetTile("widget-picker-small-scoped", w: 158, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: ScreenshotEntries.fableKey, secondaryKey: "seven_day"),
+                forcedFamily: .systemSmall)
+        }
+        await captureWidgetTile("widget-picker-medium-5h-7d", w: 348, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
+                forcedFamily: .systemMedium)
+        }
+        await captureWidgetTile("widget-picker-medium-5h-fable", w: 348, h: 158) {
+            PaceChartWidgetView(
+                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: ScreenshotEntries.fableKey),
+                forcedFamily: .systemMedium)
+        }
+        await captureWidgetTile("widget-picker-large", w: 340, h: 384) {
+            PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge, forcedFamily: .systemLarge)
+        }
+    }
+
+    /// Frame a single widget view like the desktop (card fill, rounded corners,
+    /// soft shadow on a transparent margin) and capture it at native size. The
+    /// widget views take hand-built entries and never read the store, so any
+    /// in-memory container satisfies the `capture` driver's `.modelContainer`.
+    private static func captureWidgetTile(
+        _ name: String, w: CGFloat, h: CGFloat,
+        @ViewBuilder _ content: () -> some View
+    ) async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ \(name): container creation failed"); return
+        }
+        let tile = content()
+            .frame(width: w, height: h)
+            .background(PacerDesign.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
+        await capture(name, width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { tile }
+    }
+
+    /// Seed a full current-cycle history (a monotone concave climb to `pct`)
+    /// for each scoped window, plus a `now`-anchored latest-batch row, mirroring
+    /// `seedUsageLimits` but for an arbitrary session/weekly set.
+    private static func seedLayoutScoped(_ ctx: ModelContext, now: Date, scoped: [LayoutScoped]) {
+        for (idx, s) in scoped.enumerated() {
+            // Fully qualified: a private `ScreenshotMode.WindowSpec` shadows the
+            // PacerCore type inside this file.
+            let duration = PacerCore.WindowSpec.scopedDuration(group: s.group)
+            // Reset offsets: session +2h19m (8_340s), weekly +2d4h (187_200s).
+            let isSession = s.group.lowercased() == "session"
+            let resetOffset: TimeInterval = isSession ? 8_340 : 187_200
+            let reset = now.addingTimeInterval(resetOffset)
+            let kind = "\(s.group)_scoped"
+            let identity = "\(kind)|\(s.model)|"
+            let cycleStart = reset.addingTimeInterval(-duration)
+            let elapsed = max(1, now.timeIntervalSince(cycleStart))
+            let interval = duration / 60
+            func insert(at t: Date, pct: Double) {
+                ctx.insert(UsageLimitSample(
+                    sampledAt: t, identity: identity, kind: kind, group: s.group,
+                    label: s.model, percent: pct, resetsAt: reset,
+                    severity: s.severity, isActive: s.active,
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+            }
+            var t = cycleStart
+            var i = 0
+            var last = 0.0
+            while t < now {
+                let frac = max(0, min(1, t.timeIntervalSince(cycleStart) / elapsed))
+                var pct = s.pct * (frac * (1.08 - 0.08 * frac))
+                if frac > 0.02, frac < 0.98 { pct += noise(i &* 13 &+ idx &* 7) * 1.2 }
+                pct = max(last, min(s.pct, pct))
+                last = pct
+                insert(at: t, pct: pct)
+                t = t.addingTimeInterval(interval)
+                i += 1
+            }
+            insert(at: now, pct: s.pct)
         }
     }
 
@@ -353,6 +840,12 @@ extension ScreenshotMode {
         seedPriorHourly(ctx, startOfToday: startOfToday, cal: cal)
         seedTodayHourly(ctx, today: TokenSample.formatDate(startOfToday), now: now, cal: cal)
         seedRateLimits(ctx, now: now)
+        // One tasteful scoped per-model window for the README dashboard / menu-bar
+        // / widgets: a weekly "Fable" cap sitting at a healthy ~52% alongside the
+        // fixed 5h/7d heroes, so the pace grid shows a scoped column without
+        // crowding. (The richer multi-window set stays the default for the gated
+        // design-mockup scenes.)
+        seedUsageLimits(ctx, now: now, scoped: [("Fable", 52, false, "normal")])
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
@@ -613,6 +1106,86 @@ extension ScreenshotMode {
         }
     }
 
+    /// Seed the scoped `limits[]` rows that become first-class pace columns.
+    /// Fake data only. The two account-wide windows (a session + a weekly "All
+    /// models") get a single latest-poll row — the fixed 5h/7d hero columns
+    /// already own those, so the scoped column set filters them out. The
+    /// per-model weekly windows each get a **full current-cycle history** (an
+    /// hourly climb to their target), so every scoped column shows a real
+    /// climbing actual line and the engine can forecast it — exactly like the
+    /// 5h/7d hero windows. The hottest (Haiku) is flagged as the window
+    /// currently in effect and carries an elevated severity, exercising the
+    /// active dot + severity chip. More than two scoped windows also drives the
+    /// N-column responsive grid.
+    /// The full scoped per-model weekly set used by the richer design-mockup
+    /// scenes (scoped-alerts / menu-bar chips / polish), which want several
+    /// windows in play. (model, target%, active/in-effect, severity.) The
+    /// default README seed opts into just one of these (a single "Fable" cap)
+    /// so the dashboard pace grid reads uncluttered — see `seed(into:)`.
+    private static let mockupScopedWindows:
+        [(model: String, target: Double, active: Bool, severity: String)] = [
+            ("Haiku",  93, true,  "warning"),
+            ("Opus",   84, false, "normal"),
+            ("Fable",  49, false, "normal"),
+            ("Sonnet", 22, false, "normal"),
+        ]
+
+    private static func seedUsageLimits(
+        _ ctx: ModelContext, now: Date,
+        scoped: [(model: String, target: Double, active: Bool, severity: String)] = mockupScopedWindows
+    ) {
+        let sessionReset = now.addingTimeInterval(2 * 3600 + 19 * 60)
+        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
+        let weeklyDuration: TimeInterval = 7 * 86_400
+
+        // Account-wide windows — one latest-poll row each (excluded from the
+        // scoped columns; they duplicate the 5h/7d hero windows).
+        let accountWide: [(kind: String, group: String, pct: Double, reset: Date)] = [
+            ("session",    "session", 39, sessionReset),
+            ("weekly_all", "weekly",  71, weeklyReset),
+        ]
+        for a in accountWide {
+            ctx.insert(UsageLimitSample(
+                sampledAt: now, identity: "\(a.kind)||", kind: a.kind, group: a.group,
+                label: "All models", percent: a.pct, resetsAt: a.reset,
+                severity: "normal", isActive: false,
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+        }
+
+        // Scoped per-model weekly windows — the first-class pace columns.
+        // (model, target%, active/in-effect, severity)
+        let cycleStart = weeklyReset.addingTimeInterval(-weeklyDuration)
+        let elapsed = now.timeIntervalSince(cycleStart)
+        let interval: TimeInterval = 3600
+        for (idx, s) in scoped.enumerated() {
+            let identity = "weekly_scoped|\(s.model)|"
+            func insert(at t: Date, pct: Double) {
+                ctx.insert(UsageLimitSample(
+                    sampledAt: t, identity: identity, kind: "weekly_scoped", group: "weekly",
+                    label: s.model, percent: pct, resetsAt: weeklyReset,
+                    severity: s.severity, isActive: s.active,
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+            }
+            var t = cycleStart
+            var i = 0
+            var last = 0.0
+            while t < now {
+                let frac = max(0, min(1, t.timeIntervalSince(cycleStart) / elapsed))
+                // Mild concave ramp toward the target, monotonic, small jitter.
+                var pct = s.target * (frac * (1.08 - 0.08 * frac))
+                if frac > 0.02, frac < 0.98 { pct += noise(i &* 13 &+ idx &* 7) * 1.2 }
+                pct = max(last, min(s.target, pct))
+                last = pct
+                insert(at: t, pct: pct)
+                t = t.addingTimeInterval(interval)
+                i += 1
+            }
+            // Final sample pinned to exactly `now` at the target — the
+            // latest-batch anchor so the column/engine see this identity.
+            insert(at: now, pct: s.target)
+        }
+    }
+
     private struct WindowSpec {
         let window: String
         let resetsAt: Date
@@ -838,6 +1411,75 @@ private struct MenuBarExperience: View {
     }
 }
 
+/// A menu-bar-polish mock for the activity-rings icon: the real `MenuBarLabel`
+/// at status-item size on a dark bar slice (reading the seeded store + the
+/// ring-window pref this scene set), an enlarged copy of the same rings for
+/// legibility, and a per-ring legend (outer → inner) with each window's
+/// band-colored dot and live %.
+private struct RingIconMock: View {
+    let title: String
+    /// Outer → inner. (label, usedPercentage 0–100.)
+    let windows: [(label: String, pct: Double)]
+
+    private var rings: [ActivityRings.Ring] {
+        windows.map { ActivityRings.Ring(progress: $0.pct / 100,
+                                         color: UsageBand(percentage: $0.pct).color) }
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.secondary)
+            HStack(alignment: .center, spacing: 44) {
+                VStack(spacing: 8) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.black.opacity(0.88))
+                            .frame(width: 64, height: 30)
+                        MenuBarLabel()
+                            .environment(\.colorScheme, .dark)
+                    }
+                    Text("actual size").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                VStack(spacing: 8) {
+                    ActivityRings(rings: rings).frame(width: 120, height: 120)
+                    Text("enlarged").font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(Array(windows.enumerated()), id: \.offset) { idx, w in
+                    HStack(spacing: 8) {
+                        Circle().fill(UsageBand(percentage: w.pct).color).frame(width: 10, height: 10)
+                        Text("Ring \(idx + 1) · \(w.label)").font(.system(size: 13))
+                        Spacer()
+                        Text("\(Int(w.pct))%").font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    }
+                }
+            }
+            .frame(width: 220)
+        }
+        .padding(28)
+    }
+}
+
+/// The Menu-bar settings card rendered in isolation for the polish mockups —
+/// the explicit driver picker (single-glyph style) or the ring-window picker
+/// (activity-rings style), depending on the prefs this scene set.
+private struct MenuBarSettingsMock: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("GENERAL")
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+            MenuBarCard()
+        }
+        .padding(20)
+    }
+}
+
 /// A single composite image of the home-screen widget family — the real
 /// widget views, fed fake `TimelineEntry` values, each framed at its
 /// native size with the rounded corners + shadow widgets get on the
@@ -883,6 +1525,39 @@ private struct WidgetGallery: View {
     }
 }
 
+/// The two large widget families showing scoped per-model windows as
+/// first-class rows / gauges alongside 5h and 7d — the widget half of the
+/// "scoped windows are treated identically to 5h/7d" story. Hand-built entries
+/// (the widget provider reads the real store, which is empty here).
+private struct ScopedFirstClassWidgetGallery: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 24) {
+            tile(w: 340, h: 384) {
+                PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
+                                    forcedFamily: .systemLarge)
+            }
+            tile(w: 340, h: 384) {
+                PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
+                                     forcedFamily: .systemLarge)
+            }
+        }
+        .padding(28)
+    }
+
+    @ViewBuilder
+    private func tile(w: CGFloat, h: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
+        content()
+            .frame(width: w, height: h)
+            .background(PacerDesign.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
+    }
+}
+
 /// Deterministic fake `TimelineEntry` values for the widget gallery —
 /// kept consistent with the dashboard seed (Opus-heavy, cache-dominated,
 /// 5h ≈32% / 7d ≈62%, ~$124 today).
@@ -899,8 +1574,91 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            window: .both
+            primaryKey: "five_hour", secondaryKey: "seven_day"
         )
+    }
+
+    /// Synthetic identity for the "Fable" scoped weekly window used by the
+    /// widget-picker mockups — the stable key a config-stored selection uses.
+    static let fableKey = "weekly_scoped|Fable|"
+
+    /// Large pace-chart widget with scoped per-model windows as first-class
+    /// rows below 5h/7d.
+    static var paceChartScopedLarge: PaceChartEntry {
+        PaceChartEntry(
+            date: now,
+            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
+            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            scoped: [
+                .init(key: "weekly_scoped|Haiku|", label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
+                .init(key: "weekly_scoped|Opus|",  label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
+            ],
+            primaryKey: "five_hour", secondaryKey: "seven_day"
+        )
+    }
+
+    /// A pace-chart entry with 5h, 7d, and a scoped "Fable" weekly window, for
+    /// the widget-picker mockups. `primaryKey`/`secondaryKey` pick which windows
+    /// the small/medium canvases render — exactly what the Edit-Widget sheet
+    /// stores. (Large ignores them and shows every window.)
+    static func paceChartPicker(primaryKey: String, secondaryKey: String) -> PaceChartEntry {
+        PaceChartEntry(
+            date: now,
+            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
+            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            scoped: [
+                .init(key: fableKey, label: "Fable",
+                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71), isActive: true),
+            ],
+            primaryKey: primaryKey, secondaryKey: secondaryKey)
+    }
+
+    /// Large gauges widget with scoped per-model windows as ring gauges.
+    static var paceGaugesScopedLarge: PaceGaugesEntry {
+        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
+        let weeklyDur: TimeInterval = 7 * 86_400
+        return PaceGaugesEntry(
+            date: now,
+            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
+            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            scoped: [
+                .init(key: "weekly_scoped|Haiku|",  label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
+                .init(key: "weekly_scoped|Opus|",   label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: "weekly_scoped|Fable|",  label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: "weekly_scoped|Sonnet|", label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+            ],
+            primaryKey: "five_hour", secondaryKey: "seven_day"
+        )
+    }
+
+    /// A climbing actual line with a dashed linear projection to `projectTo` at
+    /// reset — the shape a real window shows. `~62%` elapsed so the dashed
+    /// segment is visible.
+    private static func chartWindow(duration: TimeInterval, usedPct: Double, projectTo: Double) -> PaceChartEntry.WindowState {
+        let resets = now.addingTimeInterval(duration * 0.38)
+        let cycleStart = resets.addingTimeInterval(-duration)
+        let elapsed = now.timeIntervalSince(cycleStart)
+        let n = 12
+        let points = (0..<n).map { i -> PaceChartView.Data.Point in
+            let f = Double(i) / Double(n - 1)
+            return .init(time: cycleStart.addingTimeInterval(elapsed * f),
+                         value: usedPct * (f * (1.06 - 0.06 * f)))
+        }
+        let steps = 6
+        let projection = (0...steps).map { i -> PaceChartView.Data.Point in
+            let f = Double(i) / Double(steps)
+            return .init(time: now.addingTimeInterval(resets.timeIntervalSince(now) * f),
+                         value: min(100, usedPct + (projectTo - usedPct) * f))
+        }
+        let crossing: Date? = (projectTo > usedPct && projectTo >= 100)
+            ? now.addingTimeInterval(resets.timeIntervalSince(now) * ((100 - usedPct) / (projectTo - usedPct)))
+            : nil
+        return PaceChartEntry.WindowState(
+            chart: PaceChartView.Data(
+                cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
+                points: points, usedPct: usedPct,
+                projection: projection, projectionCrossesFullAt: crossing),
+            resetsAt: resets)
     }
 
     static var liveSession: LiveSessionEntry {

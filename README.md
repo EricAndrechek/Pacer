@@ -19,7 +19,7 @@ keeps all of your data on your own Mac.
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
     <img src="docs/screenshots/dashboard.png" width="760"
-         alt="Pacer dashboard — today's cost, 5-hour and 7-day rate-limit pacing, live burn rate, and a projected end-of-day total">
+         alt="Pacer dashboard — today's cost, 5-hour / 7-day / per-model rate-limit pacing, live burn rate, and a projected end-of-day total">
   </picture>
 </p>
 
@@ -29,7 +29,7 @@ keeps all of your data on your own Mac.
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menubar-dark.png">
         <img src="docs/screenshots/menubar.png" width="320"
-             alt="Pacer in the menu bar — the readout chips and the click-down popover with 5-hour and 7-day pace gauges">
+             alt="Pacer in the menu bar — the readout chips and the click-down popover with 5-hour, 7-day, and per-model pace gauges">
       </picture>
       <br><sub><b>Menu bar &amp; click-down popover</b></sub>
     </td>
@@ -92,10 +92,13 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
 
 ## What you get
 
-- **Rate-limit pacing.** Your 5-hour and weekly windows as easy-to-read pace
-  charts — are you ahead, on track, or about to hit the wall? Color bands
-  (behind / on track / ahead / nearly maxed) tell you at a glance, refreshed
-  every few minutes from Anthropic's usage data.
+- **Rate-limit pacing.** Your 5-hour, weekly, and any **per-model** windows —
+  the scoped caps Anthropic reports for your account, like a weekly Fable
+  limit — as easy-to-read pace charts. Are you ahead, on track, or about to hit
+  the wall? Color bands (behind / on track / ahead / nearly maxed) tell you at a
+  glance, and *every* window gets the same forecast: projected fill,
+  time-to-limit, and calibrated bands. Refreshed every few minutes from
+  Anthropic's usage data.
 - **Costs, your way.** See spend the way Claude Code reports it, or have Pacer
   price it from tokens itself — switchable in Settings. Daily, monthly, and
   all-time totals included.
@@ -105,10 +108,15 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   GitHub-style activity heatmap of the last six months.
 - **Live "today" view.** Your current burn rate plus a running "at this pace,
   today will end at about $X" projection.
-- **At a glance, always.** A configurable menu-bar readout (icon, percent, or
-  both) plus home-screen-style widgets for cost and pacing.
+- **Multiple accounts.** Signed into more than one Claude account? Pacer tracks
+  each account's usage and limits separately and lets you switch between them.
+- **At a glance, always.** A configurable menu-bar readout — an activity-ring
+  icon, percent chips, and an explicit choice of which window drives the icon —
+  plus home-screen-style widgets, each pickable to whichever window you care
+  about (5-hour, weekly, or a per-model cap) for cost and pacing.
 - **Optional nudges.** Local notifications when you cross a rate-limit threshold
-  (50 / 75 / 90%) or blow past a daily spending limit you set. Off by default.
+  (50 / 75 / 90%) — on any window, including a per-model cap — or blow past a
+  daily spending limit you set. Off by default.
 - **Export.** Send daily totals, daily-by-model, or per-project numbers to a
   CSV for your own spreadsheets.
 
@@ -127,6 +135,7 @@ the honest lay of the land.
 | Native macOS (not Electron) | ✓ | ✓ | ✓ | – (Electron) | – | – |
 | Always-on, glanceable | ✓ | ✓ | ✓ | ✓ | – | – |
 | Live limit % from Anthropic's API | ✓ | ✦ | ✓ | ✦ | ✦ | ✓ |
+| Per-model (scoped) limit windows | ✓ | – | – | – | – | – |
 | Pace vs. ideal-burn line | ✓ | – | – | – | – | – |
 | End-of-day spend projection | ✓ | ✓ | ✓ | ✓ | – | – |
 | Activity heatmap (6 months) | ✓ | – | – | – | – | – |

@@ -562,5 +562,79 @@ final class AppBackgroundService {
                 context: context
             )
         }
+        await checkScopedBurnRateWarnings(context: context)
+    }
+
+    /// Burn-rate warnings for **scoped per-model windows** (a "Fable · weekly"
+    /// cap, etc.), driven by the SAME engine projection surface as the fixed
+    /// 5h/7d path — `engine.scopedWindows()` for the live account-scoped windows
+    /// and `engine.burnOutlook(windowKey:)` for each one's crossing. It reuses
+    /// the fixed path's k-consecutive-refit debounce (`burnHitStreak`, namespaced
+    /// by identity) and fires the identical banner via `handleBurnRateWarning`,
+    /// labelled with the window's `displayName`.
+    ///
+    /// Two guards make scoped windows behave correctly and honestly:
+    ///   - **Opt-in** — scoped windows default to no alert, so a burn-rate
+    ///     warning fires only for a window the user configured a scoped
+    ///     threshold alert for (`ScopedRateLimitAlerts.shouldWarnBurnRate`,
+    ///     which also re-applies the ≥50% used floor). Nothing fires by default,
+    ///     and no new per-window toggle is needed.
+    ///   - **Cold-start** — the same helper suppresses a warning until the engine
+    ///     has watched the window complete enough cycles to leave its low-
+    ///     confidence band, so a freshly discovered scoped window can't page the
+    ///     user off one thin cycle.
+    /// Dormancy falls out for free: `scopedWindows()` only lists identities
+    /// present in the latest poll, so a vanished window is never evaluated (its
+    /// alert rules are kept, untouched) and resumes when it reappears.
+    private func checkScopedBurnRateWarnings(context: ModelContext) async {
+        let scopedSpecs = await engine.scopedWindows()
+        guard !scopedSpecs.isEmpty else { return }
+        let rules = (try? context.fetch(FetchDescriptor<AlertRule>())) ?? []
+
+        for spec in scopedSpecs {
+            let identity = spec.key
+            guard let outlook = await engine.burnOutlook(windowKey: identity) else {
+                burnHitStreak[identity] = 0
+                continue
+            }
+            // Debounce on the raw pre-reset crossing, identical to the fixed
+            // path: require two consecutive refits before the coordinator may
+            // fire, so one transient burst between polls can't page the user.
+            if outlook.willHitLimitBeforeReset {
+                burnHitStreak[identity, default: 0] += 1
+            } else {
+                burnHitStreak[identity] = 0
+            }
+            guard (burnHitStreak[identity] ?? 0) >= 2 else { continue }
+            // Opt-in + cold-start + used-floor gate (pure, unit-tested). A window
+            // with no configured scoped alert, too few completed cycles, or below
+            // the floor is not warned.
+            guard ScopedRateLimitAlerts.shouldWarnBurnRate(
+                identity: identity,
+                willHitLimitBeforeReset: outlook.willHitLimitBeforeReset,
+                usedPct: outlook.usedPct,
+                cyclesObserved: outlook.cyclesObserved,
+                in: rules
+            ) else { continue }
+
+            let projection = BurnRate.Projection(
+                slopePercentPerHour: outlook.slopePercentPerHour,
+                projectedFullAt: outlook.projectedFullAt,
+                etaSeconds: outlook.etaSeconds)
+            let durationHours = spec.duration / 3600
+            await NotificationCoordinator.shared.handleBurnRateWarning(
+                window: identity,
+                projection: projection,
+                resetsAt: outlook.resetsAt,
+                usedPct: outlook.usedPct,
+                hitRangeEarliest: outlook.projectedFullAtEarliest,
+                hitRangeLatest: outlook.projectedFullAtLatest,
+                capPaceRatio: durationHours > 0
+                    ? outlook.slopePercentPerHour / (100.0 / durationHours) : nil,
+                labelOverride: spec.displayName,
+                windowDurationHours: durationHours,
+                context: context
+            )
+        }
     }
 }

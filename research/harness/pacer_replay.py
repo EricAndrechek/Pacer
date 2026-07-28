@@ -113,6 +113,10 @@ def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
 def load_rate_samples(conn: sqlite3.Connection, window: str) -> list[tuple[float, float, float]]:
     """(at_unix, used_pct, resets_unix) sorted by time, resets non-null only."""
     cols = _cols(conn, "ZRATELIMITSAMPLE")
@@ -125,6 +129,62 @@ def load_rate_samples(conn: sqlite3.Connection, window: str) -> list[tuple[float
         (window,),
     ).fetchall()
     return [(r[0] + CORE_DATA_EPOCH, float(r[1]), r[2] + CORE_DATA_EPOCH) for r in rows]
+
+
+def load_usagelimit_samples(conn: sqlite3.Connection, identity: str) -> list[tuple[float, float, float]]:
+    """(at_unix, percent, resets_unix) for one scoped `limits[]` identity — the
+    same tuple shape as `load_rate_samples`, read from ZUSAGELIMITSAMPLE. Empty
+    if the table/columns are absent (store predates the scoped feature)."""
+    if "ZUSAGELIMITSAMPLE" not in _tables(conn):
+        return []
+    cols = _cols(conn, "ZUSAGELIMITSAMPLE")
+    need = {"ZSAMPLEDAT", "ZPERCENT", "ZIDENTITY", "ZRESETSAT"}
+    if not need <= cols:
+        return []
+    rows = conn.execute(
+        "SELECT ZSAMPLEDAT, ZPERCENT, ZRESETSAT FROM ZUSAGELIMITSAMPLE "
+        "WHERE ZIDENTITY = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
+        (identity,),
+    ).fetchall()
+    return [(r[0] + CORE_DATA_EPOCH, float(r[1]), r[2] + CORE_DATA_EPOCH) for r in rows]
+
+
+def scoped_identities(conn: sqlite3.Connection) -> list[tuple[str, str, float]]:
+    """Model/surface-scoped identities present in the latest poll (the staleness
+    guard), each with a resolved duration (group hint + reset-spacing fallback).
+    Returns [(identity, label, duration)] sorted. Account-wide session/weekly_all
+    rows are excluded — they're the fixed 5h/7d windows (Decision C)."""
+    if "ZUSAGELIMITSAMPLE" not in _tables(conn):
+        return []
+    cols = _cols(conn, "ZUSAGELIMITSAMPLE")
+    if "ZIDENTITY" not in cols:
+        return []
+    newest = conn.execute("SELECT MAX(ZSAMPLEDAT) FROM ZUSAGELIMITSAMPLE").fetchone()[0]
+    if newest is None:
+        return []
+    has = lambda c: c in cols
+    sel = ["ZIDENTITY",
+           "ZGROUP" if has("ZGROUP") else "NULL",
+           "ZLABEL" if has("ZLABEL") else "ZIDENTITY",
+           "ZMODELID" if has("ZMODELID") else "NULL",
+           "ZMODELDISPLAYNAME" if has("ZMODELDISPLAYNAME") else "NULL",
+           "ZSURFACE" if has("ZSURFACE") else "NULL"]
+    rows = conn.execute(
+        f"SELECT DISTINCT {', '.join(sel)} FROM ZUSAGELIMITSAMPLE WHERE ZSAMPLEDAT >= ?",
+        (newest - 2,),
+    ).fetchall()
+    out = []
+    for identity, group, label, mid, mdn, surface in rows:
+        model_scoped = any(v and str(v).strip() for v in (mid, mdn, surface))
+        if not model_scoped:
+            continue
+        resets = [r[0] for r in conn.execute(
+            "SELECT DISTINCT ZRESETSAT FROM ZUSAGELIMITSAMPLE "
+            "WHERE ZIDENTITY = ? AND ZRESETSAT IS NOT NULL ORDER BY ZRESETSAT",
+            (identity,)).fetchall()]
+        spacings = [b - a for a, b in zip(resets, resets[1:])]
+        out.append((identity, label or identity, scoped_duration(group or "", spacings)))
+    return sorted(out)
 
 
 def load_activity_grid(conn: sqlite3.Connection) -> list[list[float]]:
@@ -447,6 +507,33 @@ MODEL_COMPLEXITY = {
 }
 SHADOW_IDS = {"five_hour": {"kalman-trend", "diurnal-rate"}, "seven_day": {"kalman-trend"}}
 
+# Mirror of Swift's WindowSpec.isWeeklyScale (24h threshold). Windows at least a
+# day long are weekly-cadence: diurnal is an established candidate (not a shadow)
+# and cold-start selection defaults to it; shorter ones are session-cadence.
+# The fixed 5h/7d windows sit on either side, so their behaviour is unchanged.
+WEEKLY_SCALE_THRESHOLD = 24 * 3600.0
+
+
+def is_weekly_scale(duration: float) -> bool:
+    return duration >= WEEKLY_SCALE_THRESHOLD
+
+
+def shadow_ids(duration: float) -> set[str]:
+    """Kalman is a shadow everywhere; diurnal is a shadow on session-cadence
+    windows only (mirror of UsageIntelligenceEngine.rlShadowFloors(duration:))."""
+    return {"kalman-trend"} if is_weekly_scale(duration) else {"kalman-trend", "diurnal-rate"}
+
+
+def scoped_duration(group: str, reset_spacings: list[float] | None = None) -> float:
+    """Mirror of WindowSpec.scopedDuration: group hint, reset-spacing fallback."""
+    g = (group or "").lower()
+    if g == "session":
+        return 5 * 3600.0
+    if g == "weekly":
+        return 7 * 24 * 3600.0
+    valid = sorted(s for s in (reset_spacings or []) if s > 0)
+    return valid[len(valid) // 2] if valid else 7 * 24 * 3600.0
+
 
 def model_roster(diurnal_table):
     return {
@@ -571,12 +658,12 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
-def best_method(record: dict[str, dict[str, list[float]]], window: str, params: Params) -> str | None:
+def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params) -> str | None:
     """Port of EngineSelfEval.bestMethod: lowest median |err|, ties within
     1.5pp to the simpler model, shadow floors applied."""
     scored = []
     for mid, per_period in record.items():
-        floor = params.shadow_promotion_min_periods if mid in SHADOW_IDS[window] else 2
+        floor = params.shadow_promotion_min_periods if mid in shadow_set else 2
         if len(per_period) < floor:
             continue
         errs = [e for es in per_period.values() for e in es]
@@ -615,8 +702,12 @@ class CaseScore:
 
 
 def replay_window(window: str, samples, activity_grid, params: Params,
-                  conformal_mode: str = "auto") -> list[CaseScore]:
-    duration = WINDOW_SECONDS[window]
+                  conformal_mode: str = "auto", duration: float | None = None) -> list[CaseScore]:
+    # Fixed windows resolve duration by name; scoped identities pass it in.
+    if duration is None:
+        duration = WINDOW_SECONDS[window]
+    weekly = is_weekly_scale(duration)
+    shadow_set = shadow_ids(duration)
     cycles = segment(samples, duration)
     completed = cycles[:-1] if cycles else []   # last group = current/live
     scores: list[CaseScore] = []
@@ -634,8 +725,8 @@ def replay_window(window: str, samples, activity_grid, params: Params,
 
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
-        chosen = best_method(record, window, params) or (
-            "diurnal-rate" if window == "seven_day" else "recency-weighted")
+        chosen = best_method(record, shadow_set, params) or (
+            "diurnal-rate" if weekly else "recency-weighted")
         residuals = collect_residuals(roster[chosen], params, history, mode=conformal_mode)
 
         for cf in RL_CUT_FRACTIONS:
@@ -714,6 +805,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store", help="path to pacer.sqlite (default: app group)")
     ap.add_argument("--window", choices=["five_hour", "seven_day"], help="one window only")
+    ap.add_argument("--source", default="rate", choices=["rate", "usagelimit"],
+                    help="'rate' = fixed 5h/7d (ZRATELIMITSAMPLE); "
+                         "'usagelimit' = scoped per-model windows (ZUSAGELIMITSAMPLE)")
+    ap.add_argument("--identity", help="one scoped identity only (with --source usagelimit)")
     ap.add_argument("--conformal-mode", default="auto",
                     choices=["auto", "cuts", "block", "cut-matched", "recency"],
                     help="calibration experiment (see collect_residuals; 'auto' = shipping behavior)")
@@ -724,7 +819,35 @@ def main() -> None:
     grid = load_activity_grid(conn)
     params = Params()
     report = {"paramsVersion": params.version_tag(), "params": params.canonical(),
-              "conformalMode": args.conformal_mode, "windows": {}}
+              "conformalMode": args.conformal_mode, "source": args.source, "windows": {}}
+
+    if args.source == "usagelimit":
+        # Scoped per-model windows through the SAME pipeline as the fixed ones,
+        # duration resolved per identity (group hint + reset-spacing fallback).
+        idents = scoped_identities(conn)
+        if args.identity:
+            idents = [t for t in idents if t[0] == args.identity]
+        if not idents:
+            msg = ("no scoped identities in ZUSAGELIMITSAMPLE — the scoped-window "
+                   "feature hasn't populated this store yet")
+            print(json.dumps({**report, "note": msg}, indent=2) if args.json else msg)
+            return
+        for identity, label, dur in idents:
+            samples = load_usagelimit_samples(conn, identity)
+            scores = replay_window(identity, samples, grid, params,
+                                   conformal_mode=args.conformal_mode, duration=dur)
+            report["windows"][f"{label} [{identity}]"] = summarize(scores)
+        if args.json:
+            print(json.dumps(report, indent=2)); return
+        print(f"params {report['paramsVersion']}  ({report['params']})  source=usagelimit\n")
+        for w, s in report["windows"].items():
+            print(f"[{w}]  cases={s.get('cases', 0)}")
+            for k, v in s.items():
+                if k != "cases":
+                    print(f"  {k:>20}: {v}")
+            print()
+        return
+
     for window in ([args.window] if args.window else ["five_hour", "seven_day"]):
         samples = load_rate_samples(conn, window)
         scores = replay_window(window, samples, grid, params, conformal_mode=args.conformal_mode)

@@ -147,7 +147,8 @@ import Testing
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         return try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
-            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self, configurations: config
+            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self,
+            Account.self, AccountUsageArchive.self, UsageLimitSample.self, configurations: config
         )
     }
 
@@ -183,19 +184,20 @@ import Testing
         #expect(await poller.snapshot().laneCount == 1)
     }
 
-    @Test func addManualTokenForeignAccountNotKept() async throws {
+    @Test func addManualTokenOtherAccountKeptAsSecondary() async throws {
         let container = try makeContainer()
         let pool = EphemeralTokenPoolStore()
-        // First add establishes primary org A; second is org B (foreign).
+        // First add establishes the active account (org A); second is org B,
+        // a *different* account — now tracked as a secondary, not dropped.
         let poller = OAuthPoller(client: successClient(orgs: ["orgA", "orgB"]),
                                  container: container, configuration: .init(),
                                  clock: TestClock(), poolStore: pool)
-        _ = await poller.addManualToken(Self.validToken("A"))           // primary
-        let r = await poller.addManualToken(Self.validToken("B"))       // foreign
-        #expect(r == .foreignAccount(org: "orgB"))
-        // Only the primary lane remains; foreign token not persisted.
-        #expect(await poller.snapshot().laneCount == 1)
-        #expect(!pool.loadAll().contains { $0.credential.accessToken == Self.validToken("B") })
+        _ = await poller.addManualToken(Self.validToken("A"))           // active account
+        let r = await poller.addManualToken(Self.validToken("B"))       // different account
+        #expect(r == .otherAccount(org: "orgB"))
+        // Both lanes are kept and persisted; org B is tracked as a secondary.
+        #expect(await poller.snapshot().laneCount == 2)
+        #expect(pool.loadAll().contains { $0.credential.accessToken == Self.validToken("B") })
     }
 
     @Test func tokenFormatGate() {
@@ -240,7 +242,8 @@ import Testing
         let config = ModelConfiguration(isStoredInMemoryOnly: true)
         let container = try ModelContainer(
             for: Heartbeat.self, TokenSample.self, DailyAggregate.self, ProjectDailyAggregate.self,
-            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self, configurations: config
+            RateLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self, TokenLaneMeta.self,
+            Account.self, AccountUsageArchive.self, UsageLimitSample.self, configurations: config
         )
         let pool = EphemeralTokenPoolStore([
             StoredToken(

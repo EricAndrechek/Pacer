@@ -37,10 +37,20 @@ struct EngineFeatures: Sendable {
     /// Today's cumulative-cost series so far (last point at `now`).
     let todayElapsed: [ForecastInput.Point]
 
-    /// Rate-limit utilisation samples per window key (`five_hour`/`seven_day`),
-    /// as the `(at, usedPercentage, resetsAt)` tuples `BurnTrajectory.segment`
-    /// consumes. Only rows with a known reset are kept.
+    /// Rate-limit utilisation samples per window key (`five_hour`/`seven_day`,
+    /// plus any scoped `limits[]` identities), as the `(at, usedPercentage,
+    /// resetsAt)` tuples `BurnTrajectory.segment` consumes. Only rows with a
+    /// known reset are kept.
     let rateLimit: [String: [(at: Date, usedPercentage: Double, resetsAt: Date)]]
+
+    /// The window SET the engine forecasts, driving every per-window loop
+    /// (`makeFit`, `recompute`, `newRLOutcomes`, `snapshotDrafts`). Always the
+    /// two fixed blocks first (`five_hour`, `seven_day`, in that order — matching
+    /// the old `RateLimitWindowKind.allCases` iteration), then any discovered
+    /// scoped per-model windows, deterministically ordered. Each spec carries
+    /// the `(key, duration)` the pure per-window statics already take, so the
+    /// fixed windows reproduce the old behaviour exactly.
+    let windows: [WindowSpec]
 
     /// `[weekday 0=Sun…6=Sat][hour 0…23]` probability that the cell has any
     /// token arrival, over complete prior days. Unit-meanable shape for the
@@ -51,11 +61,39 @@ struct EngineFeatures: Sendable {
     /// gone quiet?" signal. `nil` when there's been no activity at all.
     let lastArrivalAt: Date?
 
+    /// Scoped window identities that were the *binding* limit in their group in
+    /// the latest poll — the "this is what's gating you right now" hint the
+    /// snapshot/widget surfaces. A pure display flag; it never enters a forecast.
+    let activeScopedIdentities: Set<String>
+
     // MARK: - Plain input rows (so `build` is SwiftData-free and testable)
 
     struct DailyRow: Sendable { let date: String; let cost: Double }
     struct HourlyRow: Sendable { let date: String; let hour: Int; let cost: Double; let sampleCount: Int }
     struct RateRow: Sendable { let window: String; let at: Date; let usedPercentage: Double; let resetsAt: Date? }
+
+    /// One observation of a scoped `limits[]` window (`UsageLimitSample`),
+    /// keyed by its stable `identity`. The `group`/`label`/scope fields let
+    /// `build` construct the scoped `WindowSpec` (duration from the group hint)
+    /// for the identities present in the latest batch; `resetsAt` is the series
+    /// value the engine forecasts, exactly like a `RateRow`.
+    struct ScopedRow: Sendable {
+        let identity: String
+        let group: String
+        let label: String
+        let modelId: String?
+        let modelDisplayName: String?
+        let surface: String?
+        let at: Date
+        let usedPercentage: Double
+        let resetsAt: Date?
+        /// Whether this row belongs to the most-recent poll ("latest batch") —
+        /// only identities still present there get a live `WindowSpec`, so a
+        /// vanished limit simply goes quiet (staleness guard).
+        let inLatestBatch: Bool
+        /// The `is_active` binding flag as of this row (display hint only).
+        let isActive: Bool
+    }
 
     /// Build the feature snapshot from store rows. Pure — no I/O, no clock
     /// reads beyond the passed `now`.
@@ -66,6 +104,7 @@ struct EngineFeatures: Sendable {
         hourly: [HourlyRow],
         rate: [RateRow],
         lastArrivalAt: Date?,
+        scoped: [ScopedRow] = [],
         eodPriorDays: Int = 60
     ) -> EngineFeatures {
         let todayStart = calendar.startOfDay(for: now)
@@ -108,18 +147,81 @@ struct EngineFeatures: Sendable {
         let activityGrid = buildActivityGrid(hourCost: hourCost, dailyCosts: dailyCosts,
                                              todayKey: todayKey, calendar: calendar)
 
-        // Rate-limit tuples per window.
+        // Rate-limit tuples per window key. The fixed 5h/7d series come from
+        // `rate` (RateLimitSample); scoped per-model series come from `scoped`
+        // (UsageLimitSample). Both fold into the SAME dict keyed by window key,
+        // so downstream sees one uniform per-window series shape.
         var rateLimit: [String: [(at: Date, usedPercentage: Double, resetsAt: Date)]] = [:]
         for r in rate {
             guard let resets = r.resetsAt else { continue }
             rateLimit[r.window, default: []].append((r.at, r.usedPercentage, resets))
         }
+        for s in scoped {
+            guard let resets = s.resetsAt else { continue }
+            rateLimit[s.identity, default: []].append((s.at, s.usedPercentage, resets))
+        }
         for k in rateLimit.keys { rateLimit[k]?.sort { $0.at < $1.at } }
+
+        // The window set: fixed blocks first (canonical order), then the scoped
+        // identities present in the latest batch, ordered deterministically by
+        // identity so iteration and persistence are reproducible.
+        var windows = WindowSpec.fixedWindows
+        windows.append(contentsOf: scopedWindows(scoped))
+
+        // Binding scoped identities (latest batch, is_active) — the widget hint.
+        let activeScoped = Set(scoped.lazy
+            .filter { $0.inLatestBatch && $0.isActive && isModelScoped($0) }
+            .map { $0.identity })
 
         return EngineFeatures(
             now: now, calendar: calendar, todayStart: todayStart,
             dailyCosts: dailyCosts, dailyPeriods: dailyPeriods, todayElapsed: todayElapsed,
-            rateLimit: rateLimit, activityGrid: activityGrid, lastArrivalAt: lastArrivalAt)
+            rateLimit: rateLimit, windows: windows, activityGrid: activityGrid,
+            lastArrivalAt: lastArrivalAt, activeScopedIdentities: activeScoped)
+    }
+
+    /// Resolve the scoped `WindowSpec` set from scoped rows: one spec per
+    /// identity that (a) is present in the latest batch and (b) is genuinely
+    /// model/surface-scoped (not an account-wide `session`/`weekly_all` row,
+    /// which the fixed 5h/7d hero windows already own — Decision C). Duration
+    /// comes from the group hint with a reset-spacing fallback (Decision B).
+    static func scopedWindows(_ scoped: [ScopedRow]) -> [WindowSpec] {
+        guard !scoped.isEmpty else { return [] }
+        // Latest-batch identities that carry a real scope.
+        let liveIdentities = Set(scoped.lazy
+            .filter { $0.inLatestBatch && isModelScoped($0) }
+            .map { $0.identity })
+        guard !liveIdentities.isEmpty else { return [] }
+        let byIdentity = Dictionary(grouping: scoped.filter { liveIdentities.contains($0.identity) },
+                                    by: { $0.identity })
+        var specs: [WindowSpec] = []
+        for identity in liveIdentities.sorted() {
+            guard let rows = byIdentity[identity], let latest = rows.filter({ $0.inLatestBatch }).last ?? rows.last
+            else { continue }
+            specs.append(WindowSpec.scoped(
+                identity: identity, group: latest.group, label: latest.label,
+                modelId: latest.modelId, modelDisplayName: latest.modelDisplayName, surface: latest.surface,
+                resetSpacings: resetSpacings(rows)))
+        }
+        return specs
+    }
+
+    /// A scoped row is a real per-model/per-surface window (vs. an account-wide
+    /// `session`/`weekly_all` limit that duplicates the fixed hero windows) when
+    /// it names a model or a surface.
+    static func isModelScoped(_ r: ScopedRow) -> Bool {
+        (r.modelId?.isEmpty == false) || (r.modelDisplayName?.isEmpty == false) || (r.surface?.isEmpty == false)
+    }
+
+    /// Distinct reset-to-reset spacings (seconds) over an identity's history —
+    /// the fallback signal for a scoped window's duration when its `group` isn't
+    /// a known cadence word.
+    static func resetSpacings(_ rows: [ScopedRow]) -> [TimeInterval] {
+        let resets = rows.compactMap { $0.resetsAt }
+            .map { Date(timeIntervalSince1970: ($0.timeIntervalSince1970 / 60).rounded() * 60) }
+        let distinct = Array(Set(resets)).sorted()
+        guard distinct.count >= 2 else { return [] }
+        return zip(distinct.dropFirst(), distinct).map { $0.timeIntervalSince($1) }
     }
 
     // MARK: - Idle gate

@@ -12,10 +12,15 @@ import PacerUI
 /// dismissible-modal navigation (tap-outside / Esc / ⌘W all dismiss), like
 /// every other detail surface.
 struct ProjectionCompareModal: View {
+    /// A fixed window key (`five_hour`/`seven_day`) OR a scoped `limits[]`
+    /// identity — the modal sources actuals from `RateLimitSample` for the
+    /// former, `UsageLimitSample` for the latter, and asks the engine
+    /// generically by window key either way.
     let windowKey: String
 
     @Environment(\.usageEngine) private var engine
     @Query private var samples: [RateLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
@@ -29,37 +34,65 @@ struct ProjectionCompareModal: View {
             },
             sort: \.sampledAt
         )
+        _scopedSamples = Query(
+            filter: #Predicate<UsageLimitSample> {
+                $0.identity == windowKey && $0.sampledAt >= cutoff
+            },
+            sort: \.sampledAt
+        )
+    }
+
+    private var isFixed: Bool {
+        windowKey == RateLimitWindowName.fiveHour || windowKey == RateLimitWindowName.sevenDay
     }
 
     private var duration: TimeInterval {
-        windowKey == RateLimitWindowName.fiveHour ? 5 * 3600 : 7 * 86400
+        if windowKey == RateLimitWindowName.fiveHour { return 5 * 3600 }
+        if windowKey == RateLimitWindowName.sevenDay { return 7 * 86400 }
+        return WindowSpec.scopedDuration(group: scopedSamples.last?.group ?? "weekly")
     }
     private var windowTitle: String {
-        windowKey == RateLimitWindowName.fiveHour ? "5-hour" : "7-day"
-    }
-    private var kind: RateLimitWindowKind {
-        RateLimitWindowKind(rawValue: windowKey) ?? .fiveHour
+        if windowKey == RateLimitWindowName.fiveHour { return "5-hour" }
+        if windowKey == RateLimitWindowName.sevenDay { return "7-day" }
+        return scopedSamples.last?.label ?? "Model"
     }
 
-    /// Same snapshot shape `PaceChartColumn` builds for the live chart —
-    /// current-cycle actuals with a synthesized "now" tail.
+    /// Current-cycle actuals + a synthesized "now" tail, from whichever source
+    /// backs this window (fixed 5h/7d → `RateLimitSample`; scoped → the scoped
+    /// identity's `UsageLimitSample` history).
     private var chartData: PaceChartView.Data? {
-        guard let latest = samples.last, let resets = latest.resetsAt else { return nil }
+        let latest: (resets: Date, used: Double)?
+        let pointsRaw: [(time: Date, value: Double)]
+        if isFixed {
+            guard let l = samples.last, let resets = l.resetsAt else { return nil }
+            latest = (resets, l.usedPercentage)
+            pointsRaw = samples
+                .inCycle(resetting: resets, duration: duration)
+                .map { ($0.sampledAt, $0.usedPercentage) }
+        } else {
+            guard let l = scopedSamples.last, let resets = l.resetsAt else { return nil }
+            latest = (resets, l.percent)
+            pointsRaw = scopedSamples
+                .filter { $0.resetsAt == resets }
+                .map { ($0.sampledAt, $0.percent) }
+        }
+        guard let latest else { return nil }
+        let resets = latest.resets
         let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
         guard !cycle.isAwaiting else { return nil }
         let cycleStart = resets.addingTimeInterval(-duration)
         let now = Date()
-        var points = samples
-            .inCycle(resetting: resets, duration: duration)
-            .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
-            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
+        var points = pointsRaw
+            .filter { $0.time >= cycleStart && $0.time <= now }
+            .sorted { $0.time < $1.time }
+            .map { PaceChartView.Data.Point(time: $0.time, value: $0.value) }
         let tailTime = min(now, resets)
         if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: latest.usedPercentage))
+            points.append(.init(time: tailTime, value: latest.used))
         }
         return PaceChartView.Data(
             cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-            points: points, usedPct: latest.usedPercentage
+            points: points, usedPct: latest.used
         )
     }
 
@@ -94,7 +127,7 @@ struct ProjectionCompareModal: View {
                     actual: data.points,
                     trajectories: overlays,
                     accuracy: accuracy,
-                    shadowFloors: UsageIntelligenceEngine.rlShadowFloors(kind)
+                    shadowFloors: UsageIntelligenceEngine.rlShadowFloors(duration: duration)
                 )
             } else if loaded {
                 Text("Not enough data to compare models yet.")
@@ -113,7 +146,7 @@ struct ProjectionCompareModal: View {
 
     private func refresh() async {
         guard let engine else { loaded = true; return }
-        trajectories = await engine.rateLimitTrajectories(window: kind)
+        trajectories = await engine.rateLimitTrajectories(windowKey: windowKey)
         accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(windowKey))
         loaded = true
     }

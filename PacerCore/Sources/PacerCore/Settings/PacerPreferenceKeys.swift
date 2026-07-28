@@ -14,10 +14,32 @@ public enum PacerPreferenceKeys {
     /// they had.
     public static let menuBarStyle           = "pacer.menuBarStyle"
     public static let menuBarIconStyle       = "pacer.menuBarIconStyle"
-    /// CSV of `MenuBarChip` ids in display order, e.g.
-    /// `"icon,five_hour_pct"`. Empty string = hide the status item
-    /// entirely (the user toggled every chip off). Absent key = run
-    /// the legacy-style migration on first launch with this build.
+    /// Which rate-limit window's utilization drives the status-item icon's
+    /// band color + gauge level. Stored as a window key: `"five_hour"` /
+    /// `"seven_day"` for the fixed blocks, or a scoped `limits[]` identity for
+    /// a per-model window. Chosen **explicitly** — the default is the 5-hour
+    /// window's key (`"five_hour"`). A legacy empty string ("auto") still
+    /// resolves to the 5-hour window for back-compat. When the chosen window
+    /// disappears from the latest poll the icon falls back to the 5-hour window.
+    /// See `MenuBarWindows.resolveDriver`.
+    public static let menuBarIconDriver      = "pacer.menuBarIconDriver"
+    /// CSV of up to 3 window keys, **outer → inner**, drawn as concentric
+    /// activity rings when the icon style is `.activityRings`. Default
+    /// `"five_hour,seven_day"` (the fixed 2-ring icon). A key whose window
+    /// vanishes is skipped at render; an empty/all-vanished set falls back to
+    /// the 5-hour window. See `MenuBarWindows.resolveRingWindows`.
+    public static let menuBarRingWindows     = "pacer.menuBarRingWindows"
+    /// CSV of menu-bar chip tokens in display order. Each token is EITHER a
+    /// built-in `MenuBarChip` id (`icon`, `five_hour_pct`, …) OR a scoped
+    /// per-model window chip encoded `scoped_pct:<identity>`, where `<identity>`
+    /// is a `UsageLimit.identity` — so a saved list reads e.g.
+    /// `"icon,five_hour_pct,scoped_pct:weekly_scoped|Fable|"`. The `scoped_pct:`
+    /// prefix is deliberately opaque to the fixed-chip parser, so an OLDER
+    /// client silently skips scoped chips it doesn't understand (no format
+    /// break, no migration). Empty string = hide the status item entirely (the
+    /// user toggled every chip off). Absent key = run the legacy-style migration
+    /// on first launch with this build. Parse/serialize round trip lives in
+    /// `MenuBarChipItem` (PacerCore).
     public static let menuBarChips           = "pacer.menuBarChips"
     public static let notificationsEnabled   = "pacer.notifications.enabled"
     /// Single-threshold legacy keys. Kept for migration only — new code
