@@ -109,4 +109,46 @@ struct ScopedRateLimitAlertsTests {
             isActive: false, modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth")
         #expect(ScopedRateLimitAlerts.isModelOrSurfaceScoped(perModel) == true)
     }
+
+    // MARK: - Burn-rate (time-to-limit) warning gate
+
+    @Test func burnRateOptInMirrorsAConfiguredThresholdAlert() {
+        let id = "weekly_scoped|Fable|"
+        // Default: scoped windows are opted OUT (no configured alert).
+        #expect(!ScopedRateLimitAlerts.burnRateOptedIn(identity: id, in: []))
+        // A configured, enabled threshold alert opts the window in — no new toggle.
+        #expect(ScopedRateLimitAlerts.burnRateOptedIn(identity: id, in: [rule(id, 75)]))
+        // A disabled-only rule contributes no live threshold ⇒ still opted out.
+        #expect(!ScopedRateLimitAlerts.burnRateOptedIn(identity: id, in: [rule(id, 75, enabled: false)]))
+        // A cost rule for the identity doesn't count — only rate-limit thresholds.
+        #expect(!ScopedRateLimitAlerts.burnRateOptedIn(
+            identity: id, in: [rule(id, 75, metric: AlertRuleMetric.weeklyCost)]))
+    }
+
+    @Test func burnRateWarnsOnlyWhenOptedInWarmOnPaceAndPastFloor() {
+        let id = "weekly_scoped|Fable|"
+        let warm = ScopedRateLimitAlerts.burnRateMinCyclesObserved
+        let rules = [rule(id, 75)]
+
+        // Opted in, warm, on pace to hit before reset, past the 50% floor ⇒ warns.
+        #expect(ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: true, usedPct: 80, cyclesObserved: warm, in: rules))
+
+        // No configured alert ⇒ never warns, however dire the projection (opt-in).
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: true, usedPct: 99, cyclesObserved: warm, in: []))
+
+        // Below the used floor ⇒ no warning (mirrors the fixed path's 50% floor).
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: true, usedPct: 40, cyclesObserved: warm, in: rules))
+
+        // No projected pre-reset crossing ⇒ no warning, however full the window.
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: false, usedPct: 95, cyclesObserved: warm, in: rules))
+
+        // Cold start (too few completed cycles) ⇒ no warning even when on pace and
+        // opted in — honors the engine's cold-start confidence line.
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: true, usedPct: 95, cyclesObserved: warm - 1, in: rules))
+    }
 }

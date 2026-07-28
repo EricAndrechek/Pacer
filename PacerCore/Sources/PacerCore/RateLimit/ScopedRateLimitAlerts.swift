@@ -82,4 +82,59 @@ public enum ScopedRateLimitAlerts {
     public static func dormantIdentities(in rules: [AlertRule], present: Set<String>) -> Set<String> {
         configuredIdentities(in: rules).subtracting(present)
     }
+
+    // MARK: - Burn-rate (time-to-limit) warning gate
+
+    /// Minimum completed cycles a scoped window must have before a burn-rate
+    /// ("on pace to hit the limit in ~N h") warning may fire. This is the
+    /// engine's own cold-start line: `UsageIntelligenceEngine.rateLimitOutlook`
+    /// calls its confidence `.low` while a window's completed-cycle count
+    /// (`RateLimitFit.historyCount` == `cyclesObserved`) is below 3. Below this
+    /// the scoped projection is genuinely cold — the engine hasn't watched the
+    /// window reset enough times to trust its shape — so we stay silent rather
+    /// than page the user off one or two cycles of history. The fixed 5h/7d
+    /// windows clear this within days and so are unaffected; scoped per-model
+    /// windows (which can appear cold) are the case this guards.
+    public static let burnRateMinCyclesObserved = 3
+
+    /// Whether a scoped window is **opted in** to burn-rate warnings. Consistent
+    /// with every other scoped-alert decision, scoped windows default to NO
+    /// alert: a burn-rate warning fires only for a window the user has already
+    /// configured a scoped *threshold* alert for (i.e. it has ≥ 1 enabled
+    /// `rateLimitPct` rule for its identity — the same set `thresholds(forIdentity:in:)`
+    /// returns). Reusing that config means no new per-window toggle or UI, and
+    /// nothing fires by default. A window whose only rule is disabled is not
+    /// opted in (it contributes no live threshold).
+    public static func burnRateOptedIn(identity: String, in rules: [AlertRule]) -> Bool {
+        !thresholds(forIdentity: identity, in: rules).isEmpty
+    }
+
+    /// The scoped burn-rate warning decision, pure so the App-side background
+    /// check stays a thin caller and this is unit-testable without AppKit. A
+    /// scoped window warrants a warning this tick iff:
+    ///   1. it is **opted in** (has a configured scoped threshold alert), and
+    ///   2. it is **warm** — at least `burnRateMinCyclesObserved` completed
+    ///      cycles (cold-start honesty, mirroring the engine's confidence line),
+    ///      and
+    ///   3. the engine's projection **warrants a warning by the identical rule
+    ///      the fixed 5h/7d path uses** (`BurnRate.warrantsWarning`: a projected
+    ///      pre-reset crossing while already past the used floor).
+    /// The per-cycle dedup and the k-consecutive-refit debounce stay with the
+    /// caller, exactly as they do for the fixed windows.
+    public static func shouldWarnBurnRate(
+        identity: String,
+        willHitLimitBeforeReset: Bool,
+        usedPct: Double,
+        cyclesObserved: Int,
+        in rules: [AlertRule],
+        floor: Double = BurnRate.warningUsedFloor
+    ) -> Bool {
+        guard burnRateOptedIn(identity: identity, in: rules) else { return false }
+        guard cyclesObserved >= burnRateMinCyclesObserved else { return false }
+        let projection = BurnRate.Projection(
+            slopePercentPerHour: 0,
+            projectedFullAt: willHitLimitBeforeReset ? Date() : nil,
+            etaSeconds: nil)
+        return BurnRate.warrantsWarning(projection, usedPct: usedPct, floor: floor)
+    }
 }

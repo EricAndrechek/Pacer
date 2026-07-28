@@ -64,6 +64,41 @@ struct ScopedWindowForecastTests {
 
     static func fableIdentity() -> String { "weekly_scoped|Fable|" }
 
+    /// Scoped **session** (5h) rows for one identity: `completed` moderate cycles
+    /// (peak ~60) plus a steep live cycle at ~75% climbing ~25pp/hr → the engine
+    /// projects a 100% crossing ~1h out, well before the reset ~2.5h out. Mirrors
+    /// `EngineSelfEvalTests.steepFiveHourFeatures` but on a scoped per-model
+    /// identity, so it exercises `burnOutlook(windowKey:)` for the burn warning.
+    static func onPaceSessionRows(identity: String, completed: Int) -> [EngineFeatures.ScopedRow] {
+        let duration: TimeInterval = 5 * 3600
+        var raw: [(at: Date, pct: Double, reset: Date)] = []
+        for c in 0..<completed {
+            let start = now.addingTimeInterval(-Double(completed + 1 - c) * duration)
+            let reset = start.addingTimeInterval(duration)
+            var pct = 0.0, t = start
+            while t <= reset {
+                raw.append((t, min(60, pct), reset))
+                t = t.addingTimeInterval(15 * 60); pct += 2
+            }
+        }
+        // Steep live cycle: started 2.5h ago, 75%+ and climbing ~25pp/hr.
+        let liveStart = now.addingTimeInterval(-2.5 * 3600)
+        let liveReset = liveStart.addingTimeInterval(duration)
+        var pct = 0.0, t = liveStart
+        while t <= now {
+            raw.append((t, min(100, pct), liveReset))
+            t = t.addingTimeInterval(15 * 60); pct += 25.0 / 4
+        }
+        let newest = raw.map(\.at).max() ?? now
+        return raw.map { row in
+            EngineFeatures.ScopedRow(
+                identity: identity, group: "session", label: "Fable",
+                modelId: nil, modelDisplayName: "Fable", surface: nil,
+                at: row.at, usedPercentage: row.pct, resetsAt: row.reset,
+                inLatestBatch: row.at >= newest.addingTimeInterval(-2), isActive: false)
+        }
+    }
+
     // MARK: - Duration hint (Decision B)
 
     @Test func scopedDurationFromGroupHint() {
@@ -193,6 +228,78 @@ struct ScopedWindowForecastTests {
         #expect(fit.rl[Self.fableIdentity()] == nil)
         let est = UsageIntelligenceEngine.answer(.scopedOutlook(Self.fableIdentity()), features: f, fit: fit)
         #expect(est.isInsufficient)
+    }
+
+    // MARK: - Burn-rate (time-to-limit) warning wiring
+
+    private func fableRule(_ identity: String) -> AlertRule {
+        AlertRule(name: identity, metric: AlertRuleMetric.rateLimitPct,
+                  thresholdValue: 75, scopedWindow: identity, enabled: true)
+    }
+
+    @Test func scopedOnPaceWindowWithConfiguredAlertWarrantsABurnWarning() {
+        let id = "session_scoped|Fable|"
+        let rows = Self.onPaceSessionRows(identity: id, completed: 5)
+        let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                     rate: [], lastArrivalAt: nil, scoped: rows)
+        // The scoped window is discovered and forecast through the generic path.
+        #expect(f.windows.contains { $0.isScoped && $0.key == id })
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: id)
+        #expect(outlook != nil)
+        // The engine projects a pre-reset crossing off the steep live cycle…
+        #expect(outlook!.willHitLimitBeforeReset)
+        #expect(outlook!.projectedFullAt! < outlook!.resetsAt)
+        #expect(outlook!.usedPct >= BurnRate.warningUsedFloor)
+        // …and it's warm (≥ 3 completed cycles), so not cold-start-gated.
+        #expect(outlook!.cyclesObserved >= ScopedRateLimitAlerts.burnRateMinCyclesObserved)
+
+        // With a configured scoped threshold alert → warns.
+        #expect(ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: outlook!.willHitLimitBeforeReset,
+            usedPct: outlook!.usedPct, cyclesObserved: outlook!.cyclesObserved,
+            in: [fableRule(id)]))
+        // No configured alert → never warns (opt-in default).
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: outlook!.willHitLimitBeforeReset,
+            usedPct: outlook!.usedPct, cyclesObserved: outlook!.cyclesObserved, in: []))
+    }
+
+    @Test func scopedColdStartWindowDoesNotWarnEvenOnPace() {
+        // Zero completed cycles → cold start. Even if the live cycle alone
+        // projects a crossing, the cold-start guard keeps us silent.
+        let id = "session_scoped|Fable|"
+        let rows = Self.onPaceSessionRows(identity: id, completed: 0)
+        let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                     rate: [], lastArrivalAt: nil, scoped: rows)
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        let outlook = UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: id)
+        #expect(outlook != nil)
+        #expect(outlook!.cyclesObserved < ScopedRateLimitAlerts.burnRateMinCyclesObserved)
+        // Opted in AND on pace, but cold → no warning.
+        #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
+            identity: id, willHitLimitBeforeReset: outlook!.willHitLimitBeforeReset,
+            usedPct: max(outlook!.usedPct, 80), cyclesObserved: outlook!.cyclesObserved,
+            in: [fableRule(id)]))
+    }
+
+    @Test func vanishedScopedWindowIsNotEvaluatedForBurn() {
+        // Absent from the latest poll (present:false) → no WindowSpec, no fit,
+        // and `burnOutlook` returns nil, so the burn check never fires for it.
+        let id = "session_scoped|Fable|"
+        var rows = Self.onPaceSessionRows(identity: id, completed: 5)
+        rows = rows.map {
+            EngineFeatures.ScopedRow(
+                identity: $0.identity, group: $0.group, label: $0.label,
+                modelId: $0.modelId, modelDisplayName: $0.modelDisplayName, surface: $0.surface,
+                at: $0.at, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt,
+                inLatestBatch: false, isActive: false)
+        }
+        let f = EngineFeatures.build(now: Self.now, calendar: Self.utc, daily: [], hourly: [],
+                                     rate: [], lastArrivalAt: nil, scoped: rows)
+        #expect(f.windows.filter { $0.isScoped }.isEmpty)
+        let fit = UsageIntelligenceEngine.makeFit(f)
+        #expect(UsageIntelligenceEngine.burnOutlook(f, fit, windowKey: id) == nil)
     }
 
     // MARK: - Snapshot export

@@ -358,6 +358,14 @@ public final class NotificationCoordinator {
     /// This method gates on settings + the ≥50% used floor, persists the
     /// per-cycle notified state, and formats the banner; the send/stay-silent
     /// decision itself is the pure policy.
+    ///
+    /// Scoped per-model windows reuse this exact path: they pass `labelOverride`
+    /// (the window's human name, e.g. "Fable") so the banner reads "On pace to
+    /// hit the Fable limit …" and `windowDurationHours` (the scoped window's
+    /// length) so the "burning about X%/hr" line is derived from the right
+    /// window, not the fixed 5h/7d assumption. When both are nil the fixed
+    /// behaviour is reproduced byte-for-byte. The opt-in gate + cold-start guard
+    /// live in the scoped caller (`ScopedRateLimitAlerts.shouldWarnBurnRate`).
     public func handleBurnRateWarning(
         window: String,
         projection: BurnRate.Projection,
@@ -366,6 +374,8 @@ public final class NotificationCoordinator {
         hitRangeEarliest: Date? = nil,
         hitRangeLatest: Date? = nil,
         capPaceRatio: Double? = nil,
+        labelOverride: String? = nil,
+        windowDurationHours: Double? = nil,
         context: ModelContext
     ) async {
         let defaults = PacerSettings.store
@@ -391,7 +401,9 @@ public final class NotificationCoordinator {
 
         await requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
-        let label: String = window == "five_hour" ? "5-hour" : "7-day"
+        // Scoped windows pass their human name; fixed windows fall back to the
+        // 5h/7d label derived from the key.
+        let label: String = labelOverride ?? (window == "five_hour" ? "5-hour" : "7-day")
         // Title carries the point ETA (points not ranges — Eric, 2026-07-06);
         // the calibrated earliest–latest range lives in the body's "likely
         // between…" line where there's room for it.
@@ -415,8 +427,9 @@ public final class NotificationCoordinator {
         if let ratio = capPaceRatio, ratio > 0.05 {
             // Plain %/hr, not the "N× sustainable pace" jargon (Eric,
             // 2026-06-12). Derive the rate from the ratio so this stays a
-            // pure function of what the caller already passes.
-            let windowHours = window == RateLimitWindowName.fiveHour ? 5.0 : 7.0 * 24
+            // pure function of what the caller already passes. Scoped windows
+            // pass their own length; fixed windows keep the 5h/7d assumption.
+            let windowHours = windowDurationHours ?? (window == RateLimitWindowName.fiveHour ? 5.0 : 7.0 * 24)
             let slope = ratio * (100.0 / windowHours)
             status += String(format: ", burning about %.1f%%/hr", slope)
         }
