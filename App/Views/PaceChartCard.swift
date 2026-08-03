@@ -31,12 +31,25 @@ struct PaceChartCard: View {
     /// own filter pass.
     @Query private var samples: [RateLimitSample]
 
-    /// Recent scoped `limits[]` rows, newest first. Bounded so the query never
-    /// scans the full append-only history: it feeds the latest-batch column set
-    /// plus a recent actual-line tail under each scoped column (the dashed
-    /// projection carries the forecast on to reset) — the same bounded-tail
-    /// pattern the retired scoped-limits tile card used.
-    @Query(PaceChartCard.scopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    /// The newest scoped `limits[]` rows, newest first — just enough to resolve
+    /// the latest poll's batch, which is what decides the scoped column set.
+    /// Whole rows: the label, group→duration, binding flag and severity all
+    /// read fields a columnar projection wouldn't fetch.
+    @Query(PaceChartCard.scopedLatestDescriptor) private var scopedLatest: [UsageLimitSample]
+
+    /// Scoped rows over the same 8-day window the fixed query uses — the
+    /// actual-usage line under each scoped column. Separate from the batch
+    /// query because the two want opposite things: the batch needs whole rows
+    /// but only the newest few, while the line needs thousands of rows but
+    /// only four scalars, so this one is columnar (see `docs/perf-tuning.md`).
+    ///
+    /// It has no `fetchLimit` on purpose. A flat cap here is a *cap on how much
+    /// of the cycle you can see*: at the real poll cadence (~1/min) and one row
+    /// per limit per poll, 600 rows is about three hours — 2% of a weekly
+    /// window — so the scoped line rendered as a stub near "now" no matter how
+    /// long the cycle had been running. The 8-day cutoff bounds it by time
+    /// instead, which is the bound that matches what the chart draws.
+    @Query private var scopedHistory: [UsageLimitSample]
 
     /// The shared intelligence engine — single source of the forecast
     /// trajectories (the dashed overlay; the compare-models modal asks the
@@ -79,16 +92,27 @@ struct PaceChartCard: View {
         // RateLimitSample objects on every store save. See docs/perf-tuning.md.
         descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
         _samples = Query(descriptor)
+
+        // Same cutoff, same columnar treatment, for the scoped actual lines.
+        // Built here rather than in a `static let` so the 8 days are measured
+        // from when the view was created: a process-lifetime constant would
+        // keep its launch-day cutoff and quietly widen the query by a day for
+        // every day Pacer stays open.
+        var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+        )
+        scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
+        _scopedHistory = Query(scopedDescriptor)
     }
 
-    /// Recent scoped rows, newest first, bounded. Unlike the fixed query this
-    /// can't restrict `propertiesToFetch` — the latest-batch filter, label,
-    /// group→duration, binding flag, and severity all read whole rows.
-    private static let scopedDescriptor: FetchDescriptor<UsageLimitSample> = {
+    /// Newest scoped rows, whole, capped well above any plausible `limits[]`
+    /// count so one poll's batch always fits.
+    private static let scopedLatestDescriptor: FetchDescriptor<UsageLimitSample> = {
         var d = FetchDescriptor<UsageLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
-        d.fetchLimit = 600
+        d.fetchLimit = 120
         return d
     }()
 
@@ -119,50 +143,6 @@ struct PaceChartCard: View {
         struct SeverityTag: Equatable { let text: String; let band: UsageBand }
     }
 
-    // MARK: - Chart-data builders (one per source)
-
-    /// Fixed-window actual line from `RateLimitSample`. Byte-for-byte the old
-    /// `PaceChartColumn.chartData`: synthesizes a "now" tail so the line tracks
-    /// to current time even if the latest sample is a few minutes old.
-    static func fixedBaseChart(samples: [RateLimitSample], duration: TimeInterval, now: Date) -> PaceChartView.Data? {
-        guard let latest = samples.first, let resets = latest.resetsAt else { return nil }
-        let cycleStart = resets.addingTimeInterval(-duration)
-        var points = samples
-            .inCycle(resetting: resets, duration: duration)
-            .filter { $0.sampledAt >= cycleStart && $0.sampledAt <= now }
-            .sorted { $0.sampledAt < $1.sampledAt }
-            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.usedPercentage) }
-        let tailTime = min(now, resets)
-        if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: latest.usedPercentage))
-        }
-        return PaceChartView.Data(
-            cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-            points: points, usedPct: latest.usedPercentage)
-    }
-
-    /// Scoped-window actual line from this identity's `UsageLimitSample` history
-    /// in the current cycle, plus a synthesized "now" tail. Projection-free
-    /// (the column layers it), matching the fixed builder's shape.
-    static func scopedBaseChart(row: UsageLimitSample, history: [UsageLimitSample],
-                                duration: TimeInterval, now: Date) -> PaceChartView.Data? {
-        guard let resets = row.resetsAt else { return nil }
-        let cycleStart = resets.addingTimeInterval(-duration)
-        var points = history
-            .filter { $0.identity == row.identity && $0.resetsAt == resets
-                   && $0.sampledAt >= cycleStart && $0.sampledAt <= now }
-            .sorted { $0.sampledAt < $1.sampledAt }
-            .map { PaceChartView.Data.Point(time: $0.sampledAt, value: $0.percent) }
-        let tailTime = min(now, resets)
-        if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: row.percent))
-        }
-        guard !points.isEmpty else { return nil }
-        return PaceChartView.Data(
-            cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-            points: points, usedPct: row.percent)
-    }
-
     // MARK: - Column set
 
     private struct Bucketed {
@@ -189,7 +169,7 @@ struct PaceChartCard: View {
     /// Account-wide `session`/`weekly_all` rows are excluded — the fixed 5h/7d
     /// hero columns already own those (Decision C).
     private var scopedRows: [UsageLimitSample] {
-        scopedSamples.latestBatch().filter {
+        scopedLatest.latestBatch().filter {
             ($0.modelId?.isEmpty == false)
                 || ($0.modelDisplayName?.isEmpty == false)
                 || ($0.surface?.isEmpty == false)
@@ -228,8 +208,8 @@ struct PaceChartCard: View {
             tagged.append((side, Column(
                 id: row.identity, title: row.label, duration: duration,
                 usedPct: row.percent, resetsAt: row.resetsAt,
-                baseChart: Self.scopedBaseChart(row: row, history: scopedSamples,
-                                                duration: duration, now: now),
+                baseChart: .cycle(scoped: row, history: scopedHistory,
+                                  duration: duration, now: now),
                 isActive: row.isActive, severity: severity, isScoped: true)))
         }
         return tagged
@@ -250,7 +230,7 @@ struct PaceChartCard: View {
         return Column(
             id: key, title: title, duration: duration,
             usedPct: latest?.usedPercentage, resetsAt: latest?.resetsAt,
-            baseChart: Self.fixedBaseChart(samples: samples, duration: duration, now: now),
+            baseChart: .cycle(fixed: samples, duration: duration, now: now),
             isActive: false, severity: nil, isScoped: false)
     }
 
@@ -455,14 +435,7 @@ private struct PaceColumn: View {
         // At/over the cap the trajectory collapses to its origin — fall back to
         // the projection-free chart.
         guard pts.count >= 2 else { return base }
-        return PaceChartView.Data(
-            cycleStart: base.cycleStart,
-            resetsAt: base.resetsAt,
-            durationSeconds: base.durationSeconds,
-            points: base.points,
-            usedPct: base.usedPct,
-            projection: pts,
-            projectionCrossesFullAt: rebased.crossesFullAt)
+        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt)
     }
 
     var body: some View {

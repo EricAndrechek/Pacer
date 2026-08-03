@@ -54,6 +54,13 @@ These are subtle, easy to miss, and break user-visible numbers:
 6. **Defensive parse-or-skip everywhere.** A single malformed line
    (often a truncated final line on a live session) must not break the
    scan.
+7. **Never match a rate-limit cycle with `resetsAt ==`.** The server
+   re-serializes `resets_at` per response and it jitters in the
+   milliseconds — one 7-day cycle carries thousands of distinct reset
+   instants. Cycle membership goes through `RateLimitCycle.contains`
+   (within half a window, `nil` counts as in-cycle), which both
+   `RateLimitSample.inCycle` and `UsageLimitSample.inCycle` call.
+   Exact equality matches ~1 row and collapses a chart to a single dot.
 
 ## What NOT to do
 
@@ -531,6 +538,16 @@ git log for "Views/Widgets: scope @Query" or "HourlyAggregate" or
   every SwiftData save materializes the whole table just to answer the
   question — see `WelcomeCard`, `LiveActivityCard.latestSampleProbe`,
   `LiveSessionWidget`.
+- **Bound history queries by TIME, not row count.** A `fetchLimit` on a
+  series a chart *draws* is a silent cap on how much of that series the
+  user can see, and it moves whenever write cadence does. The scoped pace
+  line was capped at 600 rows shared across every `limits[]` window; when
+  polling went adaptive (~1/min, #120) that became ~3 hours of a 7-day
+  cycle and the chart rendered as a stub. Use a cutoff predicate matching
+  what's plotted, plus `propertiesToFetch` to keep it cheap; keep
+  `fetchLimit` only as a burst backstop, set far above the real volume.
+  Compute the cutoff per view init — a `static let` freezes at process
+  start and widens the query by a day for every day the app stays open.
 
 ### Body work — cache derived values; never iterate raw rows in a view
 

@@ -61,39 +61,18 @@ struct ProjectionCompareModal: View {
     /// backs this window (fixed 5h/7d → `RateLimitSample`; scoped → the scoped
     /// identity's `UsageLimitSample` history).
     private var chartData: PaceChartView.Data? {
-        let latest: (resets: Date, used: Double)?
-        let pointsRaw: [(time: Date, value: Double)]
-        if isFixed {
-            guard let l = samples.last, let resets = l.resetsAt else { return nil }
-            latest = (resets, l.usedPercentage)
-            pointsRaw = samples
-                .inCycle(resetting: resets, duration: duration)
-                .map { ($0.sampledAt, $0.usedPercentage) }
-        } else {
-            guard let l = scopedSamples.last, let resets = l.resetsAt else { return nil }
-            latest = (resets, l.percent)
-            pointsRaw = scopedSamples
-                .filter { $0.resetsAt == resets }
-                .map { ($0.sampledAt, $0.percent) }
-        }
-        guard let latest else { return nil }
-        let resets = latest.resets
-        let cycle = DisplayCycle.resolve(resetsAt: resets, duration: duration)
-        guard !cycle.isAwaiting else { return nil }
-        let cycleStart = resets.addingTimeInterval(-duration)
         let now = Date()
-        var points = pointsRaw
-            .filter { $0.time >= cycleStart && $0.time <= now }
-            .sorted { $0.time < $1.time }
-            .map { PaceChartView.Data.Point(time: $0.time, value: $0.value) }
-        let tailTime = min(now, resets)
-        if points.last?.time != tailTime {
-            points.append(.init(time: tailTime, value: latest.used))
+        let data: PaceChartView.Data?
+        if isFixed {
+            data = .cycle(fixed: samples, duration: duration, now: now)
+        } else {
+            guard let row = scopedSamples.last else { return nil }
+            data = .cycle(scoped: row, history: scopedSamples, duration: duration, now: now)
         }
-        return PaceChartView.Data(
-            cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-            points: points, usedPct: latest.used
-        )
+        guard let data,
+              !DisplayCycle.resolve(resetsAt: data.resetsAt, duration: duration).isAwaiting
+        else { return nil }
+        return data
     }
 
     /// "62% used · resets Mon 6 AM" — the cycle context the chart is read in.

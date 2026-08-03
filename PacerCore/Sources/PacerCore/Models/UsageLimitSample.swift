@@ -179,6 +179,27 @@ public extension Sequence where Element == UsageLimitSample {
             }
     }
 
+    /// One scoped window's rows for the cycle resetting at `resets`, ascending
+    /// by time — the actual-usage line for a `limits[]` identity, the scoped
+    /// mirror of `RateLimitSample.inCycle`.
+    ///
+    /// Both filters matter and both are easy to get wrong on their own:
+    ///
+    /// - **Identity.** Every poll writes one row per limit, so an unfiltered
+    ///   history interleaves every window's curve.
+    /// - **Cycle.** Membership goes through `RateLimitCycle.contains`, never
+    ///   `resetsAt ==`. The server's `resets_at` jitters by a few hundred
+    ///   milliseconds between polls, so exact equality matches only the rows
+    ///   that happen to share the newest row's millisecond — in practice one
+    ///   row — and the chart collapses to a single dot at "now".
+    func inCycle(identity: String, resetting resets: Date, duration: TimeInterval) -> [UsageLimitSample] {
+        filter {
+            $0.identity == identity
+                && RateLimitCycle.contains(sampleReset: $0.resetsAt, resets: resets, duration: duration)
+        }
+        .sorted { $0.sampledAt < $1.sampledAt }
+    }
+
     /// Rows that carry a *genuine* per-model / per-surface scope — i.e. a real
     /// scoped window (a "Fable" weekly cap) rather than an account-wide
     /// `session`/`weekly_all` row that merely duplicates the fixed 5h/7d hero

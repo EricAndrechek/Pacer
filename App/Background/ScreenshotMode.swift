@@ -125,6 +125,16 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for the scoped-history work: the pace card over a
+        // scoped window seeded at the real poll cadence with the real
+        // sub-second `resets_at` jitter — the regression proof that the scoped
+        // actual line plots its whole cycle and not just the newest reading.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_SCOPED_HISTORY_ONLY"] == "1" {
+            await captureScopedHistoryScenes()
+            log("scoped-history screenshots complete")
+            return
+        }
+
         // Warm an intelligence engine over the seeded in-memory store so the
         // engine-powered cards (intelligence card, projected EOD/month tiles,
         // burn rows) render real answers instead of their warming-up states.
@@ -579,6 +589,95 @@ enum ScreenshotMode {
         await capture(name, width: width, height: nil, scheme: .light,
                       card: true, container: container) { PaceChartCard() }
         screenshotEngine = previous
+    }
+
+    // MARK: - Scoped-history proof scene
+
+    /// Render the `scoped-history-*` proof capture for the scoped pace line.
+    ///
+    /// Every other seeder writes scoped rows the *tidy* way — one row an hour
+    /// with a byte-identical `resetsAt` on all of them. The real server is
+    /// neither: it is polled about once a minute (adaptive polling, #120) and
+    /// its `resets_at` jitters by a few hundred milliseconds from poll to poll,
+    /// so a single weekly cycle carries a couple thousand rows with a couple
+    /// thousand *distinct* reset instants. Both properties matter — an exact
+    /// `resetsAt ==` cycle filter drops the whole history, and a small row cap
+    /// clips the tail to the last few hours — so this scene seeds them and
+    /// captures the pace card as the regression proof for both.
+    private static func captureScopedHistoryScenes() async {
+        await captureScopedHistoryScene("scoped-history-fable", width: 940)
+    }
+
+    private static func captureScopedHistoryScene(_ name: String, width: CGFloat) async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ \(name): container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        seedRateLimits(ctx, now: now)
+        seedRealisticScoped(ctx, now: now)
+        do { try ctx.save() } catch { log("⚠️ \(name): seed save failed: \(error)") }
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: now)
+        let previous = screenshotEngine
+        screenshotEngine = engine
+        await capture(name, width: width, height: nil, scheme: .dark,
+                      card: true, container: container) { PaceChartCard() }
+        screenshotEngine = previous
+    }
+
+    /// Seed one scoped weekly window (plus the two account-wide rows that ride
+    /// along in every real `limits[]` response) at the real poll cadence and
+    /// with the real sub-second `resets_at` jitter. ~22% into the cycle, a
+    /// bursty monotone climb to 15% — i.e. the shape of the chart that exposed
+    /// the bug.
+    private static func seedRealisticScoped(_ ctx: ModelContext, now: Date) {
+        let duration: TimeInterval = 7 * 86_400
+        let elapsedFraction = 0.22
+        let cycleStart = now.addingTimeInterval(-duration * elapsedFraction)
+        let resetsAt = cycleStart.addingTimeInterval(duration)
+        // Real cadence: adaptive polling settles around one call a minute.
+        let interval: TimeInterval = 55
+        let sessionReset = now.addingTimeInterval(2 * 3_600 + 19 * 60)
+
+        var t = cycleStart
+        var i = 0
+        var scopedLast = 0.0
+        while t <= now {
+            // Sub-second reset jitter — the server re-serializes `resets_at`
+            // per response, so consecutive polls disagree in the milliseconds.
+            let jitter = (noise(i &* 31) - 0.5)
+            let scopedReset = resetsAt.addingTimeInterval(jitter)
+            let frac = t.timeIntervalSince(cycleStart) / (now.timeIntervalSince(cycleStart))
+            // Bursty: two working sessions separated by a quiet stretch.
+            let shape = frac < 0.35 ? frac * 1.7
+                      : frac < 0.62 ? 0.60 + (frac - 0.35) * 0.25
+                      : 0.67 + (frac - 0.62) * 0.87
+            var pct = (15.0 * shape).rounded()
+            pct = max(scopedLast, pct)
+            scopedLast = pct
+            ctx.insert(UsageLimitSample(
+                sampledAt: t, identity: "weekly_scoped|Fable|", kind: "weekly_scoped",
+                group: "weekly", label: "Fable", percent: pct, resetsAt: scopedReset,
+                severity: "normal", isActive: true,
+                modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth"))
+            // The account-wide rows every poll also carries — they share the
+            // row budget with the scoped window, which is what made a flat
+            // fetch cap clip the scoped tail so aggressively.
+            ctx.insert(UsageLimitSample(
+                sampledAt: t, identity: "session||", kind: "session", group: "session",
+                label: "All models", percent: 39, resetsAt: sessionReset.addingTimeInterval(jitter),
+                severity: "normal", isActive: false,
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+            ctx.insert(UsageLimitSample(
+                sampledAt: t, identity: "weekly_all||", kind: "weekly_all", group: "weekly",
+                label: "All models", percent: 71, resetsAt: resetsAt.addingTimeInterval(jitter),
+                severity: "normal", isActive: false,
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+            t = t.addingTimeInterval(interval)
+            i += 1
+        }
     }
 
     // MARK: - Widget window-picker proof scenes

@@ -77,16 +77,9 @@ public final class RateLimitSample {
 
 public extension Sequence where Element == RateLimitSample {
     /// Samples that belong to the cycle resetting at `resets` — i.e. with
-    /// the stragglers from neighboring cycles dropped.
-    ///
-    /// Each sample carries its own `resetsAt`, so cycle membership is a
-    /// direct property of the row, not an inference from its timestamp.
-    /// A sample is in-cycle when its `resetsAt` matches `resets` (within
-    /// half a window — consecutive resets are always ≥ one window apart,
-    /// while a single cycle's `resets_at` only jitters by ~1s across
-    /// polls), or when it's `nil` (the server returns `resets_at: null`
-    /// for the post-reset 0%-used readings, before the new window
-    /// re-anchors on your next message).
+    /// the stragglers from neighboring cycles dropped. Membership is
+    /// `RateLimitCycle.contains` (jitter-tolerant, nil-keeping), the same
+    /// rule the scoped `UsageLimitSample` history uses.
     ///
     /// The chart consumers used to scope a cycle purely by timestamp
     /// (`sampledAt >= resets - duration`). Because the 7-day reset lands
@@ -98,10 +91,6 @@ public extension Sequence where Element == RateLimitSample {
     /// chart's left edge. Filtering on the sample's own reset removes it
     /// regardless of sub-second boundary jitter.
     func inCycle(resetting resets: Date, duration: TimeInterval) -> [RateLimitSample] {
-        let tolerance = duration / 2
-        return filter { sample in
-            guard let sampleReset = sample.resetsAt else { return true }
-            return abs(sampleReset.timeIntervalSince(resets)) < tolerance
-        }
+        filter { RateLimitCycle.contains(sampleReset: $0.resetsAt, resets: resets, duration: duration) }
     }
 }
