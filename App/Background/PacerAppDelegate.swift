@@ -112,6 +112,22 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
+        // DuckDB archive spike: read the REAL store (read-only — the scan
+        // loop never starts), write a throwaway archive into the App Group
+        // container, report, exit. Same shape as screenshot mode: no menu
+        // bar, no hotkey, no background service, no writes.
+        if ArchiveSpike.isActive {
+            PacerSettings.registerDefaults()
+            do {
+                container = try PacerStore.makeModelContainer()
+            } catch {
+                Self.showFatalContainerError(error)
+            }
+            backgroundService = AppBackgroundService(container: container)
+            super.init()
+            return
+        }
+
         // Redirect stderr to a log file before anything else so the
         // ScanCoordinator/OAuthPoller log lines (via PacerCore.Log)
         // land somewhere readable. The retired daemon got its
@@ -273,6 +289,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 await SampleCostCache.reload()
                 ScreenshotMode.seed(into: container)
                 await ScreenshotMode.captureAll(container: container)
+                exit(0)
+            }
+            return
+        }
+
+        // DuckDB archive spike — see `ArchiveSpike`.
+        if ArchiveSpike.isActive {
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                await ArchiveSpike.run(container: container)
                 exit(0)
             }
             return

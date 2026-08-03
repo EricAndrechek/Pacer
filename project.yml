@@ -135,6 +135,37 @@ targets:
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
+        # --- DuckDB archive SPIKE (branch: spike/duckdb-integration) ---
+        # Proving a large C++ static library links into the real target,
+        # survives the hardened runtime + notarization, and can write into
+        # the App Group container. Resolves against Homebrew's `duckdb`
+        # formula, which is a DEV-MACHINE dependency: shipping this means
+        # vendoring a minimal build (no parquet/json/icu/autocomplete —
+        # measured at 19.2 MB vs 32.3 MB for all of them) as an XCFramework
+        # built against MACOSX_DEPLOYMENT_TARGET, so CI and contributors
+        # don't need Homebrew. The widget extension deliberately does NOT
+        # link it — widgets read SwiftData rollups only, so their memory
+        # budget is untouched.
+        SWIFT_OBJC_BRIDGING_HEADER: App/Archive/PacerArchiveBridge.h
+        HEADER_SEARCH_PATHS: $(inherited) /opt/homebrew/opt/duckdb/include
+        OTHER_LDFLAGS: >-
+          $(inherited)
+          /opt/homebrew/opt/duckdb/lib/libduckdb_static.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_fastpforlib.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_fmt.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_fsst.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_hyperloglog.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_mbedtls.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_miniz.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_pg_query.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_re2.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_skiplistlib.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_utf8proc.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_yyjson.a
+          /opt/homebrew/opt/duckdb/lib/libduckdb_zstd.a
+          /opt/homebrew/opt/duckdb/lib/libdummy_static_extension_loader.a
+          -lc++
+          -Wl,-dead_strip
     dependencies:
       - package: PacerCore
         product: PacerCore
