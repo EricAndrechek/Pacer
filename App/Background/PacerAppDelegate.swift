@@ -298,7 +298,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ArchiveSpike.isActive {
             NSApp.setActivationPolicy(.accessory)
             Task { @MainActor in
-                await ArchiveSpike.run(container: container)
+                if ArchiveSpike.isColdStart {
+                    await ArchiveSpike.runColdStart()
+                } else {
+                    await ArchiveSpike.run(container: container)
+                }
                 exit(0)
             }
             return

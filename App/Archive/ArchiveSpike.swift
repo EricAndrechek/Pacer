@@ -28,6 +28,49 @@ enum ArchiveSpike {
 
     static var isActive: Bool {
         ProcessInfo.processInfo.environment["PACER_ARCHIVE_SPIKE"] == "1"
+            || ProcessInfo.processInfo.environment["PACER_COLD_START_SPIKE"] == "1"
+    }
+
+    /// Measure what a *first* launch actually costs: an empty store, the real
+    /// scanner, the user's whole `~/.claude` history.
+    ///
+    /// This is the number the bulk-ingest design hinges on. "Swift is slow at
+    /// ingesting months of history" splits into two very different costs —
+    /// parsing the JSONL, and inserting rows into SwiftData — and only the
+    /// first is one DuckDB can take over. If the cold start is parse-bound,
+    /// routing the backfill through DuckDB fixes it; if it's insert-bound,
+    /// the rows have to stop landing in SwiftData at all for it to matter.
+    /// The scan report's phase timings separate the two.
+    static var isColdStart: Bool {
+        ProcessInfo.processInfo.environment["PACER_COLD_START_SPIKE"] == "1"
+    }
+
+    static func runColdStart() async {
+        log("cold-start ingest: empty in-memory store, real scanner, real ~/.claude")
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("FAIL: in-memory container"); return
+        }
+        await SampleCostCache.reload()
+        let coordinator = ScanCoordinator(container: container)
+        let start = Date()
+        do {
+            let report = try await coordinator.runOnce()
+            let elapsed = Date().timeIntervalSince(start)
+            let p = report.phaseTimings
+            log(String(format: "TOTAL cold ingest: %.1f s (scan report: %.1f s)",
+                       elapsed, report.durationSeconds))
+            log("  parsed \(report.scanProgress.entriesParsed) entries from "
+                + "\(report.scanProgress.filesScanned) files, "
+                + "inserted \(report.persisterStats.inserted), "
+                + "deduped \(report.persisterStats.skippedAsDuplicate)")
+            log(String(format: "  PARSE  (scan phase, JSONL→entries):  %8.0f ms", p.scanMs))
+            log(String(format: "  INSERT (save phase, entries→store):  %8.0f ms", p.saveMs))
+            log(String(format: "  flush %.0f · daily %.0f · hourly %.0f · project %.0f · session %.0f ms",
+                       p.flushMs, p.dailyRecomputeMs, p.hourlyRecomputeMs,
+                       p.projectRecomputeMs, p.sessionRecomputeMs))
+        } catch {
+            log("FAIL: scan threw \(error)")
+        }
     }
 
     /// Throwaway file — deliberately NOT the name a shipping archive would

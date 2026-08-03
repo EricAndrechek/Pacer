@@ -60,3 +60,11 @@ updates/
 # so every contributor/agent gets them, e.g. .claude/skills/ship).
 .claude/*
 !.claude/skills/
+
+# Vendored DuckDB static XCFramework — ~78 MB, rebuilt by
+# bin/build-duckdb-xcframework.sh. Never committed: every version bump
+# would add another copy to git history permanently. CI and contributors
+# get it from the pinned .binaryTarget once published, or by running the
+# script.
+Vendor/DuckDB.xcframework/
+Vendor/DuckDB.xcframework.zip
