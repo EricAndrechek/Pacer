@@ -68,6 +68,25 @@ enum ArchiveSpike {
             log(String(format: "  flush %.0f · daily %.0f · hourly %.0f · project %.0f · session %.0f ms",
                        p.flushMs, p.dailyRecomputeMs, p.hourlyRecomputeMs,
                        p.projectRecomputeMs, p.sessionRecomputeMs))
+
+            // Field-level totals for the differential test against the DuckDB
+            // extraction. A matching row COUNT proves the filter and dedup
+            // agree; only per-field sums prove the mapping does — a swapped
+            // cache tier or a missed legacy-sum fallback keeps the count
+            // identical while silently changing everyone's cost.
+            let ctx = ModelContext(container)
+            if let rows = try? ctx.fetch(FetchDescriptor<TokenSample>()) {
+                var input: Int64 = 0, output: Int64 = 0, read: Int64 = 0
+                var cc5m: Int64 = 0, cc1h: Int64 = 0
+                for r in rows {
+                    input += r.inputTokens; output += r.outputTokens
+                    read += r.cacheReadTokens
+                    cc5m += r.cacheCreation5mTokens; cc1h += r.cacheCreation1hTokens
+                }
+                log("  TOTALS rows=\(rows.count) input=\(input) output=\(output) "
+                    + "cacheRead=\(read) cc5m=\(cc5m) cc1h=\(cc1h) "
+                    + "all=\(input + output + read + cc5m + cc1h)")
+            }
         } catch {
             log("FAIL: scan threw \(error)")
         }
