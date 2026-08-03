@@ -578,5 +578,23 @@
             type="application/octet-stream"
             sparkle:edSignature="3/9wmJZRYUCUBe33Wi2G4iDw5NgA4QipIEplhbym8cLUoCjnsv2CSR77bDqP/ZbMXAjhkn4PQ5yoPAcjy5KxDQ==" />
     </item>
+            <item>
+        <title>Version 0.4.1</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>Scoped per-model pace charts plot their whole cycle, not one dot by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5049735019" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/122" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/122/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/122">EricAndrechek/Pacer#122</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.0...v0.4.1">EricAndrechek/Pacer@<tt>v0.4.0...v0.4.1</tt></a></p>]]></description>
+        <pubDate>Mon, 03 Aug 2026 12:33:40 +0000</pubDate>
+        <sparkle:version>1785760123</sparkle:version>
+        <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.1/Pacer-0.4.1.dmg"
+            length="8109436"
+            type="application/octet-stream"
+            sparkle:edSignature="SwAhRNileXXqr1m0pTbRDSEg+G3lS5JN90oQxqoJOFiJSoyvqej0xe7XHi+1HCl3FwTF75PdkFzPSCGvN60UBg==" />
+    </item>
         </channel>
 </rss>
