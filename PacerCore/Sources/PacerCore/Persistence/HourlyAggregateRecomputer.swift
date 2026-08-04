@@ -161,13 +161,24 @@ public final class HourlyAggregateRecomputer {
         // — a few hundred rows even on a heavy session — so the
         // in-memory hour filter is negligible vs the saving of not
         // running a separate sampledAt-range predicate per hour.
+        //
+        // UPDATE: the hour is now STORED, so it belongs in the predicate. The
+        // note above assumed "a few hundred rows" per (day, model); on a real
+        // store it is ~3,000, and rebuilding a couple of hour buckets was
+        // materializing ~18,000 rows and costing 1.4 s of a 4.5 s cycle.
+        //
+        // `localHour < 0` is still admitted because rows written before the
+        // field existed carry -1 and must not silently drop out of their
+        // bucket. That set only shrinks — the integrity walk backfills it —
+        // so this converges on fetching just the bucket.
+        let targetHour = bucket.hour
         let sampleDescriptor = FetchDescriptor<TokenSample>(
             predicate: #Predicate<TokenSample> {
                 $0.date == dateString && $0.model == modelString
+                    && ($0.localHour == targetHour || $0.localHour < 0)
             }
         )
         let allDayModelSamples = try context.fetch(sampleDescriptor)
-        let targetHour = bucket.hour
         let samples = allDayModelSamples.filter { sample in
             // The STORED hour, falling back to derivation only for rows
             // written before the field existed. Deriving here would put this

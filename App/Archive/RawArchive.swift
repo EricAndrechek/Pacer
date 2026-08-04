@@ -138,14 +138,22 @@ final class RawArchive {
     /// Sums for verifying against SwiftData. `CAST(... AS BIGINT)` because
     /// `SUM(BIGINT)` yields HUGEINT, which the C scalar accessor can't read —
     /// the same trap that made an early spike report a phantom mismatch.
-    func totals() throws -> Totals {
+    /// - Parameter beforeDate: only count turns whose local `date` sorts
+    ///   before this `YYYY-MM-DD` string. Day-bounded rather than
+    ///   instant-bounded so the store side can be answered from
+    ///   `DailyAggregate` — comparing whole days is the difference between a
+    ///   200-row read and materializing every sample.
+    func totals(beforeDate: String? = nil) throws -> Totals {
+        // Safe to interpolate: callers pass a formatted date, and the column
+        // is compared as text. Quoted defensively all the same.
+        let filter = beforeDate.map { " WHERE date < '\($0.replacingOccurrences(of: "'", with: ""))'" } ?? ""
         var t = Totals()
-        t.rows = try scalar("SELECT COUNT(*) FROM turn")
-        t.input = try scalar("SELECT CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) FROM turn")
-        t.output = try scalar("SELECT CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) FROM turn")
-        t.cacheRead = try scalar("SELECT CAST(COALESCE(SUM(cache_read),0) AS BIGINT) FROM turn")
-        t.cc5m = try scalar("SELECT CAST(COALESCE(SUM(cache_creation_5m),0) AS BIGINT) FROM turn")
-        t.cc1h = try scalar("SELECT CAST(COALESCE(SUM(cache_creation_1h),0) AS BIGINT) FROM turn")
+        t.rows = try scalar("SELECT COUNT(*) FROM turn" + filter)
+        t.input = try scalar("SELECT CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) FROM turn" + filter)
+        t.output = try scalar("SELECT CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) FROM turn" + filter)
+        t.cacheRead = try scalar("SELECT CAST(COALESCE(SUM(cache_read),0) AS BIGINT) FROM turn" + filter)
+        t.cc5m = try scalar("SELECT CAST(COALESCE(SUM(cache_creation_5m),0) AS BIGINT) FROM turn" + filter)
+        t.cc1h = try scalar("SELECT CAST(COALESCE(SUM(cache_creation_1h),0) AS BIGINT) FROM turn" + filter)
         return t
     }
 

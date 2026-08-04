@@ -35,9 +35,14 @@ final class ArchiveSync {
     private var appendedTotal = 0
     private var nextLogAt = 1
     private var lastReconcileAt: Date?
+    private var lastVerifyAt: Date?
 
     /// How often the trailing window is reconciled rather than trusted.
     private static let reconcileInterval: TimeInterval = 30 * 60
+    /// How often the archive is compared against the store. Hourly: often
+    /// enough that a divergence is caught the same day, rare enough that six
+    /// aggregate scans of each side cost nothing.
+    private static let verifyInterval: TimeInterval = 60 * 60
     /// How far back reconciliation looks. Replay reach-back was measured on a
     /// real corpus at p99 6.07 days and max 7.15; 30 days is ~4x the observed
     /// worst case, and `--resume` can always target something older, which is
@@ -86,18 +91,25 @@ final class ArchiveSync {
                 // caught only because the check counted one row too many.
                 pending: Set(rows.compactMap(\.dedupKey))))
 
-            guard !rows.isEmpty else { return }
-            try archive.append(rows)
+            if !rows.isEmpty { try archive.append(rows) }
             // Advanced only after the append succeeded, so a failed write is
             // retried rather than skipped.
-            watermark = newest
+            if !rows.isEmpty { watermark = newest }
             appendedTotal += rows.count
             // Logged sparsely — every cycle would be noise, but silence made
             // it impossible to tell "working" from "never ran".
-            if appendedTotal >= nextLogAt {
+            if !rows.isEmpty, appendedTotal >= nextLogAt {
                 Log.write("ArchiveSync", "archived \(appendedTotal) turn(s) this session")
                 nextLogAt = appendedTotal + 500
             }
+
+            // Verify from inside the app, because from outside it can't be:
+            // DuckDB's exclusive lock means `make verify-data` can only check
+            // the archive with Pacer closed, which in practice means almost
+            // never. A second copy that is never compared is just a second
+            // chance to be wrong — and this archive had already lost 32 turns
+            // before anything compared them.
+            try verifyIfDue(archive: archive, context: context)
         } catch {
             Log.write("ArchiveSync", "disabled after error: \(error)")
             disabled = true
@@ -140,6 +152,65 @@ final class ArchiveSync {
                       "reconcile: \(missed.count) turn(s) the watermark had skipped")
         }
         return missed
+    }
+
+    /// Compare the archive against the store over a settled window and record
+    /// the verdict where `make verify-data` can read it without the lock.
+    ///
+    /// The window is whole days ending before today, because the guarantee is
+    /// eventual, not instantaneous — comparing right up to the newest turn
+    /// reports ordinary sync lag as corruption, which is the false alarm that
+    /// made the first version of this check useless.
+    private func verifyIfDue(archive: RawArchive, context: ModelContext) throws {
+        let now = Date()
+        if let last = lastVerifyAt, now.timeIntervalSince(last) < Self.verifyInterval { return }
+        lastVerifyAt = now
+
+        // Whole days only, ending before today. Two reasons: today is still
+        // being written on both sides, and comparing at a day boundary lets
+        // the store side be answered from `DailyAggregate` — ~200 rows — where
+        // summing the samples themselves means materializing all 190k, which
+        // measured ~10.9 s. An integrity check that costs ten seconds an hour
+        // on the scan actor is a regression, not a safeguard.
+        //
+        // Chaining through the rollup is sound because `make verify-data`
+        // already proves hourly == samples; this adds archive == hourly.
+        let today = TokenSample.formatDate(now)
+        let archived = try archive.totals(beforeDate: today)
+
+        // Hourly rather than daily purely because it carries `sampleCount`,
+        // so the row count is checked too and not just the token sums. ~1,500
+        // rows against ~190,000.
+        var stored = RawArchive.Totals()
+        let days = try context.fetch(FetchDescriptor<HourlyAggregate>(
+            predicate: #Predicate<HourlyAggregate> { $0.date < today }))
+        for day in days {
+            stored.rows += Int64(day.sampleCount)
+            stored.input += day.inputTokens
+            stored.output += day.outputTokens
+            stored.cacheRead += day.cacheReadTokens
+            stored.cc5m += day.cacheCreation5mTokens
+            stored.cc1h += day.cacheCreation1hTokens
+        }
+
+        let stamp = Int(now.timeIntervalSince1970)
+        let verdict: String
+        if archived == stored {
+            verdict = "ok|\(stamp)|\(archived.rows)"
+        } else {
+            let detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
+            verdict = "mismatch|\(stamp)|\(detail)"
+            Log.write("ArchiveSync", "INTEGRITY: archive disagrees with the store — \(detail)")
+        }
+        try writeMeta(ClaudeCodeMetaKey.archiveIntegrity, value: verdict, context: context)
+    }
+
+    private func writeMeta(_ key: String, value: String, context: ModelContext) throws {
+        let existing = try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })).first
+        if let existing { existing.value = value }
+        else { context.insert(ClaudeCodeMeta(key: key, value: value)) }
+        try context.save()
     }
 
     /// Turns currently archived — for `make verify-data` and diagnostics.

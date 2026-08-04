@@ -154,7 +154,25 @@ elif ! command -v duckdb >/dev/null 2>&1; then
   printf '  - skipped: duckdb CLI not installed (brew install duckdb)\n'
 elif ! d_rows="$(duckdb -noheader -list -readonly "$ARCHIVE" \
         "SELECT COUNT(*) FROM turn" 2>/dev/null)" || [ -z "$d_rows" ]; then
-  printf '  - skipped: Pacer holds an exclusive lock on the archive; quit it to check\n'
+  # Locked, so read the verdict the app recorded instead. Pacer checks the
+  # same thing hourly from inside, precisely because a check that requires
+  # quitting the app is a check that never runs.
+  verdict="$(q "SELECT ZVALUE FROM ZCLAUDECODEMETA WHERE ZKEY='archive_integrity'")"
+  case "${verdict%%|*}" in
+    ok)
+      when="$(echo "$verdict" | cut -d'|' -f2)"
+      rows="$(echo "$verdict" | cut -d'|' -f3)"
+      age=$(( $(date +%s) - ${when:-0} ))
+      printf '%s  ✓%s archive matched the store (%s turns, self-checked %sm ago)\n' \
+        "$G" "$X" "$rows" "$(( age / 60 ))"
+      ;;
+    mismatch)
+      check "archive matches the store (app self-check)" "ok" "${verdict#mismatch|*|}"
+      ;;
+    *)
+      printf '  - skipped: Pacer holds the archive lock and has not self-checked yet\n'
+      ;;
+  esac
 else
   # Check the guarantee the archive actually makes, which is eventual, not
   # instantaneous: turns arriving out of order are picked up by a reconcile

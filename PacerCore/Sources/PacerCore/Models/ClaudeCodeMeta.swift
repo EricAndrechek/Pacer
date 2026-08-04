@@ -44,6 +44,12 @@ public enum ClaudeCodeMetaKey {
     /// When the still-open rollup buckets were last rebuilt from their
     /// samples rather than trusted. See `ScanCoordinator.rebuildLiveBuckets`.
     public static let lastLiveBucketRebuildAt = "last_live_bucket_rebuild_at"
+    /// Result of the app's own archive-vs-store comparison, written by
+    /// `ArchiveSync`. `make verify-data` reads this so it can report on the
+    /// archive WITHOUT holding DuckDB's exclusive lock — i.e. without needing
+    /// Pacer closed, which is the only way the check runs often enough to
+    /// matter. Format: `ok|<unix>|<rows>` or `mismatch|<unix>|<detail>`.
+    public static let archiveIntegrity = "archive_integrity"
     /// Which generation of the duplicate-turn repair has run.
     /// See `SamplePersister.repairDuplicateSamples`.
     public static let duplicateRepairVersion = "duplicate_repair_version"
