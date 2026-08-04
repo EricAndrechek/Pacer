@@ -41,6 +41,9 @@ public enum ClaudeCodeMetaKey {
     /// this is what keeps the integrity checks — missing aggregates, stranded
     /// hourly rows — running on a store that ingests nothing for a while.
     public static let lastIntegrityWalkAt = "last_integrity_walk_at"
+    /// When the still-open rollup buckets were last rebuilt from their
+    /// samples rather than trusted. See `ScanCoordinator.rebuildLiveBuckets`.
+    public static let lastLiveBucketRebuildAt = "last_live_bucket_rebuild_at"
 
     /// ISO-8601 timestamp of the last successful incremental scan.
     /// Passed to `JSONLScanner` as the `mtimeAfter` cutoff so files

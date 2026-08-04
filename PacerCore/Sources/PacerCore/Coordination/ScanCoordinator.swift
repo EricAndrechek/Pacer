@@ -81,7 +81,15 @@ public final class ScanCoordinator {
     ///         previously $0 via LiteLLM's zero placeholder) and
     ///         pricing refresh now gap-fills from models.dev, which
     ///         can price models LiteLLM lacked at earlier scans.
-    public static let currentCostRecomputeVersion = "5"
+    /// - "6" — recomputes could run before `SampleCostCache` was warm,
+    ///         and an unwarm cache prices everything at $0. Any bucket
+    ///         rebuilt in that window kept the zero permanently, because
+    ///         a rollup can't distinguish "cost $0" from "not priced".
+    ///         Measured as project rollups sitting $663 under the daily
+    ///         rollup for one day — the entire `claude-fable-5` share.
+    ///         The scan now warms pricing before recomputing anything;
+    ///         this rebuild clears the zeros already written.
+    public static let currentCostRecomputeVersion = "6"
 
     /// Version of the project-path canonicalization rules. Bumped when
     /// a parsing/canonicalization change requires updating in-place
@@ -882,6 +890,38 @@ public final class ScanCoordinator {
             log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
         }
 
+        // Open buckets drift; settled ones can't.
+        //
+        // The incremental fast path adds a new sample's tokens AND its cost
+        // to the open bucket in one step. If those two ever fall out of step
+        // — a cost computed before pricing finished loading, an upgrade that
+        // reached one rollup and not another, a cycle that died between the
+        // write and the save — the bucket carries the error, and nothing
+        // marks it dirty again. When the hour rolls over, the error freezes
+        // there permanently.
+        //
+        // That isn't hypothetical. Hour 10 of 2026-08-04 held tokens that
+        // matched its 125 samples exactly, to the token, while its cost sat
+        // $0.6971 low against those same tokens at a price vector that
+        // explained every other bucket that day to four decimal places. It
+        // was found by `make verify-data`, not by the app, and it would have
+        // stayed wrong forever.
+        //
+        // So rebuild the still-open buckets from their samples on a
+        // throttle: bounded, predictable work against an unbounded class of
+        // drift. `now - 1h` is included because the bucket that matters most
+        // is the one that just closed — that's the one about to freeze.
+        // Anything older is settled and is only recomputed when a sample
+        // actually lands in it.
+        if try fetchMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt) == nil {
+            try writeMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt,
+                          value: String(Date().timeIntervalSince1970))
+        } else if try liveBucketRebuildIsDue() {
+            try rebuildLiveBuckets(persister: activePersister)
+            try writeMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt,
+                          value: String(Date().timeIntervalSince1970))
+        }
+
         // Path-canonicalization migration. Walks every TokenSample,
         // re-applies the worktree-stripping canonicalizer (plus the
         // user's current alias map) in place, and folds both the old
@@ -1009,6 +1049,16 @@ public final class ScanCoordinator {
         phase.scanMs = tickMs()
         try activePersister.flush()
         phase.flushMs = tickMs()
+        // Pricing must be warm BEFORE anything recomputes a bucket. The
+        // recomputers price from `SampleCostCache`, whose empty default
+        // computes every cost as $0 — and a rollup can't tell a real zero
+        // from an unpriced one, so the zero sticks. The app warms the cache
+        // in an un-awaited `Task` at launch, which the first scan cycle
+        // routinely beats. One await, only while cold; afterwards `isWarm`
+        // is true and this costs nothing.
+        if configuration.costMode != .display, !SampleCostCache.isWarm {
+            await SampleCostCache.reload()
+        }
         try saveCursors(result.updatedCursors)
         // After the cycle's rows are in, so the index never claims coverage
         // the store doesn't have. Throttled inside, and failure-tolerant —
@@ -1287,6 +1337,63 @@ public final class ScanCoordinator {
     /// stranded hourly rows) and never urgent, so a day's latency costs
     /// nothing while a walk per launch costs 9-16 s every time.
     private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
+
+    /// How often the open buckets are rebuilt rather than trusted. Ten
+    /// minutes bounds how long a drifted bucket can stay wrong while it is
+    /// still open, and costs one recompute of the current day's buckets —
+    /// small next to the full-store rebuild a cost-version bump triggers.
+    private static let liveBucketRebuildInterval: TimeInterval = 10 * 60
+
+    private func liveBucketRebuildIsDue() throws -> Bool {
+        // Never run: stamp and skip rather than firing. This is an integrity
+        // measure, not a startup one, and cold start is already the most
+        // expensive cycle there is — piling the day's buckets onto it buys
+        // nothing that waiting one interval doesn't.
+        guard let raw = try fetchMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt),
+              let at = TimeInterval(raw) else { return false }
+        return Date().timeIntervalSince1970 - at >= Self.liveBucketRebuildInterval
+    }
+
+    /// Fold the still-open rollup buckets into the dirty+polluted sets, so
+    /// they get rebuilt from the samples they contain instead of from their
+    /// own running totals.
+    ///
+    /// Polluting is the point: `addDirty*` marks each bucket as one the
+    /// recomputers' incremental path must not touch, which is what forces
+    /// the from-scratch rebuild.
+    private func rebuildLiveBuckets(persister: SamplePersister) throws {
+        let now = Date()
+        let calendar = Calendar.current
+        var pairs: Set<DateModelPair> = []
+        var triples: Set<DateHourModelTriple> = []
+        var projects: Set<ProjectDatePair> = []
+
+        for offset in [TimeInterval(0), -3600] {
+            let at = now.addingTimeInterval(offset)
+            let date = TokenSample.formatDate(at, timeZone: calendar.timeZone)
+            let hour = calendar.component(.hour, from: at)
+
+            var models = FetchDescriptor<DailyAggregate>(
+                predicate: #Predicate<DailyAggregate> { $0.date == date })
+            models.propertiesToFetch = [\.model]
+            for model in try context.fetch(models).map(\.model) {
+                pairs.insert(DateModelPair(date: date, model: model))
+                triples.insert(DateHourModelTriple(date: date, hour: hour, model: model))
+            }
+
+            var paths = FetchDescriptor<ProjectDailyAggregate>(
+                predicate: #Predicate<ProjectDailyAggregate> { $0.date == date })
+            paths.propertiesToFetch = [\.projectPath]
+            for path in try context.fetch(paths).map(\.projectPath) {
+                projects.insert(ProjectDatePair(projectPath: path, date: date))
+            }
+        }
+
+        guard !pairs.isEmpty else { return }
+        persister.addDirtyPairs(pairs)
+        persister.addDirtyHourBuckets(triples)
+        persister.addDirtyProjectDates(projects)
+    }
 
     private func integrityWalkIsDue() throws -> Bool {
         guard let raw = try fetchMeta(ClaudeCodeMetaKey.lastIntegrityWalkAt),
