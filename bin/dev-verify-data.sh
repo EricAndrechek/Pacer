@@ -118,6 +118,63 @@ check "hourly cost equals daily"  "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOS
 check "project cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")"
 check "session cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")"
 
+# Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
+# to prevent — it means the same turn was counted twice, inflating tokens and
+# cost for whatever day it lands on. Reported, never auto-repaired: raw samples
+# are never deleted without a human deciding to (see the never-delete rule),
+# and old residue like this can predate the fix that made it impossible.
+printf '\n%s==>%s Duplicate turns\n' "$B" "$X"
+dupes="$(q "SELECT COUNT(*) FROM (SELECT ZDEDUPKEY FROM ZTOKENSAMPLE
+            WHERE ZDEDUPKEY IS NOT NULL GROUP BY ZDEDUPKEY HAVING COUNT(*) > 1)")"
+if [ "${dupes:-0}" = 0 ]; then
+  printf '%s  ✓%s no turn is stored twice\n' "$G" "$X"
+else
+  # Not a failure: known residue, and failing on it would make the whole check
+  # useless as a gate until someone decides what to do about it.
+  printf '  ! %s dedup key(s) appear on more than one row — double-counted turns\n' "$dupes"
+  q "SELECT '      ' || ZDATE || '  ' || COUNT(*) || ' key(s)' FROM (
+       SELECT ZDEDUPKEY k, ZDATE, COUNT(*) n FROM ZTOKENSAMPLE
+       WHERE ZDEDUPKEY IS NOT NULL GROUP BY k HAVING n > 1)
+     GROUP BY ZDATE ORDER BY ZDATE DESC LIMIT 5"
+fi
+
+# The raw archive is a SECOND copy of every billable turn, written by a
+# different code path (DuckDB appender) than the store (SwiftData). Two copies
+# that are never compared are just two chances to be wrong, so compare them.
+#
+# DuckDB takes an EXCLUSIVE per-process file lock, so this can only run while
+# Pacer is closed. That's a real limitation of the design, not an oversight —
+# it's why the app also verifies its own appends. Skipped loudly rather than
+# silently, because a check that quietly does nothing is worse than no check.
+printf '\n%s==>%s Raw archive vs store\n' "$B" "$X"
+ARCHIVE="${HOME}/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/raw-archive.duckdb"
+if [ ! -f "$ARCHIVE" ]; then
+  printf '  - no archive yet (nothing has been written)\n'
+elif ! command -v duckdb >/dev/null 2>&1; then
+  printf '  - skipped: duckdb CLI not installed (brew install duckdb)\n'
+elif ! d_rows="$(duckdb -noheader -list -readonly "$ARCHIVE" \
+        "SELECT COUNT(*) FROM turn" 2>/dev/null)" || [ -z "$d_rows" ]; then
+  printf '  - skipped: Pacer holds an exclusive lock on the archive; quit it to check\n'
+else
+  # Only turns at or before the archive's own watermark can be expected —
+  # the store is always a little ahead between syncs.
+  mark="$(duckdb -noheader -list -readonly "$ARCHIVE" \
+    "SELECT COALESCE(CAST(EPOCH(MAX(sampled_at)) AS BIGINT), 0) FROM turn" 2>/dev/null)"
+  # SwiftData stores dates as seconds since 2001-01-01.
+  ref="$(( mark - 978307200 ))"
+  check "archive row count matches the store" \
+    "$(q "SELECT COUNT(*) FROM ZTOKENSAMPLE WHERE ZSAMPLEDAT <= ${ref}")" "$d_rows"
+  for pair in "input_tokens:ZINPUTTOKENS" "output_tokens:ZOUTPUTTOKENS" \
+              "cache_read:ZCACHEREADTOKENS" "cache_creation_5m:ZCACHECREATION5MTOKENS" \
+              "cache_creation_1h:ZCACHECREATION1HTOKENS"; do
+    dcol="${pair%%:*}"; scol="${pair##*:}"
+    check "archive ${dcol} matches the store" \
+      "$(q "SELECT COALESCE(SUM(${scol}),0) FROM ZTOKENSAMPLE WHERE ZSAMPLEDAT <= ${ref}")" \
+      "$(duckdb -noheader -list -readonly "$ARCHIVE" \
+         "SELECT CAST(COALESCE(SUM(${dcol}),0) AS BIGINT) FROM turn" 2>/dev/null)"
+  done
+fi
+
 printf '\n%s==>%s Store\n' "$B" "$X"
 printf '    %s rows · %s daily · %s hourly · %s project · %s sessions\n' \
   "$(q 'SELECT COUNT(*) FROM ZTOKENSAMPLE')" \

@@ -34,6 +34,15 @@ final class ArchiveSync {
     private var disabled = false
     private var appendedTotal = 0
     private var nextLogAt = 1
+    private var lastReconcileAt: Date?
+
+    /// How often the trailing window is reconciled rather than trusted.
+    private static let reconcileInterval: TimeInterval = 30 * 60
+    /// How far back reconciliation looks. Replay reach-back was measured on a
+    /// real corpus at p99 6.07 days and max 7.15; 30 days is ~4x the observed
+    /// worst case, and `--resume` can always target something older, which is
+    /// what `make verify-data` is for.
+    private static let reconcileWindow: TimeInterval = 30 * 86_400
 
     init(container: ModelContainer, archiveURL: URL) {
         self.container = container
@@ -57,22 +66,26 @@ final class ArchiveSync {
             var newest = watermark
             try context.enumerate(descriptor, batchSize: 5_000) { sample in
                 if newest == nil || sample.sampledAt > newest! { newest = sample.sampledAt }
-                rows.append(ArchiveRow(
-                    sampledAt: sample.sampledAt,
-                    date: sample.date,
-                    localHour: sample.localHour >= 0
-                        ? sample.localHour
-                        : Calendar.current.component(.hour, from: sample.sampledAt),
-                    model: sample.model,
-                    breakdown: sample.breakdown,
-                    sourceCostUSD: sample.sourceCostUSD,
-                    dedupKey: sample.dedupKey,
-                    sessionId: sample.sessionId,
-                    // The RAW cwd — canonicalization is a view over the alias
-                    // graph, and the graph changes. Never bake it in here.
-                    originalProjectPath: sample.originalProjectPath ?? sample.projectPath,
-                    ccVersion: sample.ccVersion))
+                rows.append(row(from: sample))
             }
+            // Out-of-order arrivals are the hole in a forward-only watermark:
+            // a resumed session backfills turns whose `sampledAt` predates the
+            // newest thing already archived, and `> watermark` skips them
+            // FOREVER. Measured on the real store as 32 turns missing out of
+            // 191,421 — found by `make verify-data`, not by anything here.
+            //
+            // So the fast path stays forward-only, and a trailing window is
+            // reconciled on a throttle: ask the archive which dedup keys it
+            // already holds for that window and append the store rows it
+            // doesn't. Bounded work, and self-correcting.
+            rows.append(contentsOf: try missedTurns(
+                archive: archive, context: context,
+                // Already staged by the forward path above and NOT yet in the
+                // archive, so reconciliation would otherwise "rescue" them a
+                // second time. An append-only table can't take that back —
+                // caught only because the check counted one row too many.
+                pending: Set(rows.compactMap(\.dedupKey))))
+
             guard !rows.isEmpty else { return }
             try archive.append(rows)
             // Advanced only after the append succeeded, so a failed write is
@@ -92,10 +105,67 @@ final class ArchiveSync {
         }
     }
 
+    /// Store turns inside the trailing window that the archive doesn't have.
+    ///
+    /// Keyed on `dedupKey` because that's the identity the rest of the app
+    /// already agrees on. Turns without one (no message id and no request id)
+    /// can't be matched and are left to the forward path — they're rare, and
+    /// guessing at identity here would risk archiving the same turn twice,
+    /// which an append-only table can't take back.
+    private func missedTurns(archive: RawArchive, context: ModelContext,
+                             pending: Set<String>) throws -> [ArchiveRow] {
+        let now = Date()
+        if let last = lastReconcileAt,
+           now.timeIntervalSince(last) < Self.reconcileInterval { return [] }
+        lastReconcileAt = now
+
+        let since = now.addingTimeInterval(-Self.reconcileWindow)
+        let archived = try archive.dedupKeys(since: since)
+
+        var descriptor = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.sampledAt >= since },
+            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        descriptor.propertiesToFetch = [
+            \.sampledAt, \.date, \.localHour, \.model, \.dedupKey, \.sessionId,
+            \.originalProjectPath, \.projectPath, \.ccVersion, \.sourceCostUSD]
+
+        var missed: [ArchiveRow] = []
+        try context.enumerate(descriptor, batchSize: 5_000) { sample in
+            guard let key = sample.dedupKey,
+                  !archived.contains(key), !pending.contains(key) else { return }
+            missed.append(row(from: sample))
+        }
+        if !missed.isEmpty {
+            Log.write("ArchiveSync",
+                      "reconcile: \(missed.count) turn(s) the watermark had skipped")
+        }
+        return missed
+    }
+
     /// Turns currently archived — for `make verify-data` and diagnostics.
     func archivedTurnCount() -> Int64? {
         guard !disabled, let count = try? openIfNeeded().totals().rows else { return nil }
         return count
+    }
+
+    /// One place both the forward path and reconciliation build a row, so the
+    /// two can't drift on something like which project path gets recorded.
+    private func row(from sample: TokenSample) -> ArchiveRow {
+        ArchiveRow(
+            sampledAt: sample.sampledAt,
+            date: sample.date,
+            localHour: sample.localHour >= 0
+                ? sample.localHour
+                : Calendar.current.component(.hour, from: sample.sampledAt),
+            model: sample.model,
+            breakdown: sample.breakdown,
+            sourceCostUSD: sample.sourceCostUSD,
+            dedupKey: sample.dedupKey,
+            sessionId: sample.sessionId,
+            // The RAW cwd — canonicalization is a view over the alias graph,
+            // and the graph changes. Never bake it in here.
+            originalProjectPath: sample.originalProjectPath ?? sample.projectPath,
+            ccVersion: sample.ccVersion)
     }
 
     private func openIfNeeded() throws -> RawArchive {
