@@ -280,9 +280,10 @@ actor HourlyAggregateBulkWorker {
         // use everywhere else.
         // Shared with the daily and project workers — see SampleSnapshot.
         var grouped: [DateHourModelTriple: [SampleSnapshot.Row]] = [:]
-        let cal = Calendar.current
         for s in try snapshots.snapshot().rows {
-            let h = cal.component(.hour, from: s.sampledAt)
+            // The STORED hour, not a fresh derivation — re-deriving is what
+            // let historical buckets drift across a DST/timezone change.
+            let h = s.localHour
             grouped[DateHourModelTriple(date: s.date, hour: h, model: s.model),
                     default: []].append(s)
         }

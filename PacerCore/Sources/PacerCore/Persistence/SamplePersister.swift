@@ -306,7 +306,7 @@ public final class SamplePersister {
         // sample, even though wall-clock has rolled to tomorrow, will
         // land correctly under (tomorrow, 0). `Calendar.current` is
         // safe to call here; we're on MainActor.
-        let hour = Self.localHour(of: sample.sampledAt)
+        let hour = Self.localHour(of: sample)
         let hourBucket = DateHourModelTriple(
             date: sample.date, hour: hour, model: sample.model)
         dirtyHourBuckets.insert(hourBucket)
@@ -405,7 +405,7 @@ public final class SamplePersister {
             pendingProjectSamples[projectPair] = nil
 
             let hourBucket = DateHourModelTriple(
-                date: sample.date, hour: Self.localHour(of: sample.sampledAt), model: sample.model)
+                date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
             dirtyHourBuckets.insert(hourBucket)
             pollutedHourBuckets.insert(hourBucket)
             pendingHourSamples[hourBucket] = nil
@@ -586,11 +586,17 @@ public final class SamplePersister {
         // the cost; without it the hourly rollup would not rebuild on
         // a cost-recompute version bump and every HourlyAggregate
         // would silently keep its pre-bump cost numbers.
-        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt]
+        descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour]
         // Batched for the same reason the preload is: this walks the whole
         // table, and materializing it all at once is the cost (see
         // `preloadFromStore`).
         try context.enumerate(descriptor, batchSize: 5_000) { sample in
+            // Backfill the stored hour while we're walking every row anyway.
+            // Rows written before the field existed carry -1 and would keep
+            // deriving — and drifting — otherwise.
+            if sample.localHour < 0 {
+                sample.localHour = Self.localHour(of: sample.sampledAt)
+            }
             let pair = DateModelPair(date: sample.date, model: sample.model)
             dirtyPairs.insert(pair)
             // Pollute so any concurrent insert(_:) in the same cycle
@@ -603,7 +609,7 @@ public final class SamplePersister {
             let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
             dirtyProjectDates.insert(projectPair)
             pollutedProjectPairs.insert(projectPair)
-            let hour = Self.localHour(of: sample.sampledAt)
+            let hour = Self.localHour(of: sample)
             let hourBucket = DateHourModelTriple(
                 date: sample.date, hour: hour, model: sample.model)
             dirtyHourBuckets.insert(hourBucket)
@@ -744,6 +750,17 @@ public final class SamplePersister {
         Calendar.current.component(.hour, from: date)
     }
 
+    /// A sample's local hour, preferring the value stored at insert.
+    ///
+    /// Deriving it fresh is what let historical buckets drift: the derivation
+    /// depends on the calendar in effect at read time, so a DST or timezone
+    /// change re-buckets old samples. `-1` marks rows written before the field
+    /// existed; those still derive, and the `costRecomputeVersion` walk
+    /// backfills them.
+    fileprivate static func localHour(of sample: TokenSample) -> Int {
+        sample.localHour >= 0 ? sample.localHour : localHour(of: sample.sampledAt)
+    }
+
     private func preloadFromStore() throws {
         // SwiftData materializes every row in a `FetchDescriptor`
         // result as a full `@Model` object by default. With ~500K
@@ -770,7 +787,8 @@ public final class SamplePersister {
             // outputTokens rides along so `bestOutputByKey` knows whether a
             // stored row is a finished message or a mid-stream snapshot
             // that a later scan can still upgrade.
-            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.outputTokens
+            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.outputTokens,
+            \.localHour
         ]
         // Fetched through a throwaway context, NOT the persister's own.
         //
@@ -807,7 +825,7 @@ public final class SamplePersister {
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
             sampleProjectPairs.insert(ProjectDatePair(projectPath: path, date: sample.date))
-            let hour = Self.localHour(of: sample.sampledAt)
+            let hour = Self.localHour(of: sample)
             sampleHourBuckets.insert(DateHourModelTriple(
                 date: sample.date, hour: hour, model: sample.model))
             if let sid = sample.sessionId, !sid.isEmpty {

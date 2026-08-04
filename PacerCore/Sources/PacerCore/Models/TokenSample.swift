@@ -94,6 +94,21 @@ public final class TokenSample {
     public var originalProjectPath: String?
     public var ccVersion: String?
 
+    /// Local hour 0–23, **stored at insert** the way `date` is.
+    ///
+    /// It used to be derived from `sampledAt` on every read, through whatever
+    /// calendar was current at that moment. That makes it unstable: a DST
+    /// boundary or timezone change silently re-buckets historical samples, so
+    /// `HourlyAggregate` rows computed under the old derivation end up holding
+    /// another hour's numbers. Measured on a real store as 64 of 1,440 buckets
+    /// wrong — one hour 289k output too low while its neighbour ran 253k too
+    /// high — with the daily rollup unaffected precisely because `date` is
+    /// stored rather than derived.
+    ///
+    /// `-1` means "written before this field existed"; readers fall back to
+    /// deriving it, and the `costRecomputeVersion` walk backfills.
+    public var localHour: Int = -1
+
     public init(
         sampledAt: Date,
         date: String,
@@ -124,6 +139,7 @@ public final class TokenSample {
         self.projectPath = projectPath
         self.originalProjectPath = originalProjectPath
         self.ccVersion = ccVersion
+        self.localHour = Calendar.current.component(.hour, from: sampledAt)
     }
 }
 

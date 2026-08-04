@@ -52,7 +52,15 @@ public final class ScanCoordinator {
     public static let currentScanVersion = "3"
 
     /// Bumped when a code change requires recomputing the cost columns
-    /// on existing aggregates. ScanCoordinator detects a mismatch on
+    /// on existing aggregates.
+    ///
+    /// "5" — `TokenSample.localHour` is now stored at insert instead of
+    /// derived on every read. Existing rows carry the `-1` sentinel and their
+    /// `HourlyAggregate` rows were computed under whatever calendar was
+    /// current at the time, so a DST/timezone shift left 64 of 1,440 buckets
+    /// holding another hour's numbers (one 289k output too low while its
+    /// neighbour ran 253k high). The bump drives the whole-table walk that
+    /// backfills the field and rebuilds every aggregate from it. ScanCoordinator detects a mismatch on
     /// startup and folds every known sample's (date,model),
     /// (project,date), and sessionId into the persister's dirty set
     /// — the recomputers then rebuild every aggregate row from the
@@ -73,7 +81,7 @@ public final class ScanCoordinator {
     ///         previously $0 via LiteLLM's zero placeholder) and
     ///         pricing refresh now gap-fills from models.dev, which
     ///         can price models LiteLLM lacked at earlier scans.
-    public static let currentCostRecomputeVersion = "4"
+    public static let currentCostRecomputeVersion = "5"
 
     /// Version of the project-path canonicalization rules. Bumped when
     /// a parsing/canonicalization change requires updating in-place

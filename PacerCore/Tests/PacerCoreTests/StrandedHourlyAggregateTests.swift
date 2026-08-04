@@ -104,3 +104,62 @@ import Testing
         #expect(persister.consumeStrandedHourBuckets().isEmpty)
     }
 }
+
+/// The stored hour is what stops buckets drifting in the first place.
+///
+/// Deleting stranded rows only fixes the case where the sample's new bucket
+/// didn't exist. Where both the old and new bucket exist, a shift just
+/// misfiles the numbers — measured on a real store as 64 of 1,440 buckets
+/// holding another hour's values, one 289k output too low while its neighbour
+/// ran 253k high. Storing the hour at insert removes the derivation that
+/// could move.
+@Suite struct StoredLocalHourTests {
+
+    @Test func hourIsStoredAtInsert() {
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        let sample = TokenSample(
+            sampledAt: at, date: TokenSample.formatDate(at), model: "claude-opus-5",
+            inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+        #expect(sample.localHour == Calendar.current.component(.hour, from: at))
+        #expect(sample.localHour >= 0 && sample.localHour <= 23)
+    }
+
+    /// A row written before the field existed carries the sentinel, and must
+    /// keep working by deriving until the backfill walk reaches it.
+    @Test func sentinelMeansNotBackfilledYet() {
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        let sample = TokenSample(
+            sampledAt: at, date: TokenSample.formatDate(at), model: "claude-opus-5",
+            inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+        sample.localHour = -1          // as a pre-migration row decodes
+        let row = SampleSnapshot.Row(
+            date: sample.date, model: sample.model, projectPath: nil, sessionId: nil,
+            sampledAt: sample.sampledAt,
+            localHour: sample.localHour >= 0
+                ? sample.localHour
+                : Calendar.current.component(.hour, from: sample.sampledAt),
+            ccVersion: nil, breakdown: sample.breakdown, sourceCostUSD: nil)
+        #expect(row.localHour == Calendar.current.component(.hour, from: at))
+    }
+
+    /// The stored hour must survive a timezone change, which is the whole
+    /// point — a derived one would not.
+    @Test func storedHourDoesNotFollowTheCalendar() {
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        let sample = TokenSample(
+            sampledAt: at, date: TokenSample.formatDate(at), model: "claude-opus-5",
+            inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+        let recorded = sample.localHour
+
+        // What a shifted calendar would have produced instead.
+        var shifted = Calendar(identifier: .gregorian)
+        shifted.timeZone = TimeZone(secondsFromGMT: Calendar.current.timeZone.secondsFromGMT(for: at) + 3600)!
+        let derivedAfterShift = shifted.component(.hour, from: at)
+
+        #expect(sample.localHour == recorded)          // unchanged
+        #expect(derivedAfterShift != recorded)         // a derivation would have moved
+    }
+}

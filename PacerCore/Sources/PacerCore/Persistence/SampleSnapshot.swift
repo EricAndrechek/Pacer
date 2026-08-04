@@ -26,13 +26,16 @@ public struct SampleSnapshot: Sendable {
         public let projectPath: String?
         public let sessionId: String?
         public let sampledAt: Date
+        /// Local hour as STORED on the sample — never re-derived here. See
+        /// `TokenSample.localHour`.
+        public let localHour: Int
         public let ccVersion: String?
         public let breakdown: TokenBreakdown
         public let sourceCostUSD: Double?
 
         public init(
             date: String, model: String, projectPath: String?, sessionId: String?,
-            sampledAt: Date, ccVersion: String?, breakdown: TokenBreakdown,
+            sampledAt: Date, localHour: Int, ccVersion: String?, breakdown: TokenBreakdown,
             sourceCostUSD: Double?
         ) {
             self.date = date
@@ -40,6 +43,7 @@ public struct SampleSnapshot: Sendable {
             self.projectPath = projectPath
             self.sessionId = sessionId
             self.sampledAt = sampledAt
+            self.localHour = localHour
             self.ccVersion = ccVersion
             self.breakdown = breakdown
             self.sourceCostUSD = sourceCostUSD
@@ -60,6 +64,9 @@ public struct SampleSnapshot: Sendable {
                 projectPath: sample.projectPath,
                 sessionId: sample.sessionId,
                 sampledAt: sample.sampledAt,
+                localHour: sample.localHour >= 0
+                    ? sample.localHour
+                    : Calendar.current.component(.hour, from: sample.sampledAt),
                 ccVersion: sample.ccVersion,
                 breakdown: TokenBreakdown(
                     inputTokens: sample.inputTokens,

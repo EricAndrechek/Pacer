@@ -35,7 +35,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
-        logs logs-tail status open clean-data perf-snapshot screenshots \
+        logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
         pricing-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
@@ -63,6 +63,9 @@ verify:  ## Verification build (no signing, no install) — fastest sanity check
 
 # Convenience alias.
 build: verify  ## Alias for `verify`.
+
+verify-data:  ## Check every rollup against the raw samples in the REAL store. Read-only; exits non-zero on any inconsistency.
+	@$(REPO_ROOT)/bin/dev-verify-data.sh
 
 test:  ## Run the PacerCore unit + ground-truth tests.
 	@cd PacerCore && swift test 2>&1 | tail -3
