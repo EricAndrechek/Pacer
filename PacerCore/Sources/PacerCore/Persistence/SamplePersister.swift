@@ -730,12 +730,19 @@ public final class SamplePersister {
         //
         // A scratch context frees the lot when it goes out of scope.
         let scratchContext = ModelContext(context.container)
-        let samples = try scratchContext.fetch(sampleDescriptor)
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
         var sampleHourBuckets: Set<DateHourModelTriple> = []
         var sampleSessionIds: Set<String> = []
-        for sample in samples {
+        var rowCount = 0
+        let tWalk = Date()
+        // `enumerate`, not `fetch`. Instrumented on a real 189k-row store, the
+        // eager fetch was **11,564 ms of a 12,545 ms startup** — pure
+        // materialization; the loop below is only 853 ms of it and the
+        // aggregate-gap queries 128 ms. Batching drains each chunk before
+        // pulling the next, so the whole table never exists as objects at once.
+        try scratchContext.enumerate(sampleDescriptor, batchSize: 5_000) { sample in
+            rowCount += 1
             if let key = sample.dedupKey {
                 // Seed with what's stored so a finished copy arriving in a
                 // later session can still recognise a partial row and
@@ -751,6 +758,16 @@ public final class SamplePersister {
             if let sid = sample.sessionId, !sid.isEmpty {
                 sampleSessionIds.insert(sid)
             }
+        }
+
+        let walkMs = Date().timeIntervalSince(tWalk) * 1000
+        let tGaps = Date()
+        defer {
+            // Startup's `prep` phase is the largest cost on a warm store;
+            // splitting it means the next person tuning this doesn't guess.
+            Log.write("SamplePersister", String(
+                format: "preload: %d rows — walk %.0fms · gaps %.0fms",
+                rowCount, walkMs, Date().timeIntervalSince(tGaps) * 1000))
         }
 
         // Pairs that have aggregate rows already are *not* gaps; only
