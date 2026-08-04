@@ -62,10 +62,15 @@ updates/
 !.claude/skills/
 
 
-# Vendored DuckDB static XCFramework. Not used by main — the DuckDB work
-# lives on spike/duckdb-integration (see docs/duckdb-archive.md) — but that
-# build script writes here, and an 80 MB binary must never reach git history.
-# Ignored defensively so running it on any branch cannot commit it.
+# Vendored DuckDB static XCFramework — built by
+# bin/build-duckdb-xcframework.sh, linked by the app for its raw-row archive
+# (docs/duckdb-archive.md). The artifact is ~78 MB and would land in git
+# history once per version bump, so it is never committed: CI rebuilds it and
+# caches it by version in .github/actions/prepare-build.
+#
+# `Vendor/` is ignored wholesale and the two artifacts are named again below,
+# because an earlier attempt narrowed this and `git add -A` immediately swept
+# in an 80 MB library that then needed a history rewrite to remove.
 Vendor/
 
 Vendor/DuckDB.xcframework/

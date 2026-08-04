@@ -49,6 +49,33 @@ runs:
         restore-keys: |
           spm-${{ runner.os }}-${{ runner.arch }}-
 
+    # ---- DuckDB -----------------------------------------------------------
+    # The app links a static DuckDB XCFramework for its raw-row archive. The
+    # artifact is ~78 MB, so it is NOT committed (that would land in git
+    # history forever, once per version bump) — CI rebuilds it, and caches it
+    # so that happens once per DuckDB version rather than once per run.
+    #
+    # The key covers the version file AND the build script, because the
+    # script decides which extensions are compiled in: bump `CORE_EXTENSIONS`
+    # without invalidating the cache and every later run links a library
+    # missing the function it needs, failing at *runtime* rather than at
+    # link time.
+    #
+    # SPM-only jobs skip this — PacerCore doesn't link DuckDB, and paying a
+    # cold compile there would double the cost of the cheapest job.
+    - name: Cache DuckDB XCFramework
+      if: inputs.generate-project == 'true'
+      id: duckdb-cache
+      uses: actions/cache@v4
+      with:
+        path: Vendor/DuckDB.xcframework
+        key: duckdb-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Vendor/duckdb-version.txt', 'bin/build-duckdb-xcframework.sh') }}
+
+    - name: Build DuckDB XCFramework
+      if: inputs.generate-project == 'true' && steps.duckdb-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: bin/build-duckdb-xcframework.sh
+
     - name: Generate Xcode project
       if: inputs.generate-project == 'true'
       shell: bash

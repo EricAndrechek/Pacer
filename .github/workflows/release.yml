@@ -50,7 +50,9 @@ jobs:
   release:
     name: Build, sign, notarize, publish
     runs-on: macos-15
-    timeout-minutes: 45
+    # Normally restores the DuckDB cache that CI populated on main. Budgeted
+    # for the case where it doesn't and the engine compiles from source.
+    timeout-minutes: 75
     env:
       # Used in several steps; declaring once here keeps them in sync.
       APP_NAME: Pacer

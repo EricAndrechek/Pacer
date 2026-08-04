@@ -48,7 +48,9 @@ jobs:
   app-build:
     name: App + widgets verify build
     runs-on: macos-15
-    timeout-minutes: 25
+    # 25 was right when the only compile was Pacer's own. A DuckDB cache miss
+    # builds the engine from source, which does not fit in it.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
