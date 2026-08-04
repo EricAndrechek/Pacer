@@ -29,6 +29,87 @@ enum ArchiveSpike {
     static var isActive: Bool {
         ProcessInfo.processInfo.environment["PACER_ARCHIVE_SPIKE"] == "1"
             || ProcessInfo.processInfo.environment["PACER_COLD_START_SPIKE"] == "1"
+            || ProcessInfo.processInfo.environment["PACER_IMPORT_SPIKE"] == "1"
+    }
+
+    static var isImport: Bool {
+        ProcessInfo.processInfo.environment["PACER_IMPORT_SPIKE"] == "1"
+    }
+
+    /// The bulk-import path end to end: DuckDB parses, the ordinary
+    /// `SamplePersister` persists. Reports the same totals the cold-start
+    /// harness does so the two are directly comparable — same corpus, same
+    /// expected rows, same expected token sums.
+    static func runImport() async {
+        log("bulk import: DuckDB parse → SamplePersister → in-memory store")
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("FAIL: in-memory container"); return
+        }
+        await SampleCostCache.reload()
+        let roots: [URL]
+        do {
+            roots = try ClaudePathResolver().resolve().map(\.projectsDirectory)
+        } catch {
+            log("FAIL: could not resolve Claude roots — \(error)"); return
+        }
+        log("roots: \(roots.map(\.path).joined(separator: ", "))")
+
+        let imported: ArchiveImporter.Result
+        do {
+            imported = try ArchiveImporter.importAll(roots: roots)
+        } catch {
+            log("FAIL: import threw \(error)"); return
+        }
+        log(String(format: "PARSE (DuckDB): %.2f s for %d entries from %d files",
+                   imported.seconds, imported.entries.count, imported.fileMarks.count))
+
+        let persistStart = Date()
+        do {
+            let outcome = try await persist(entries: imported.entries, container: container)
+            log(String(format: "PERSIST: %.2f s — inserted %d, duplicates %d, upgraded %d",
+                       Date().timeIntervalSince(persistStart),
+                       outcome.inserted, outcome.duplicates, outcome.upgraded))
+            log("  TOTALS rows=\(outcome.rows) input=\(outcome.input) output=\(outcome.output) "
+                + "cacheRead=\(outcome.cacheRead) cc5m=\(outcome.cc5m) cc1h=\(outcome.cc1h) "
+                + "all=\(outcome.input + outcome.output + outcome.cacheRead + outcome.cc5m + outcome.cc1h)")
+        } catch {
+            log("FAIL: persist threw \(error)"); return
+        }
+        log("done")
+    }
+
+    private struct PersistOutcome: Sendable {
+        var inserted = 0, duplicates = 0, upgraded = 0, rows = 0
+        var input: Int64 = 0, output: Int64 = 0, cacheRead: Int64 = 0
+        var cc5m: Int64 = 0, cc1h: Int64 = 0
+    }
+
+    /// Persisting runs on `ScanActor` — the same isolation the live scan uses,
+    /// so the bulk path exercises the persister exactly as production does
+    /// rather than through some test-only relaxation. Totals are summed here
+    /// and returned as plain numbers because `TokenSample` can't cross actors.
+    @ScanActor
+    private static func persist(
+        entries: [ParsedUsageEntry], container: ModelContainer
+    ) throws -> PersistOutcome {
+        let context = ModelContext(container)
+        let persister = try SamplePersister(context: context)
+        for entry in entries { _ = try persister.insert(entry) }
+        try context.save()
+
+        var outcome = PersistOutcome()
+        outcome.inserted = persister.stats.inserted
+        outcome.duplicates = persister.stats.skippedAsDuplicate
+        outcome.upgraded = persister.stats.upgradedFromPartial
+        for row in try context.fetch(FetchDescriptor<TokenSample>()) {
+            outcome.rows += 1
+            outcome.input += row.inputTokens
+            outcome.output += row.outputTokens
+            outcome.cacheRead += row.cacheReadTokens
+            outcome.cc5m += row.cacheCreation5mTokens
+            outcome.cc1h += row.cacheCreation1hTokens
+        }
+        return outcome
     }
 
     /// Measure what a *first* launch actually costs: an empty store, the real

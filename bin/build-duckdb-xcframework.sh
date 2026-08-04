@@ -73,6 +73,10 @@ ok "source at $WORK/src"
 #     file lock, so while Pacer holds the archive open nothing else can open
 #     it, not even read-only; COPY TO parquet is how a user gets their data
 #     out without quitting the app.
+#   json — required by the bulk importer. `read_ndjson_objects` and every
+#     `json_extract*` function live here, and DuckDB's core has no JSON
+#     parsing at all, so without it the importer fails at runtime with
+#     "Table Function with name read_ndjson_objects is not in the catalog".
 info "Building (${ARCH}, macOS ${DEPLOYMENT_TARGET}, no shell/tests/autoload)"
 cmake -S "$WORK/src" -B "$WORK/build" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -80,6 +84,7 @@ cmake -S "$WORK/src" -B "$WORK/build" \
   -DBUILD_UNITTESTS=OFF \
   -DENABLE_EXTENSION_AUTOLOADING=0 \
   -DENABLE_EXTENSION_AUTOINSTALL=0 \
+  -DCORE_EXTENSIONS="json" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   -DCMAKE_OSX_ARCHITECTURES="$ARCH" >/dev/null
 cmake --build "$WORK/build" -j "$(sysctl -n hw.ncpu)" >/dev/null
@@ -99,6 +104,7 @@ libtool -static -o "$STAGE/libduckdb.a" \
   "$WORK"/build/third_party/*/*.a \
   "$WORK/build/extension/core_functions/libcore_functions_extension.a" \
   "$WORK/build/extension/parquet/libparquet_extension.a" \
+  "$WORK/build/extension/json/libjson_extension.a" \
   "$WORK/build/extension/libduckdb_generated_extension_loader.a" 2>&1 \
   | grep -v "has no symbols" || true
 ok "$(du -h "$STAGE/libduckdb.a" | cut -f1) merged static library"

@@ -300,6 +300,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in
                 if ArchiveSpike.isColdStart {
                     await ArchiveSpike.runColdStart()
+                } else if ArchiveSpike.isImport {
+                    await ArchiveSpike.runImport()
                 } else {
                     await ArchiveSpike.run(container: container)
                 }

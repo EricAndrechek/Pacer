@@ -25,12 +25,17 @@ runs:
       shell: bash
       run: echo "version=$(tr -d '[:space:]' < Vendor/duckdb-version.txt)" >> "$GITHUB_OUTPUT"
 
+    # The key covers the build RECIPE as well as the version — changing which
+    # extensions get compiled in (adding `json` for the bulk importer, say)
+    # produces a different artifact from the same DuckDB tag, and keying on
+    # the version alone would silently restore the stale one and fail at
+    # runtime with a missing-catalog-entry error.
     - name: Restore DuckDB XCFramework
       id: duckdb-cache
       uses: actions/cache@v4
       with:
         path: Vendor/DuckDB.xcframework
-        key: duckdb-${{ steps.duckdb-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-v1
+        key: duckdb-${{ steps.duckdb-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/build-duckdb-xcframework.sh') }}
 
     - name: Build DuckDB XCFramework (cache miss only)
       if: steps.duckdb-cache.outputs.cache-hit != 'true'

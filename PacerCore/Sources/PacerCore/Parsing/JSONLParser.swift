@@ -142,4 +142,13 @@ public enum JSONLLineParser {
         if let date = timestampDecoder.date(from: string) { return date }
         return timestampDecoderNoFraction.date(from: string)
     }
+
+    /// Same timestamp handling for the bulk importer, which gets its fields
+    /// from DuckDB rather than from `JSONDecoder` but must interpret them
+    /// identically — including the with/without-fractional-seconds fallback.
+    /// Exposed rather than duplicated so the two ingest paths can't drift on
+    /// something as easy to get subtly wrong as date parsing.
+    public static func parseTimestampForImport(_ string: String) -> Date? {
+        parseTimestamp(string)
+    }
 }
