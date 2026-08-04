@@ -31,7 +31,10 @@
 
 set -euo pipefail
 
-DUCKDB_VERSION="${1:-v1.5.5}"
+REPO_ROOT_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Single source of truth, shared with CI (.github/workflows/*) so the cache
+# key and the built artifact can never drift apart.
+DUCKDB_VERSION="${1:-$(tr -d "[:space:]" < "$REPO_ROOT_EARLY/Vendor/duckdb-version.txt")}"
 # Must match the app's MACOSX_DEPLOYMENT_TARGET in project.yml. A library
 # built for a NEWER minimum than the app fails to link; older is fine.
 DEPLOYMENT_TARGET="15.0"

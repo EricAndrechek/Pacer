@@ -1,0 +1,84 @@
+name: Prepare Pacer build
+description: >-
+  Everything a Pacer build needs before xcodebuild — the vendored DuckDB
+  XCFramework, XcodeGen, resolved SPM packages, and the generated project —
+  with caching so PR, main, and release runs all pay the same (small) cost.
+
+inputs:
+  generate-project:
+    description: Run `xcodegen generate` (skip for SPM-only jobs).
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    # ---- DuckDB -----------------------------------------------------------
+    # The XCFramework is gitignored (~78 MB per version would live in git
+    # history forever), so without this the app target simply won't link.
+    # Building it from source takes ~10 minutes, which is why it's cached on
+    # the pinned version rather than rebuilt per run: the key only changes
+    # when Vendor/duckdb-version.txt does, so in steady state this is a
+    # ~20 MB restore measured in seconds.
+    - name: Read pinned DuckDB version
+      id: duckdb-version
+      shell: bash
+      run: echo "version=$(tr -d '[:space:]' < Vendor/duckdb-version.txt)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore DuckDB XCFramework
+      id: duckdb-cache
+      uses: actions/cache@v4
+      with:
+        path: Vendor/DuckDB.xcframework
+        key: duckdb-${{ steps.duckdb-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+    - name: Build DuckDB XCFramework (cache miss only)
+      if: steps.duckdb-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        echo "::notice::DuckDB ${{ steps.duckdb-version.outputs.version }} not cached — building from source (~10 min, once per version)"
+        bin/build-duckdb-xcframework.sh
+        # The zip is only for publishing a .binaryTarget; don't let it into
+        # the cache entry and double its size.
+        rm -f Vendor/DuckDB.xcframework.zip
+
+    # ---- XcodeGen ---------------------------------------------------------
+    # `brew install xcodegen` resolves taps and can take 30-60s. The project
+    # ships a prebuilt binary per release, so fetch that instead — pinned,
+    # deterministic, and a couple of seconds.
+    - name: Install XcodeGen
+      shell: bash
+      env:
+        XCODEGEN_VERSION: "2.44.1"
+      run: |
+        set -euo pipefail
+        if command -v xcodegen >/dev/null 2>&1; then
+          echo "xcodegen already present: $(xcodegen --version)"; exit 0
+        fi
+        curl -fsSL -o /tmp/xcodegen.zip \
+          "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+        unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+        sudo mkdir -p /usr/local/bin /usr/local/share
+        sudo cp -R /tmp/xcodegen/xcodegen/bin/* /usr/local/bin/
+        sudo cp -R /tmp/xcodegen/xcodegen/share/* /usr/local/share/
+        xcodegen --version
+
+    # ---- Swift packages ---------------------------------------------------
+    # Sparkle is fetched and compiled on every clean build otherwise. Keyed on
+    # the resolved versions so a dependency bump invalidates it, and on the
+    # local package manifest so a PacerCore change does too.
+    - name: Cache Swift packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/Library/Caches/org.swift.swiftpm
+          ~/.swiftpm
+          PacerCore/.build
+        key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('project.yml', 'PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+        restore-keys: |
+          spm-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Generate Xcode project
+      if: inputs.generate-project == 'true'
+      shell: bash
+      run: xcodegen generate

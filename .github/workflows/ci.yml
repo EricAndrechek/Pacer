@@ -25,6 +25,19 @@ jobs:
           xcodebuild -version
           swift --version
 
+      # PacerCore is pure SPM — it needs no DuckDB and no Xcode project, just
+      # a warm package cache so Sparkle isn't refetched every run.
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+            PacerCore/.build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ runner.arch }}-
+
       # Standalone SPM package — no Xcode project required for the
       # PacerCore + PacerUI tests. Runs in well under a minute on the
       # standard runner.
@@ -42,11 +55,11 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        run: xcodegen generate
+      # Vendored DuckDB + XcodeGen + SPM cache + project generation. Without
+      # the DuckDB step the app target can't link at all — the XCFramework is
+      # gitignored, so CI has nothing to link against until this restores or
+      # builds it.
+      - uses: ./.github/actions/prepare-build
 
       # Unsigned compile-only build — same flags `make verify` uses
       # locally. We don't run signed builds in CI because the Developer
