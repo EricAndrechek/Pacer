@@ -8,6 +8,12 @@ later overnight loops, so don't put durable knowledge there.
 
 ## TL;DR — current state
 
+- **Physical footprint ≈ 200 MB idle** (was 646 MB before 2026-08-04).
+- **Startup `prep` ≈ 9 s** on a 189k-row store (was 12.5 s) — the largest
+  remaining phase, and it runs on every launch. See "Memory and startup
+  (2026-08-04)".
+- **Cold start ≈ 41 s** for a first launch over a 1,697-file history (was
+  75 s).
 - **p50 scan cycle ≈ 100 ms** (was 1500 ms at start of the 2026-05 work).
 - **Idle CPU ≈ 0 %** with brief spikes during actual scan cycles (was
   105 % sustained).
@@ -143,6 +149,67 @@ mechanisms are subtle enough that grep won't catch them in review.
    in `Task.detached { [engine] in await engine.… }.value` so the await
    genuinely hops off the main actor. (A dedicated `unownedExecutor` on
    the engine would fix every call site at once — deferred.)
+
+## Memory and startup (2026-08-04)
+
+Three fixes, and — more useful than the fixes — three hypotheses that were
+wrong. Every one was plausible, and none survived measurement. **Profile
+first here; this area punishes reasoning.**
+
+### What was actually wrong
+
+1. **The whole sample table was live in memory at idle.** 189,183
+   `TokenSample` objects, plus ~890 bytes of SwiftData bookkeeping *each*
+   (backing data, `_ModelMetadata`, a property-snapshot array, an
+   observation registrar, a weak-ref slot) and 1.2M `CFString`s.
+   `preloadFromStore` walks every row to build the dedup map — all plain
+   values — but fetched through the persister's long-lived context, which
+   registers every object permanently. Fetching through a **scratch
+   `ModelContext`** frees them: footprint 646 MB → 199 MB, malloc'd nodes
+   3.17M → 721k.
+2. **Whole-table walks materialized everything at once.** `enumerate(batchSize:)`
+   drains each chunk before pulling the next: startup `prep` 12.5 s → 9.0 s.
+   Applied to all three walks — `preloadFromStore`, `markEverySampleDirty`
+   (every cost-recompute bump), `canonicalizeProjectPaths` (every alias
+   change).
+3. **Per-item fetches on bulk paths** — see the invariant in AGENTS.md.
+
+### The three wrong guesses
+
+| guess | reality |
+|---|---|
+| hourly rollup is slow from `Calendar.component(.hour:)` | **13.3 ms** for all 54,046 rows; offset arithmetic saves 9 ms, for DST risk |
+| idle memory is the dedup-key strings | it was the retained objects |
+| idle memory is the `sampleByKey` map | removing it moved peak RSS 751 → 714 MB |
+
+### How to measure this properly
+
+`heap <pid>` gives a class-by-class breakdown and "Physical footprint",
+which is what to quote — RSS lags because macOS doesn't return freed pages
+promptly. Watch the count of `_ContiguousArrayStorage<Optional<Any>>` and
+`_ModelMetadata`: those track live SwiftData objects one-for-one, so they
+tell you instantly whether something is pinning a table.
+
+`PACER_COLD_START_PROBE=1` (with `CLAUDE_CONFIG_DIR` pointed at a frozen
+transcript copy) reports phase timings plus all six per-field token totals.
+The startup log line `[SamplePersister] preload: N rows — walk Xms · gaps Yms`
+splits the `prep` phase permanently.
+
+### Still open here
+
+`prep` is ~8.6 s of SwiftData materialization at ~45 µs/row, paid on **every**
+launch — including one with nothing to ingest (`inserted=0`). Options, none
+taken yet:
+
+- **Make the preload lazy** (build on first insert). Blocked on the same walk
+  seeding the integrity-recovery sets, which look for PRE-EXISTING aggregate
+  gaps and so can't wait for an insert. Worth noting that recovery has fired
+  0 times in the last 6 startups — a throttle (once a day) would let the
+  common launch skip the walk entirely.
+- **Persist a compact dedup index** (hash + outputTokens), ~1.5 MB here, read
+  in one go. Real win, but a stale or corrupt index silently double-counts.
+- **Read the columns straight from SQLite.** Fastest, and couples us to
+  CoreData's private table mapping. Don't.
 
 ## Open work (deferred from the autonomous loop)
 
