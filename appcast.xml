@@ -666,5 +666,27 @@
             type="application/octet-stream"
             sparkle:edSignature="UCSGIWo1RHrDp6QA9QPCJTBhHnw2kTLfolPP2uw6MGobhg94nGo1C3YQVkZITwFCKizpd0W0zNFGSEdu0jG+CA==" />
     </item>
+            <item>
+        <title>Version 0.4.7</title>
+        <description><![CDATA[<h2>What's Changed</h2>
+<ul>
+<li>perf: don't compute the auto-alias candidate hash on idle cycles</li>
+<li>docs(perf): the startup walk is gone — record how, and its regression</li>
+<li>perf: throttle dedup-index writes, they cost 90ms every cycle</li>
+<li>perf: persist the dedup map so launches stop walking the store</li>
+<li>test(verify-data): check cost, not just tokens</li>
+<li>fix(release): stop shipping empty release notes</li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.6...v0.4.7">EricAndrechek/Pacer@<tt>v0.4.6...v0.4.7</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 15:11:59 +0000</pubDate>
+        <sparkle:version>1785855978</sparkle:version>
+        <sparkle:shortVersionString>0.4.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.7/Pacer-0.4.7.dmg"
+            length="8178602"
+            type="application/octet-stream"
+            sparkle:edSignature="mS8bkMV1awLSXCx0MwA5nk3tbt1lVLATid3imVSn+Fr7C4ak+59aApmNgYssa4rnmzmmYz83s9v4yVHL8qTyAA==" />
+    </item>
         </channel>
 </rss>
