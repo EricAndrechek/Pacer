@@ -610,5 +610,19 @@
             type="application/octet-stream"
             sparkle:edSignature="VV2vLk6YyXzvzxbOKYVPpKStd4tl5s9u2Tx9+4GA/4F8b65ljqJbEgrC46NG/nuG1dM31pMq2HUZr3JBFhR4DQ==" />
     </item>
+            <item>
+        <title>Version 0.4.3</title>
+        <description><![CDATA[
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.2...v0.4.3">EricAndrechek/Pacer@<tt>v0.4.2...v0.4.3</tt></a></p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 12:43:44 +0000</pubDate>
+        <sparkle:version>1785847121</sparkle:version>
+        <sparkle:shortVersionString>0.4.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.3/Pacer-0.4.3.dmg"
+            length="8142405"
+            type="application/octet-stream"
+            sparkle:edSignature="oWoIL6vwbHeE/bU4bUIMtYjnjw/iIeqRNDLTZGO4f2SQ8YZz4t9YkDx5rz8OWFS1kcENiioTeIODL45/PTppBg==" />
+    </item>
         </channel>
 </rss>
