@@ -54,9 +54,9 @@ enum ArchiveSpike {
         }
         log("roots: \(roots.map(\.path).joined(separator: ", "))")
 
-        let imported: ArchiveImporter.Result
+        let imported: BulkImportResult
         do {
-            imported = try ArchiveImporter.importAll(roots: roots)
+            imported = try ArchiveImporter().importAll(roots: roots, aliases: [:])
         } catch {
             log("FAIL: import threw \(error)"); return
         }
@@ -69,9 +69,11 @@ enum ArchiveSpike {
             log(String(format: "PERSIST: %.2f s — inserted %d, duplicates %d, upgraded %d",
                        Date().timeIntervalSince(persistStart),
                        outcome.inserted, outcome.duplicates, outcome.upgraded))
+            let all: Int64 = outcome.input + outcome.output + outcome.cacheRead
+                + outcome.cc5m + outcome.cc1h
             log("  TOTALS rows=\(outcome.rows) input=\(outcome.input) output=\(outcome.output) "
                 + "cacheRead=\(outcome.cacheRead) cc5m=\(outcome.cc5m) cc1h=\(outcome.cc1h) "
-                + "all=\(outcome.input + outcome.output + outcome.cacheRead + outcome.cc5m + outcome.cc1h)")
+                + "all=\(all)")
         } catch {
             log("FAIL: persist threw \(error)"); return
         }
@@ -132,7 +134,11 @@ enum ArchiveSpike {
             log("FAIL: in-memory container"); return
         }
         await SampleCostCache.reload()
-        let coordinator = ScanCoordinator(container: container)
+        // Exercise the production wiring: the coordinator picks the bulk
+        // importer itself because this is a full scan.
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: ScanCoordinator.Configuration(bulkImporter: ArchiveImporter()))
         let start = Date()
         do {
             let report = try await coordinator.runOnce()

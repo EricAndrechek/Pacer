@@ -18,16 +18,7 @@ import PacerCore
 /// only changed bytes (33-80 ms a cycle, ~0% idle CPU); DuckDB has no
 /// incremental cursor and re-reads whole files. This is for the cold path —
 /// first launch, and re-deriving history when a parsing rule changes.
-enum ArchiveImporter {
-
-    struct Result {
-        var entries: [ParsedUsageEntry]
-        /// Byte length + mtime per file at read time, so the live scanner can
-        /// resume from the end of what was imported instead of re-reading it
-        /// all on the very next cycle.
-        var fileMarks: [String: (size: Int64, mtime: Date)]
-        var seconds: Double
-    }
+struct ArchiveImporter: BulkTranscriptImporter {
 
     enum ImportError: Error {
         case openFailed
@@ -54,7 +45,7 @@ enum ArchiveImporter {
     /// several times while streaming and only the last copy carries the real
     /// `output_tokens`), then the largest output. Rows with no dedup key fall
     /// through untouched, exactly as the Swift path leaves them.
-    private static func extractionSQL(globs: [String]) -> String {
+    static func extractionSQL(globs: [String]) -> String {
         let sources = globs.map { "'\($0.replacingOccurrences(of: "'", with: "''"))'" }
             .joined(separator: ", ")
         return """
@@ -114,7 +105,7 @@ enum ArchiveImporter {
     /// Import every transcript under `roots` (each root being a `projects/`
     /// directory). `aliases` is threaded through so project paths canonicalize
     /// identically to the live path.
-    static func importAll(roots: [URL], aliases: [String: String] = [:]) throws -> Result {
+    func importAll(roots: [URL], aliases: [String: String] = [:]) throws -> BulkImportResult {
         let started = Date()
         var db: duckdb_database?
         var con: duckdb_connection?
@@ -126,7 +117,7 @@ enum ArchiveImporter {
 
         let globs = roots.map { $0.appendingPathComponent("**/*.jsonl").path }
         var result = duckdb_result()
-        let sql = extractionSQL(globs: globs)
+        let sql = Self.extractionSQL(globs: globs)
         guard sql.withCString({ duckdb_query(con, $0, &result) }) == DuckDBSuccess else {
             let message = duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown"
             duckdb_destroy_result(&result)
@@ -202,16 +193,16 @@ enum ArchiveImporter {
         // session recomputer both assume ascending arrival.
         entries.sort { $0.timestamp < $1.timestamp }
 
-        return Result(entries: entries,
-                      fileMarks: fileMarks(roots: roots),
-                      seconds: Date().timeIntervalSince(started))
+        return BulkImportResult(entries: entries,
+                                fileMarks: Self.fileMarks(roots: roots),
+                                seconds: Date().timeIntervalSince(started))
     }
 
     /// Size + mtime for every transcript we just read, so the caller can seed
     /// the live scanner's cursors. Without this the next scan re-reads all
     /// 1.8 GB and the import saves nothing.
-    private static func fileMarks(roots: [URL]) -> [String: (size: Int64, mtime: Date)] {
-        var marks: [String: (size: Int64, mtime: Date)] = [:]
+    private static func fileMarks(roots: [URL]) -> [String: BulkImportResult.FileMark] {
+        var marks: [String: BulkImportResult.FileMark] = [:]
         let fm = FileManager.default
         for root in roots {
             guard let walker = fm.enumerator(
@@ -222,7 +213,7 @@ enum ArchiveImporter {
                     forKeys: [.fileSizeKey, .contentModificationDateKey]),
                       let size = values.fileSize,
                       let mtime = values.contentModificationDate else { continue }
-                marks[url.path] = (Int64(size), mtime)
+                marks[url.path] = BulkImportResult.FileMark(size: Int64(size), mtime: mtime)
             }
         }
         return marks
