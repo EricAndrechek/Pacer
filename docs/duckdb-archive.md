@@ -1,23 +1,39 @@
-# DuckDB for Pacer — evaluated, measured, deliberately not shipped
+# DuckDB in Pacer — what shipped, what it cost, and what it bought
 
-**Nothing here is in main.** A complete, working implementation lives on the
-branch `spike/duckdb-integration` (PR #123): a vendored static DuckDB, a bulk
-transcript importer, and an injected `BulkTranscriptImporter` seam in
-`ScanCoordinator`. It is parked, not abandoned.
+**Shipped (2026-08-04).** A vendored static DuckDB, an append-only raw-row
+archive kept current from the live scan, and a bulk transcript importer behind
+an injected `BulkTranscriptImporter` seam in `ScanCoordinator`.
 
-**Why it's parked.** DuckDB's justification was a columnar archive holding raw
-rows forever (8× storage, compounding). That archive isn't built. Without it,
-DuckDB buys a faster *first launch only* — and it costs every user +26 MB of
-binary and ~2.7× the auto-update download, permanently:
+This document was written when all of it was *parked*, and the reversal is the
+most useful thing in it, so the reasoning is preserved rather than rewritten.
 
-| cold start (1,697-file corpus) | time | bundle cost |
+**Why it was parked.** DuckDB's justification was a columnar archive holding
+raw rows forever (8x storage, compounding). That archive didn't exist. Without
+it, DuckDB bought a faster *first launch only*, and cost every user +26 MB of
+binary and ~2.7x the auto-update download, permanently. 25 seconds off a
+one-time first launch does not pay for that. The stated condition was
+**"revisit when the archive is built"**.
+
+**Why it un-parked.** The archive was built, and it links DuckDB. That made
+the 26 MB a sunk cost, and the same importer went from costing 26 MB to
+costing **0.1 MB** (68.8 -> 68.9 MB). The feature didn't change; the
+denominator did.
+
+| cold start (1,709-file / 1.9 GB corpus) | time | marginal bundle cost |
 |---|---|---|
 | before any of this work | 74.8 s | — |
-| **Swift parser + the rollup/cursor fixes (shipped)** | **41.2 s** | none |
-| + DuckDB bulk importer (parked) | 15.8 s | +26 MB, 2.7× download |
+| Swift parser + the rollup/cursor fixes | 47.4 s | none |
+| **+ DuckDB bulk importer (shipped)** | **14.3 s** | +0.1 MB |
 
-25 seconds on a one-time first launch does not pay for doubling the bundle.
-**Revisit when the archive is built** — that's what the cost was for.
+Both ingest paths agree byte-for-byte on all six fields (`rows=57353
+input=18239073 output=78912411 cacheRead=15902949205 cc5m=208082849
+cc1h=173750134`) — see the differential gate below for why row counts alone
+would not be evidence.
+
+**The transferable lesson:** a feature parked on a *stated condition* can be
+re-evaluated mechanically when that condition changes. Had #123 been closed as
+"too expensive" rather than "revisit when X", this would have needed
+rediscovering.
 
 Everything below is measured on a frozen 1,697-file snapshot of a real
 `~/.claude` (302,783 lines, 1.8 GB) or on a real 189k-row store. None of it is
@@ -252,12 +268,19 @@ of aggregate rows it materializes, which is inherent to bucketing by hour.
 Anything further needs a profile, not another hypothesis — do not "optimize"
 this from a plausible story again.
 
-## The archive, not yet built
+## The archive — built, and what it still doesn't do
 
-The original goal was an immutable columnar archive of raw rows, kept forever
-(Pacer never deletes raw data — that's what makes retrospective model
-evaluation and re-deriving past mistakes possible). Measured, designed, and
-**not implemented**:
+An immutable columnar archive of raw rows, kept forever (Pacer never deletes
+raw data — that's what makes retrospective model evaluation and re-deriving
+past mistakes possible). `App/Archive/RawArchive.swift`, fed by `ArchiveSync`
+off the live scan.
+
+**It writes a second copy, and that's the current state of it.** The 8x win
+below only materialises once SwiftData stops holding full history and keeps a
+recent window plus rollups — which it can't do until something else holds the
+rest, which is why the archive had to exist first. Until then the cost is
+~13 MB of duplication and the benefit is that the raw truth is queryable
+analytically. What was measured:
 
 - **8× storage.** Same rows, nothing dropped: SQLite 99.7 MB (55.5 data +
   44.2 indexes) vs DuckDB 13.0 MB. Projected to 5 years at the maintainer's
