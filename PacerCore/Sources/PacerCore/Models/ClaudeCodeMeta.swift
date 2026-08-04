@@ -44,6 +44,9 @@ public enum ClaudeCodeMetaKey {
     /// When the still-open rollup buckets were last rebuilt from their
     /// samples rather than trusted. See `ScanCoordinator.rebuildLiveBuckets`.
     public static let lastLiveBucketRebuildAt = "last_live_bucket_rebuild_at"
+    /// Which generation of the duplicate-turn repair has run.
+    /// See `SamplePersister.repairDuplicateSamples`.
+    public static let duplicateRepairVersion = "duplicate_repair_version"
     /// JSON array of model names that had usage but no pricing at the last
     /// scan. When one of them gains a price, its history is rebuilt.
     /// See `ScanCoordinator.reconcileUnpricedModels`.

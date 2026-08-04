@@ -703,6 +703,90 @@ public final class SamplePersister {
         pollutedSessionIds.formUnion(ids)
     }
 
+    /// Collapse turns that got stored more than once.
+    ///
+    /// A `dedupKey` identifies one billable turn, so two rows carrying the
+    /// same one means the same turn was counted twice — inflating tokens and
+    /// cost for whatever day it lands on. The dedup guard exists to make this
+    /// impossible, and it does now; what's left is residue from before it was
+    /// right. Found on a real store as **126 byte-identical pairs** from
+    /// 2026-05-06/07, reported by `make verify-data`.
+    ///
+    /// This is the ONE place Pacer removes raw rows, and it is not retention:
+    /// nothing observed is lost, because the row kept and the rows dropped
+    /// describe the same turn. Which one is kept follows the same
+    /// `supersedes` rule the live path uses — most complete, then largest
+    /// output — so this is correct even for pairs that aren't identical, such
+    /// as a partial streamed copy that survived alongside its finished one.
+    ///
+    /// Deliberately NOT predicate-driven: an `IN` over the duplicated keys is
+    /// the shape that crashes SwiftData's expression compiler (AGENTS.md
+    /// bug list), so both passes walk and filter in memory. It runs once,
+    /// gated on a meta version, so the two walks cost nothing ongoing.
+    @discardableResult
+    public func repairDuplicateSamples() throws -> Int {
+        // Pass 1: which keys appear more than once. Two Sets rather than a
+        // dictionary of rows — the table doesn't fit in memory twice.
+        var seen: Set<String> = []
+        var duplicated: Set<String> = []
+        var keyOnly = FetchDescriptor<TokenSample>()
+        keyOnly.propertiesToFetch = [\.dedupKey]
+        try context.enumerate(keyOnly, batchSize: 5_000) { sample in
+            guard let key = sample.dedupKey, !key.isEmpty else { return }
+            if !seen.insert(key).inserted { duplicated.insert(key) }
+        }
+        guard !duplicated.isEmpty else { return 0 }
+
+        // Pass 2: gather only the offending rows, keep the best of each.
+        var groups: [String: [TokenSample]] = [:]
+        try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000) { sample in
+            guard let key = sample.dedupKey, duplicated.contains(key) else { return }
+            groups[key, default: []].append(sample)
+        }
+
+        var removed = 0
+        for (_, rows) in groups where rows.count > 1 {
+            // Largest output wins, then the earliest row so the choice is
+            // deterministic across runs. `TokenSample` doesn't store the
+            // completeness flag `ParsedUsageEntry.supersedes` prefers — it
+            // isn't needed here, because a partial streamed copy is by
+            // definition the one with FEWER output tokens.
+            let keeper = rows.dropFirst().reduce(rows[0]) { best, row in
+                if row.outputTokens != best.outputTokens {
+                    return row.outputTokens > best.outputTokens ? row : best
+                }
+                return best.sampledAt <= row.sampledAt ? best : row
+            }
+            for row in rows where row !== keeper {
+                markBucketsDirty(for: row)
+                context.delete(row)
+                removed += 1
+            }
+            markBucketsDirty(for: keeper)
+        }
+        return removed
+    }
+
+    /// Fold one sample's four rollup buckets into the dirty+polluted sets.
+    /// Shared so the repair can't mark a different set than the walk does.
+    private func markBucketsDirty(for sample: TokenSample) {
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        pollutedDailyPairs.insert(pair)
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            pollutedSessionIds.insert(sid)
+        }
+    }
+
     /// Mark every sample-driven aggregate as needing recompute.
     /// Used on startup when ScanCoordinator detects a `costRecomputeVersion`
     /// mismatch — the on-disk aggregates are correct topologically but

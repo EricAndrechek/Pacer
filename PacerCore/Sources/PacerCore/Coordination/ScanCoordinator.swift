@@ -91,6 +91,14 @@ public final class ScanCoordinator {
     ///         this rebuild clears the zeros already written.
     public static let currentCostRecomputeVersion = "6"
 
+    /// Generation of the duplicate-turn repair.
+    ///
+    /// - "1" — collapse turns stored more than once under one `dedupKey`.
+    ///         Found on a real store as 126 byte-identical pairs from
+    ///         2026-05-06/07, inflating those two days. The dedup guard makes
+    ///         this impossible now; this clears what predates it.
+    public static let currentDuplicateRepairVersion = "1"
+
     /// Version of the project-path canonicalization rules. Bumped when
     /// a parsing/canonicalization change requires updating in-place
     /// the `projectPath` field on every existing TokenSample row —
@@ -895,6 +903,19 @@ public final class ScanCoordinator {
         if needsCostRebuild {
             try activePersister.markEverySampleDirty()
             log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
+        }
+
+        // Duplicate turns: the same billable turn stored under one dedup key
+        // more than once, inflating whatever day it lands on. Runs once ever,
+        // gated on a version, because it costs two full walks.
+        if try fetchMeta(ClaudeCodeMetaKey.duplicateRepairVersion)
+            != Self.currentDuplicateRepairVersion {
+            let removed = try activePersister.repairDuplicateSamples()
+            if removed > 0 {
+                log("integrity: collapsed \(removed) duplicate turn(s) — rebuilding affected buckets")
+            }
+            try writeMeta(ClaudeCodeMetaKey.duplicateRepairVersion,
+                          value: Self.currentDuplicateRepairVersion)
         }
 
         // Open buckets drift; settled ones can't.

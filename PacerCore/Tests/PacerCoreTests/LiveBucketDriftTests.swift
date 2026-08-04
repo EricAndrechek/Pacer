@@ -212,6 +212,55 @@ import Testing
         #expect(daily > 0, "history stayed at $0 after the model gained a price")
     }
 
+    /// The same billable turn stored twice gets collapsed to one.
+    ///
+    /// A `dedupKey` identifies one turn, so two rows carrying it means it was
+    /// counted twice. Found on a real store as 126 byte-identical pairs from
+    /// 2026-05-06/07 — reported by `make verify-data`, invisible to the app.
+    ///
+    /// This is the only place Pacer removes raw rows, so the test pins BOTH
+    /// halves: the extra copy goes, and the surviving row is the one with the
+    /// most output (a partial streamed copy must never win over its finished
+    /// twin).
+    @ScanActor
+    @Test func duplicateTurnsAreCollapsedKeepingTheFullestCopy() async throws {
+        let container = try makeDriftContainer()
+        let context = ModelContext(container)
+
+        let at = Date(timeIntervalSince1970: 1_780_000_000)
+        let date = TokenSample.formatDate(at)
+        for output in [50, 900, 300] as [Int64] {
+            let sample = TokenSample(
+                sampledAt: at, date: date, model: "claude-opus-4-8",
+                inputTokens: 10, outputTokens: output, cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+            sample.dedupKey = "msg_dupe:req_dupe"
+            context.insert(sample)
+        }
+        // A turn that is NOT duplicated must survive untouched.
+        let solo = TokenSample(
+            sampledAt: at, date: date, model: "claude-opus-4-8",
+            inputTokens: 10, outputTokens: 7, cacheReadTokens: 0,
+            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+        solo.dedupKey = "msg_solo:req_solo"
+        context.insert(solo)
+        try context.save()
+
+        let persister = try SamplePersister(context: context)
+        #expect(try persister.repairDuplicateSamples() == 2)
+        try context.save()
+
+        let rows = try context.fetch(FetchDescriptor<TokenSample>())
+        #expect(rows.count == 2, "one per distinct turn")
+        let kept = rows.first { $0.dedupKey == "msg_dupe:req_dupe" }
+        #expect(try #require(kept).outputTokens == 900,
+                "kept the fullest copy, not the first or last seen")
+        #expect(rows.contains { $0.dedupKey == "msg_solo:req_solo" })
+
+        // Idempotent — a second run has nothing left to do.
+        #expect(try persister.repairDuplicateSamples() == 0)
+    }
+
     /// The throttle has to actually throttle — otherwise this trades a
     /// correctness bug for the cost of rebuilding the day's buckets on every
     /// cycle, which is the fast path's whole reason for existing.
