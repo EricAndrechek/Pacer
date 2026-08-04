@@ -191,6 +191,11 @@ public final class SamplePersister {
     /// `consumeMissingHourBuckets()` drain is one-shot per persister
     /// lifetime; subsequent scans see no gaps and return empty.
     private var missingHourBuckets: Set<DateHourModelTriple>
+    /// `HourlyAggregate` rows whose `(date, hour, model)` no longer matches
+    /// any sample — see where this is populated. Drained once per persister
+    /// lifetime like the `missing*` sets, but it drives deletion rather than
+    /// recompute.
+    private var strandedHourBuckets: Set<DateHourModelTriple>
     /// Session ids with TokenSamples but no matching `SessionInfo` row
     /// at persister-init time. Same one-shot recovery path as the other
     /// missing-* sets. Bootstrap for users upgrading from a build that
@@ -233,6 +238,7 @@ public final class SamplePersister {
         self.missingAggregatePairs = []
         self.missingProjectAggregatePairs = []
         self.missingHourBuckets = []
+        self.strandedHourBuckets = []
         self.missingSessionIds = []
         self.pendingInsertCount = 0
         self.stats = Stats(inserted: 0, skippedAsDuplicate: 0)
@@ -389,6 +395,28 @@ public final class SamplePersister {
             if applied == wanted.count { break }   // nothing left to find
         }
         pendingUpgrades.removeAll(keepingCapacity: false)
+    }
+
+    /// Hourly rows with no samples behind them, drained once. The caller
+    /// deletes them; leaving them makes every hourly total read high.
+    public func consumeStrandedHourBuckets() -> Set<DateHourModelTriple> {
+        let out = strandedHourBuckets
+        strandedHourBuckets = []
+        return out
+    }
+
+    /// Delete the given `HourlyAggregate` rows. Returns how many went.
+    @discardableResult
+    public func deleteHourAggregates(_ buckets: Set<DateHourModelTriple>) throws -> Int {
+        guard !buckets.isEmpty else { return 0 }
+        var deleted = 0
+        for agg in try context.fetch(FetchDescriptor<HourlyAggregate>()) {
+            let key = DateHourModelTriple(date: agg.date, hour: agg.hour, model: agg.model)
+            guard buckets.contains(key) else { continue }
+            context.delete(agg)
+            deleted += 1
+        }
+        return deleted
     }
 
     /// Reset the batching counter. The coordinator calls this after the
@@ -802,6 +830,24 @@ public final class SamplePersister {
                 date: agg.date, hour: agg.hour, model: agg.model))
         }
         missingHourBuckets = sampleHourBuckets.subtracting(hourAggregateTriples)
+        // …and the other direction: hourly rows with no samples behind them.
+        //
+        // Unlike `date`, which `TokenSample` stores at insert, the hour is
+        // DERIVED from `sampledAt` through the current calendar. Anything that
+        // shifts that derivation by an hour — a DST boundary, a timezone
+        // change, an older build computing it differently — re-buckets a
+        // sample and strands the row it used to live in. The recomputer can't
+        // clean those up: it only deletes a bucket that is in its dirty set,
+        // and a bucket with no samples never gets marked dirty by an insert.
+        //
+        // Found on a real store as 34 stranded rows carrying 1,915,526 output
+        // tokens — the hourly rollup reading ~1% high while the daily rollup,
+        // which buckets on the stored `date`, matched the samples exactly.
+        // Each stranded row held the sample count belonging to the hour after
+        // it, which is the one-hour-shift signature.
+        //
+        // Both sets are already in hand here, so detecting them is free.
+        strandedHourBuckets = hourAggregateTriples.subtracting(sampleHourBuckets)
 
         var sessDesc = FetchDescriptor<SessionInfo>()
         sessDesc.propertiesToFetch = [\.sessionId]

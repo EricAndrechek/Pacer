@@ -798,6 +798,19 @@ public final class ScanCoordinator {
             activePersister.addDirtyHourBuckets(recoveryHourBuckets)
             log("integrity: \(recoveryHourBuckets.count) (date,hour,model) bucket(s) missing hourly aggregates - rebuilding")
         }
+        // The inverse repair: hourly rows whose bucket no longer matches any
+        // sample. The hour is derived from `sampledAt` rather than stored the
+        // way `date` is, so a DST boundary or timezone change re-buckets a
+        // sample and strands the row it used to occupy — and nothing else
+        // cleans those up, because the recomputer only deletes buckets that
+        // are in its dirty set and an empty bucket is never dirtied by an
+        // insert. Left alone they make every hourly total read high.
+        let stranded = activePersister.consumeStrandedHourBuckets()
+        if !stranded.isEmpty {
+            let deleted = try activePersister.deleteHourAggregates(stranded)
+            log("integrity: deleted \(deleted) stranded hourly aggregate(s) with no samples")
+        }
+
         // Same recovery path for SessionInfo. Bootstraps the rollup
         // table for users upgrading from a build that didn't maintain
         // it; afterwards incremental scans only touch the sessions
