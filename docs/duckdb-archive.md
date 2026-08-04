@@ -169,6 +169,38 @@ row instead of skipping it. Rows whose transcripts Claude Code has since
 rotated away keep their old values — we never delete a sample we can't
 re-derive.
 
+## Independently verified against ccusage (2026-08-04)
+
+The dedup fix was checked against a *fresh* `bun x ccusage daily --json` on
+the same machine — an external tool that still has the first-wins bug — over
+the 37 days both cover:
+
+```
+inputTokens    match 18/37       cacheRead      match 18/37
+cacheCreation  match 19/37       (Pacer 5m+1h summed vs ccusage flat)
+outputTokens   Pacer higher 16 · equal 18 · lower 3   →  1.31x overall
+```
+
+Reading that correctly matters, because none of these are failures:
+
+- **Exact matches on input/cacheRead/cacheCreation** are the real check: those
+  fields were untouched by the fix, and they agree on every day where Pacer's
+  retained history and ccusage's on-disk view coincide.
+- **Pacer higher on output** is the fix. ccusage keeps the mid-stream copy;
+  we keep the finished one. 1.31x is the same direction and rough size as the
+  63% figure measured on the frozen corpus.
+- **Days where they diverge on input/cacheRead** are the retention asymmetry —
+  Pacer keeps rows whose transcripts Claude Code has since pruned, ccusage
+  only sees what's on disk today.
+- **The three days Pacer reads LOWER on output** are that asymmetry pointing
+  the other way plus live drift: a repair can only fix rows whose transcripts
+  still exist, so a day with pruned files keeps unrepairable partials while
+  ccusage re-reads only the survivors (all finished). The third is today,
+  still being written.
+
+Re-run this after any ingest change. `ccusage` reports `period` (not `date`)
+and now carries an `agent` field, so filter before comparing.
+
 ## Two performance lessons, both learned the hard way (both fixes DID ship)
 
 Both were found by running against a **real 189k-row store**, and neither was
