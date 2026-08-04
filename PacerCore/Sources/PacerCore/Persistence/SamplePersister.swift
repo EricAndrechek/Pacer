@@ -535,8 +535,10 @@ public final class SamplePersister {
         // a cost-recompute version bump and every HourlyAggregate
         // would silently keep its pre-bump cost numbers.
         descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt]
-        let samples = try context.fetch(descriptor)
-        for sample in samples {
+        // Batched for the same reason the preload is: this walks the whole
+        // table, and materializing it all at once is the cost (see
+        // `preloadFromStore`).
+        try context.enumerate(descriptor, batchSize: 5_000) { sample in
             let pair = DateModelPair(date: sample.date, model: sample.model)
             dirtyPairs.insert(pair)
             // Pollute so any concurrent insert(_:) in the same cycle
@@ -578,10 +580,11 @@ public final class SamplePersister {
     /// recomputer.
     @discardableResult
     public func canonicalizeProjectPaths(aliases: [String: String] = [:]) throws -> Int {
-        let samples = try context.fetch(FetchDescriptor<TokenSample>())
+        // Batched — same whole-table shape as the preload.
         var changedCount = 0
-        for sample in samples {
-            guard let pre = sample.projectPath else { continue }
+        // `continue` becomes `return` — the body is a per-row closure now.
+        try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000) { sample in
+            guard let pre = sample.projectPath else { return }
             // Backfill `originalProjectPath` whenever it's nil. The
             // pre-migration `projectPath` is the best historical
             // value we have for this row — for samples inserted
@@ -595,7 +598,7 @@ public final class SamplePersister {
                 sample.originalProjectPath = pre
             }
             let canonical = ProjectPathCanonicalizer.canonicalize(pre, aliases: aliases)
-            guard canonical != pre else { continue }
+            guard canonical != pre else { return }
             sample.projectPath = canonical
             // Both ends of the change need recompute: the old bucket
             // emptied (so the recomputer deletes it) and the new
