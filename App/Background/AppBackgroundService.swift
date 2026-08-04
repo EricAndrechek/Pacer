@@ -108,7 +108,14 @@ final class AppBackgroundService {
         )
         let scanCoordinator = ScanCoordinator(
             container: container,
-            configuration: ScanCoordinator.Configuration(costMode: costMode),
+            configuration: ScanCoordinator.Configuration(
+                costMode: costMode,
+                // DuckDB-backed bulk parse, used on FULL scans only — a first
+                // launch, or a `currentScanVersion` bump re-deriving history.
+                // Injected rather than imported by PacerCore so the widget
+                // extension never links the engine. Incremental cycles are
+                // untouched. See `BulkTranscriptImporter`.
+                bulkImporter: ArchiveImporter()),
             oauthClient: oauthClient,
             oauthPoolStore: KeychainTokenPoolStore()
         )

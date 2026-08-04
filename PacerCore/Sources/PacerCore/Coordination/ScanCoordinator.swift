@@ -162,19 +162,26 @@ public final class ScanCoordinator {
         /// init; passing a configuration here without a client is a
         /// no-op (matches the test default — no network calls).
         public var oauthPolling: OAuthPoller.Configuration
+        /// Optional faster path for **full** scans only — first launch and
+        /// parser-version re-derivations. `nil` (the default, and what the
+        /// widget extension and tests use) keeps every scan on
+        /// `JSONLScanner`. See `BulkTranscriptImporter`.
+        public var bulkImporter: BulkTranscriptImporter?
 
         public init(
             costMode: CostMode = .auto,
             watcherMode: JSONLWatcher.Mode = .live(latencySeconds: 0.5, backstopInterval: 60),
             probeStatsCache: Bool = true,
             saveBatchSize: Int = 1_000,
-            oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration()
+            oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration(),
+            bulkImporter: BulkTranscriptImporter? = nil
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
             self.probeStatsCache = probeStatsCache
             self.saveBatchSize = saveBatchSize
             self.oauthPolling = oauthPolling
+            self.bulkImporter = bulkImporter
         }
     }
 
@@ -1030,13 +1037,40 @@ public final class ScanCoordinator {
             hintedPaths = paths.isEmpty ? nil : paths
         }
         let consumeMs = tickMs()
-        let result = try await scanner.scan(
-            roots: resolvedRoots,
-            cursors: cursors,
-            aliases: aliases,
-            hintedPaths: hintedPaths,
-            emit: { entry in sink.consume(entry) }
-        )
+        // A full scan means "read every transcript from byte zero" — a first
+        // launch, or a `currentScanVersion` bump re-deriving history under
+        // new parsing rules. That's the one shape a bulk importer is better
+        // at (74.8 s → 12.4 s on a 1,697-file corpus), and the one time
+        // re-reading whole files costs nothing extra, since we were going to
+        // read them all anyway.
+        //
+        // Incremental cycles never come here: they resume from byte offsets
+        // and touch only what changed, which no bulk reader can match.
+        var bulkResult: JSONLScanner.ScanResult?
+        if isFullScan, let importer = configuration.bulkImporter {
+            do {
+                bulkResult = try bulkScan(importer: importer,
+                                          roots: resolvedRoots.map(\.projectsDirectory),
+                                          aliases: aliases, sink: sink)
+            } catch {
+                // Degrade to slow, never to broken: the line parser is always
+                // able to do this job, so an importer failure costs time and
+                // a log line rather than a launch.
+                log("bulk import failed (\(error)) — falling back to the line parser")
+            }
+        }
+        let result: JSONLScanner.ScanResult
+        if let bulkResult {
+            result = bulkResult
+        } else {
+            result = try await scanner.scan(
+                roots: resolvedRoots,
+                cursors: cursors,
+                aliases: aliases,
+                hintedPaths: hintedPaths,
+                emit: { entry in sink.consume(entry) }
+            )
+        }
         // Bulk-insert everything the scanner collected. One MainActor
         // pass over the entries; see `InsertSink` doc for the rationale.
         try sink.flush()
@@ -1448,6 +1482,41 @@ public final class ScanCoordinator {
         guard let raw = try fetchMeta(ClaudeCodeMetaKey.lastIntegrityWalkAt),
               let at = TimeInterval(raw) else { return true }   // never run
         return Date().timeIntervalSince1970 - at >= Self.integrityWalkInterval
+    }
+
+    /// Run a full scan through the injected bulk importer, shaped as a
+    /// `JSONLScanner.ScanResult` so everything downstream — the sink, the
+    /// persister, cursor saving, the phase log — behaves identically to the
+    /// line parser's path.
+    ///
+    /// Cursors are seeded from the size/mtime the importer observed, so the
+    /// next incremental cycle resumes at the end of what was imported rather
+    /// than re-reading it. A file that grew in between is harmless: its mtime
+    /// won't match the saved cursor, so the next scan re-opens it and reads
+    /// the tail.
+    private func bulkScan(
+        importer: BulkTranscriptImporter,
+        roots: [URL],
+        aliases: [String: String],
+        sink: InsertSink
+    ) throws -> JSONLScanner.ScanResult {
+        let imported = try importer.importAll(roots: roots, aliases: aliases)
+        for entry in imported.entries { sink.consume(entry) }
+        log(String(format: "bulk import: %d entries from %d files in %.1fs",
+                   imported.entries.count, imported.fileMarks.count, imported.seconds))
+        return JSONLScanner.ScanResult(
+            progress: JSONLScanner.ScanProgress(
+                filesScanned: imported.fileMarks.count,
+                filesSkipped: 0,
+                entriesParsed: imported.entries.count,
+                entriesAccepted: imported.entries.count,
+                // The importer deduplicates in SQL, so whatever it dropped is
+                // already gone before we see it — reporting a number here
+                // would be inventing one.
+                duplicatesDropped: 0),
+            updatedCursors: imported.fileMarks.mapValues {
+                JSONLScanner.CursorState(byteOffset: $0.size, lastSeenMtime: $0.mtime)
+            })
     }
 
     /// Return the cached cursor map, loading from disk on first call.

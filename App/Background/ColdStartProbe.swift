@@ -44,7 +44,14 @@ enum ColdStartProbe {
 
         let start = Date()
         do {
-            let report = try await ScanCoordinator(container: container).runOnce()
+            // Production wiring, or the line parser for comparison. A probe
+            // that skips the injection measures a path no user is on.
+            let useBulk = ProcessInfo.processInfo.environment["PACER_COLD_START_NO_BULK"] != "1"
+            log(useBulk ? "ingest: DuckDB bulk importer" : "ingest: line parser (comparison)")
+            let report = try await ScanCoordinator(
+                container: container,
+                configuration: .init(bulkImporter: useBulk ? ArchiveImporter() : nil)
+            ).runOnce()
             let p = report.phaseTimings
             log(String(format: "TOTAL %.1f s", Date().timeIntervalSince(start)))
             log("  parsed \(report.scanProgress.entriesParsed) entries from "
