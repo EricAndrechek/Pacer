@@ -159,6 +159,59 @@ import Testing
         #expect(abs(session - daily) < 0.000_001, "session \(session) vs daily \(daily)")
     }
 
+    /// A model that arrives before its price does gets its history rebuilt
+    /// when the price shows up — without a release.
+    ///
+    /// Every model launch has hit this: `costRecomputeVersion` "3" was Fable
+    /// 5 and Mythos 5 aggregating at $0 because LiteLLM had no entry on
+    /// their launch day, "4" was Mythos Preview. Each needed a human to
+    /// notice and ship a bump. Pricing self-heals; the rollups built from it
+    /// did not.
+    @ScanActor
+    @Test func historyIsRebuiltWhenAModelGainsPricing() async throws {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let root = try makeDriftFixtureRoot(withLines: [
+            makeDriftAssistantLine(timestamp: stamp.string(from: Date()),
+                                   storedCost: 0.25, messageId: "m1", requestId: "r1")
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = try makeDriftContainer()
+        let context = ModelContext(container)
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .calculate, watcherMode: .manual,
+                                 probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+        )
+        _ = try await coordinator.runOnce()
+
+        let model = try #require(
+            try context.fetch(FetchDescriptor<DailyAggregate>()).first).model
+
+        // Rewrite history as it would look had this model been unpriced when
+        // its samples were first aggregated: $0 cost, and recorded as
+        // unpriced so the next cycle can see it has since gained a price.
+        for row in try context.fetch(FetchDescriptor<DailyAggregate>()) { row.totalCostUSD = 0 }
+        for row in try context.fetch(FetchDescriptor<HourlyAggregate>()) { row.totalCostUSD = 0 }
+        let key = ClaudeCodeMetaKey.unpricedModels
+        let json = String(data: try JSONEncoder().encode(Set([model])), encoding: .utf8)!
+        let existing = try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))
+        if let row = existing.first { row.value = json }
+        else { context.insert(ClaudeCodeMeta(key: key, value: json)) }
+        try context.save()
+
+        _ = try await coordinator.runOnce()
+
+        // The model is priced now, so it left the unpriced set, so its
+        // history was rebuilt — no version bump, no release.
+        let daily = try context.fetch(FetchDescriptor<DailyAggregate>())
+            .reduce(0) { $0 + $1.totalCostUSD }
+        #expect(daily > 0, "history stayed at $0 after the model gained a price")
+    }
+
     /// The throttle has to actually throttle — otherwise this trades a
     /// correctness bug for the cost of rebuilding the day's buckets on every
     /// cycle, which is the fast path's whole reason for existing.

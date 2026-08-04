@@ -1059,6 +1059,9 @@ public final class ScanCoordinator {
         if configuration.costMode != .display, !SampleCostCache.isWarm {
             await SampleCostCache.reload()
         }
+        if configuration.costMode != .display {
+            try reconcileUnpricedModels(persister: activePersister)
+        }
         try saveCursors(result.updatedCursors)
         // After the cycle's rows are in, so the index never claims coverage
         // the store doesn't have. Throttled inside, and failure-tolerant —
@@ -1337,6 +1340,52 @@ public final class ScanCoordinator {
     /// stranded hourly rows) and never urgent, so a day's latency costs
     /// nothing while a walk per launch costs 9-16 s every time.
     private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
+
+    /// Rebuild history when a model that had no price gains one.
+    ///
+    /// A model Pacer sees before any pricing source lists it aggregates at
+    /// $0 — `CostCalculator` has nothing to multiply by, and $0 is a legal
+    /// total, so the rollup never revisits it. This has happened at every
+    /// model launch: `costRecomputeVersion` "3" was Fable 5 and Mythos 5,
+    /// "4" was Mythos Preview. Each needed a human to notice and ship a
+    /// version bump, and until then those users' costs read low.
+    ///
+    /// Pricing already self-heals (LiteLLM plus a models.dev gap-fill). The
+    /// rollups didn't. Now the set of models with usage but no price is
+    /// carried across cycles, and anything that leaves that set takes its
+    /// history with it — no bump, no release.
+    ///
+    /// Deliberately not scoped to the model's own buckets: the project and
+    /// session rollups aren't model-keyed, so a mixed bucket has to be
+    /// rebuilt whole anyway. This fires only when a price appears, which is
+    /// a handful of times a year.
+    private func reconcileUnpricedModels(persister: SamplePersister) throws {
+        let snapshot = SampleCostCache.current()
+        var models = FetchDescriptor<DailyAggregate>()
+        models.propertiesToFetch = [\.model]
+        let used = Set(try context.fetch(models).map(\.model))
+        guard !used.isEmpty else { return }
+
+        let unpriced = used.filter { snapshot.pricing(for: $0) == nil }
+        let previously: Set<String> = (try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
+            .flatMap { Data($0.utf8) }
+            .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+
+        // Left the unpriced set => gained a price => its history is stale.
+        let nowPriced = previously.subtracting(unpriced)
+        if !nowPriced.isEmpty {
+            try persister.markEverySampleDirty()
+            log("pricing: \(nowPriced.sorted().joined(separator: ", ")) gained pricing — rebuilding cost history")
+        }
+        if unpriced != previously,
+           let encoded = try? JSONEncoder().encode(unpriced),
+           let json = String(data: encoded, encoding: .utf8) {
+            try writeMeta(ClaudeCodeMetaKey.unpricedModels, value: json)
+            if !unpriced.subtracting(previously).isEmpty {
+                log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
+            }
+        }
+    }
 
     /// How often the open buckets are rebuilt rather than trusted. Ten
     /// minutes bounds how long a drifted bucket can stay wrong while it is

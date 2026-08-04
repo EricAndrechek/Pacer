@@ -44,6 +44,10 @@ public enum ClaudeCodeMetaKey {
     /// When the still-open rollup buckets were last rebuilt from their
     /// samples rather than trusted. See `ScanCoordinator.rebuildLiveBuckets`.
     public static let lastLiveBucketRebuildAt = "last_live_bucket_rebuild_at"
+    /// JSON array of model names that had usage but no pricing at the last
+    /// scan. When one of them gains a price, its history is rebuilt.
+    /// See `ScanCoordinator.reconcileUnpricedModels`.
+    public static let unpricedModels = "unpriced_models"
 
     /// ISO-8601 timestamp of the last successful incremental scan.
     /// Passed to `JSONLScanner` as the `mtimeAfter` cutoff so files
