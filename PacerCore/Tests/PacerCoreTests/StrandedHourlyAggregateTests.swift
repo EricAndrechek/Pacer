@@ -163,3 +163,54 @@ import Testing
         #expect(derivedAfterShift != recorded)         // a derivation would have moved
     }
 }
+
+/// Both rollup paths must bucket on the STORED hour.
+///
+/// The bulk path and the per-bucket path each decide which samples belong to
+/// an hour, and they're separate code. Moving only one off the derived hour
+/// leaves the other drifting — which is exactly what happened: the bulk
+/// worker was fixed while `recomputeOne` kept calling
+/// `Calendar.component(.hour:)`, so the fix silently applied to full rebuilds
+/// but not to incremental ones.
+///
+/// A sample whose stored hour deliberately disagrees with its derived hour
+/// pins both paths to the stored value.
+@Suite struct HourlyBucketingUsesStoredHourTests {
+
+    @ScanActor
+    @Test func perBucketRecomputeUsesStoredHour() async throws {
+        let container = try ModelContainer(
+            for: TokenSample.self, HourlyAggregate.self, DailyAggregate.self,
+                ProjectDailyAggregate.self, SessionInfo.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = ModelContext(container)
+
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        let derived = Calendar.current.component(.hour, from: at)
+        let stored = (derived + 5) % 24          // deliberately not the derived one
+        let date = TokenSample.formatDate(at)
+
+        let sample = TokenSample(
+            sampledAt: at, date: date, model: "claude-opus-5",
+            inputTokens: 3, outputTokens: 7, cacheReadTokens: 0,
+            cacheCreation5mTokens: 0, cacheCreation1hTokens: 0)
+        sample.localHour = stored
+        context.insert(sample)
+        try context.save()
+
+        // One bucket keeps this on the per-bucket path, not the bulk worker.
+        let recomputer = HourlyAggregateRecomputer(
+            container: container, context: context, mode: .display)
+        _ = try await recomputer.recompute(
+            buckets: [DateHourModelTriple(date: date, hour: stored, model: "claude-opus-5")])
+        try context.save()
+
+        let rows = try context.fetch(FetchDescriptor<HourlyAggregate>())
+        #expect(rows.count == 1)
+        #expect(rows.first?.hour == stored)
+        // The sample counted — if this path still derived, it would have
+        // filtered itself out and written a zeroed or deleted bucket.
+        #expect(rows.first?.outputTokens == 7)
+        #expect(rows.first?.sampleCount == 1)
+    }
+}

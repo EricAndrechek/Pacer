@@ -169,7 +169,14 @@ public final class HourlyAggregateRecomputer {
         let allDayModelSamples = try context.fetch(sampleDescriptor)
         let targetHour = bucket.hour
         let samples = allDayModelSamples.filter { sample in
-            Calendar.current.component(.hour, from: sample.sampledAt) == targetHour
+            // The STORED hour, falling back to derivation only for rows
+            // written before the field existed. Deriving here would put this
+            // per-bucket path back on the drifting definition the bulk path
+            // just moved off — same bug, different code path.
+            let hour = sample.localHour >= 0
+                ? sample.localHour
+                : Calendar.current.component(.hour, from: sample.sampledAt)
+            return hour == targetHour
         }
 
         let aggKey = HourlyAggregate.makeKey(
