@@ -196,3 +196,62 @@ private actor FixtureCollector {
     _ = try await JSONLScanner().scan(roots: [root]) { entry in await collector.add(entry) }
     #expect(await collector.model("2026-03-01", opus).inputTokens == 105)
 }
+
+/// A streamed message written to the transcript three times — the shape
+/// Claude Code actually produces — must land as ONE turn carrying the
+/// finished token counts, not the first mid-stream snapshot.
+///
+/// This is the end-to-end companion to `StreamingDedupTests`: those pin the
+/// parser and the persister, this pins the *scanner*, which has to notice
+/// that a repeat key superseded what it already emitted and re-emit rather
+/// than dropping it as a duplicate. Getting that wrong silently under-counts
+/// output by ~63% (correctness rule §7) while every row count stays right.
+@Test func scannerKeepsFinishedCopyOfStreamedMessage() async throws {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("pacer-stream-\(UUID().uuidString)", isDirectory: true)
+    let projects = dir.appendingPathComponent("projects/proj", isDirectory: true)
+    try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    // Same message id + requestId; output climbs; only the last is finished.
+    func line(_ ts: String, _ output: Int64, stop: String?) -> String {
+        let stopJSON = stop.map { "\"\($0)\"" } ?? "null"
+        return """
+        {"type":"assistant","timestamp":"\(ts)","requestId":"req1","cwd":"/tmp/pacer-fixture/proj","message":{"id":"msgStream","model":"\(opus)","stop_reason":\(stopJSON),"usage":{"input_tokens":2,"output_tokens":\(output),"cache_read_input_tokens":9992}}}
+        """
+    }
+    // Trailing newline matters: the scanner deliberately leaves an
+    // unterminated final line for the next pass, since that's how a
+    // mid-write live session looks.
+    try ([line("2026-03-01T10:00:00.000Z", 1, stop: nil),
+          line("2026-03-01T10:00:02.000Z", 1, stop: nil),
+          line("2026-03-01T10:00:03.000Z", 289, stop: "tool_use")]
+        .joined(separator: "\n") + "\n")
+        .write(to: projects.appendingPathComponent("stream.jsonl"),
+               atomically: true, encoding: .utf8)
+
+    let root = ClaudePathResolver.ResolvedRoot(
+        root: dir, projectsDirectory: dir.appendingPathComponent("projects", isDirectory: true))
+    let emitted = EntryCollector()
+    _ = try await JSONLScanner().scan(roots: [root]) { entry in await emitted.add(entry) }
+    let entries = await emitted.all
+
+    // The scanner's contract is "emit the best copy so far", which means it
+    // MAY emit a key more than once as better copies arrive — the persister
+    // is what collapses them onto one row (see StreamingDedupTests). So this
+    // asserts on the emissions themselves, not on a naive sum, which would
+    // double-count by design.
+    #expect(entries.count == 2)                    // the partial, then the finished one
+    #expect(entries.last?.breakdown.outputTokens == 289)
+    #expect(entries.last?.isComplete == true)
+    #expect(entries.allSatisfy { $0.dedupKey == "msgStream:req1" })
+    // The mid-stream copy that added nothing was dropped, not re-emitted.
+    #expect(!entries.contains { $0.breakdown.outputTokens == 1 && $0.isComplete })
+}
+
+/// Collects raw emissions, for tests that care about what the scanner emitted
+/// rather than what the totals add up to.
+private actor EntryCollector {
+    private(set) var all: [ParsedUsageEntry] = []
+    func add(_ entry: ParsedUsageEntry) { all.append(entry) }
+}

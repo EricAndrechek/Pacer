@@ -6,7 +6,7 @@ import Testing
 /// per-day token totals as `bun x ccusage daily --json` did when the
 /// snapshot at `docs/research/ccusage-outputs/daily.json` was captured.
 ///
-/// **Key deviation that this test handles**: ccusage flattens
+/// **Deviation 1 — cache tiers.** ccusage flattens
 /// `cache_creation_input_tokens` into a single `cacheCreationTokens`
 /// field; Pacer keeps the 5m/1h split (`cacheCreation5mTokens` +
 /// `cacheCreation1hTokens`). The comparison sums Pacer's two columns
@@ -14,6 +14,17 @@ import Testing
 /// split itself is the deliberate Pacer-better-than-ccusage extension
 /// and isn't comparable. (See AGENTS.md "Non-negotiable correctness
 /// rules" §5.)
+///
+/// **Deviation 2 — output tokens no longer match, on purpose.** ccusage
+/// dedups first-wins. Claude Code writes the same assistant message to the
+/// transcript several times while it streams, and only the last copy carries
+/// the real `output_tokens`, so first-wins keeps the mid-stream snapshot.
+/// Measured on a real 1,697-file corpus that under-counts output by
+/// 29,533,409 tokens — 63% of what gets recorded. Pacer keeps the finished
+/// copy (correctness rule §7), so **Pacer's output totals are legitimately
+/// HIGHER than ccusage's** and these snapshots cannot be expected to match on
+/// that field until ccusage fixes the same bug. A failure here showing Pacer
+/// ahead on output is the fix working; do not "correct" it.
 ///
 /// **Opt-in.** These captured-snapshot tests are gated behind
 /// `PACER_RUN_CCUSAGE_SNAPSHOT_TEST=1` and skip otherwise. They compare a

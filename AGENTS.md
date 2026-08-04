@@ -20,8 +20,14 @@ See `docs/design.md` for the full v1 design.
 - `docs/research/ccusage-outputs/` — captured `bun x ccusage` JSON outputs
   for the local dataset. **Use these as ground-truth in tests** — every
   metric Pacer surfaces should match `ccusage`'s number for the same
-  range, modulo the cache 5m/1h split (we track separately, ccusage
-  doesn't).
+  range, with exactly **two deliberate deviations**:
+  1. the cache 5m/1h split (we track them separately, ccusage flattens);
+  2. **output tokens on streamed messages** — ccusage dedups first-wins,
+     which keeps the mid-stream snapshot instead of the finished message
+     and under-counts output by ~63% on a real corpus (correctness rule
+     §7). Pacer is deliberately higher here. If a ccusage comparison
+     shows us reporting *more* output than ccusage, that is the fix
+     working — do not "correct" it back.
 - **`AGENTS.md` → "Performance — invariants and patterns"** (below) —
   read before adding ANY `@Query`, `FetchDescriptor`, computed view
   property, widget provider, or new rollup table. Codifies hard-won
@@ -54,7 +60,24 @@ These are subtle, easy to miss, and break user-visible numbers:
 6. **Defensive parse-or-skip everywhere.** A single malformed line
    (often a truncated final line on a live session) must not break the
    scan.
-7. **Never match a rate-limit cycle with `resetsAt ==`.** The server
+7. **A repeat `dedupKey` is not automatically a duplicate.** Claude Code
+   appends the same assistant message to the transcript several times
+   while it streams; only the last copy carries the real `output_tokens`
+   and a non-null `stop_reason`. First-wins dedup (ccusage's rule, right
+   for *replayed* duplicates) kept the mid-stream snapshot and discarded
+   29.5M output tokens — 63% of the output recorded. Precedence lives in
+   `ParsedUsageEntry.supersedes`: finished message first, else larger
+   output. Do not "simplify" it back to skip-on-seen. See
+   `docs/duckdb-archive.md`.
+8. **Verify ingest changes against a REAL store, not a synthetic one.**
+   Both performance bugs and the dedup bug above were invisible on a
+   fresh in-memory store — an empty store has nothing to upgrade and no
+   cursors to rewrite. Freeze a copy of a real `~/.claude`, point at it
+   with `CLAUDE_CONFIG_DIR`, and compare all six token totals between
+   the two ingest paths (`PACER_COLD_START_SPIKE=1` vs
+   `PACER_IMPORT_SPIKE=1`). Row count alone proves nothing about field
+   mapping.
+9. **Never match a rate-limit cycle with `resetsAt ==`.** The server
    re-serializes `resets_at` per response and it jitters in the
    milliseconds — one 7-day cycle carries thousands of distinct reset
    instants. Cycle membership goes through `RateLimitCycle.contains`
@@ -538,6 +561,21 @@ git log for "Views/Widgets: scope @Query" or "HourlyAggregate" or
   every SwiftData save materializes the whole table just to answer the
   question — see `WelcomeCard`, `LiveActivityCard.latestSampleProbe`,
   `LiveSessionWidget`.
+- **A per-item fetch is a bulk-path bug waiting to happen.** An indexed
+  lookup per item is the right shape for the handful an incremental
+  cycle touches and ruinous for the thousands a full scan does. Two
+  places had it, both invisible until run against a real store: the
+  dedup upgrade path fetched by `dedupKey` per row (98% CPU, >2 GB
+  resident), and `saveCursors` fetched by path per cursor (1,701
+  round-trips to avoid reading a 1,701-row table — 33.7 s of a 70 s
+  scan). Both now switch to one fetch + a dictionary above a threshold.
+  When you add a bulk path, ask what it costs at 100× the item count.
+- **Don't re-read the same table once per worker.** All four rollup
+  workers fetched the whole sample table into their own `ModelContext`.
+  They can't share SwiftData objects (context-bound, separate actors),
+  so they share `SampleSnapshot` — a `Sendable` value projection built
+  at most once per cycle, lazily, so incremental cycles never
+  materialize it.
 - **Bound history queries by TIME, not row count.** A `fetchLimit` on a
   series a chart *draws* is a silent cap on how much of that series the
   user can see, and it moves whenever write cadence does. The scoped pace
