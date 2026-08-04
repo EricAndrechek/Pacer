@@ -330,11 +330,27 @@ public final class SamplePersister {
     /// Newest `sampledAt` the in-memory map accounts for.
     private var indexWatermark = Date(timeIntervalSince1970: 0)
 
+    /// How long to let the index lag before rewriting it.
+    ///
+    /// The file is rewritten whole, so writing every cycle meant re-emitting
+    /// 4.4 MB for one new row — 90 ms on every scan, against a 33-80 ms
+    /// budget for the entire cycle. Lagging is explicitly safe: the watermark
+    /// makes a behind-but-valid index usable, because rows newer than it are
+    /// re-walked on load. Worst case after a hard kill is re-walking a few
+    /// minutes of rows.
+    private static let indexWriteInterval: TimeInterval = 5 * 60
+    private var lastIndexWriteAt: Date?
+
     /// Persist the dedup map so the next launch skips the walk. Called after a
     /// cycle's writes have landed; failures are logged and ignored, since the
     /// index is only ever an optimisation.
-    public func writeDedupIndexIfNeeded() {
+    ///
+    /// `force` bypasses the throttle — used on shutdown, where the next write
+    /// opportunity may be a long time away.
+    public func writeDedupIndexIfNeeded(force: Bool = false) {
         guard indexNeedsWrite, let indexURL, preloaded else { return }
+        if !force, let last = lastIndexWriteAt,
+           Date().timeIntervalSince(last) < Self.indexWriteInterval { return }
         do {
             let keyed = FetchDescriptor<TokenSample>(
                 predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
@@ -343,6 +359,7 @@ public final class SamplePersister {
                                    watermark: indexWatermark)
             try index.write(to: indexURL)
             indexNeedsWrite = false
+            lastIndexWriteAt = Date()
         } catch {
             Log.write("SamplePersister", "dedup index write failed (harmless): \(error)")
         }

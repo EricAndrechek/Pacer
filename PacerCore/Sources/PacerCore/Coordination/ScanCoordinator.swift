@@ -543,6 +543,10 @@ public final class ScanCoordinator {
     }
 
     public func stop() async {
+        // Flush the dedup index unconditionally on the way out: writes are
+        // throttled during normal operation, so without this a clean quit
+        // could still leave several minutes of rows to re-walk next launch.
+        persister?.writeDedupIndexIfNeeded(force: true)
         await watcher.stop()
         if let oauthPoller {
             await oauthPoller.stop()
@@ -983,7 +987,11 @@ public final class ScanCoordinator {
         phase.flushMs = tickMs()
         try saveCursors(result.updatedCursors)
         // After the cycle's rows are in, so the index never claims coverage
-        // the store doesn't have. Cheap and failure-tolerant — it's a cache.
+        // the store doesn't have. Throttled inside, and failure-tolerant —
+        // it's a cache. NOTE its cost lands in the `curs=` phase of the scan
+        // log rather than a field of its own; unthrottled that read as
+        // "cursor saving got 90x slower", which is how the regression was
+        // spotted at all.
         activePersister.writeDedupIndexIfNeeded()
         phase.saveCursorsMs = tickMs()
 
