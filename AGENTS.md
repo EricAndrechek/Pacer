@@ -73,10 +73,11 @@ These are subtle, easy to miss, and break user-visible numbers:
    Both performance bugs and the dedup bug above were invisible on a
    fresh in-memory store — an empty store has nothing to upgrade and no
    cursors to rewrite. Freeze a copy of a real `~/.claude`, point at it
-   with `CLAUDE_CONFIG_DIR`, and compare all six token totals between
-   the two ingest paths (`PACER_COLD_START_SPIKE=1` vs
-   `PACER_IMPORT_SPIKE=1`). Row count alone proves nothing about field
-   mapping.
+   with `CLAUDE_CONFIG_DIR`, and run `PACER_COLD_START_PROBE=1` (see
+   `App/Background/ColdStartProbe.swift`), which reports phase timings
+   AND all six per-field token totals. Row count alone proves nothing
+   about field mapping — a swapped cache tier leaves every count
+   identical while changing everyone's cost.
 9. **Never match a rate-limit cycle with `resetsAt ==`.** The server
    re-serializes `resets_at` per response and it jitters in the
    milliseconds — one 7-day cycle carries thousands of distinct reset

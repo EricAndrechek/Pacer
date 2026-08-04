@@ -112,14 +112,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // DuckDB archive spike: read the REAL store (read-only — the scan
-        // loop never starts), write a throwaway archive into the App Group
-        // container, report, exit. Same shape as screenshot mode: no menu
-        // bar, no hotkey, no background service, no writes.
-        if ArchiveSpike.isActive {
+        // Cold-start probe: measures a first launch against an in-memory
+        // store. Takes the same early exit as screenshot mode because it
+        // must not hit the single-instance gate — it is nearly always run
+        // while the real Pacer is going, and would otherwise just exit. It
+        // also skips the stderr redirect so its report lands on the
+        // terminal instead of the log file.
+        if ColdStartProbe.isActive {
             PacerSettings.registerDefaults()
             do {
-                container = try PacerStore.makeModelContainer()
+                container = try PacerStore.makeInMemoryContainer()
             } catch {
                 Self.showFatalContainerError(error)
             }
@@ -294,17 +296,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // DuckDB archive spike — see `ArchiveSpike`.
-        if ArchiveSpike.isActive {
+        // Cold-start measurement harness — see `ColdStartProbe`.
+        if ColdStartProbe.isActive {
             NSApp.setActivationPolicy(.accessory)
             Task { @MainActor in
-                if ArchiveSpike.isColdStart {
-                    await ArchiveSpike.runColdStart()
-                } else if ArchiveSpike.isImport {
-                    await ArchiveSpike.runImport()
-                } else {
-                    await ArchiveSpike.run(container: container)
-                }
+                await ColdStartProbe.run()
                 exit(0)
             }
             return

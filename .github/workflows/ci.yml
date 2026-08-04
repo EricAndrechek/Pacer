@@ -25,8 +25,8 @@ jobs:
           xcodebuild -version
           swift --version
 
-      # PacerCore is pure SPM — it needs no DuckDB and no Xcode project, just
-      # a warm package cache so Sparkle isn't refetched every run.
+      # PacerCore is pure SPM — no Xcode project needed, just a warm package
+      # cache so Sparkle isn't refetched every run.
       - name: Cache Swift packages
         uses: actions/cache@v4
         with:
@@ -55,10 +55,8 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
-      # Vendored DuckDB + XcodeGen + SPM cache + project generation. Without
-      # the DuckDB step the app target can't link at all — the XCFramework is
-      # gitignored, so CI has nothing to link against until this restores or
-      # builds it.
+      # XcodeGen (pinned prebuilt, not brew) + SPM cache + project generation,
+      # shared with the release workflow so the two can't drift.
       - uses: ./.github/actions/prepare-build
 
       # Unsigned compile-only build — same flags `make verify` uses

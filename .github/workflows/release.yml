@@ -150,8 +150,8 @@ jobs:
           rm -f project.yml.bak
           grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
 
-      # Vendored DuckDB + XcodeGen + SPM cache. Project generation is left to
-      # the step below because it has to run AFTER the version stamp above.
+      # XcodeGen + SPM cache. Project generation is left to the step below
+      # because it has to run AFTER the version stamp above.
       - uses: ./.github/actions/prepare-build
         with:
           generate-project: "false"

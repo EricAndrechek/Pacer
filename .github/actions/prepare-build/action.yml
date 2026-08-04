@@ -1,8 +1,8 @@
 name: Prepare Pacer build
 description: >-
-  Everything a Pacer build needs before xcodebuild — the vendored DuckDB
-  XCFramework, XcodeGen, resolved SPM packages, and the generated project —
-  with caching so PR, main, and release runs all pay the same (small) cost.
+  Everything a Pacer build needs before xcodebuild — XcodeGen, resolved SPM
+  packages, and the generated project — with caching so PR, main, and release
+  runs all pay the same (small) cost.
 
 inputs:
   generate-project:
@@ -13,40 +13,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # ---- DuckDB -----------------------------------------------------------
-    # The XCFramework is gitignored (~78 MB per version would live in git
-    # history forever), so without this the app target simply won't link.
-    # Building it from source takes ~10 minutes, which is why it's cached on
-    # the pinned version rather than rebuilt per run: the key only changes
-    # when Vendor/duckdb-version.txt does, so in steady state this is a
-    # ~20 MB restore measured in seconds.
-    - name: Read pinned DuckDB version
-      id: duckdb-version
-      shell: bash
-      run: echo "version=$(tr -d '[:space:]' < Vendor/duckdb-version.txt)" >> "$GITHUB_OUTPUT"
-
-    # The key covers the build RECIPE as well as the version — changing which
-    # extensions get compiled in (adding `json` for the bulk importer, say)
-    # produces a different artifact from the same DuckDB tag, and keying on
-    # the version alone would silently restore the stale one and fail at
-    # runtime with a missing-catalog-entry error.
-    - name: Restore DuckDB XCFramework
-      id: duckdb-cache
-      uses: actions/cache@v4
-      with:
-        path: Vendor/DuckDB.xcframework
-        key: duckdb-${{ steps.duckdb-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bin/build-duckdb-xcframework.sh') }}
-
-    - name: Build DuckDB XCFramework (cache miss only)
-      if: steps.duckdb-cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        echo "::notice::DuckDB ${{ steps.duckdb-version.outputs.version }} not cached — building from source (~10 min, once per version)"
-        bin/build-duckdb-xcframework.sh
-        # The zip is only for publishing a .binaryTarget; don't let it into
-        # the cache entry and double its size.
-        rm -f Vendor/DuckDB.xcframework.zip
-
     # ---- XcodeGen ---------------------------------------------------------
     # `brew install xcodegen` resolves taps and can take 30-60s. The project
     # ships a prebuilt binary per release, so fetch that instead — pinned,

@@ -1,18 +1,29 @@
-# DuckDB in Pacer — what's built, what it cost, and why
+# DuckDB for Pacer — evaluated, measured, deliberately not shipped
 
-Pacer links a static DuckDB build. Today it does exactly one job: **parsing
-every transcript at once on a full scan**. The larger idea it came from — a
-columnar archive holding raw rows forever — is measured and designed but *not
-built*; see "The archive, not yet built" at the end.
+**Nothing here is in main.** A complete, working implementation lives on the
+branch `spike/duckdb-integration` (PR #123): a vendored static DuckDB, a bulk
+transcript importer, and an injected `BulkTranscriptImporter` seam in
+`ScanCoordinator`. It is parked, not abandoned.
 
-Read this before changing anything under `App/Archive/`, `bin/build-duckdb-xcframework.sh`,
-or the bulk path in `ScanCoordinator`.
+**Why it's parked.** DuckDB's justification was a columnar archive holding raw
+rows forever (8× storage, compounding). That archive isn't built. Without it,
+DuckDB buys a faster *first launch only* — and it costs every user +26 MB of
+binary and ~2.7× the auto-update download, permanently:
 
-Every number here is measured on a frozen 1,697-file snapshot of a real
-`~/.claude` (302,783 lines, 1.8 GB) or on the maintainer's real 189k-row
-store. None of it is estimated.
+| cold start (1,697-file corpus) | time | bundle cost |
+|---|---|---|
+| before any of this work | 74.8 s | — |
+| **Swift parser + the rollup/cursor fixes (shipped)** | **41.2 s** | none |
+| + DuckDB bulk importer (parked) | 15.8 s | +26 MB, 2.7× download |
 
-## Why DuckDB is here at all
+25 seconds on a one-time first launch does not pay for doubling the bundle.
+**Revisit when the archive is built** — that's what the cost was for.
+
+Everything below is measured on a frozen 1,697-file snapshot of a real
+`~/.claude` (302,783 lines, 1.8 GB) or on a real 189k-row store. None of it is
+estimated, and it's recorded so the next attempt doesn't re-derive it.
+
+## Why DuckDB was considered at all
 
 A first launch has to parse the user's whole history. Measured with the real
 scanner over an empty store:
@@ -118,21 +129,17 @@ Swift          54,046  18,227,526  76,144,456  14,283,467,300  14,741,420,680
 DuckDB         54,046  18,227,526  76,144,456  14,283,467,300  14,741,420,680
 ```
 
-Harnesses (env-gated, headless, read-only):
-
-- `PACER_COLD_START_SPIKE=1` — real scanner, empty in-memory store, phase
-  timings and per-field totals.
-- `PACER_IMPORT_SPIKE=1` — DuckDB parse → the ordinary persister, same totals
-  for comparison.
-
-Point either at a frozen corpus with `CLAUDE_CONFIG_DIR` so results are
-reproducible while your live transcripts keep growing.
+The harness that survives on main is `PACER_COLD_START_PROBE=1`
+(`App/Background/ColdStartProbe.swift`) — real scanner, empty in-memory store,
+phase timings and per-field totals. Point it at a frozen corpus with
+`CLAUDE_CONFIG_DIR` so results stay comparable while live transcripts grow.
+The branch adds `PACER_IMPORT_SPIKE=1` for the DuckDB side of the comparison.
 
 **This gate has already paid for itself.** Chasing a 0.005% gap between the two
 paths surfaced [the streaming-dedup bug](#the-bug-the-gate-found) — a 63%
 under-count that had been shipping for months.
 
-## The bug the gate found
+## The bug the gate found (this one DID ship)
 
 Claude Code appends the same assistant message to the transcript several times
 while it streams. Copies share `${messageId}:${requestId}`, `input` and
@@ -156,13 +163,13 @@ across 54,046 keys, **no** key had a finished copy whose output wasn't also the
 maximum — and 6.3% of keys never get a finished copy at all (interrupted
 messages), so "largest wins" resolves those too rather than dropping them.
 
-`currentScanVersion` bumped to `"3"` repairs existing stores: the bump wipes
+This fix is **in main**. `currentScanVersion` bumped to `"3"` repairs existing stores: the bump wipes
 cursors, every transcript is re-read, and the persister now *upgrades* a stored
 row instead of skipping it. Rows whose transcripts Claude Code has since
 rotated away keep their old values — we never delete a sample we can't
 re-derive.
 
-## Two performance lessons, both learned the hard way
+## Two performance lessons, both learned the hard way (both fixes DID ship)
 
 Both were found by running against a **real 189k-row store**, and neither was
 visible in a synthetic cold start.
