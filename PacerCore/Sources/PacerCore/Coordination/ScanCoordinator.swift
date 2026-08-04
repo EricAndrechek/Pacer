@@ -998,10 +998,17 @@ public final class ScanCoordinator {
         // pairs (no existing row) AND polluted pairs (recovery /
         // markEverySampleDirty / canonicalize) fall through to the
         // full recompute path — same code as before this change.
+        // One projection of the sample table for every rollup this cycle.
+        // Each bulk worker used to fetch the whole table into its own context;
+        // on a cold start all three fire and that was ~3 s apiece re-reading
+        // rows the previous worker had just read. Built lazily, so a normal
+        // incremental cycle — every worker on its fast path — never touches it.
+        let sampleSnapshots = SampleSnapshotCache(container: container)
         let recomputeStats = try await recomputer.recompute(
             pairs: activePersister.dirtyPairs,
             pending: activePersister.pendingPairSamples,
-            polluted: activePersister.pollutedDailyPairs
+            polluted: activePersister.pollutedDailyPairs,
+            snapshots: sampleSnapshots
         )
         phase.dailyRecomputeMs = tickMs()
 
@@ -1019,7 +1026,8 @@ public final class ScanCoordinator {
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
             buckets: activePersister.dirtyHourBuckets,
             pending: activePersister.pendingHourSamples,
-            polluted: activePersister.pollutedHourBuckets
+            polluted: activePersister.pollutedHourBuckets,
+            snapshots: sampleSnapshots
         )
         phase.hourlyRecomputeMs = tickMs()
 
@@ -1044,7 +1052,8 @@ public final class ScanCoordinator {
         let projectRecomputeStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates,
             pending: activePersister.pendingProjectSamples,
-            polluted: activePersister.pollutedProjectPairs
+            polluted: activePersister.pollutedProjectPairs,
+            snapshots: sampleSnapshots
         )
         phase.projectRecomputeMs = tickMs()
 
@@ -1083,6 +1092,7 @@ public final class ScanCoordinator {
         )
         let sessionRecomputeStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds,
+            snapshots: sampleSnapshots,
             pending: activePersister.pendingSessionSamples,
             polluted: activePersister.pollutedSessionIds
         )

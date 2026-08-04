@@ -57,6 +57,7 @@ public final class SessionInfoRecomputer {
     @discardableResult
     public func recompute(
         sessionIds: Set<String>,
+        snapshots: SampleSnapshotCache? = nil,
         pending: [String: [TokenSample]] = [:],
         polluted: Set<String> = []
     ) async throws -> Stats {
@@ -73,7 +74,8 @@ public final class SessionInfoRecomputer {
             try context.save()
             let worker = SessionInfoBulkWorker(modelContainer: container)
             return try await worker.bulkRecompute(
-                sessionIds: sessionIds, mode: mode, snapshot: snapshot)
+                sessionIds: sessionIds, mode: mode, snapshot: snapshot,
+                snapshots: snapshots ?? SampleSnapshotCache(container: container))
         }
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
@@ -122,17 +124,17 @@ public final class SessionInfoRecomputer {
         }
 
         for s in pending {
-            existing.cumulativeInputTokens += s.inputTokens
-            existing.cumulativeOutputTokens += s.outputTokens
-            existing.cumulativeCacheReadTokens += s.cacheReadTokens
-            existing.cumulativeCacheCreation5mTokens += s.cacheCreation5mTokens
-            existing.cumulativeCacheCreation1hTokens += s.cacheCreation1hTokens
+            existing.cumulativeInputTokens += s.breakdown.inputTokens
+            existing.cumulativeOutputTokens += s.breakdown.outputTokens
+            existing.cumulativeCacheReadTokens += s.breakdown.cacheReadTokens
+            existing.cumulativeCacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
+            existing.cumulativeCacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
             let breakdown = TokenBreakdown(
-                inputTokens: s.inputTokens,
-                outputTokens: s.outputTokens,
-                cacheReadTokens: s.cacheReadTokens,
-                cacheCreation5mTokens: s.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.cacheCreation1hTokens
+                inputTokens: s.breakdown.inputTokens,
+                outputTokens: s.breakdown.outputTokens,
+                cacheReadTokens: s.breakdown.cacheReadTokens,
+                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
             )
             existing.cumulativeCostUSD += CostCalculator.cost(
                 storedCostUSD: s.sourceCostUSD,
@@ -191,9 +193,9 @@ public final class SessionInfoRecomputer {
         )
     }
 
-    fileprivate nonisolated static func applySamples(
+    fileprivate nonisolated static func applySamples<S: AggregatableSample>(
         sessionId: String,
-        samples: [TokenSample],
+        samples: [S],
         existing: SessionInfo?,
         mode: CostMode,
         snapshot: PricingTable.Snapshot,
@@ -229,20 +231,20 @@ public final class SessionInfoRecomputer {
                 ccVersion = s.ccVersion ?? ccVersion
                 projectPath = s.projectPath ?? projectPath
             }
-            inputTokens += s.inputTokens
-            outputTokens += s.outputTokens
-            cacheReadTokens += s.cacheReadTokens
-            cache5m += s.cacheCreation5mTokens
-            cache1h += s.cacheCreation1hTokens
+            inputTokens += s.breakdown.inputTokens
+            outputTokens += s.breakdown.outputTokens
+            cacheReadTokens += s.breakdown.cacheReadTokens
+            cache5m += s.breakdown.cacheCreation5mTokens
+            cache1h += s.breakdown.cacheCreation1hTokens
             // Cost via the cost-mode-aware path. See same comment in
             // ProjectAggregateRecomputer.applySamples — fall back to
             // tokens × pricing when CC didn't store a cost.
             let breakdown = TokenBreakdown(
-                inputTokens: s.inputTokens,
-                outputTokens: s.outputTokens,
-                cacheReadTokens: s.cacheReadTokens,
-                cacheCreation5mTokens: s.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.cacheCreation1hTokens
+                inputTokens: s.breakdown.inputTokens,
+                outputTokens: s.breakdown.outputTokens,
+                cacheReadTokens: s.breakdown.cacheReadTokens,
+                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
             )
             cost += CostCalculator.cost(
                 storedCostUSD: s.sourceCostUSD,
@@ -251,7 +253,7 @@ public final class SessionInfoRecomputer {
                 mode: mode,
                 snapshot: snapshot
             )
-            let t = s.inputTokens + s.outputTokens
+            let t = s.breakdown.inputTokens + s.breakdown.outputTokens
             modelTokens[s.model, default: 0] += t
             if firstModel == nil { firstModel = s.model }
         }
@@ -303,18 +305,15 @@ actor SessionInfoBulkWorker {
     func bulkRecompute(
         sessionIds: Set<String>,
         mode: CostMode,
-        snapshot: PricingTable.Snapshot
+        snapshot: PricingTable.Snapshot,
+        snapshots: SampleSnapshotCache
     ) async throws -> SessionInfoRecomputer.Stats {
         var stats = SessionInfoRecomputer.Stats(
             sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
 
-        let allSamples = try modelContext.fetch(
-            FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.sessionId != nil }
-            )
-        )
-        var grouped: [String: [TokenSample]] = [:]
-        for s in allSamples {
+        // Shared with the daily/hourly/project workers — see SampleSnapshot.
+        var grouped: [String: [SampleSnapshot.Row]] = [:]
+        for s in try snapshots.snapshot().rows {
             guard let sid = s.sessionId, !sid.isEmpty else { continue }
             grouped[sid, default: []].append(s)
         }
