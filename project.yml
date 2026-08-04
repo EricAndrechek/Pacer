@@ -135,6 +135,14 @@ targets:
         CODE_SIGN_ENTITLEMENTS: App/Pacer.entitlements
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
+        # DuckDB, statically linked, for the immutable raw-row archive.
+        # Built by bin/build-duckdb-xcframework.sh — see docs/duckdb-archive.md
+        # for why we build rather than use the official dylib-only artifact,
+        # and which extensions are non-optional. The widget extension does NOT
+        # link it: widgets render from rollups and must not carry an
+        # analytical engine.
+        SWIFT_OBJC_BRIDGING_HEADER: App/Archive/PacerArchiveBridge.h
+        OTHER_LDFLAGS: $(inherited) -lc++ -Wl,-dead_strip
     dependencies:
       - package: PacerCore
         product: PacerCore
@@ -143,6 +151,10 @@ targets:
       - package: Sparkle
         product: Sparkle
       - target: PacerWidgets
+      # Static XCFramework — linked into the binary, so there's no dylib to
+      # embed, re-sign, or subject to hardened-runtime library validation.
+      - framework: Vendor/DuckDB.xcframework
+        embed: false
 
   PacerWidgets:
     type: app-extension

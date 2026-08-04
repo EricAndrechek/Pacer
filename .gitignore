@@ -67,3 +67,6 @@ updates/
 # build script writes here, and an 80 MB binary must never reach git history.
 # Ignored defensively so running it on any branch cannot commit it.
 Vendor/
+
+Vendor/DuckDB.xcframework/
+Vendor/DuckDB.xcframework.zip
