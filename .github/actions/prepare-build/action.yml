@@ -9,6 +9,16 @@ inputs:
     description: Run `xcodegen generate` (skip for SPM-only jobs).
     required: false
     default: "true"
+  duckdb:
+    description: >-
+      Restore or build the DuckDB XCFramework the app target links. Its own
+      input rather than a rider on `generate-project`: the release workflow
+      passes generate-project=false (it stamps the version into project.yml
+      first and generates afterwards) and so silently skipped DuckDB, which
+      failed the release at link time with the framework missing. Only turn
+      this off for jobs that never build the app target.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -64,7 +74,7 @@ runs:
     # SPM-only jobs skip this — PacerCore doesn't link DuckDB, and paying a
     # cold compile there would double the cost of the cheapest job.
     - name: Cache DuckDB XCFramework
-      if: inputs.generate-project == 'true'
+      if: inputs.duckdb == 'true'
       id: duckdb-cache
       uses: actions/cache@v4
       with:
@@ -72,7 +82,7 @@ runs:
         key: duckdb-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Vendor/duckdb-version.txt', 'bin/build-duckdb-xcframework.sh') }}
 
     - name: Build DuckDB XCFramework
-      if: inputs.generate-project == 'true' && steps.duckdb-cache.outputs.cache-hit != 'true'
+      if: inputs.duckdb == 'true' && steps.duckdb-cache.outputs.cache-hit != 'true'
       shell: bash
       run: bin/build-duckdb-xcframework.sh
 
