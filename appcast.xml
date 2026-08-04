@@ -746,5 +746,36 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="5yQ8zsUnDtOJKdqi55DKRCj65gPUijKxicwJwomUUQfo0BH/0f9wuISjKGf19m8NmPErXB6wKOXgwS080M2zBg==" />
     </item>
+            <item>
+        <title>Version 0.4.9</title>
+        <description><![CDATA[<p>Faster rollups, and Pacer now checks its own archive.</p>
+<h2>Hourly figures rebuild ~47x faster</h2>
+<p>Recalculating an hour's usage was loading a whole day of that model's<br>
+records and filtering them in memory. It now asks for just that hour —<br>
+1,406 ms down to 30 ms on a large history. You'll notice it most if you<br>
+use Pacer heavily, where the background refresh could briefly stall.</p>
+<h2>The raw archive verifies itself</h2>
+<p>0.4.8 introduced an append-only archive of every billable turn. Pacer now<br>
+compares it against its main database every hour and records the result,<br>
+so a disagreement surfaces on its own instead of waiting for someone to<br>
+go looking.</p>
+<p>It also fixes a case where turns that arrived out of order — which happens<br>
+whenever you resume an older session — could be left out of the archive<br>
+permanently.</p>
+<p>Nothing here changes your numbers; 0.4.8 was the release that corrected<br>
+those.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or<br>
+download below.</p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 20:02:55 +0000</pubDate>
+        <sparkle:version>1785873470</sparkle:version>
+        <sparkle:shortVersionString>0.4.9</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.9/Pacer-0.4.9.dmg"
+            length="19935629"
+            type="application/octet-stream"
+            sparkle:edSignature="VOhroT/A8UZ0eq7T8sbErwQg4G0Yd8R27wcAFi8N2Cwko/PqCSsJmXWFLO8TxIiuSwCKIwpaNigo0wP3m0/yDg==" />
+    </item>
         </channel>
 </rss>
