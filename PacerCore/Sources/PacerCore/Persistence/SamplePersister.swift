@@ -82,6 +82,18 @@ public final class SamplePersister {
     /// keys never get a finished copy at all — so "largest output wins"
     /// decides both cases correctly without persisting a completeness flag.
     private var bestOutputByKey: [String: Int64]
+    /// dedupKey → the stored row, so upgrading a partial is a dictionary hit
+    /// rather than a query.
+    ///
+    /// `preloadFromStore` already fetches every sample to build
+    /// `bestOutputByKey`; keeping the reference costs one pointer per row and
+    /// removes a `FetchDescriptor` round-trip per upgrade. That mattered
+    /// enormously in practice: with a predicate fetch per upgrade, repairing a
+    /// real 189k-row store pinned a core at 98% and climbed past 2 GB resident
+    /// before it finished, because every lookup materialized more rows into
+    /// the context. A synthetic cold start never showed it — an empty store
+    /// has nothing to upgrade.
+    private var sampleByKey: [String: TokenSample]
     /// Buckets touched this session — the recomputer's input.
     public private(set) var dirtyPairs: Set<DateModelPair>
     /// `(projectPath, date)` buckets touched this session. Drives
@@ -204,6 +216,7 @@ public final class SamplePersister {
         self.context = context
         self.saveBatchSize = saveBatchSize
         self.bestOutputByKey = [:]
+        self.sampleByKey = [:]
         self.dirtyPairs = []
         self.dirtyProjectDates = []
         self.dirtyHourBuckets = []
@@ -248,6 +261,7 @@ public final class SamplePersister {
         }
         let sample = TokenSample(from: entry)
         context.insert(sample)
+        if let key = entry.dedupKey { sampleByKey[key] = sample }
         let pair = DateModelPair(date: sample.date, model: sample.model)
         dirtyPairs.insert(pair)
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
@@ -331,13 +345,10 @@ public final class SamplePersister {
     /// which is correct by construction and rare enough not to matter (a
     /// live cycle only sees messages that were mid-stream at its boundary).
     private func upgradeStoredSample(key: String, to entry: ParsedUsageEntry) throws {
-        var descriptor = FetchDescriptor<TokenSample>(
-            predicate: #Predicate<TokenSample> { $0.dedupKey == key })
-        descriptor.fetchLimit = 1
-        guard let sample = try context.fetch(descriptor).first else {
-            // The key is known but the row isn't there — it belongs to an
-            // account timeline that was archived out, or the store was
-            // pruned under us. Nothing to upgrade.
+        guard let sample = sampleByKey[key] else {
+            // The key is known but we hold no row for it — it belongs to an
+            // account timeline that was archived out, or the store was pruned
+            // under us. Nothing to upgrade.
             return
         }
         sample.inputTokens = entry.breakdown.inputTokens
@@ -707,6 +718,7 @@ public final class SamplePersister {
                 // later session can still recognise a partial row and
                 // upgrade it, not just skip it as a duplicate.
                 bestOutputByKey[key] = sample.outputTokens
+                sampleByKey[key] = sample
             }
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath

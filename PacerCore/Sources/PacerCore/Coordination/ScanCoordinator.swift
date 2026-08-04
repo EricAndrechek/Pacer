@@ -1288,19 +1288,41 @@ public final class ScanCoordinator {
         return out
     }
 
+    /// Cursor updates above which one full-table fetch beats a per-path
+    /// lookup each. An incremental cycle updates 1-3 cursors and the indexed
+    /// per-path fetch is ideal there; a full scan updates every file, and on a
+    /// real 1,701-file store that was **33.7 s of a 70 s scan** — 1,701
+    /// round-trips to avoid reading a table with 1,701 rows in it.
+    private static let bulkCursorSaveThreshold = 32
+
     /// Persist cursor updates to disk and mirror them into the cache.
-    /// Per-path fetch (one indexed lookup against `JSONLFileCursor.path
-    /// @Attribute(.unique)`) replaces the previous full-table fetch —
-    /// for a typical 1-3 updates per cycle that's a 1000× reduction
-    /// in rows pulled from SwiftData per scan.
+    ///
+    /// Two strategies, because the two call shapes are genuinely different:
+    /// a handful of changed files (incremental — indexed lookup per path,
+    /// pulls almost nothing) versus all of them (full scan — one fetch, then
+    /// dictionary hits).
     private func saveCursors(_ updates: [String: JSONLScanner.CursorState]) throws {
         guard !updates.isEmpty else { return }
+        var existingByPath: [String: JSONLFileCursor]?
+        if updates.count >= Self.bulkCursorSaveThreshold {
+            var byPath: [String: JSONLFileCursor] = [:]
+            for row in try context.fetch(FetchDescriptor<JSONLFileCursor>()) {
+                byPath[row.path] = row
+            }
+            existingByPath = byPath
+        }
         for (path, state) in updates {
             let pathLocal = path
-            let descriptor = FetchDescriptor<JSONLFileCursor>(
-                predicate: #Predicate<JSONLFileCursor> { $0.path == pathLocal }
-            )
-            if let existing = try context.fetch(descriptor).first {
+            let existing: JSONLFileCursor?
+            if let existingByPath {
+                existing = existingByPath[pathLocal]
+            } else {
+                let descriptor = FetchDescriptor<JSONLFileCursor>(
+                    predicate: #Predicate<JSONLFileCursor> { $0.path == pathLocal }
+                )
+                existing = try context.fetch(descriptor).first
+            }
+            if let existing {
                 existing.byteOffset = state.byteOffset
                 existing.lastSeenMtime = state.lastSeenMtime
             } else {
