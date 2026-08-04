@@ -156,14 +156,24 @@ elif ! d_rows="$(duckdb -noheader -list -readonly "$ARCHIVE" \
         "SELECT COUNT(*) FROM turn" 2>/dev/null)" || [ -z "$d_rows" ]; then
   printf '  - skipped: Pacer holds an exclusive lock on the archive; quit it to check\n'
 else
-  # Only turns at or before the archive's own watermark can be expected —
-  # the store is always a little ahead between syncs.
-  mark="$(duckdb -noheader -list -readonly "$ARCHIVE" \
-    "SELECT COALESCE(CAST(EPOCH(MAX(sampled_at)) AS BIGINT), 0) FROM turn" 2>/dev/null)"
+  # Check the guarantee the archive actually makes, which is eventual, not
+  # instantaneous: turns arriving out of order are picked up by a reconcile
+  # pass every 30 minutes, so anything newer than that is legitimately absent.
+  # The cutoff is therefore 2 hours ago — well past one reconcile interval —
+  # and it is applied to BOTH sides.
+  #
+  # Two ways this was wrong before, both of which looked like data loss:
+  # filtering only the store side (so rows sharing the boundary second landed
+  # on different sides of the comparison), and comparing right up to the
+  # archive's newest row (so normal sync lag read as a permanent shortfall).
+  cutoff="$(( $(date +%s) - 7200 ))"
   # SwiftData stores dates as seconds since 2001-01-01.
-  ref="$(( mark - 978307200 ))"
+  ref="$(( cutoff - 978307200 ))"
+  a_where="WHERE sampled_at <= make_timestamp(${cutoff}000000)"
   check "archive row count matches the store" \
-    "$(q "SELECT COUNT(*) FROM ZTOKENSAMPLE WHERE ZSAMPLEDAT <= ${ref}")" "$d_rows"
+    "$(q "SELECT COUNT(*) FROM ZTOKENSAMPLE WHERE ZSAMPLEDAT <= ${ref}")" \
+    "$(duckdb -noheader -list -readonly "$ARCHIVE" \
+       "SELECT COUNT(*) FROM turn ${a_where}" 2>/dev/null)"
   for pair in "input_tokens:ZINPUTTOKENS" "output_tokens:ZOUTPUTTOKENS" \
               "cache_read:ZCACHEREADTOKENS" "cache_creation_5m:ZCACHECREATION5MTOKENS" \
               "cache_creation_1h:ZCACHECREATION1HTOKENS"; do
@@ -171,7 +181,7 @@ else
     check "archive ${dcol} matches the store" \
       "$(q "SELECT COALESCE(SUM(${scol}),0) FROM ZTOKENSAMPLE WHERE ZSAMPLEDAT <= ${ref}")" \
       "$(duckdb -noheader -list -readonly "$ARCHIVE" \
-         "SELECT CAST(COALESCE(SUM(${dcol}),0) AS BIGINT) FROM turn" 2>/dev/null)"
+         "SELECT CAST(COALESCE(SUM(${dcol}),0) AS BIGINT) FROM turn ${a_where}" 2>/dev/null)"
   done
 fi
 

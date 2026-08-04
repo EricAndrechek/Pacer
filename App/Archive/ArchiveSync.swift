@@ -171,6 +171,13 @@ final class ArchiveSync {
     private func openIfNeeded() throws -> RawArchive {
         if let archive { return archive }
         let opened = try RawArchive(url: archiveURL)
+        // Once per launch, and a no-op unless something is actually wrong.
+        // The store's own duplicate repair removes rows the archive already
+        // holds; without this the two would disagree forever and
+        // `make verify-data` would fail on every run from then on.
+        if let removed = try? opened.collapseDuplicates(), removed > 0 {
+            Log.write("ArchiveSync", "collapsed \(removed) duplicate turn(s) in the archive")
+        }
         archive = opened
         return opened
     }

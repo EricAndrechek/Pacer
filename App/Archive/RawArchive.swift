@@ -208,6 +208,42 @@ final class RawArchive {
         return keys
     }
 
+    /// Collapse turns held more than once, keeping the copy with the most
+    /// output tokens — the same rule the store's repair uses.
+    ///
+    /// Sits uneasily with "append-only", so: append-only is a rule about not
+    /// rewriting *observations*. Two rows describing one turn aren't two
+    /// observations, they're one bookkeeping error, and this file's own
+    /// contract already says the store is the system of record and wins on
+    /// any disagreement. When the store collapses a duplicate, an archive
+    /// that kept both would be permanently, visibly wrong.
+    ///
+    /// Returns the number of rows removed. Checks first and executes nothing
+    /// when there is nothing to do, so the common path issues no DELETE at
+    /// all.
+    @discardableResult
+    func collapseDuplicates() throws -> Int64 {
+        let duplicated = try scalar("""
+            SELECT COUNT(*) FROM (
+                SELECT dedup_key FROM turn
+                WHERE dedup_key IS NOT NULL
+                GROUP BY dedup_key HAVING COUNT(*) > 1)
+            """)
+        guard duplicated > 0 else { return 0 }
+
+        let before = try scalar("SELECT COUNT(*) FROM turn")
+        try exec("""
+            DELETE FROM turn WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, row_number() OVER (
+                        PARTITION BY dedup_key
+                        ORDER BY output_tokens DESC, sampled_at ASC, rowid ASC) AS rn
+                    FROM turn WHERE dedup_key IS NOT NULL)
+                WHERE rn > 1)
+            """)
+        return before - (try scalar("SELECT COUNT(*) FROM turn"))
+    }
+
     // MARK: - Plumbing
 
     private func appendText(_ appender: duckdb_appender?, _ value: String?) {
