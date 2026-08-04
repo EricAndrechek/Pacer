@@ -100,7 +100,10 @@ public enum JSONLLineParser {
             // about WHERE inside that repo a session ran.
             originalProjectPath: raw.cwd,
             claudeCodeVersion: raw.version,
-            isApiErrorMessage: raw.isApiErrorMessage ?? false
+            isApiErrorMessage: raw.isApiErrorMessage ?? false,
+            // A finished message carries a stop_reason; a mid-stream
+            // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.
+            isComplete: raw.message?.stop_reason != nil
         )
     }
 

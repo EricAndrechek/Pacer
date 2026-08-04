@@ -136,7 +136,10 @@ public actor JSONLScanner {
         // duplicates regardless.
         let sorted = candidates.sorted { $0.mtime < $1.mtime }
 
-        var seen = Set<String>()
+        // Best copy seen so far per dedup key, not merely "seen". A streamed
+        // message lands in the transcript several times; the winner is
+        // decided by `ParsedUsageEntry.supersedes`, not by arrival order.
+        var bestByKey: [String: ParsedUsageEntry] = [:]
         var filesScanned = 0
         var filesSkipped = 0
         var entriesParsed = 0
@@ -173,10 +176,19 @@ public actor JSONLScanner {
                     guard let entry = JSONLLineParser.parse(line: lineData, aliases: aliases) else { return }
                     entriesParsed += 1
                     if let key = entry.dedupKey {
-                        if !seen.insert(key).inserted {
+                        if let prior = bestByKey[key] {
+                            // Not simply "already seen, drop it": a streamed
+                            // message appears several times and only the last
+                            // copy carries the real output_tokens. Keep the
+                            // better one and re-emit so the persister can
+                            // upgrade what it stored.
                             duplicatesDropped += 1
+                            guard entry.supersedes(prior) else { return }
+                            bestByKey[key] = entry
+                            emit(entry)
                             return
                         }
+                        bestByKey[key] = entry
                     }
                     entriesAccepted += 1
                     emit(entry)
