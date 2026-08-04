@@ -411,7 +411,16 @@ jobs:
             ${prev_tag:+-f previous_tag_name="${prev_tag}"} \
             --jq '.body' > "${notes_file}" 2>/dev/null || : > "${notes_file}"
 
-          if ! grep -q '^\* ' "${notes_file}"; then
+          # A hand-written file wins over anything generated. Generated notes
+          # describe what CHANGED IN THE REPO; a release note should say what
+          # changed FOR THE USER, and only a human (or an agent that just did
+          # the work) can write that. Checked in, so it is reviewable in the
+          # PR that ships the change and can't be lost in a UI edit afterwards.
+          authored="docs/release-notes/${tag#v}.md"
+          if [ -f "${authored}" ]; then
+            echo "using authored notes: ${authored}"
+            cp "${authored}" "${notes_file}"
+          elif ! grep -q '^\* ' "${notes_file}"; then
             echo "generated notes list no PRs — falling back to commit subjects"
             {
               echo "## What's Changed"
