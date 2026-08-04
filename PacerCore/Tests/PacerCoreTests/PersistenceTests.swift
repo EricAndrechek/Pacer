@@ -60,6 +60,12 @@ private func makeEntry(
     let context = ModelContext(container)
     let persister = try SamplePersister(context: context)
 
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+
+    // schedule for exactly these integrity checks. Do the same here.
+
+    try persister.ensurePreloaded()
+
     #expect(try persister.insert(makeEntry(dedup: "msg1:req1")) == true)
     #expect(try persister.insert(makeEntry(dedup: "msg2:req2")) == true)
     try persister.flush()
@@ -74,6 +80,12 @@ private func makeEntry(
     let container = try makeInMemoryContainer()
     let context = ModelContext(container)
     let persister = try SamplePersister(context: context)
+
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+
+    // schedule for exactly these integrity checks. Do the same here.
+
+    try persister.ensurePreloaded()
 
     #expect(try persister.insert(makeEntry(dedup: "msg1:req1")) == true)
     // Same dedup key — should be rejected without a DB query.
@@ -114,6 +126,9 @@ private func makeEntry(
     try context.save()
 
     let persister = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+    // schedule for exactly these integrity checks. Do the same here.
+    try persister.ensurePreloaded()
     #expect(try persister.insert(makeEntry(dedup: "preexisting:1")) == false)
     #expect(try persister.insert(makeEntry(dedup: "fresh:1")) == true)
     try persister.flush()
@@ -152,6 +167,9 @@ private func makeEntry(
     try context.save()
 
     let persister = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+    // schedule for exactly these integrity checks. Do the same here.
+    try persister.ensurePreloaded()
     let recovered = persister.consumeMissingAggregatePairs()
 
     #expect(recovered.count == 2)
@@ -186,6 +204,9 @@ private func makeEntry(
     try context.save()
 
     let persister = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+    // schedule for exactly these integrity checks. Do the same here.
+    try persister.ensurePreloaded()
     #expect(persister.consumeMissingAggregatePairs().isEmpty)
 }
 
@@ -800,6 +821,9 @@ private struct AggregateSnapshot: Sendable {
     try context.save()
 
     let persister = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+    // schedule for exactly these integrity checks. Do the same here.
+    try persister.ensurePreloaded()
     let recovered = persister.consumeMissingSessionIds()
     #expect(recovered.count == 2)
     #expect(recovered.contains("sess-A"))
@@ -830,6 +854,9 @@ private struct AggregateSnapshot: Sendable {
     try context.save()
 
     let persister = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a
+    // schedule for exactly these integrity checks. Do the same here.
+    try persister.ensurePreloaded()
     let recovered = persister.consumeMissingProjectAggregatePairs()
     #expect(recovered.count == 3)
     #expect(recovered.contains(ProjectDatePair(projectPath: "/p1", date: dayStr)))

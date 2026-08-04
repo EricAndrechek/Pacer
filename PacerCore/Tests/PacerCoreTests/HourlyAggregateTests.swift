@@ -225,6 +225,9 @@ private func sortedByKey(_ rows: [HourlyAggregate]) -> [HourlyAggregate] {
     // Fresh persister rediscovers the same samples; preload should
     // flag both hour buckets as missing.
     let second = try SamplePersister(context: context)
+    // The store walk is lazy now — `ScanCoordinator` forces it on a schedule
+    // for exactly these integrity checks. Do the same here.
+    try second.ensurePreloaded()
     let missing = second.consumeMissingHourBuckets()
     #expect(missing.count == 2)
     #expect(missing.contains(where: { $0.hour == 10 }))

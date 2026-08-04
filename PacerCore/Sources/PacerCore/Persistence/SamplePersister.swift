@@ -242,6 +242,27 @@ public final class SamplePersister {
         self.missingSessionIds = []
         self.pendingInsertCount = 0
         self.stats = Stats(inserted: 0, skippedAsDuplicate: 0)
+    }
+
+    /// Whether the one-time store walk has run for this persister.
+    private var preloaded = false
+
+    /// Run the store walk if it hasn't run yet.
+    ///
+    /// Deferred rather than done in `init` because the walk costs 9-16 s on a
+    /// real store and most launches don't need it: three consecutive startups
+    /// in a live log ingested NOTHING and spent 15.4 s, 13.0 s and 9.0 s
+    /// respectively finding that out. `insert(_:)` calls this, so the dedup
+    /// map is always built before the first row that could need it, and a
+    /// cycle with nothing to ingest never pays.
+    ///
+    /// The walk also seeds the integrity sets (missing aggregates, stranded
+    /// hourly rows), which are NOT insert-driven — they look for pre-existing
+    /// damage. `ScanCoordinator` forces this on a schedule so that keeps
+    /// working; see `integrityWalkInterval`.
+    public func ensurePreloaded() throws {
+        guard !preloaded else { return }
+        preloaded = true
         try preloadFromStore()
     }
 
@@ -250,6 +271,9 @@ public final class SamplePersister {
     /// on insert.
     @discardableResult
     public func insert(_ entry: ParsedUsageEntry) throws -> Bool {
+        // Builds the dedup map on the first row that could need it. No-op
+        // afterwards, and free on a cycle that inserts nothing.
+        try ensurePreloaded()
         if let key = entry.dedupKey {
             if let bestSoFar = bestOutputByKey[key] {
                 // Seen before. Only a *larger* output means this is the

@@ -36,6 +36,11 @@ public enum ClaudeCodeMetaKey {
     /// Used for diagnostics; the actual decision to do a fresh full
     /// scan keys off `scanVersion`.
     public static let lastFullScanAt = "last_full_scan_at"
+    /// When `SamplePersister`'s store walk last ran for integrity purposes.
+    /// The walk is otherwise lazy (see `SamplePersister.ensurePreloaded`), so
+    /// this is what keeps the integrity checks — missing aggregates, stranded
+    /// hourly rows — running on a store that ingests nothing for a while.
+    public static let lastIntegrityWalkAt = "last_integrity_walk_at"
 
     /// ISO-8601 timestamp of the last successful incremental scan.
     /// Passed to `JSONLScanner` as the `mtimeAfter` cutoff so files

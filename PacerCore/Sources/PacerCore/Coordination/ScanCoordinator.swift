@@ -772,6 +772,18 @@ public final class ScanCoordinator {
         // dirty (every entry hits seenDedupKeys), so missing aggregates
         // would stay missing forever. Subsequent cycles get an empty
         // set back.
+        // The persister's store walk is lazy — a cycle that ingests nothing
+        // shouldn't pay 9-16 s for it. But the integrity checks below read
+        // what that walk produces and are NOT insert-driven: they look for
+        // pre-existing damage (missing aggregates, hourly rows whose samples
+        // moved). So force it on a schedule, which is the compromise between
+        // paying every launch and never checking at all.
+        if try integrityWalkIsDue() {
+            try activePersister.ensurePreloaded()
+            try writeMeta(ClaudeCodeMetaKey.lastIntegrityWalkAt,
+                          value: String(Date().timeIntervalSince1970))
+        }
+
         let recoveryPairs = activePersister.consumeMissingAggregatePairs()
         if !recoveryPairs.isEmpty {
             activePersister.addDirtyPairs(recoveryPairs)
@@ -1211,6 +1223,18 @@ public final class ScanCoordinator {
 
     private func makePersister() throws -> SamplePersister {
         try SamplePersister(context: context, saveBatchSize: configuration.saveBatchSize)
+    }
+
+    /// How often the store walk is forced for integrity's sake. Daily: the
+    /// damage it looks for is rare (one real instance found in months — 34
+    /// stranded hourly rows) and never urgent, so a day's latency costs
+    /// nothing while a walk per launch costs 9-16 s every time.
+    private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
+
+    private func integrityWalkIsDue() throws -> Bool {
+        guard let raw = try fetchMeta(ClaudeCodeMetaKey.lastIntegrityWalkAt),
+              let at = TimeInterval(raw) else { return true }   // never run
+        return Date().timeIntervalSince1970 - at >= Self.integrityWalkInterval
     }
 
     /// Return the cached cursor map, loading from disk on first call.

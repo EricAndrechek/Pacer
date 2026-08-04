@@ -55,6 +55,9 @@ import Testing
 
         // The persister spots it during its preload walk.
         let persister = try SamplePersister(context: context)
+        // The store walk is lazy now — `ScanCoordinator` forces it on a
+        // schedule for exactly these integrity checks. Do the same here.
+        try persister.ensurePreloaded()
         let stranded = persister.consumeStrandedHourBuckets()
         #expect(stranded.count == 1)
         #expect(stranded.first?.hour == (hour + 23) % 24)
@@ -95,6 +98,9 @@ import Testing
         try context.save()
 
         let persister = try SamplePersister(context: context)
+        // The store walk is lazy now — `ScanCoordinator` forces it on a
+        // schedule for exactly these integrity checks. Do the same here.
+        try persister.ensurePreloaded()
         #expect(persister.consumeStrandedHourBuckets().isEmpty)
     }
 }
