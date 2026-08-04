@@ -204,11 +204,21 @@ cursor save      33,673 ms  batched
 TOTAL             74.8 s    15.8 s
 ```
 
-Remaining hot spot is the **hourly rollup** (~11.6 s on the real store). It is
-*compute*, not fetch — it reuses the shared snapshot. Suspected cause is 54k
-`Calendar.component(.hour:)` calls for its `(date, hour, model)` grouping, but
-that is **unverified**. The obvious alternative is timezone-offset arithmetic,
-which risks misfiling usage across DST transitions; measure before touching it.
+Remaining hot spot is the **hourly rollup**. It is *compute*, not fetch — it
+reuses the shared snapshot.
+
+An earlier version of this doc blamed 54k `Calendar.component(.hour:)` calls
+and flagged the guess as unverified. **That guess was wrong**, and it's
+recorded here so nobody spends the DST risk on it: benchmarked at the real row
+count, `Calendar.component(.hour:)` costs **13.3 ms total** for 54,046 rows.
+Timezone-offset arithmetic would get that to 4.1 ms — saving 9 ms, against a
+multi-second phase. Not the problem.
+
+What is measurable: the hourly rollup emits **1,470 rows to daily's 184**, an
+8× fan-out, and on a cold start every one is new. Its cost tracks the number
+of aggregate rows it materializes, which is inherent to bucketing by hour.
+Anything further needs a profile, not another hypothesis — do not "optimize"
+this from a plausible story again.
 
 ## The archive, not yet built
 
