@@ -390,14 +390,46 @@ jobs:
           version="${{ steps.version.outputs.version }}"
           tag="v${version}"
 
-          # Create-or-update the release. `--generate-notes` populates
-          # the body from commits since the previous tag.
+          # Create-or-update the release.
+          #
+          # `--generate-notes` builds the body from merged PULL REQUESTS, not
+          # commits — so it renders an empty "What's Changed" whenever work
+          # lands straight on main, which is most of the time here. Four
+          # releases shipped with notes that said nothing at all, one of them
+          # carrying a change that moved every user's reported output tokens
+          # by ~30%. Silence is the worst possible note for that.
+          #
+          # So: use the generated notes when they actually contain something,
+          # and otherwise fall back to the commit subjects since the previous
+          # tag, which is where the real description lives in this repo.
+          prev_tag="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          gh api --method POST "repos/{owner}/{repo}/releases/generate-notes" \
+            -f tag_name="${tag}" -f target_commitish=main \
+            ${prev_tag:+-f previous_tag_name="${prev_tag}"} \
+            --jq '.body' > "${notes_file}" 2>/dev/null || : > "${notes_file}"
+
+          if ! grep -q '^\* ' "${notes_file}"; then
+            echo "generated notes list no PRs — falling back to commit subjects"
+            {
+              echo "## What's Changed"
+              echo
+              if [ -n "${prev_tag}" ]; then
+                git log --no-merges --format='* %s' "${prev_tag}..${tag}"
+                echo
+                echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${prev_tag}...${tag}"
+              else
+                git log --no-merges --format='* %s' "${tag}"
+              fi
+            } > "${notes_file}"
+          fi
+
           if gh release view "${tag}" >/dev/null 2>&1; then
             gh release upload "${tag}" "${DMG_PATH}" --clobber
           else
             gh release create "${tag}" "${DMG_PATH}" \
               --title "Pacer ${version}" \
-              --generate-notes \
+              --notes-file "${notes_file}" \
               --verify-tag
           fi
 
