@@ -193,16 +193,46 @@ final class ArchiveSync {
             stored.cc1h += day.cacheCreation1hTokens
         }
 
+        // Carry counters forward rather than just the latest verdict. One
+        // overwritten row answers "is it OK right now", which is the wrong
+        // question — the question is "has it EVER disagreed", and a failure
+        // that self-corrects before anyone looks would otherwise leave no
+        // trace at all.
+        let previous = try fetchMeta(ClaudeCodeMetaKey.archiveIntegrity, context: context)
+        var checks = 0, mismatches = 0, worst = ""
+        for field in (previous ?? "").split(separator: "|") {
+            if field.hasPrefix("checks=") { checks = Int(field.dropFirst(7)) ?? 0 }
+            if field.hasPrefix("mismatches=") { mismatches = Int(field.dropFirst(11)) ?? 0 }
+            if field.hasPrefix("first=") { worst = String(field) }
+        }
+        checks += 1
+
         let stamp = Int(now.timeIntervalSince1970)
-        let verdict: String
+        var verdict: String
         if archived == stored {
             verdict = "ok|\(stamp)|\(archived.rows)"
         } else {
+            mismatches += 1
             let detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
             verdict = "mismatch|\(stamp)|\(detail)"
+            // Only the FIRST divergence is kept: it's the one with diagnostic
+            // value. Later ones are usually the same fault still present.
+            if worst.isEmpty { worst = "first=\(stamp):\(detail)" }
             Log.write("ArchiveSync", "INTEGRITY: archive disagrees with the store — \(detail)")
         }
+        verdict += "|checks=\(checks)|mismatches=\(mismatches)"
+        if !worst.isEmpty { verdict += "|" + worst }
+        // Logged every time, not only on failure: a soak needs to distinguish
+        // "clean for two days" from "never ran".
+        Log.write("ArchiveSync",
+                  "integrity check \(checks): \(archived == stored ? "ok" : "MISMATCH") "
+                  + "(\(archived.rows) turns, \(mismatches) mismatch(es) all-time)")
         try writeMeta(ClaudeCodeMetaKey.archiveIntegrity, value: verdict, context: context)
+    }
+
+    private func fetchMeta(_ key: String, context: ModelContext) throws -> String? {
+        try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })).first?.value
     }
 
     private func writeMeta(_ key: String, value: String, context: ModelContext) throws {

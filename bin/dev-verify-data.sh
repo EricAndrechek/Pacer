@@ -163,8 +163,14 @@ elif ! d_rows="$(duckdb -noheader -list -readonly "$ARCHIVE" \
       when="$(echo "$verdict" | cut -d'|' -f2)"
       rows="$(echo "$verdict" | cut -d'|' -f3)"
       age=$(( $(date +%s) - ${when:-0} ))
+      checks="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^checks=//p')"
+      misses="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^mismatches=//p')"
       printf '%s  ✓%s archive matched the store (%s turns, self-checked %sm ago)\n' \
         "$G" "$X" "$rows" "$(( age / 60 ))"
+      printf '      %s check(s) all-time, %s mismatch(es)\n' "${checks:-?}" "${misses:-0}"
+      # A soak is only evidence if a failure that self-corrected still shows.
+      first="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^first=//p')"
+      [ -n "$first" ] && printf '%s      ! first divergence: %s%s\n' "$R" "$first" "$X"
       ;;
     mismatch)
       check "archive matches the store (app self-check)" "ok" "${verdict#mismatch|*|}"
