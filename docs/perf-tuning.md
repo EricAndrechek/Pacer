@@ -280,6 +280,52 @@ Remaining nit: the launch-time `prep` preload (~7 s: build the
 dedup Set from every TokenSample + prune stale cursors) is one-time and
 off-main, but could be chunked/yielded if it ever matters.
 
+## The optimisation that made a cost wrong (2026-08-04)
+
+The single most instructive bug of this whole effort, because it was
+*caused* by a perf fix and hid behind an asymmetry.
+
+**The optimisation.** Recomputers used to `await PricingTable.shared`
+per cycle, costing ~150 ms per phase under MainActor contention. That
+was replaced with `SampleCostCache.current()` — a process-wide snapshot,
+sync, warmed once at launch. Correct reasoning, real win.
+
+**The hole.** The cache's default value is empty, and an empty pricing
+snapshot doesn't mean "unknown" to `CostCalculator` — it means **$0**.
+The app warms it in an un-awaited `Task` at launch, which the first scan
+cycle routinely beats. Any bucket recomputed in that window is written
+with zero cost, and *a rollup cannot tell a real $0 from an unpriced
+one*, so nothing ever recomputes it. The zero is permanent.
+
+**Why it survived.** Only two of the four recomputers switched to the
+cache for their from-scratch path; daily and hourly still read
+`PricingTable` directly. So daily stayed right while project and session
+went to zero, and no single number looked wrong on its own. Had all four
+read the cache, they'd have agreed with each other and been silently
+wrong together — undetectable by any cross-rollup check.
+
+**How it was found.** Not by the app. `make verify-data` reported hourly
+cost $0.70 under daily. Solving a price vector across the day's buckets
+localised it to one frozen bucket; forcing a rebuild of the open buckets
+then exposed the real bug as a **$663** project shortfall — the whole
+`claude-fable-5` share of one day.
+
+Three lessons, in order of how much they cost:
+
+1. **Moving a value behind a cache moves its failure mode with it.**
+   The hop was the cost; the *guarantee* that pricing was loaded before
+   use was the thing quietly dropped.
+2. **"Missing" must not render as a legal value.** $0 is a plausible
+   cost. If unknown and zero are the same bits, nothing downstream can
+   ever repair it.
+3. **A partial migration is worse than either end state.** Two paths
+   reading two pricing sources is what made this *detectable*, and is
+   also what made it possible. The detectability was luck.
+
+Fixed by awaiting pricing before any recompute, plus rebuilding still-open
+buckets on a 10-minute throttle so drift can't freeze at the hour
+boundary. `costRecomputeVersion` 5 → 6 clears zeros already written.
+
 ## Known correctness items
 
 - `sessionRecomputerRollsUpPerSession` test fails on `main` (asserts
