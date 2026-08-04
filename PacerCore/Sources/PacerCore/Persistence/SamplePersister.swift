@@ -81,7 +81,11 @@ public final class SamplePersister {
     /// had anything other than the maximum output of its copies, and 6.3% of
     /// keys never get a finished copy at all — so "largest output wins"
     /// decides both cases correctly without persisting a completeness flag.
-    private var bestOutputByKey: [String: Int64]
+    ///
+    /// Keyed by `DedupIndex.Key` (128-bit SHA-256) rather than the ~57-char
+    /// string, so the same map can be written to disk and read back next
+    /// launch instead of being rebuilt by walking every row.
+    private var bestOutputByKey: [DedupIndex.Key: Int64]
     /// Upgrades discovered this cycle, applied together in `flush()`.
     ///
     /// The obvious implementations are both wrong at scale, and both were
@@ -205,6 +209,11 @@ public final class SamplePersister {
     /// long historical scans.
     private var pendingInsertCount: Int
     private let saveBatchSize: Int
+    /// Where the on-disk dedup index lives, or nil to disable it (tests and
+    /// in-memory stores, which have no container to write into).
+    private let indexURL: URL?
+    /// Set when the in-memory map has moved past what's on disk.
+    private var indexNeedsWrite = false
 
     public struct Stats: Sendable {
         public var inserted: Int
@@ -218,9 +227,11 @@ public final class SamplePersister {
 
     public private(set) var stats: Stats
 
-    public init(context: ModelContext, saveBatchSize: Int = 1_000) throws {
+    public init(context: ModelContext, saveBatchSize: Int = 1_000,
+                indexURL: URL? = nil) throws {
         self.context = context
         self.saveBatchSize = saveBatchSize
+        self.indexURL = indexURL
         self.bestOutputByKey = [:]
         self.pendingUpgrades = [:]
         self.dirtyPairs = []
@@ -263,7 +274,78 @@ public final class SamplePersister {
     public func ensurePreloaded() throws {
         guard !preloaded else { return }
         preloaded = true
+        if try loadDedupIndex() { return }
         try preloadFromStore()
+        indexNeedsWrite = true
+    }
+
+    /// Seed the dedup map from the on-disk index, or report that we can't.
+    ///
+    /// Returns false — meaning "walk the store instead" — for a missing file,
+    /// an unreadable one, or any index that doesn't account for exactly the
+    /// rows the store holds. That strictness is the whole safety argument:
+    /// the fallback costs seconds, while trusting a stale index double-counts
+    /// turns, and this map is what stands between a resumed session and
+    /// 2-3x inflated costs.
+    ///
+    /// Note this seeds ONLY the dedup map. The integrity sets (missing
+    /// aggregates, stranded hourly rows) still require the walk, which is why
+    /// `ScanCoordinator` forces one daily regardless.
+    private func loadDedupIndex() throws -> Bool {
+        guard let indexURL, let index = DedupIndex.load(from: indexURL) else { return false }
+
+        // `fetchCount` is a SQL COUNT — it doesn't materialise anything, so
+        // validating is cheap even though the thing it guards is expensive.
+        let keyed = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
+        let storeCount = try context.fetchCount(keyed)
+        guard index.isValid(againstKeyedRowCount: storeCount) else {
+            Log.write("SamplePersister",
+                      "dedup index covers \(index.rowCount) rows, store has \(storeCount) — rebuilding")
+            return false
+        }
+
+        bestOutputByKey = index.entries
+        // Rows written after the index was saved are still unaccounted for;
+        // pick them up so a merely-behind index is usable rather than binned.
+        let since = index.watermark        // predicates can't traverse `index.`
+        var tail = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.sampledAt > since })
+        tail.propertiesToFetch = [\.dedupKey, \.outputTokens]
+        var newest = index.watermark
+        var tailCount = 0
+        try context.enumerate(tail, batchSize: 5_000) { sample in
+            tailCount += 1
+            if sample.sampledAt > newest { newest = sample.sampledAt }
+            guard let key = sample.dedupKey else { return }
+            bestOutputByKey[DedupIndex.Key(key)] = sample.outputTokens
+        }
+        indexWatermark = newest
+        if tailCount > 0 { indexNeedsWrite = true }
+        Log.write("SamplePersister",
+                  "dedup index: \(index.entries.count) entries + \(tailCount) newer row(s)")
+        return true
+    }
+
+    /// Newest `sampledAt` the in-memory map accounts for.
+    private var indexWatermark = Date(timeIntervalSince1970: 0)
+
+    /// Persist the dedup map so the next launch skips the walk. Called after a
+    /// cycle's writes have landed; failures are logged and ignored, since the
+    /// index is only ever an optimisation.
+    public func writeDedupIndexIfNeeded() {
+        guard indexNeedsWrite, let indexURL, preloaded else { return }
+        do {
+            let keyed = FetchDescriptor<TokenSample>(
+                predicate: #Predicate<TokenSample> { $0.dedupKey != nil })
+            let index = DedupIndex(entries: bestOutputByKey,
+                                   rowCount: try context.fetchCount(keyed),
+                                   watermark: indexWatermark)
+            try index.write(to: indexURL)
+            indexNeedsWrite = false
+        } catch {
+            Log.write("SamplePersister", "dedup index write failed (harmless): \(error)")
+        }
     }
 
     /// Returns true if the entry was inserted, false if it was a
@@ -275,7 +357,8 @@ public final class SamplePersister {
         // afterwards, and free on a cycle that inserts nothing.
         try ensurePreloaded()
         if let key = entry.dedupKey {
-            if let bestSoFar = bestOutputByKey[key] {
+            let hashed = DedupIndex.Key(key)
+            if let bestSoFar = bestOutputByKey[hashed] {
                 // Seen before. Only a *larger* output means this is the
                 // finished message and what we stored was a mid-stream
                 // snapshot; anything else is a true duplicate.
@@ -287,14 +370,16 @@ public final class SamplePersister {
                 // updates immediately so a third copy compares against what
                 // we've decided to keep, not against what's still on disk.
                 pendingUpgrades[key] = entry
-                bestOutputByKey[key] = entry.breakdown.outputTokens
+                bestOutputByKey[hashed] = entry.breakdown.outputTokens
                 stats.upgradedFromPartial += 1
                 return false
             }
-            bestOutputByKey[key] = entry.breakdown.outputTokens
+            bestOutputByKey[hashed] = entry.breakdown.outputTokens
         }
         let sample = TokenSample(from: entry)
         context.insert(sample)
+        if sample.sampledAt > indexWatermark { indexWatermark = sample.sampledAt }
+        indexNeedsWrite = true
         let pair = DateModelPair(date: sample.date, model: sample.model)
         dirtyPairs.insert(pair)
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
@@ -808,6 +893,9 @@ public final class SamplePersister {
         var sampleHourBuckets: Set<DateHourModelTriple> = []
         var sampleSessionIds: Set<String> = []
         var rowCount = 0
+        // The walk covers everything currently stored, so its newest row
+        // becomes the index watermark.
+        var maxSampledAt = Date(timeIntervalSince1970: 0)
         let tWalk = Date()
         // `enumerate`, not `fetch`. Instrumented on a real 189k-row store, the
         // eager fetch was **11,564 ms of a 12,545 ms startup** — pure
@@ -816,11 +904,12 @@ public final class SamplePersister {
         // pulling the next, so the whole table never exists as objects at once.
         try scratchContext.enumerate(sampleDescriptor, batchSize: 5_000) { sample in
             rowCount += 1
+            if sample.sampledAt > maxSampledAt { maxSampledAt = sample.sampledAt }
             if let key = sample.dedupKey {
                 // Seed with what's stored so a finished copy arriving in a
                 // later session can still recognise a partial row and
                 // upgrade it, not just skip it as a duplicate.
-                bestOutputByKey[key] = sample.outputTokens
+                bestOutputByKey[DedupIndex.Key(key)] = sample.outputTokens
             }
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath

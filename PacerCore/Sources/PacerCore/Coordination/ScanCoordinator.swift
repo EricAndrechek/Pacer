@@ -982,6 +982,9 @@ public final class ScanCoordinator {
         try activePersister.flush()
         phase.flushMs = tickMs()
         try saveCursors(result.updatedCursors)
+        // After the cycle's rows are in, so the index never claims coverage
+        // the store doesn't have. Cheap and failure-tolerant — it's a cache.
+        activePersister.writeDedupIndexIfNeeded()
         phase.saveCursorsMs = tickMs()
 
         let cycleStats = SamplePersister.Stats(
@@ -1230,7 +1233,20 @@ public final class ScanCoordinator {
     }
 
     private func makePersister() throws -> SamplePersister {
-        try SamplePersister(context: context, saveBatchSize: configuration.saveBatchSize)
+        // Derive the index location from THIS container's own store file,
+        // never from the shared app-group path. Asking for the shared one
+        // makes every in-memory container — tests, the screenshot harness —
+        // read and overwrite the real user's index, which a test caught by
+        // failing on duplicate rows. An in-memory store gets no index and
+        // simply pays the walk.
+        let storeConfig = container.configurations.first
+        let indexURL: URL? = (storeConfig?.isStoredInMemoryOnly ?? true)
+            ? nil
+            : storeConfig?.url.deletingLastPathComponent().appending(
+                path: DedupIndex.fileName)
+        return try SamplePersister(context: context,
+                                   saveBatchSize: configuration.saveBatchSize,
+                                   indexURL: indexURL)
     }
 
     /// How often the store walk is forced for integrity's sake. Daily: the
