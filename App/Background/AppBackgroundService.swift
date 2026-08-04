@@ -131,6 +131,7 @@ final class AppBackgroundService {
 
         installImmediateScanObserver()
         installGlobalResetObserver()
+        installArchiveObserver()
         startEngine()
         widgetRefreshCoordinator.start()
         startPricingRefreshTask()
@@ -350,6 +351,45 @@ final class AppBackgroundService {
     /// rate-limit rows, check whether Anthropic just reset limits early.
     /// Gated on `rateLimitsChanged` so the chatty JSONL scan path (which
     /// posts `samplesChanged` many times a minute) never triggers it.
+    /// Mirrors new turns into the raw archive. Created lazily on the first
+    /// cycle that reports samples, so an install with nothing to archive never
+    /// pays for opening DuckDB.
+    @ScanActor private var archiveSync: ArchiveSync?
+    private var archiveObserver: NSObjectProtocol?
+
+    /// Append new turns to the raw archive after any cycle that wrote samples.
+    ///
+    /// Deliberately its own observer rather than a step inside the scan: the
+    /// archive is additive, nothing user-visible reads it, and a problem with
+    /// it must never be able to slow or break the scan that feeds everything
+    /// else. See `ArchiveSync`.
+    private func installArchiveObserver() {
+        guard let containerURL = try? PacerStore.sharedContainerURL() else { return }
+        let archiveURL = containerURL.appendingPathComponent("raw-archive.duckdb")
+        archiveObserver = NotificationCenter.default.addObserver(
+            forName: .pacerScanCycleDidComplete,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let samplesChanged = (note.object as? ScanCycleSummary)?.samplesChanged ?? false
+            guard samplesChanged else { return }
+            Task { @ScanActor [weak self] in
+                guard let self else { return }
+                await self.syncArchive(archiveURL: archiveURL)
+            }
+        }
+    }
+
+    /// Created and used entirely on `ScanActor` — `ArchiveSync` owns a DuckDB
+    /// connection, which is a C handle that must not cross actors.
+    @ScanActor
+    private func syncArchive(archiveURL: URL) {
+        if archiveSync == nil {
+            archiveSync = ArchiveSync(container: container, archiveURL: archiveURL)
+        }
+        archiveSync?.syncNewTurns()
+    }
+
     private func installGlobalResetObserver() {
         globalResetObserver = NotificationCenter.default.addObserver(
             forName: .pacerScanCycleDidComplete,

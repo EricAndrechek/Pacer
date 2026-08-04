@@ -482,11 +482,41 @@ public final class SamplePersister {
     /// existing aggregate; that's a delta, and a delta is wrong when a row
     /// already counted changes underneath it. Marking the affected buckets
     /// polluted forces the full-recompute path for exactly those.
+    /// Above this many pending upgrades, one full scan beats an indexed
+    /// lookup each. Live cycles sit far below it; a repair sits far above.
+    private static let bulkUpgradeThreshold = 32
+
     private func applyPendingUpgrades() throws {
         guard !pendingUpgrades.isEmpty else { return }
         let wanted = pendingUpgrades
         var applied = 0
-        for sample in try context.fetch(FetchDescriptor<TokenSample>()) {
+
+        // Two strategies, because the two call shapes are wildly different —
+        // the same lesson `saveCursors` taught. A live cycle upgrades a
+        // handful of streamed messages, where an indexed lookup each is
+        // ideal. A repair upgrades ~18k, where one scan wins.
+        //
+        // Scanning unconditionally cost **9,859 ms of a 10,089 ms cycle** on a
+        // 191k-row store, because live streaming means almost every cycle has
+        // an upgrade pending. Fetching per key unconditionally was the
+        // previous bug in the other direction: 98% CPU and >2 GB resident
+        // during a repair.
+        let rows: [TokenSample]
+        if wanted.count < Self.bulkUpgradeThreshold {
+            var found: [TokenSample] = []
+            for key in wanted.keys {
+                let k = key
+                var d = FetchDescriptor<TokenSample>(
+                    predicate: #Predicate<TokenSample> { $0.dedupKey == k })
+                d.fetchLimit = 1
+                if let row = try context.fetch(d).first { found.append(row) }
+            }
+            rows = found
+        } else {
+            rows = try context.fetch(FetchDescriptor<TokenSample>())
+        }
+
+        for sample in rows {
             guard let key = sample.dedupKey, let entry = wanted[key] else { continue }
             sample.inputTokens = entry.breakdown.inputTokens
             sample.outputTokens = entry.breakdown.outputTokens
