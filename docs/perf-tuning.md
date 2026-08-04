@@ -9,9 +9,9 @@ later overnight loops, so don't put durable knowledge there.
 ## TL;DR — current state
 
 - **Physical footprint ≈ 200 MB idle** (was 646 MB before 2026-08-04).
-- **Startup `prep` ≈ 9 s** on a 189k-row store (was 12.5 s) — the largest
-  remaining phase, and it runs on every launch. See "Memory and startup
-  (2026-08-04)".
+- **Startup `prep` ≈ 40 ms** on a 190k-row store (was 12.5 s). The dedup map
+  is persisted beside the store (`DedupIndex`) instead of rebuilt by walking
+  every row. See "Memory and startup (2026-08-04)".
 - **Cold start ≈ 41 s** for a first launch over a 1,697-file history (was
   75 s).
 - **p50 scan cycle ≈ 100 ms** (was 1500 ms at start of the 2026-05 work).
@@ -195,21 +195,40 @@ transcript copy) reports phase timings plus all six per-field token totals.
 The startup log line `[SamplePersister] preload: N rows — walk Xms · gaps Yms`
 splits the `prep` phase permanently.
 
+### How the walk was eliminated
+
+Both options from the original list got taken, in order:
+
+1. **Lazy** — the walk moved out of `init` into `ensurePreloaded()`, called by
+   `insert(_:)`. Launches with nothing to ingest stopped paying (`ms=274`
+   total). The integrity sets it also seeds aren't insert-driven, so
+   `ScanCoordinator` forces a walk once a day (`lastIntegrityWalkAt`).
+2. **Persisted** — `DedupIndex` writes the map beside the store, 24 bytes per
+   turn (4.4 MB here), loaded in milliseconds. That covered the remaining
+   case, a launch that *does* ingest:
+
+   ```
+   before   prep 9,293 ms   walk 190,296 rows
+   after    prep    42 ms   "dedup index: 190,067 entries + 0 newer"
+   ```
+
+The index caches the dedup guard, which is the most load-bearing correctness
+rule here, so it is built to refuse itself: an exact `fetchCount` match or the
+walk runs, and a 128-bit digest so a collision can't silently drop a turn.
+Read `DedupIndex`'s header before changing any of it.
+
+**It also caused a regression worth remembering.** Written on every cycle, it
+re-emitted 4.4 MB to record one row — 90 ms per scan against a 33-80 ms
+budget, pushing steady state to 178 ms. Throttled to 5 minutes with a forced
+flush on shutdown; the watermark makes lagging safe. It surfaced as
+"`curs=` got 90x slower" because the write lands inside that phase's timing
+window. An optimisation that MOVES work rather than removing it lands
+somewhere — check the hot path afterwards.
+
 ### Still open here
 
-`prep` is ~8.6 s of SwiftData materialization at ~45 µs/row, paid on **every**
-launch — including one with nothing to ingest (`inserted=0`). Options, none
-taken yet:
-
-- **Make the preload lazy** (build on first insert). Blocked on the same walk
-  seeding the integrity-recovery sets, which look for PRE-EXISTING aggregate
-  gaps and so can't wait for an insert. Worth noting that recovery has fired
-  0 times in the last 6 startups — a throttle (once a day) would let the
-  common launch skip the walk entirely.
-- **Persist a compact dedup index** (hash + outputTokens), ~1.5 MB here, read
-  in one go. Real win, but a stale or corrupt index silently double-counts.
-- **Read the columns straight from SQLite.** Fastest, and couples us to
-  CoreData's private table mapping. Don't.
+Nothing large. The hourly rollup emits 1,470 rows to daily's 184, which is
+inherent to bucketing by hour, and `autoA` runs 37-57 ms on a live cycle.
 
 ## Open work (deferred from the autonomous loop)
 
