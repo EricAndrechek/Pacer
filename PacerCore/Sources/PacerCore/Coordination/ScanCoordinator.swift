@@ -341,6 +341,9 @@ public final class ScanCoordinator {
     /// is unchanged. 60 s matches the routine-log throttle and the
     /// backstop scan interval.
     private static let autoAliasInterval: TimeInterval = 60
+    /// Rows the previous cycle inserted. Cheap stand-in for "a new project
+    /// might exist" — see the auto-alias throttle.
+    private var lastCycleInsertedCount = 0
 
     /// Nonisolated so the driver (`AppBackgroundService`, on MainActor)
     /// can construct the coordinator without an `await` hop. The
@@ -731,21 +734,42 @@ public final class ScanCoordinator {
         // The hash is over distinct project paths; new projects bypass
         // the timer gate (we want their alias detection to be fresh,
         // not 60 s stale), while unchanged sets fall through.
-        let candidatePaths = try fetchDistinctProjectPaths()
-        let candidateHash = Self.fnv1aHex(candidatePaths.sorted().joined(separator: "\u{001F}"))
         let now = Date()
-        let candidatesChanged = lastAutoAliasCandidateHash != candidateHash
         let throttleExpired: Bool = {
             guard let last = lastAutoAliasAt else { return true }
             return now.timeIntervalSince(last) >= Self.autoAliasInterval
         }()
-        if candidatesChanged || throttleExpired {
+        // Computing the candidate hash is not free — it materialises every
+        // ProjectDailyAggregate row (387 here, ~40 ms) — and it ran on EVERY
+        // cycle, including idle ones, purely to decide whether to skip the
+        // work it guards. That's half the budget of an 80 ms cycle spent
+        // proving there was nothing to do.
+        //
+        // A genuinely new project can only arrive on the back of a new
+        // sample, so "did the previous cycle insert anything?" is a sound and
+        // nearly-free proxy for "the candidate set might have moved". A first
+        // sample lands during the scan, which runs AFTER this, so detection
+        // slips by one cycle — cycles are seconds apart and alias detection
+        // has never been latency-sensitive.
+        var candidatePaths: [String]?
+        var candidateHash: String?
+        var candidatesChanged = false
+        if throttleExpired || lastCycleInsertedCount > 0 {
+            let paths = try fetchDistinctProjectPaths()
+            let hash = Self.fnv1aHex(paths.sorted().joined(separator: "\u{001F}"))
+            candidatePaths = paths
+            candidateHash = hash
+            candidatesChanged = lastAutoAliasCandidateHash != hash
+        }
+        // Entering here implies the block above ran (both conditions require
+        // it), so the paths are always in hand.
+        if let candidatePaths, candidatesChanged || throttleExpired {
             let autoAliasResult = try await autoAliaser.run(candidatePaths: candidatePaths)
             if autoAliasResult.aliasesAdded > 0 {
                 log("auto-alias: probed \(autoAliasResult.pathsProbed) path(s), added \(autoAliasResult.aliasesAdded) alias(es)")
             }
             lastAutoAliasAt = now
-            lastAutoAliasCandidateHash = candidateHash
+            lastAutoAliasCandidateHash = candidateHash ?? lastAutoAliasCandidateHash
         }
         phase.autoAliasMs = tickMs()
 
@@ -999,6 +1023,7 @@ public final class ScanCoordinator {
             inserted: activePersister.stats.inserted - beforeStats.inserted,
             skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate
         )
+        lastCycleInsertedCount = cycleStats.inserted
 
         let recomputer = AggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
