@@ -106,6 +106,18 @@ check "session: per-session values match" 0 "$(q "
   SELECT COUNT(*) FROM s JOIN ZSESSIONINFO si ON si.ZSESSIONID=s.sid
   WHERE si.ZCUMULATIVEINPUTTOKENS<>s.i OR si.ZCUMULATIVEOUTPUTTOKENS<>s.o")"
 
+# Cost is the number users actually look at, and it's DERIVED (tokens x
+# pricing, or Claude Code's own figure depending on cost mode) rather than
+# summed from a stored column — so it can drift independently of the tokens
+# above. Every rollup slices the same samples differently, so all four totals
+# must agree with each other to the cent.
+printf '\n%s==>%s Cost — every rollup slices the same spend\n' "$B" "$X"
+
+daily_cost="$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZDAILYAGGREGATE")"
+check "hourly cost equals daily"  "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZHOURLYAGGREGATE")"
+check "project cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")"
+check "session cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")"
+
 printf '\n%s==>%s Store\n' "$B" "$X"
 printf '    %s rows · %s daily · %s hourly · %s project · %s sessions\n' \
   "$(q 'SELECT COUNT(*) FROM ZTOKENSAMPLE')" \
