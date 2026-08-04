@@ -133,6 +133,13 @@ cmd_release() {
   assert_releasable
   git rev-parse "$tag" >/dev/null 2>&1 && die "tag ${tag} already exists"
   info "Tagging ${tag} on $(git rev-parse --short HEAD) and pushing"
+  # Remember when we started, so we can tell OUR Release run from an earlier
+  # one for the same tag. A retag after a failed release leaves a completed
+  # run with the identical headBranch, and picking the newest of what happens
+  # to be listed grabbed that stale failure — reporting a release as failed
+  # while the real run was still building.
+  local started_at
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   git tag -a "$tag" -m "Pacer ${version}"
   git push origin "$tag" >/dev/null
   ok "pushed ${tag} — Release workflow will pick it up"
@@ -142,7 +149,7 @@ cmd_release() {
   for _ in $(seq 1 25); do
     run_id="$(gh run list --workflow=Release --limit 15 \
       --json databaseId,headBranch,createdAt \
-      --jq "[.[]|select(.headBranch==\"$tag\")]|sort_by(.createdAt)|last|.databaseId" 2>/dev/null || true)"
+      --jq "[.[]|select(.headBranch==\"$tag\" and .createdAt > \"$started_at\")]|sort_by(.createdAt)|last|.databaseId" 2>/dev/null || true)"
     [ -n "$run_id" ] && [ "$run_id" != null ] && break
     sleep 6
   done
