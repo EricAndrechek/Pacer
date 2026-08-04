@@ -846,6 +846,15 @@ public final class SamplePersister {
         // Each stranded row held the sample count belonging to the hour after
         // it, which is the one-hour-shift signature.
         //
+        // Only the hourly rollup needs this, and the reason is worth keeping:
+        // daily buckets on stored `date`+`model` and SessionInfo on stored
+        // `sessionId`, none of which can move. The project rollup DOES bucket
+        // on a mutable column, but `canonicalizeProjectPaths` folds the old
+        // AND new pair into the dirty set on every rewrite, so its emptied
+        // bucket gets deleted the normal way. Hourly was the one key derived
+        // at read time with nothing tracking the move. Verified on a real
+        // store: 0 stranded daily, 0 project, 0 session.
+        //
         // Both sets are already in hand here, so detecting them is free.
         strandedHourBuckets = hourAggregateTriples.subtracting(sampleHourBuckets)
 
