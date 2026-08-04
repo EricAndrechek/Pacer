@@ -82,18 +82,19 @@ public final class SamplePersister {
     /// keys never get a finished copy at all — so "largest output wins"
     /// decides both cases correctly without persisting a completeness flag.
     private var bestOutputByKey: [String: Int64]
-    /// dedupKey → the stored row, so upgrading a partial is a dictionary hit
-    /// rather than a query.
+    /// Upgrades discovered this cycle, applied together in `flush()`.
     ///
-    /// `preloadFromStore` already fetches every sample to build
-    /// `bestOutputByKey`; keeping the reference costs one pointer per row and
-    /// removes a `FetchDescriptor` round-trip per upgrade. That mattered
-    /// enormously in practice: with a predicate fetch per upgrade, repairing a
-    /// real 189k-row store pinned a core at 98% and climbed past 2 GB resident
-    /// before it finished, because every lookup materialized more rows into
-    /// the context. A synthetic cold start never showed it — an empty store
-    /// has nothing to upgrade.
-    private var sampleByKey: [String: TokenSample]
+    /// The obvious implementations are both wrong at scale, and both were
+    /// tried: a `FetchDescriptor` per upgraded row pinned a core at 98% and
+    /// climbed past 2 GB while repairing a real store, and holding the
+    /// `TokenSample` for every key instead — so the upgrade is a dictionary
+    /// hit — traded that for **751 MB resident**, because a strong reference
+    /// per row stops the context from ever releasing any of them.
+    ///
+    /// Deferring is what makes both go away: nothing is retained beyond the
+    /// entries actually superseded this cycle (a handful on a live scan), and
+    /// they resolve in one pass instead of one query each.
+    private var pendingUpgrades: [String: ParsedUsageEntry]
     /// Buckets touched this session — the recomputer's input.
     public private(set) var dirtyPairs: Set<DateModelPair>
     /// `(projectPath, date)` buckets touched this session. Drives
@@ -216,7 +217,7 @@ public final class SamplePersister {
         self.context = context
         self.saveBatchSize = saveBatchSize
         self.bestOutputByKey = [:]
-        self.sampleByKey = [:]
+        self.pendingUpgrades = [:]
         self.dirtyPairs = []
         self.dirtyProjectDates = []
         self.dirtyHourBuckets = []
@@ -252,7 +253,10 @@ public final class SamplePersister {
                     stats.skippedAsDuplicate += 1
                     return false
                 }
-                try upgradeStoredSample(key: key, to: entry)
+                // Recorded now, applied in `flush()`. `bestOutputByKey`
+                // updates immediately so a third copy compares against what
+                // we've decided to keep, not against what's still on disk.
+                pendingUpgrades[key] = entry
                 bestOutputByKey[key] = entry.breakdown.outputTokens
                 stats.upgradedFromPartial += 1
                 return false
@@ -261,7 +265,6 @@ public final class SamplePersister {
         }
         let sample = TokenSample(from: entry)
         context.insert(sample)
-        if let key = entry.dedupKey { sampleByKey[key] = sample }
         let pair = DateModelPair(date: sample.date, model: sample.model)
         dirtyPairs.insert(pair)
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
@@ -335,51 +338,57 @@ public final class SamplePersister {
         return true
     }
 
-    /// Rewrite the stored row for `key` with the finished message's numbers.
+    /// Apply every upgrade collected this cycle in a single pass.
     ///
-    /// Every bucket the old numbers fed has to be invalidated too. The
-    /// rollup recomputers have a fast path that *adds* pending samples onto
-    /// the existing aggregate; that's a delta, and a delta is wrong when a
-    /// row already counted changes underneath it. Marking the affected
-    /// buckets polluted forces the full-recompute path for exactly those,
-    /// which is correct by construction and rare enough not to matter (a
-    /// live cycle only sees messages that were mid-stream at its boundary).
-    private func upgradeStoredSample(key: String, to entry: ParsedUsageEntry) throws {
-        guard let sample = sampleByKey[key] else {
-            // The key is known but we hold no row for it — it belongs to an
-            // account timeline that was archived out, or the store was pruned
-            // under us. Nothing to upgrade.
-            return
+    /// One fetch, filtered in memory, instead of a query per row — and the
+    /// materialized rows are released as soon as this returns, which is the
+    /// whole point. `propertiesToFetch` can't help here: applying an upgrade
+    /// writes six columns and reads four more for bucket invalidation.
+    ///
+    /// Every bucket the old numbers fed has to be invalidated too. The rollup
+    /// recomputers have a fast path that *adds* pending samples onto the
+    /// existing aggregate; that's a delta, and a delta is wrong when a row
+    /// already counted changes underneath it. Marking the affected buckets
+    /// polluted forces the full-recompute path for exactly those.
+    private func applyPendingUpgrades() throws {
+        guard !pendingUpgrades.isEmpty else { return }
+        let wanted = pendingUpgrades
+        var applied = 0
+        for sample in try context.fetch(FetchDescriptor<TokenSample>()) {
+            guard let key = sample.dedupKey, let entry = wanted[key] else { continue }
+            sample.inputTokens = entry.breakdown.inputTokens
+            sample.outputTokens = entry.breakdown.outputTokens
+            sample.cacheReadTokens = entry.breakdown.cacheReadTokens
+            sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
+            sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
+            sample.sourceCostUSD = entry.storedCostUSD
+
+            let pair = DateModelPair(date: sample.date, model: sample.model)
+            dirtyPairs.insert(pair)
+            pollutedDailyPairs.insert(pair)
+            pendingPairSamples[pair] = nil
+
+            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+            dirtyProjectDates.insert(projectPair)
+            pollutedProjectPairs.insert(projectPair)
+            pendingProjectSamples[projectPair] = nil
+
+            let hourBucket = DateHourModelTriple(
+                date: sample.date, hour: Self.localHour(of: sample.sampledAt), model: sample.model)
+            dirtyHourBuckets.insert(hourBucket)
+            pollutedHourBuckets.insert(hourBucket)
+            pendingHourSamples[hourBucket] = nil
+
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+                pollutedSessionIds.insert(sid)
+                pendingSessionSamples[sid] = nil
+            }
+            applied += 1
+            if applied == wanted.count { break }   // nothing left to find
         }
-        sample.inputTokens = entry.breakdown.inputTokens
-        sample.outputTokens = entry.breakdown.outputTokens
-        sample.cacheReadTokens = entry.breakdown.cacheReadTokens
-        sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
-        sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
-        sample.sourceCostUSD = entry.storedCostUSD
-
-        let pair = DateModelPair(date: sample.date, model: sample.model)
-        dirtyPairs.insert(pair)
-        pollutedDailyPairs.insert(pair)
-        pendingPairSamples[pair] = nil
-
-        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
-        dirtyProjectDates.insert(projectPair)
-        pollutedProjectPairs.insert(projectPair)
-        pendingProjectSamples[projectPair] = nil
-
-        let hourBucket = DateHourModelTriple(
-            date: sample.date, hour: Self.localHour(of: sample.sampledAt), model: sample.model)
-        dirtyHourBuckets.insert(hourBucket)
-        pollutedHourBuckets.insert(hourBucket)
-        pendingHourSamples[hourBucket] = nil
-
-        if let sid = sample.sessionId, !sid.isEmpty {
-            dirtySessionIds.insert(sid)
-            pollutedSessionIds.insert(sid)
-            pendingSessionSamples[sid] = nil
-        }
+        pendingUpgrades.removeAll(keepingCapacity: false)
     }
 
     /// Reset the batching counter. The coordinator calls this after the
@@ -394,6 +403,7 @@ public final class SamplePersister {
     /// and start tripping the saveBatchSize threshold mid-insert on
     /// every cycle, defeating the "one save per cycle" goal.
     public func flush() throws {
+        try applyPendingUpgrades()
         pendingInsertCount = 0
     }
 
@@ -707,7 +717,20 @@ public final class SamplePersister {
             // that a later scan can still upgrade.
             \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.outputTokens
         ]
-        let samples = try context.fetch(sampleDescriptor)
+        // Fetched through a throwaway context, NOT the persister's own.
+        //
+        // This walks every TokenSample to build the dedup map and the
+        // dirty/missing bucket sets — all plain values. Fetching it through
+        // the long-lived context registers all of them there permanently,
+        // and SwiftData charges roughly 890 bytes of bookkeeping per row on
+        // top of the row itself (backing data, _ModelMetadata, a property
+        // snapshot array, an observation registrar, a weak-ref slot). Heap-
+        // profiled on a real 189k-row store that was ~500 MB resident at
+        // idle, for objects nothing ever reads again.
+        //
+        // A scratch context frees the lot when it goes out of scope.
+        let scratchContext = ModelContext(context.container)
+        let samples = try scratchContext.fetch(sampleDescriptor)
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
         var sampleHourBuckets: Set<DateHourModelTriple> = []
@@ -718,7 +741,6 @@ public final class SamplePersister {
                 // later session can still recognise a partial row and
                 // upgrade it, not just skip it as a duplicate.
                 bestOutputByKey[key] = sample.outputTokens
-                sampleByKey[key] = sample
             }
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath

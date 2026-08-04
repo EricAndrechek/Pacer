@@ -104,6 +104,11 @@ import Testing
             let entry = try #require(JSONLLineParser.parse(line: raw))
             _ = try persister.insert(entry)
         }
+        // Upgrades are applied in `flush()`, not inline — one pass per cycle
+        // instead of a query per superseded row, and nothing retained in
+        // between. The coordinator always flushes after the scan emits its
+        // last entry, so this mirrors production ordering.
+        try persister.flush()
         try context.save()
 
         let rows = try context.fetch(FetchDescriptor<TokenSample>())
@@ -129,6 +134,7 @@ import Testing
             let entry = try #require(JSONLLineParser.parse(line: raw))
             _ = try persister.insert(entry)
         }
+        try persister.flush()
         try context.save()
 
         let rows = try context.fetch(FetchDescriptor<TokenSample>())
