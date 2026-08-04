@@ -688,5 +688,63 @@
             type="application/octet-stream"
             sparkle:edSignature="mS8bkMV1awLSXCx0MwA5nk3tbt1lVLATid3imVSn+Fr7C4ak+59aApmNgYssa4rnmzmmYz83s9v4yVHL8qTyAA==" />
     </item>
+            <item>
+        <title>Version 0.4.8</title>
+        <description><![CDATA[<p>Your costs were reading low. This release fixes that and rebuilds the history.</p>
+<h2>Costs were under-reported, and now self-correct</h2>
+<p>Pacer derives cost from tokens x pricing. If pricing hadn't finished loading<br>
+when a total was calculated — which routinely happened in the first seconds<br>
+after launch — everything computed in that window came out as $0. A $0 total<br>
+looks exactly like a real one, so nothing ever recalculated it, and the error<br>
+stayed permanently.</p>
+<p>On a real store this showed up as one day's project totals sitting $663 below<br>
+the same day's daily total, all of it one model's spend.</p>
+<p>Three fixes:</p>
+<ul>
+<li>Pricing is now guaranteed to be loaded before any total is calculated.</li>
+<li>When a brand-new model gets priced for the first time, Pacer now rebuilds<br>
+its history automatically. Previously every model launch needed a Pacer<br>
+update to correct the costs that had accumulated at $0.</li>
+<li>Today's and the current hour's figures are recalculated from your raw usage<br>
+every 10 minutes, so a number can't drift and then freeze when the hour<br>
+rolls over.</li>
+</ul>
+<p><strong>Your existing totals are rebuilt once on first launch after updating.</strong> No<br>
+action needed, and nothing is deleted — Pacer keeps every raw sample and<br>
+recomputes from those.</p>
+<h2>Two days in May were counted twice</h2>
+<p>126 turns from May 6th and 7th had been recorded twice over, so both days<br>
+read higher than they should. Pacer now finds and collapses these on first<br>
+launch after updating.</p>
+<p>Nothing is lost: the duplicate copies were identical to the ones kept, and<br>
+this is the only situation in which Pacer removes a raw record — it never<br>
+deletes your history by age or for space.</p>
+<h2>First launch is 3.3x faster</h2>
+<p>Setting Pacer up used to mean waiting while it read every transcript you had<br>
+ever written, one line at a time. On a 1,700-file, 1.9 GB history that was<br>
+47 seconds of an unresponsive app.</p>
+<p>It now reads them all at once: <strong>14.3 seconds</strong>, with results verified<br>
+identical to the old path down to the individual token.</p>
+<p>This only affects first launch and full re-scans. Ongoing updates are<br>
+unchanged — Pacer still watches for file changes and reads only the bytes<br>
+that changed, at ~0% idle CPU.</p>
+<h2>Under the hood</h2>
+<p>Pacer now keeps an append-only archive of every billable turn it has seen,<br>
+alongside the main database. Nothing user-visible reads it yet; it's the<br>
+foundation for keeping full history without the storage growing unbounded.<br>
+It never deletes anything.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 04 Aug 2026 19:23:04 +0000</pubDate>
+        <sparkle:version>1785871007</sparkle:version>
+        <sparkle:shortVersionString>0.4.8</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.8/Pacer-0.4.8.dmg"
+            length="19929749"
+            type="application/octet-stream"
+            sparkle:edSignature="5yQ8zsUnDtOJKdqi55DKRCj65gPUijKxicwJwomUUQfo0BH/0f9wuISjKGf19m8NmPErXB6wKOXgwS080M2zBg==" />
+    </item>
         </channel>
 </rss>
