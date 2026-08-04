@@ -87,7 +87,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install xcodegen create-dmg
+          brew install create-dmg
 
       - name: Import Developer ID Application cert
         env:
@@ -149,6 +149,12 @@ jobs:
             project.yml
           rm -f project.yml.bak
           grep -E "(MARKETING_VERSION|CURRENT_PROJECT_VERSION)" project.yml
+
+      # XcodeGen + SPM cache. Project generation is left to the step below
+      # because it has to run AFTER the version stamp above.
+      - uses: ./.github/actions/prepare-build
+        with:
+          generate-project: "false"
 
       - name: Generate Xcode project
         run: xcodegen generate

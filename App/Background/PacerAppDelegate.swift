@@ -112,6 +112,24 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
+        // Cold-start probe: measures a first launch against an in-memory
+        // store. Takes the same early exit as screenshot mode because it
+        // must not hit the single-instance gate — it is nearly always run
+        // while the real Pacer is going, and would otherwise just exit. It
+        // also skips the stderr redirect so its report lands on the
+        // terminal instead of the log file.
+        if ColdStartProbe.isActive {
+            PacerSettings.registerDefaults()
+            do {
+                container = try PacerStore.makeInMemoryContainer()
+            } catch {
+                Self.showFatalContainerError(error)
+            }
+            backgroundService = AppBackgroundService(container: container)
+            super.init()
+            return
+        }
+
         // Redirect stderr to a log file before anything else so the
         // ScanCoordinator/OAuthPoller log lines (via PacerCore.Log)
         // land somewhere readable. The retired daemon got its
@@ -273,6 +291,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 await SampleCostCache.reload()
                 ScreenshotMode.seed(into: container)
                 await ScreenshotMode.captureAll(container: container)
+                exit(0)
+            }
+            return
+        }
+
+        // Cold-start measurement harness — see `ColdStartProbe`.
+        if ColdStartProbe.isActive {
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                await ColdStartProbe.run()
                 exit(0)
             }
             return

@@ -55,7 +55,8 @@ public final class ProjectAggregateRecomputer {
     public func recompute(
         pairs: Set<ProjectDatePair>,
         pending: [ProjectDatePair: [TokenSample]] = [:],
-        polluted: Set<ProjectDatePair> = []
+        polluted: Set<ProjectDatePair> = [],
+        snapshots: SampleSnapshotCache? = nil
     ) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
@@ -77,7 +78,8 @@ public final class ProjectAggregateRecomputer {
             try context.save()
             let worker = ProjectAggregateBulkWorker(modelContainer: container)
             return try await worker.bulkRecompute(
-                pairs: pairs, mode: mode, snapshot: snapshot)
+                pairs: pairs, mode: mode, snapshot: snapshot,
+                snapshots: snapshots ?? SampleSnapshotCache(container: container))
         }
         for pair in pairs {
             stats.pairsRecomputed += 1
@@ -138,17 +140,17 @@ public final class ProjectAggregateRecomputer {
         }
 
         for s in pending {
-            existing.inputTokens += s.inputTokens
-            existing.outputTokens += s.outputTokens
-            existing.cacheReadTokens += s.cacheReadTokens
-            existing.cacheCreation5mTokens += s.cacheCreation5mTokens
-            existing.cacheCreation1hTokens += s.cacheCreation1hTokens
+            existing.inputTokens += s.breakdown.inputTokens
+            existing.outputTokens += s.breakdown.outputTokens
+            existing.cacheReadTokens += s.breakdown.cacheReadTokens
+            existing.cacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
+            existing.cacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
             let breakdown = TokenBreakdown(
-                inputTokens: s.inputTokens,
-                outputTokens: s.outputTokens,
-                cacheReadTokens: s.cacheReadTokens,
-                cacheCreation5mTokens: s.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.cacheCreation1hTokens
+                inputTokens: s.breakdown.inputTokens,
+                outputTokens: s.breakdown.outputTokens,
+                cacheReadTokens: s.breakdown.cacheReadTokens,
+                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
             )
             let cost = CostCalculator.cost(
                 storedCostUSD: s.sourceCostUSD,
@@ -161,7 +163,7 @@ public final class ProjectAggregateRecomputer {
             if let sid = s.sessionId, !sid.isEmpty {
                 sessions.insert(sid)
             }
-            modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens
+            modelTokens[s.model, default: 0] += s.breakdown.inputTokens + s.breakdown.outputTokens
             modelCost[s.model, default: 0] += cost
             if s.sampledAt > existing.lastActive {
                 existing.lastActive = s.sampledAt
@@ -225,9 +227,9 @@ public final class ProjectAggregateRecomputer {
         )
     }
 
-    fileprivate nonisolated static func applySamples(
+    fileprivate nonisolated static func applySamples<S: AggregatableSample>(
         pair: ProjectDatePair,
-        samples: [TokenSample],
+        samples: [S],
         existing: ProjectDailyAggregate?,
         mode: CostMode,
         snapshot: PricingTable.Snapshot,
@@ -257,11 +259,11 @@ public final class ProjectAggregateRecomputer {
         var lastActive: Date = .distantPast
 
         for s in samples {
-            inputTokens += s.inputTokens
-            outputTokens += s.outputTokens
-            cacheReadTokens += s.cacheReadTokens
-            cacheCreation5mTokens += s.cacheCreation5mTokens
-            cacheCreation1hTokens += s.cacheCreation1hTokens
+            inputTokens += s.breakdown.inputTokens
+            outputTokens += s.breakdown.outputTokens
+            cacheReadTokens += s.breakdown.cacheReadTokens
+            cacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
+            cacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
             // Cost via the same per-sample path AggregateRecomputer
             // uses: prefer Claude Code's stored value when present
             // (auto/display modes), fall back to tokens × pricing.
@@ -270,11 +272,11 @@ public final class ProjectAggregateRecomputer {
             // free — that's why the Projects tab showed $0 across the
             // board for many users.
             let breakdown = TokenBreakdown(
-                inputTokens: s.inputTokens,
-                outputTokens: s.outputTokens,
-                cacheReadTokens: s.cacheReadTokens,
-                cacheCreation5mTokens: s.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.cacheCreation1hTokens
+                inputTokens: s.breakdown.inputTokens,
+                outputTokens: s.breakdown.outputTokens,
+                cacheReadTokens: s.breakdown.cacheReadTokens,
+                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
+                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
             )
             let cost = CostCalculator.cost(
                 storedCostUSD: s.sourceCostUSD,
@@ -287,7 +289,7 @@ public final class ProjectAggregateRecomputer {
             if let sid = s.sessionId, !sid.isEmpty {
                 sessions.insert(sid)
             }
-            modelTokens[s.model, default: 0] += s.inputTokens + s.outputTokens
+            modelTokens[s.model, default: 0] += s.breakdown.inputTokens + s.breakdown.outputTokens
             modelCost[s.model, default: 0] += cost
             if s.sampledAt > lastActive { lastActive = s.sampledAt }
         }
@@ -344,14 +346,15 @@ actor ProjectAggregateBulkWorker {
     func bulkRecompute(
         pairs: Set<ProjectDatePair>,
         mode: CostMode,
-        snapshot: PricingTable.Snapshot
+        snapshot: PricingTable.Snapshot,
+        snapshots: SampleSnapshotCache
     ) async throws -> ProjectAggregateRecomputer.Stats {
         var stats = ProjectAggregateRecomputer.Stats(
             pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
 
-        let allSamples = try modelContext.fetch(FetchDescriptor<TokenSample>())
-        var grouped: [ProjectDatePair: [TokenSample]] = [:]
-        for s in allSamples {
+        // Shared with the daily and hourly workers — see SampleSnapshot.
+        var grouped: [ProjectDatePair: [SampleSnapshot.Row]] = [:]
+        for s in try snapshots.snapshot().rows {
             let path = s.projectPath ?? ProjectDailyAggregate.unknownProjectPath
             grouped[ProjectDatePair(projectPath: path, date: s.date), default: []].append(s)
         }

@@ -76,10 +76,15 @@ public final class AggregateRecomputer {
     /// behavior for callers that don't have pending-sample tracking
     /// (tests, the rare manual call).
     @discardableResult
+    /// `snapshots` lets the caller share one projection of the sample table
+    /// across every rollup worker in a cycle. The default creates a private
+    /// one, which is correct but re-reads the table — the coordinator passes
+    /// a shared instance so the three bulk workers read it once between them.
     public func recompute(
         pairs: Set<DateModelPair>,
         pending: [DateModelPair: [TokenSample]] = [:],
-        polluted: Set<DateModelPair> = []
+        polluted: Set<DateModelPair> = [],
+        snapshots: SampleSnapshotCache? = nil
     ) async throws -> Stats {
         if pairs.isEmpty {
             return Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
@@ -98,7 +103,8 @@ public final class AggregateRecomputer {
             return try await worker.bulkRecompute(
                 pairs: pairs,
                 mode: mode,
-                pricingTable: pricingTable
+                pricingTable: pricingTable,
+                snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
 
@@ -294,15 +300,17 @@ actor AggregateBulkWorker {
     func bulkRecompute(
         pairs: Set<DateModelPair>,
         mode: CostMode,
-        pricingTable: PricingTable
+        pricingTable: PricingTable,
+        snapshots: SampleSnapshotCache
     ) async throws -> AggregateRecomputer.Stats {
         var stats = AggregateRecomputer.Stats(
             pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
 
-        // One fetch of all samples, grouped by (date, model).
-        let allSamples = try modelContext.fetch(FetchDescriptor<TokenSample>())
-        var grouped: [DateModelPair: [TokenSample]] = [:]
-        for s in allSamples {
+        // Samples come from the cycle's shared snapshot rather than a fetch of
+        // our own: the hourly and project workers need the identical table and
+        // would each re-materialize it in their own context otherwise.
+        var grouped: [DateModelPair: [SampleSnapshot.Row]] = [:]
+        for s in try snapshots.snapshot().rows {
             grouped[DateModelPair(date: s.date, model: s.model), default: []].append(s)
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<DailyAggregate>())
@@ -328,13 +336,7 @@ actor AggregateBulkWorker {
             var sum = TokenBreakdown()
             var totalCost: Double = 0
             for sample in samples {
-                let breakdown = TokenBreakdown(
-                    inputTokens: sample.inputTokens,
-                    outputTokens: sample.outputTokens,
-                    cacheReadTokens: sample.cacheReadTokens,
-                    cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                    cacheCreation1hTokens: sample.cacheCreation1hTokens
-                )
+                let breakdown = sample.breakdown
                 sum.add(breakdown)
 
                 switch mode {

@@ -25,6 +25,19 @@ jobs:
           xcodebuild -version
           swift --version
 
+      # PacerCore is pure SPM — no Xcode project needed, just a warm package
+      # cache so Sparkle isn't refetched every run.
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            ~/.swiftpm
+            PacerCore/.build
+          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ runner.arch }}-
+
       # Standalone SPM package — no Xcode project required for the
       # PacerCore + PacerUI tests. Runs in well under a minute on the
       # standard runner.
@@ -42,11 +55,9 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        run: xcodegen generate
+      # XcodeGen (pinned prebuilt, not brew) + SPM cache + project generation,
+      # shared with the release workflow so the two can't drift.
+      - uses: ./.github/actions/prepare-build
 
       # Unsigned compile-only build — same flags `make verify` uses
       # locally. We don't run signed builds in CI because the Developer

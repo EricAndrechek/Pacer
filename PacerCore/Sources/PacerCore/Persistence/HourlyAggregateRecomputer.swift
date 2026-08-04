@@ -54,7 +54,8 @@ public final class HourlyAggregateRecomputer {
     public func recompute(
         buckets: Set<DateHourModelTriple>,
         pending: [DateHourModelTriple: [TokenSample]] = [:],
-        polluted: Set<DateHourModelTriple> = []
+        polluted: Set<DateHourModelTriple> = [],
+        snapshots: SampleSnapshotCache? = nil
     ) async throws -> Stats {
         if buckets.isEmpty {
             return Stats(bucketsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
@@ -71,7 +72,8 @@ public final class HourlyAggregateRecomputer {
             return try await worker.bulkRecompute(
                 buckets: buckets,
                 mode: mode,
-                pricingTable: pricingTable
+                pricingTable: pricingTable,
+                snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
 
@@ -266,7 +268,8 @@ actor HourlyAggregateBulkWorker {
     func bulkRecompute(
         buckets: Set<DateHourModelTriple>,
         mode: CostMode,
-        pricingTable: PricingTable
+        pricingTable: PricingTable,
+        snapshots: SampleSnapshotCache
     ) async throws -> HourlyAggregateRecomputer.Stats {
         var stats = HourlyAggregateRecomputer.Stats(
             bucketsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
@@ -275,10 +278,10 @@ actor HourlyAggregateBulkWorker {
         // memory. Hour is the user-local calendar component, same
         // semantics the per-pair path and `SamplePersister.localHour`
         // use everywhere else.
-        let allSamples = try modelContext.fetch(FetchDescriptor<TokenSample>())
-        var grouped: [DateHourModelTriple: [TokenSample]] = [:]
+        // Shared with the daily and project workers — see SampleSnapshot.
+        var grouped: [DateHourModelTriple: [SampleSnapshot.Row]] = [:]
         let cal = Calendar.current
-        for s in allSamples {
+        for s in try snapshots.snapshot().rows {
             let h = cal.component(.hour, from: s.sampledAt)
             grouped[DateHourModelTriple(date: s.date, hour: h, model: s.model),
                     default: []].append(s)
@@ -307,13 +310,7 @@ actor HourlyAggregateBulkWorker {
             var sum = TokenBreakdown()
             var totalCost: Double = 0
             for sample in samples {
-                let breakdown = TokenBreakdown(
-                    inputTokens: sample.inputTokens,
-                    outputTokens: sample.outputTokens,
-                    cacheReadTokens: sample.cacheReadTokens,
-                    cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                    cacheCreation1hTokens: sample.cacheCreation1hTokens
-                )
+                let breakdown = sample.breakdown
                 sum.add(breakdown)
 
                 switch mode {

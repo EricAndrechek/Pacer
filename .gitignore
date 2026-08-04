@@ -60,3 +60,10 @@ updates/
 # so every contributor/agent gets them, e.g. .claude/skills/ship).
 .claude/*
 !.claude/skills/
+
+
+# Vendored DuckDB static XCFramework. Not used by main — the DuckDB work
+# lives on spike/duckdb-integration (see docs/duckdb-archive.md) — but that
+# build script writes here, and an 80 MB binary must never reach git history.
+# Ignored defensively so running it on any branch cannot commit it.
+Vendor/

@@ -63,10 +63,37 @@ public struct DateHourModelTriple: Hashable, Sendable {
 public final class SamplePersister {
 
     private let context: ModelContext
-    /// Existing dedupKeys seen in the DB at startup, plus everything
-    /// inserted this session. Single source of truth for "have we seen
-    /// this already." 500K entries × ~40 bytes = ~20MB — fine in RAM.
-    private var seenDedupKeys: Set<String>
+    /// dedupKey → the best `outputTokens` recorded for it so far, across
+    /// both the DB at startup and everything inserted this session. Single
+    /// source of truth for "have we seen this, and is what we stored the
+    /// finished version."
+    ///
+    /// It maps to a value rather than being a plain `Set` because a repeat
+    /// sighting is not necessarily a duplicate to discard. Claude Code
+    /// appends the same assistant message to the transcript several times
+    /// while it streams, and only the last copy carries the real
+    /// `output_tokens` — so a later, larger copy must *upgrade* the row we
+    /// already wrote. Keeping first-wins silently discarded 29.5M output
+    /// tokens on a 1,697-file corpus (63% of the output actually recorded).
+    ///
+    /// Comparing on output alone is sufficient, not just convenient: across
+    /// that corpus there was no key whose finished copy (`stop_reason` set)
+    /// had anything other than the maximum output of its copies, and 6.3% of
+    /// keys never get a finished copy at all — so "largest output wins"
+    /// decides both cases correctly without persisting a completeness flag.
+    private var bestOutputByKey: [String: Int64]
+    /// dedupKey → the stored row, so upgrading a partial is a dictionary hit
+    /// rather than a query.
+    ///
+    /// `preloadFromStore` already fetches every sample to build
+    /// `bestOutputByKey`; keeping the reference costs one pointer per row and
+    /// removes a `FetchDescriptor` round-trip per upgrade. That mattered
+    /// enormously in practice: with a predicate fetch per upgrade, repairing a
+    /// real 189k-row store pinned a core at 98% and climbed past 2 GB resident
+    /// before it finished, because every lookup materialized more rows into
+    /// the context. A synthetic cold start never showed it — an empty store
+    /// has nothing to upgrade.
+    private var sampleByKey: [String: TokenSample]
     /// Buckets touched this session — the recomputer's input.
     public private(set) var dirtyPairs: Set<DateModelPair>
     /// `(projectPath, date)` buckets touched this session. Drives
@@ -176,6 +203,11 @@ public final class SamplePersister {
     public struct Stats: Sendable {
         public var inserted: Int
         public var skippedAsDuplicate: Int
+        /// Rows rewritten because a later copy of the same message carried
+        /// its finished token counts. Distinct from `skippedAsDuplicate`
+        /// (a genuine replay we correctly ignored) — this one changed
+        /// stored numbers, so it's worth seeing in the scan log.
+        public var upgradedFromPartial: Int = 0
     }
 
     public private(set) var stats: Stats
@@ -183,7 +215,8 @@ public final class SamplePersister {
     public init(context: ModelContext, saveBatchSize: Int = 1_000) throws {
         self.context = context
         self.saveBatchSize = saveBatchSize
-        self.seenDedupKeys = []
+        self.bestOutputByKey = [:]
+        self.sampleByKey = [:]
         self.dirtyPairs = []
         self.dirtyProjectDates = []
         self.dirtyHourBuckets = []
@@ -211,14 +244,24 @@ public final class SamplePersister {
     @discardableResult
     public func insert(_ entry: ParsedUsageEntry) throws -> Bool {
         if let key = entry.dedupKey {
-            if seenDedupKeys.contains(key) {
-                stats.skippedAsDuplicate += 1
+            if let bestSoFar = bestOutputByKey[key] {
+                // Seen before. Only a *larger* output means this is the
+                // finished message and what we stored was a mid-stream
+                // snapshot; anything else is a true duplicate.
+                guard entry.breakdown.outputTokens > bestSoFar else {
+                    stats.skippedAsDuplicate += 1
+                    return false
+                }
+                try upgradeStoredSample(key: key, to: entry)
+                bestOutputByKey[key] = entry.breakdown.outputTokens
+                stats.upgradedFromPartial += 1
                 return false
             }
-            seenDedupKeys.insert(key)
+            bestOutputByKey[key] = entry.breakdown.outputTokens
         }
         let sample = TokenSample(from: entry)
         context.insert(sample)
+        if let key = entry.dedupKey { sampleByKey[key] = sample }
         let pair = DateModelPair(date: sample.date, model: sample.model)
         dirtyPairs.insert(pair)
         let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
@@ -290,6 +333,53 @@ public final class SamplePersister {
             pendingInsertCount = 0
         }
         return true
+    }
+
+    /// Rewrite the stored row for `key` with the finished message's numbers.
+    ///
+    /// Every bucket the old numbers fed has to be invalidated too. The
+    /// rollup recomputers have a fast path that *adds* pending samples onto
+    /// the existing aggregate; that's a delta, and a delta is wrong when a
+    /// row already counted changes underneath it. Marking the affected
+    /// buckets polluted forces the full-recompute path for exactly those,
+    /// which is correct by construction and rare enough not to matter (a
+    /// live cycle only sees messages that were mid-stream at its boundary).
+    private func upgradeStoredSample(key: String, to entry: ParsedUsageEntry) throws {
+        guard let sample = sampleByKey[key] else {
+            // The key is known but we hold no row for it — it belongs to an
+            // account timeline that was archived out, or the store was pruned
+            // under us. Nothing to upgrade.
+            return
+        }
+        sample.inputTokens = entry.breakdown.inputTokens
+        sample.outputTokens = entry.breakdown.outputTokens
+        sample.cacheReadTokens = entry.breakdown.cacheReadTokens
+        sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
+        sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
+        sample.sourceCostUSD = entry.storedCostUSD
+
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        pollutedDailyPairs.insert(pair)
+        pendingPairSamples[pair] = nil
+
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        pendingProjectSamples[projectPair] = nil
+
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: Self.localHour(of: sample.sampledAt), model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        pendingHourSamples[hourBucket] = nil
+
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            pollutedSessionIds.insert(sid)
+            pendingSessionSamples[sid] = nil
+        }
     }
 
     /// Reset the batching counter. The coordinator calls this after the
@@ -612,7 +702,10 @@ public final class SamplePersister {
         // need a second full fetch — costly during preload for power
         // users with ~500K rows.
         sampleDescriptor.propertiesToFetch = [
-            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt
+            // outputTokens rides along so `bestOutputByKey` knows whether a
+            // stored row is a finished message or a mid-stream snapshot
+            // that a later scan can still upgrade.
+            \.dedupKey, \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.outputTokens
         ]
         let samples = try context.fetch(sampleDescriptor)
         var samplePairs: Set<DateModelPair> = []
@@ -621,7 +714,11 @@ public final class SamplePersister {
         var sampleSessionIds: Set<String> = []
         for sample in samples {
             if let key = sample.dedupKey {
-                seenDedupKeys.insert(key)
+                // Seed with what's stored so a finished copy arriving in a
+                // later session can still recognise a partial row and
+                // upgrade it, not just skip it as a duplicate.
+                bestOutputByKey[key] = sample.outputTokens
+                sampleByKey[key] = sample
             }
             samplePairs.insert(DateModelPair(date: sample.date, model: sample.model))
             let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath

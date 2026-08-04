@@ -44,6 +44,44 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     public let claudeCodeVersion: String?
     public let isApiErrorMessage: Bool
 
+    /// Whether this line is the **finished** message rather than a
+    /// mid-stream snapshot of it — i.e. whether `message.stop_reason` was
+    /// set.
+    ///
+    /// Claude Code appends the same assistant message to the transcript
+    /// several times while it streams. Every copy shares a `dedupKey`, and
+    /// `input`/`cache_read` are identical across them, but `output_tokens`
+    /// climbs to its real value only on the last one:
+    ///
+    ///     18:31:20.543  output=1    stop_reason=null
+    ///     18:31:22.947  output=1    stop_reason=null
+    ///     18:31:23.564  output=289  stop_reason="tool_use"
+    ///
+    /// Dedup used to be first-wins (inherited from ccusage, which is right
+    /// for *replayed* duplicates and wrong for *streamed* ones), so we kept
+    /// the `output=1` row and dropped the `output=289` one. Measured on a
+    /// frozen 1,697-file corpus that discarded 29.5M output tokens — 63% of
+    /// the output total actually recorded.
+    ///
+    /// Verified across that corpus: of 54,046 dedup keys, **zero** had a
+    /// complete copy whose output wasn't also the maximum, so this flag and
+    /// "highest output wins" never disagree. 6.3% of keys never get a
+    /// complete copy at all (interrupted messages), which is why incomplete
+    /// lines are still kept rather than filtered — see
+    /// `supersedes(_:)`.
+    public let isComplete: Bool
+
+    /// Should this entry replace `other`, which shares its `dedupKey`?
+    ///
+    /// Prefer the finished message; between two equally-finished (or two
+    /// equally-unfinished) copies prefer the larger output, which is what a
+    /// later stream snapshot always is. Total and deterministic, so scan
+    /// order can't change the result.
+    public func supersedes(_ other: ParsedUsageEntry) -> Bool {
+        if isComplete != other.isComplete { return isComplete }
+        return breakdown.outputTokens > other.breakdown.outputTokens
+    }
+
     /// Explicit init — defaulting `originalProjectPath` keeps old
     /// test fixtures compiling without touching their named-argument
     /// call sites.
@@ -57,8 +95,10 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         projectPath: String? = nil,
         originalProjectPath: String? = nil,
         claudeCodeVersion: String? = nil,
-        isApiErrorMessage: Bool = false
+        isApiErrorMessage: Bool = false,
+        isComplete: Bool = true
     ) {
+        self.isComplete = isComplete
         self.timestamp = timestamp
         self.model = model
         self.breakdown = breakdown
@@ -139,6 +179,12 @@ struct RawJSONLine: Decodable {
         let id: String?
         let model: String?
         let usage: RawUsage?
+        /// `"end_turn"` / `"tool_use"` / … once the message finishes, `nil`
+        /// while it is still streaming. This is the *completeness* signal:
+        /// Claude Code writes the same assistant message to the transcript
+        /// several times as it streams, and only the final line carries the
+        /// real `output_tokens`. See `ParsedUsageEntry.isComplete`.
+        let stop_reason: String?
     }
 
     struct RawUsage: Decodable {

@@ -37,7 +37,19 @@ public final class ScanCoordinator {
     ///         rows, then the cost-recompute pass on the same cycle
     ///         rebuilds `ProjectDailyAggregate` rows under the new
     ///         project keys.
-    public static let currentScanVersion = "2"
+    /// - "3" — dedup keeps the *finished* copy of a streamed message
+    ///         instead of the first one. Existing stores hold the
+    ///         mid-stream snapshot for any message Claude Code wrote
+    ///         more than once — on the maintainer's own store that was
+    ///         29.5M output tokens, 63% of the output recorded. The
+    ///         forced re-read is what repairs them: the persister now
+    ///         upgrades a stored row when a larger-output copy arrives
+    ///         rather than skipping it as a duplicate, so simply
+    ///         re-reading every transcript corrects history in place.
+    ///         Rows whose transcripts Claude Code has since rotated
+    ///         away keep their old values — we never delete a sample we
+    ///         can no longer re-derive.
+    public static let currentScanVersion = "3"
 
     /// Bumped when a code change requires recomputing the cost columns
     /// on existing aggregates. ScanCoordinator detects a mismatch on
@@ -952,10 +964,17 @@ public final class ScanCoordinator {
         // pairs (no existing row) AND polluted pairs (recovery /
         // markEverySampleDirty / canonicalize) fall through to the
         // full recompute path — same code as before this change.
+        // One projection of the sample table for every rollup this cycle.
+        // Each bulk worker used to fetch the whole table into its own context;
+        // on a cold start all three fire and that was ~3 s apiece re-reading
+        // rows the previous worker had just read. Built lazily, so a normal
+        // incremental cycle — every worker on its fast path — never touches it.
+        let sampleSnapshots = SampleSnapshotCache(container: container)
         let recomputeStats = try await recomputer.recompute(
             pairs: activePersister.dirtyPairs,
             pending: activePersister.pendingPairSamples,
-            polluted: activePersister.pollutedDailyPairs
+            polluted: activePersister.pollutedDailyPairs,
+            snapshots: sampleSnapshots
         )
         phase.dailyRecomputeMs = tickMs()
 
@@ -973,7 +992,8 @@ public final class ScanCoordinator {
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
             buckets: activePersister.dirtyHourBuckets,
             pending: activePersister.pendingHourSamples,
-            polluted: activePersister.pollutedHourBuckets
+            polluted: activePersister.pollutedHourBuckets,
+            snapshots: sampleSnapshots
         )
         phase.hourlyRecomputeMs = tickMs()
 
@@ -998,7 +1018,8 @@ public final class ScanCoordinator {
         let projectRecomputeStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates,
             pending: activePersister.pendingProjectSamples,
-            polluted: activePersister.pollutedProjectPairs
+            polluted: activePersister.pollutedProjectPairs,
+            snapshots: sampleSnapshots
         )
         phase.projectRecomputeMs = tickMs()
 
@@ -1037,6 +1058,7 @@ public final class ScanCoordinator {
         )
         let sessionRecomputeStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds,
+            snapshots: sampleSnapshots,
             pending: activePersister.pendingSessionSamples,
             polluted: activePersister.pollutedSessionIds
         )
@@ -1197,19 +1219,41 @@ public final class ScanCoordinator {
         return out
     }
 
+    /// Cursor updates above which one full-table fetch beats a per-path
+    /// lookup each. An incremental cycle updates 1-3 cursors and the indexed
+    /// per-path fetch is ideal there; a full scan updates every file, and on a
+    /// real 1,701-file store that was **33.7 s of a 70 s scan** — 1,701
+    /// round-trips to avoid reading a table with 1,701 rows in it.
+    private static let bulkCursorSaveThreshold = 32
+
     /// Persist cursor updates to disk and mirror them into the cache.
-    /// Per-path fetch (one indexed lookup against `JSONLFileCursor.path
-    /// @Attribute(.unique)`) replaces the previous full-table fetch —
-    /// for a typical 1-3 updates per cycle that's a 1000× reduction
-    /// in rows pulled from SwiftData per scan.
+    ///
+    /// Two strategies, because the two call shapes are genuinely different:
+    /// a handful of changed files (incremental — indexed lookup per path,
+    /// pulls almost nothing) versus all of them (full scan — one fetch, then
+    /// dictionary hits).
     private func saveCursors(_ updates: [String: JSONLScanner.CursorState]) throws {
         guard !updates.isEmpty else { return }
+        var existingByPath: [String: JSONLFileCursor]?
+        if updates.count >= Self.bulkCursorSaveThreshold {
+            var byPath: [String: JSONLFileCursor] = [:]
+            for row in try context.fetch(FetchDescriptor<JSONLFileCursor>()) {
+                byPath[row.path] = row
+            }
+            existingByPath = byPath
+        }
         for (path, state) in updates {
             let pathLocal = path
-            let descriptor = FetchDescriptor<JSONLFileCursor>(
-                predicate: #Predicate<JSONLFileCursor> { $0.path == pathLocal }
-            )
-            if let existing = try context.fetch(descriptor).first {
+            let existing: JSONLFileCursor?
+            if let existingByPath {
+                existing = existingByPath[pathLocal]
+            } else {
+                let descriptor = FetchDescriptor<JSONLFileCursor>(
+                    predicate: #Predicate<JSONLFileCursor> { $0.path == pathLocal }
+                )
+                existing = try context.fetch(descriptor).first
+            }
+            if let existing {
                 existing.byteOffset = state.byteOffset
                 existing.lastSeenMtime = state.lastSeenMtime
             } else {

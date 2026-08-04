@@ -100,7 +100,10 @@ public enum JSONLLineParser {
             // about WHERE inside that repo a session ran.
             originalProjectPath: raw.cwd,
             claudeCodeVersion: raw.version,
-            isApiErrorMessage: raw.isApiErrorMessage ?? false
+            isApiErrorMessage: raw.isApiErrorMessage ?? false,
+            // A finished message carries a stop_reason; a mid-stream
+            // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.
+            isComplete: raw.message?.stop_reason != nil
         )
     }
 
@@ -138,5 +141,14 @@ public enum JSONLLineParser {
     private static func parseTimestamp(_ string: String) -> Date? {
         if let date = timestampDecoder.date(from: string) { return date }
         return timestampDecoderNoFraction.date(from: string)
+    }
+
+    /// Same timestamp handling for the bulk importer, which gets its fields
+    /// from DuckDB rather than from `JSONDecoder` but must interpret them
+    /// identically — including the with/without-fractional-seconds fallback.
+    /// Exposed rather than duplicated so the two ingest paths can't drift on
+    /// something as easy to get subtly wrong as date parsing.
+    public static func parseTimestampForImport(_ string: String) -> Date? {
+        parseTimestamp(string)
     }
 }
