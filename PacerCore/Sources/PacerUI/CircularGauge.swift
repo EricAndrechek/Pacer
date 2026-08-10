@@ -49,6 +49,16 @@ public struct CircularGauge: View {
             Text("\(Int(percentage.rounded()))%")
                 .font(labelFont)
                 .monospacedDigit()
+                // "100%" is one glyph wider than every other reading, and the
+                // callers size this ring for two digits. Without these it
+                // wraps to two lines and spills outside the ring — reported as
+                // issue #125 against the 22pt menu-bar gauge.
+                //
+                // Shrink-to-fit rather than a smaller font for everyone:
+                // anything that already fits is untouched, so the dashboard
+                // and widget gauges render identically to before.
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
         }
     }
 }

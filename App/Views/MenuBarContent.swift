@@ -658,7 +658,14 @@ struct MenuStatusContent: View {
 
                     Text("\(Int(pct.rounded()))%")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                        .frame(width: 32, alignment: .trailing)
+                        // 32pt fits "99%" and not "100%", so at the cap this
+                        // wrapped to "100" over "%" (issue #125). minWidth
+                        // keeps every two-digit row pixel-identical to before
+                        // and lets only the three-digit case take the ~6pt it
+                        // needs.
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(minWidth: 32, alignment: .trailing)
 
                     Text("pace \(Int(pacePct.rounded()))%")
                         .font(.system(size: 11, weight: .medium))

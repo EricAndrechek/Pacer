@@ -93,6 +93,17 @@ enum ScreenshotMode {
             return
         }
 
+        // Focused proof run for issue #125 — a window sitting AT 100%. The
+        // ordinary seed clamps to 99 (`min(99, pct)`), so the three-digit case
+        // was literally not renderable by the harness, which is part of why it
+        // shipped: every scene that could have shown the overflow was capped
+        // one point below it.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_AT_LIMIT_ONLY"] == "1" {
+            await captureAtLimitScenes()
+            log("at-limit screenshots complete")
+            return
+        }
+
         // Focused proof run for the menu-bar-polish work: the activity-rings
         // icon with 2 vs 3 windows, and the Menu-bar settings card showing the
         // explicit driver picker (no "Auto") and the ring-window picker. Writes
@@ -382,6 +393,57 @@ enum ScreenshotMode {
         // Never leave a non-default driver persisted in the shared suite.
         PacerSettings.store.set(
             MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+    }
+
+    // MARK: - At-the-limit proof scene (issue #125)
+
+    /// Render the menu-bar dropdown with the 5-hour window at **100%**, which
+    /// is what issue #125 reported: the three-digit percentage overflows the
+    /// gauge and wraps the value column onto two lines.
+    ///
+    /// Mirrors the reporter's screenshot — 5h at 100, 7d at 50, one scoped
+    /// per-model window at 11 — so the fix can be judged against the same
+    /// shape it was reported in.
+    private static func captureAtLimitScenes() async {
+        guard let container = try? PacerStore.makeInMemoryContainer() else {
+            log("⚠️ at-limit: container creation failed"); return
+        }
+        let ctx = ModelContext(container)
+        let now = Date()
+        seedRateLimits(ctx, now: now)
+        seedLayoutScoped(ctx, now: now, scoped: [
+            .init(model: "Fable", group: "weekly", pct: 11, active: false, severity: "normal"),
+        ])
+        // Push the fixed windows to the reported readings. Appended AFTER the
+        // trail so these are the latest samples the dropdown reads, and so the
+        // seed's own 99 clamp doesn't apply.
+        for (window, pct, reset) in [
+            ("five_hour", 100.0, now.addingTimeInterval(2 * 3_600)),
+            ("seven_day", 50.0, now.addingTimeInterval(3 * 86_400)),
+        ] {
+            // One second AFTER the trail's last point. At an identical
+            // timestamp the ordering between these and the seeded trail is
+            // undefined, and the 7-day row rendered 63% in one run and 50% in
+            // the next — a scene that doesn't render the same twice can't be
+            // before/after evidence.
+            ctx.insert(RateLimitSample(
+                sampledAt: now.addingTimeInterval(1), window: window,
+                usedPercentage: pct, resetsAt: reset, source: "oauth"))
+        }
+        do { try ctx.save() } catch { log("⚠️ at-limit: seed save failed: \(error)") }
+
+        let engine = UsageIntelligenceEngine(modelContainer: container)
+        await engine.recompute(now: now)
+        screenshotEngine = engine
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        PacerSettings.store.set(
+            "icon,five_hour_pct,seven_day_pct", forKey: PacerSettings.Key.menuBarChips)
+        PacerSettings.store.set(
+            MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+
+        await capture("at-limit-dropdown", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
     }
 
     // MARK: - Menu-bar-polish proof scenes
