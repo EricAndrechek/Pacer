@@ -252,6 +252,58 @@ final class RawArchive {
         return before - (try scalar("SELECT COUNT(*) FROM turn"))
     }
 
+    /// Best `output_tokens` archived per dedup key, at or after `since`.
+    ///
+    /// Presence alone isn't enough to tell whether a turn is faithfully
+    /// archived: a streamed message is written partial and UPGRADED in place
+    /// in the store when its finished copy arrives, so a key can be present
+    /// and still be wrong. The archive can't see that mutation, so the caller
+    /// compares values.
+    func outputByDedupKey(since: Date?) throws -> [String: Int64] {
+        var result = duckdb_result()
+        let filter = since.map {
+            " AND sampled_at >= make_timestamp(\(Int64($0.timeIntervalSince1970 * 1_000_000)))"
+        } ?? ""
+        let sql = """
+            SELECT dedup_key, MAX(output_tokens) FROM turn
+            WHERE dedup_key IS NOT NULL\(filter) GROUP BY dedup_key
+            """
+        let ok = sql.withCString { duckdb_query(con, $0, &result) } == DuckDBSuccess
+        defer { duckdb_destroy_result(&result) }
+        guard ok else {
+            throw ArchiveError.queryFailed(
+                duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown")
+        }
+
+        var out: [String: Int64] = [:]
+        while let chunk = duckdb_fetch_chunk(result) {
+            defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
+            let count = Int(duckdb_data_chunk_get_size(chunk))
+            guard count > 0,
+                  let keyData = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 0)),
+                  let valData = duckdb_vector_get_data(duckdb_data_chunk_get_vector(chunk, 1))
+            else { continue }
+            let keys = keyData.assumingMemoryBound(to: duckdb_string_t.self)
+            let values = valData.assumingMemoryBound(to: Int64.self)
+            for row in 0..<count {
+                var value = keys[row]
+                let length = Int(duckdb_string_t_length(value))
+                guard length > 0 else { continue }
+                let key: String
+                if duckdb_string_is_inlined(value) {
+                    key = withUnsafeBytes(of: &value.value.inlined.inlined) { raw in
+                        String(decoding: raw.prefix(length), as: UTF8.self)
+                    }
+                } else if let pointer = duckdb_string_t_data(&value) {
+                    key = String(decoding: UnsafeRawBufferPointer(start: pointer, count: length),
+                                 as: UTF8.self)
+                } else { continue }
+                out[key] = values[row]
+            }
+        }
+        return out
+    }
+
     // MARK: - Plumbing
 
     private func appendText(_ appender: duckdb_appender?, _ value: String?) {

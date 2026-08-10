@@ -165,8 +165,15 @@ elif ! d_rows="$(duckdb -noheader -list -readonly "$ARCHIVE" \
       age=$(( $(date +%s) - ${when:-0} ))
       checks="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^checks=//p')"
       misses="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^mismatches=//p')"
-      printf '%s  ✓%s archive matched the store (%s turns, self-checked %sm ago)\n' \
-        "$G" "$X" "$rows" "$(( age / 60 ))"
+      # A stale verdict is a failure, not a detail. `ArchiveSync` disables
+      # itself after an error, and a check that silently stopped running
+      # looks exactly like a check that keeps passing.
+      if [ "$age" -gt 10800 ]; then
+        check "archive self-check is running" "within 3h" "$(( age / 3600 ))h ago"
+      else
+        printf '%s  ✓%s archive matched the store (%s turns, self-checked %sm ago)\n' \
+          "$G" "$X" "$rows" "$(( age / 60 ))"
+      fi
       printf '      %s check(s) all-time, %s mismatch(es)\n' "${checks:-?}" "${misses:-0}"
       # A soak is only evidence if a failure that self-corrected still shows.
       first="$(echo "$verdict" | tr '|' '\n' | sed -n 's/^first=//p')"

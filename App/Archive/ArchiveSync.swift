@@ -36,6 +36,14 @@ final class ArchiveSync {
     private var nextLogAt = 1
     private var lastReconcileAt: Date?
     private var lastVerifyAt: Date?
+    /// Set when the hourly check finds a divergence: the next reconcile pass
+    /// drops its window and walks everything. Bounded because it only happens
+    /// when something is provably wrong, and it makes convergence independent
+    /// of whether the window happened to be wide enough.
+    private var needsFullReconcile = false
+    /// Set when reconciliation re-appended an upgraded turn, so the archive
+    /// briefly holds both copies and must collapse to the fuller one.
+    private var pendingCollapse = false
 
     /// How often the trailing window is reconciled rather than trusted.
     private static let reconcileInterval: TimeInterval = 30 * 60
@@ -92,6 +100,12 @@ final class ArchiveSync {
                 pending: Set(rows.compactMap(\.dedupKey))))
 
             if !rows.isEmpty { try archive.append(rows) }
+            if pendingCollapse {
+                pendingCollapse = false
+                if let removed = try? archive.collapseDuplicates(), removed > 0 {
+                    Log.write("ArchiveSync", "collapsed \(removed) superseded copy/copies")
+                }
+            }
             // Advanced only after the append succeeded, so a failed write is
             // retried rather than skipped.
             if !rows.isEmpty { watermark = newest }
@@ -131,26 +145,48 @@ final class ArchiveSync {
            now.timeIntervalSince(last) < Self.reconcileInterval { return [] }
         lastReconcileAt = now
 
-        let since = now.addingTimeInterval(-Self.reconcileWindow)
-        let archived = try archive.dedupKeys(since: since)
+        let full = needsFullReconcile
+        needsFullReconcile = false
+        let since: Date? = full ? nil : now.addingTimeInterval(-Self.reconcileWindow)
+        // Values, not just presence. A streamed message is archived PARTIAL
+        // and then upgraded in place in the store when its finished copy
+        // arrives; the archive can't see that mutation, so a key can be
+        // present and still be wrong.
+        //
+        // Six days of soak measured this precisely: 466 turns where the
+        // archive held less output than the store, ZERO where it held more,
+        // 2,351,397 output tokens missing. Presence-only reconciliation
+        // called every one of them fine.
+        let archived = try archive.outputByDedupKey(since: since)
 
         var descriptor = FetchDescriptor<TokenSample>(
-            predicate: #Predicate<TokenSample> { $0.sampledAt >= since },
+            predicate: since.map { cutoff in
+                #Predicate<TokenSample> { $0.sampledAt >= cutoff }
+            },
             sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
-        descriptor.propertiesToFetch = [
-            \.sampledAt, \.date, \.localHour, \.model, \.dedupKey, \.sessionId,
-            \.originalProjectPath, \.projectPath, \.ccVersion, \.sourceCostUSD]
-
         var missed: [ArchiveRow] = []
+        var upgraded = 0
         try context.enumerate(descriptor, batchSize: 5_000) { sample in
-            guard let key = sample.dedupKey,
-                  !archived.contains(key), !pending.contains(key) else { return }
-            missed.append(row(from: sample))
+            guard let key = sample.dedupKey, !pending.contains(key) else { return }
+            guard let archivedOutput = archived[key] else {
+                missed.append(row(from: sample))   // never archived
+                return
+            }
+            // Archived, but with a smaller output than the store now holds —
+            // i.e. we captured it mid-stream. Re-append; the duplicate
+            // collapse below keeps the fuller copy, which is the same rule
+            // `ParsedUsageEntry.supersedes` applies on the live path.
+            if sample.outputTokens > archivedOutput {
+                missed.append(row(from: sample))
+                upgraded += 1
+            }
         }
         if !missed.isEmpty {
             Log.write("ArchiveSync",
-                      "reconcile: \(missed.count) turn(s) the watermark had skipped")
+                      "reconcile\(full ? " (full)" : ""): \(missed.count - upgraded) skipped, "
+                      + "\(upgraded) upgraded since archiving")
         }
+        pendingCollapse = upgraded > 0
         return missed
     }
 
@@ -215,6 +251,10 @@ final class ArchiveSync {
             mismatches += 1
             let detail = "rows \(archived.rows)/\(stored.rows) out \(archived.output)/\(stored.output)"
             verdict = "mismatch|\(stamp)|\(detail)"
+            // Widen the next reconcile pass to everything. Convergence then
+            // doesn't depend on the window having been wide enough, which is
+            // the assumption that let this run for six days.
+            needsFullReconcile = true
             // Only the FIRST divergence is kept: it's the one with diagnostic
             // value. Later ones are usually the same fault still present.
             if worst.isEmpty { worst = "first=\(stamp):\(detail)" }
