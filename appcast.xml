@@ -806,5 +806,29 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="i+aU2U64Ce1L6G3SxkLsqycZ6yN+XviEXinw2hPqqYbqjPM8a6ojWN2NIOFNKhH30Q2j4gsgHtzxOPBBkFofDA==" />
     </item>
+            <item>
+        <title>Version 0.4.11</title>
+        <description><![CDATA[<p>Fixes a menu-bar display bug at 100% usage.</p>
+<h2>"100%" no longer breaks the dropdown</h2>
+<p>When a window reached 100%, the menu-bar dropdown wrapped the number onto<br>
+two lines and pushed the label outside its ring. Three digits are one<br>
+character wider than every other reading, and both spots were sized for<br>
+two.</p>
+<p>Reported by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/jfwoods/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/jfwoods">@jfwoods</a> in #125 — thank you.</p>
+<p>Readings below 100% are unchanged, pixel for pixel, including the gauges<br>
+in the dashboard and widgets.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or<br>
+download below.</p>]]></description>
+        <pubDate>Mon, 10 Aug 2026 12:45:55 +0000</pubDate>
+        <sparkle:version>1786365660</sparkle:version>
+        <sparkle:shortVersionString>0.4.11</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.11/Pacer-0.4.11.dmg"
+            length="19938767"
+            type="application/octet-stream"
+            sparkle:edSignature="2SYkMuW2NKDCXA8d+kQdKvd/OTyxeh+h57WqdxDWa8j5PKFrcs5EWWLNVQL5JHWjb47ccfdCoryS1YPDLQIaBA==" />
+    </item>
         </channel>
 </rss>
