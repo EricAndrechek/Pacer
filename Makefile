@@ -36,6 +36,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # get confused if a file with the same name appears.
 .PHONY: help build verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
+        verify-archive \
         pricing-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
@@ -63,6 +64,12 @@ verify:  ## Verification build (no signing, no install) — fastest sanity check
 
 # Convenience alias.
 build: verify  ## Alias for `verify`.
+
+verify-archive:  ## Prove the DuckDB archive can give back every field it was given (14 days, read-only). Quits Pacer for the lock, then restarts it.
+	@osascript -e 'quit app "Pacer"' 2>/dev/null || true
+	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
+	@PACER_ARCHIVE_ROUNDTRIP=1 /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep roundtrip || true
+	@open -a Pacer
 
 verify-data:  ## Check every rollup against the raw samples in the REAL store. Read-only; exits non-zero on any inconsistency.
 	@$(REPO_ROOT)/bin/dev-verify-data.sh

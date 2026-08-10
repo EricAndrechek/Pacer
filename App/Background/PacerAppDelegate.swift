@@ -118,12 +118,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // while the real Pacer is going, and would otherwise just exit. It
         // also skips the stderr redirect so its report lands on the
         // terminal instead of the log file.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive {
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
             PacerSettings.registerDefaults()
             do {
                 // The backfill reads the REAL store (read-only); the cold-start
                 // probe wants an empty one.
-                container = ArchiveBackfill.isActive
+                container = (ArchiveBackfill.isActive || ArchiveRoundTrip.isActive)
                     ? try PacerStore.makeModelContainer()
                     : try PacerStore.makeInMemoryContainer()
             } catch {
@@ -301,11 +301,15 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Cold-start measurement harness — see `ColdStartProbe`.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive {
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
             NSApp.setActivationPolicy(.accessory)
             Task { @MainActor in
                 if ArchiveBackfill.isActive {
                     await ArchiveBackfill.run(container: container)
+                } else if ArchiveRoundTrip.isActive {
+                    await ArchiveRoundTrip.run(
+                        container: container,
+                        archiveURL: AppBackgroundService.archiveURL())
                 } else {
                     await ColdStartProbe.run()
                 }

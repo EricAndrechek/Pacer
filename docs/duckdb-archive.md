@@ -30,6 +30,30 @@ input=18239073 output=78912411 cacheRead=15902949205 cc5m=208082849
 cc1h=173750134`) — see the differential gate below for why row counts alone
 would not be evidence.
 
+## Update 2026-08-10 — the archive is readable, and the gate changed
+
+The archive was **write-only** for its first six days: it could report how many
+turns it held and what they summed to, but not hand one back. That is a
+checksum, not a record — two files can agree on every sum while disagreeing on
+which turn belongs to which project.
+
+That, not caution, is why SwiftData was never allowed to drop a row. The
+distinction that matters:
+
+- A trim you **cannot** undo is a deletion. It needs the archive to be perfect
+  forever — and the six-day soak proved it wasn't (466 turns recorded short).
+- A trim you **can** undo is a cache eviction. It needs the archive to be
+  *restorable*, which is testable on demand rather than hoped for.
+
+`RawArchive.turns(onDate:)` reads whole turns back, and `make verify-archive`
+compares every field against the store over the last 14 days. First run on real
+data: **20,633 turns, zero field mismatches, nothing missing.**
+
+So the remaining gate on the hot window is no longer "soak longer". It is:
+make the trim restore-backed, then prove the round-trip after a crash
+mid-append and after a restore from backup — the two cases a steady-state soak
+does not exercise.
+
 **The transferable lesson:** a feature parked on a *stated condition* can be
 re-evaluated mechanically when that condition changes. Had #123 been closed as
 "too expensive" rather than "revisit when X", this would have needed

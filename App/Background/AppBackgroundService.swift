@@ -370,9 +370,17 @@ final class AppBackgroundService {
     /// archive is additive, nothing user-visible reads it, and a problem with
     /// it must never be able to slow or break the scan that feeds everything
     /// else. See `ArchiveSync`.
+    /// One definition of where the archive lives, so a diagnostic can't end up
+    /// pointed at a different file than the writer uses.
+    static func archiveURL() -> URL {
+        (try? PacerStore.sharedContainerURL())?
+            .appendingPathComponent("raw-archive.duckdb")
+            ?? URL(fileURLWithPath: "/dev/null")
+    }
+
     private func installArchiveObserver() {
-        guard let containerURL = try? PacerStore.sharedContainerURL() else { return }
-        let archiveURL = containerURL.appendingPathComponent("raw-archive.duckdb")
+        guard (try? PacerStore.sharedContainerURL()) != nil else { return }
+        let archiveURL = Self.archiveURL()
         archiveObserver = NotificationCenter.default.addObserver(
             forName: .pacerScanCycleDidComplete,
             object: nil,

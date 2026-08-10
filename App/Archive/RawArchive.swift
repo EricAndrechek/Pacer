@@ -304,6 +304,90 @@ final class RawArchive {
         return out
     }
 
+    /// Read whole turns back out for one local date.
+    ///
+    /// Until this existed the archive was **write-only**: it could report how
+    /// many turns it held and what they summed to, but not hand one back. That
+    /// makes it a checksum, not a record — and it is the reason trimming
+    /// SwiftData was never safe to attempt. A trim you cannot undo is a
+    /// deletion; a trim you can undo is a cache eviction.
+    ///
+    /// Bounded by date deliberately: restoring is a targeted operation (this
+    /// day looks wrong / I want this range back), and an unbounded read would
+    /// materialize five years of turns to answer it.
+    func turns(onDate date: String) throws -> [ArchiveRow] {
+        var result = duckdb_result()
+        let safe = date.replacingOccurrences(of: "'", with: "")
+        let sql = """
+            SELECT sampled_at, date, local_hour, model,
+                   input_tokens, output_tokens, cache_read,
+                   cache_creation_5m, cache_creation_1h, source_cost,
+                   dedup_key, session_id, original_project_path, cc_version
+            FROM turn WHERE date = '\(safe)' ORDER BY sampled_at
+            """
+        let ok = sql.withCString { duckdb_query(con, $0, &result) } == DuckDBSuccess
+        defer { duckdb_destroy_result(&result) }
+        guard ok else {
+            throw ArchiveError.queryFailed(
+                duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown")
+        }
+
+        var rows: [ArchiveRow] = []
+        while let chunk = duckdb_fetch_chunk(result) {
+            defer { var c: duckdb_data_chunk? = chunk; duckdb_destroy_data_chunk(&c) }
+            let count = Int(duckdb_data_chunk_get_size(chunk))
+            guard count > 0 else { continue }
+
+            let vectors = (0..<14).map { duckdb_data_chunk_get_vector(chunk, UInt64($0)) }
+            let data = vectors.map { duckdb_vector_get_data($0) }
+            let validity = vectors.map { duckdb_vector_get_validity($0) }
+            func isNull(_ col: Int, _ row: Int) -> Bool {
+                guard let v = validity[col] else { return false }
+                return !duckdb_validity_row_is_valid(v, UInt64(row))
+            }
+            func int64(_ col: Int, _ row: Int) -> Int64 {
+                data[col]?.assumingMemoryBound(to: Int64.self)[row] ?? 0
+            }
+            func text(_ col: Int, _ row: Int) -> String? {
+                guard !isNull(col, row), let base = data[col] else { return nil }
+                var value = base.assumingMemoryBound(to: duckdb_string_t.self)[row]
+                let length = Int(duckdb_string_t_length(value))
+                guard length > 0 else { return "" }
+                if duckdb_string_is_inlined(value) {
+                    return withUnsafeBytes(of: &value.value.inlined.inlined) {
+                        String(decoding: $0.prefix(length), as: UTF8.self)
+                    }
+                }
+                guard let pointer = duckdb_string_t_data(&value) else { return nil }
+                return String(decoding: UnsafeRawBufferPointer(start: pointer, count: length),
+                              as: UTF8.self)
+            }
+
+            for row in 0..<count {
+                // TIMESTAMP is microseconds since epoch in DuckDB's layout.
+                let micros = data[0]?.assumingMemoryBound(to: Int64.self)[row] ?? 0
+                rows.append(ArchiveRow(
+                    sampledAt: Date(timeIntervalSince1970: Double(micros) / 1_000_000),
+                    date: text(1, row) ?? date,
+                    localHour: Int(data[2]?.assumingMemoryBound(to: Int32.self)[row] ?? -1),
+                    model: text(3, row) ?? "",
+                    breakdown: TokenBreakdown(
+                        inputTokens: int64(4, row),
+                        outputTokens: int64(5, row),
+                        cacheReadTokens: int64(6, row),
+                        cacheCreation5mTokens: int64(7, row),
+                        cacheCreation1hTokens: int64(8, row)),
+                    sourceCostUSD: isNull(9, row)
+                        ? nil : data[9]?.assumingMemoryBound(to: Double.self)[row],
+                    dedupKey: text(10, row),
+                    sessionId: text(11, row),
+                    originalProjectPath: text(12, row),
+                    ccVersion: text(13, row)))
+            }
+        }
+        return rows
+    }
+
     // MARK: - Plumbing
 
     private func appendText(_ appender: duckdb_appender?, _ value: String?) {
