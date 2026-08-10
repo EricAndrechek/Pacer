@@ -777,5 +777,34 @@ download below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="VOhroT/A8UZ0eq7T8sbErwQg4G0Yd8R27wcAFi8N2Cwko/PqCSsJmXWFLO8TxIiuSwCKIwpaNigo0wP3m0/yDg==" />
     </item>
+            <item>
+        <title>Version 0.4.10</title>
+        <description><![CDATA[<p>A fix for the raw archive, which was quietly recording some replies short.</p>
+<h2>Streamed replies were archived before they finished</h2>
+<p>Pacer's archive (added in 0.4.8) keeps a permanent record of every billable<br>
+turn. Claude Code writes a long reply to disk repeatedly as it streams, and<br>
+Pacer corrects its own records once the finished version arrives — but the<br>
+archive kept whichever version it saw first.</p>
+<p>Over six days on a real machine that came to 466 turns holding roughly 2.35<br>
+million fewer output tokens than they should. Pacer's visible numbers were<br>
+never affected; only the archive was.</p>
+<p>Pacer now checks the archive's contents against its own records rather than<br>
+just checking that a turn is present at all, and repairs anything that has<br>
+been superseded. Existing archives are corrected automatically on the next<br>
+launch — no action needed.</p>
+<p>Nothing here changes the usage or cost figures you see.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Mon, 10 Aug 2026 12:08:36 +0000</pubDate>
+        <sparkle:version>1786363351</sparkle:version>
+        <sparkle:shortVersionString>0.4.10</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.10/Pacer-0.4.10.dmg"
+            length="19935852"
+            type="application/octet-stream"
+            sparkle:edSignature="i+aU2U64Ce1L6G3SxkLsqycZ6yN+XviEXinw2hPqqYbqjPM8a6ojWN2NIOFNKhH30Q2j4gsgHtzxOPBBkFofDA==" />
+    </item>
         </channel>
 </rss>
