@@ -490,13 +490,28 @@ private struct ToolbarFreshness: View {
         return candidates.compactMap { $0 }.max()
     }
 
-    private func parseScanMeta() -> Date? {
-        guard let raw = scanMeta.first?.value else { return nil }
+    /// Two formatters, built once.
+    ///
+    /// This runs on every store save — `@Query` re-evaluates the outer body
+    /// each time, even though `.equatable()` correctly stops the render there.
+    /// Constructing `ISO8601DateFormatter` is expensive, and this was building
+    /// TWO per call, several times a second under load. Apple documents
+    /// `ISO8601DateFormatter` parsing as thread-safe, which is the same reason
+    /// `JSONLParser` holds its decoders statically.
+    nonisolated(unsafe) private static let fractionalParser: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: raw) { return d }
+        return f
+    }()
+    nonisolated(unsafe) private static let plainParser: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
-        return f.date(from: raw)
+        return f
+    }()
+
+    private func parseScanMeta() -> Date? {
+        guard let raw = scanMeta.first?.value else { return nil }
+        return Self.fractionalParser.date(from: raw) ?? Self.plainParser.date(from: raw)
     }
 
     private var freshness: FreshnessPulse.Freshness {

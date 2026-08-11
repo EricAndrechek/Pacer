@@ -51,7 +51,28 @@ final class AppBackgroundService {
     /// many times a minute, and refitting is cheap but not free, so we refit at
     /// most this often. The next scan after the interval picks up everything
     /// missed in between (the engine reads the whole store, not a delta).
-    private static let engineRecomputeMinInterval: TimeInterval = 20
+    /// Floor between refits when RATE-LIMIT data changed — the input the
+    /// forecast is actually about.
+    ///
+    /// Set against what the refit COSTS, not against how often the data moves:
+    /// ~4.5 s of heavy statistical work, so a 60 s floor is still a 7% duty
+    /// cycle forever. Adaptive OAuth polling lands new rate-limit rows far more
+    /// often than the five minutes originally assumed, so the floor has to do
+    /// the limiting. The forecast is hourly-granularity — a fit up to five
+    /// minutes old says the same thing as a fresh one.
+    private static let engineRecomputeMinInterval: TimeInterval = 300
+
+    /// Floor between refits driven only by new TOKEN samples.
+    ///
+    /// A refit costs ~4.5 s of heavy statistical work — diurnal fit, regime
+    /// profiles, conformal calibrators, self-eval — and token samples arrive
+    /// continuously while Claude Code is in use. At the old 20 s floor that is
+    /// a **23% duty cycle, forever**, to recompute answers that change on the
+    /// scale of hours. The forecast is hourly-granularity; refitting it three
+    /// times a minute produced the same numbers at the cost of a core.
+    private static let engineRecomputeIdleInterval: TimeInterval = 600
+    private var engineRefitCount = 0
+    private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
     /// Consecutive engine refits that projected a pre-reset cap hit, per
     /// window — the burn warning's debounce counter.
@@ -454,11 +475,12 @@ final class AppBackgroundService {
             // Recompute on either cost (`samplesChanged`) or rate-limit data,
             // since the engine answers both cost and rate-limit questions.
             let summary = note.object as? ScanCycleSummary
-            let relevant = (summary?.samplesChanged ?? false) || (summary?.rateLimitsChanged ?? false)
+            let rateLimitsChanged = summary?.rateLimitsChanged ?? false
+            let relevant = (summary?.samplesChanged ?? false) || rateLimitsChanged
             guard relevant else { return }
             Task { @MainActor [weak self] in
                 self?.refreshModelPalette()
-                await self?.recomputeEngineIfDue()
+                await self?.recomputeEngineIfDue(rateLimitsChanged: rateLimitsChanged)
             }
         }
     }
@@ -481,21 +503,47 @@ final class AppBackgroundService {
     /// answers exist — not speculatively on raw scan ticks. Also exports the
     /// compact outlook snapshot the widgets read (they run out-of-process and
     /// can't reach the engine actor).
-    private func recomputeEngineIfDue(force: Bool = false) async {
+    /// - Parameter rateLimitsChanged: whether this was prompted by fresh
+    ///   rate-limit data (the forecast's real input) rather than by token
+    ///   samples alone. Token-only prompts get a much longer floor.
+    private func recomputeEngineIfDue(force: Bool = false,
+                                      rateLimitsChanged: Bool = true) async {
         let now = Date()
+        let floor = rateLimitsChanged
+            ? Self.engineRecomputeMinInterval
+            : Self.engineRecomputeIdleInterval
         if !force, let last = lastEngineRecomputeAt,
-           now.timeIntervalSince(last) < Self.engineRecomputeMinInterval { return }
+           now.timeIntervalSince(last) < floor { return }
         lastEngineRecomputeAt = now
         // Recompute OFF the main actor. `recomputeEngineIfDue` runs on
         // `@MainActor`, so `await engine.recompute(...)` would resume the
         // heavy forecast fit INLINE on the main thread (uncontended-actor
         // optimization — confirmed on Main via sample(1) during a scroll).
         // A detached task forces it onto the engine's executor.
+        let started = Date()
         await Task.detached(priority: .utility) { [engine] in
             await engine.recompute(now: now)
         }.value
+        let refitMs = Int(Date().timeIntervalSince(started) * 1000)
         await exportEngineSnapshot()
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+
+        // The refit is the most expensive recurring thing Pacer does and it
+        // had never been timed — which is how it went unnoticed that it runs
+        // as often as every 20 s. Cost alone says little; cost against the
+        // interval is the duty cycle, and that's the number that decides
+        // whether this is a background app or a busy one.
+        engineRefitCount += 1
+        engineRefitTotalMs += refitMs
+        if refitMs >= 1_000 || engineRefitCount % 20 == 0 {
+            let duty = Double(engineRefitTotalMs) / max(1, Double(engineRefitCount))
+                / floor / 10.0
+            Log.write("Engine",
+                      "refit \(engineRefitCount): \(refitMs) ms "
+                      + String(format: "(avg %d ms, ~%.0f%% duty at %.0fs interval)",
+                               engineRefitTotalMs / max(1, engineRefitCount),
+                               duty, floor))
+        }
     }
 
     /// Upsert the engine's outlook snapshot into `ClaudeCodeMeta` so the
