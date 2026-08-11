@@ -915,5 +915,43 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="4p02DZo1b46NS08EjdoPNo8zGoRDcaQ/Se/JLjxuViWTeFu6qzRg13x0sw+E832Jlrzz+GbmrNQQFJNZkM+JCw==" />
     </item>
+            <item>
+        <title>Version 0.4.14</title>
+        <description><![CDATA[<p>More CPU work, this time aimed at keeping the Dashboard window open.</p>
+<h2>Optimised for the window being open</h2>
+<p>0.4.12 and 0.4.13 cut Pacer's CPU use a long way, but both were verified<br>
+with the Dashboard closed. If you keep the window open — on a second<br>
+monitor, say — that's the state that matters, and it had its own set of<br>
+problems.</p>
+<p>Four pieces of work were repeating constantly for no benefit:</p>
+<ul>
+<li>The burn-rate warning re-fitted a statistical model every time rate-limit<br>
+data arrived, even though its inputs only change when the forecast is<br>
+refit.</li>
+<li>The toolbar's activity pill re-read the database on every write, to show<br>
+a label that changes about once a minute.</li>
+<li>The "Now" and "Today" tiles did the same, six times over.</li>
+<li>The rate-limit charts reloaded eight days of history — about 25,700<br>
+records — every time a poll added three new ones. They now load just<br>
+the new ones.</li>
+</ul>
+<p>No single part of Pacer now dominates its own CPU profile.</p>
+<h2>Also fixed</h2>
+<p>The "Now" tiles captured today's date and the current hour when the window<br>
+opened and kept them, so after an hour rolled over they read from the wrong<br>
+hour bucket until the window was reopened.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 15:20:48 +0000</pubDate>
+        <sparkle:version>1786461319</sparkle:version>
+        <sparkle:shortVersionString>0.4.14</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.14/Pacer-0.4.14.dmg"
+            length="19976555"
+            type="application/octet-stream"
+            sparkle:edSignature="F9oZZnRMIFZvQ00RD0bsEtNLeCjL5X0+awWr83tePmZ7rstWnH7r1N9f7Rhy2j3AlMF9SmhyRLeLOjIOvevPBg==" />
+    </item>
         </channel>
 </rss>
