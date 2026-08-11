@@ -29,7 +29,18 @@ struct PaceChartCard: View {
     /// 8-day window of fixed rate-limit samples. Body never reads the array —
     /// pre-bucketed by window in `bucketed` so neither fixed column does its
     /// own filter pass.
-    @Query private var samples: [RateLimitSample]
+    ///
+    /// **Loaded on a signal, not through `@Query`.** `@Query` re-runs when the
+    /// context changes, and Pacer's context changes on every scan cycle
+    /// because that's when token samples are written. These two series total
+    /// ~25,700 rows over 8 days, so every unrelated save re-materialized all of
+    /// them on the main thread while the Dashboard was open. Measured at
+    /// **103.9% CPU with the window open against 0.0% with it closed** — the
+    /// window being open was the entire difference.
+    ///
+    /// Rate-limit rows only change when the OAuth poller writes, roughly every
+    /// five minutes, so `newestSignal` (one row) decides when to reload.
+    @State private var samples: [RateLimitSample] = []
 
     /// The newest scoped `limits[]` rows, newest first — just enough to resolve
     /// the latest poll's batch, which is what decides the scoped column set.
@@ -49,7 +60,20 @@ struct PaceChartCard: View {
     /// window — so the scoped line rendered as a stub near "now" no matter how
     /// long the cycle had been running. The 8-day cutoff bounds it by time
     /// instead, which is the bound that matches what the chart draws.
-    @Query private var scopedHistory: [UsageLimitSample]
+    @State private var scopedHistory: [UsageLimitSample] = []
+
+    /// One row: the newest rate-limit sample. Cheap to re-run on every save —
+    /// which is exactly what `@Query` will do — and its timestamp is the
+    /// signal that the expensive series are stale.
+    @Query private var newestSignal: [RateLimitSample]
+
+    /// The scoped equivalent. Both are watched because a poll can in principle
+    /// write scoped `limits[]` rows without a fixed one, and keying the reload
+    /// on only the fixed series would leave the per-model charts stale until
+    /// the next fixed sample landed. One row each — the cost is nil.
+    @Query private var newestScopedSignal: [UsageLimitSample]
+
+    @Environment(\.modelContext) private var modelContext
 
     /// The shared intelligence engine — single source of the forecast
     /// trajectories (the dashed overlay; the compare-models modal asks the
@@ -82,28 +106,55 @@ struct PaceChartCard: View {
 
     init(onCompare: ((String) -> Void)? = nil) {
         self.onCompare = onCompare
+        // Only the signal is a `@Query`. One row, so re-running it on every
+        // save costs nothing; the series it guards are loaded in `reload()`.
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
+    }
+
+    /// Newest timestamp across both sources — the trigger for a reload.
+    private var reloadSignal: Date? {
+        let fixed = newestSignal.first?.sampledAt
+        let scoped = newestScopedSignal.first?.sampledAt
+        guard let fixed else { return scoped }
+        guard let scoped else { return fixed }
+        return max(fixed, scoped)
+    }
+
+    /// Load the two 8-day series. Called on appear and whenever a new
+    /// rate-limit sample lands — not on every context change.
+    ///
+    /// The cutoff is computed here rather than held from `init` so the window
+    /// stays 8 days wide however long Pacer has been open; a stored constant
+    /// would keep its launch-day value and widen the query by a day per day.
+    @MainActor
+    private func reload() {
         let cutoff = Date().addingTimeInterval(-8 * 86400)
+
         var descriptor = FetchDescriptor<RateLimitSample>(
             predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
-        // Columnar projection: the card only reads these four scalar
-        // attributes, so fetching just them avoids materializing ~2.8k full
-        // RateLimitSample objects on every store save. See docs/perf-tuning.md.
+        // Columnar projection: the card reads only these four scalars, so
+        // fetching just them avoids materializing whole rows.
         descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
-        _samples = Query(descriptor)
+        samples = (try? modelContext.fetch(descriptor)) ?? []
 
-        // Same cutoff, same columnar treatment, for the scoped actual lines.
-        // Built here rather than in a `static let` so the 8 days are measured
-        // from when the view was created: a process-lifetime constant would
-        // keep its launch-day cutoff and quietly widen the query by a day for
-        // every day Pacer stays open.
         var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
             predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-        _scopedHistory = Query(scopedDescriptor)
+        scopedHistory = (try? modelContext.fetch(scopedDescriptor)) ?? []
     }
 
     /// Newest scoped rows, whole, capped well above any plausible `limits[]`
@@ -330,6 +381,10 @@ struct PaceChartCard: View {
                 Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
             }
         }
+        // Reload the 8-day series when a NEW rate-limit sample lands (the
+        // poller writes roughly every five minutes), not on every context
+        // change. `.task(id:)` also fires once on appear, which seeds them.
+        .task(id: reloadSignal) { reload() }
         .task(id: windowKey) { await refreshProjections(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshProjections(scopedIdentities: scopedIds) }

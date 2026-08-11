@@ -48,9 +48,38 @@ final class RawArchive {
     private var con: duckdb_connection?
 
     /// Opens (creating if needed) the archive beside the SwiftData store.
+    ///
+    /// **Configured, not defaulted.** DuckDB sizes its worker pool to the
+    /// machine's core count and parks every one of those threads in
+    /// `TaskScheduler::ExecuteForever`. That's the right default for an
+    /// analytics box running big queries; it is completely wrong for a menu-bar
+    /// app that holds a connection open for its entire lifetime to append a
+    /// handful of rows per scan cycle.
+    ///
+    /// Shipped without this, it cost **a full core, continuously**: measured
+    /// at 100.3% average CPU over 22 hours on a 14-core machine, with 14
+    /// threads sampled inside `ExecuteForever` — one per core, doing nothing.
+    /// Pacer's whole reason to exist is that it sits quietly in the
+    /// background, and the perf work behind it fought to reach ~0% idle.
     init(url: URL) throws {
+        var config: duckdb_config?
+        if duckdb_create_config(&config) == DuckDBSuccess {
+            // One worker. The heaviest thing this connection ever does is a
+            // COUNT/SUM over ~200k rows, which finishes in milliseconds
+            // single-threaded; parallelism here buys nothing and costs a core.
+            _ = "threads".withCString { name in
+                "1".withCString { value in duckdb_set_config(config, name, value) }
+            }
+            // The buffer manager otherwise sizes itself to a share of system
+            // RAM. The archive is 13 MB.
+            _ = "memory_limit".withCString { name in
+                "256MB".withCString { value in duckdb_set_config(config, name, value) }
+            }
+        }
+        defer { duckdb_destroy_config(&config) }
+
         var message: UnsafeMutablePointer<CChar>?
-        let opened = url.path.withCString { duckdb_open_ext($0, &db, nil, &message) }
+        let opened = url.path.withCString { duckdb_open_ext($0, &db, config, &message) }
         guard opened == DuckDBSuccess else {
             let detail = message.map { String(cString: $0) } ?? "unknown"
             duckdb_free(message)

@@ -316,6 +316,12 @@ public final class ScanCoordinator {
     /// per day. Unusual scans (slow, with dups, with errors) bypass
     /// this throttle and always log.
     private var lastRoutineLogAt: Date?
+    /// Cycles run since the last routine log line. The log is throttled to
+    /// one line a minute, which made the cycle RATE invisible — a cost of
+    /// 200 ms/cycle reads as harmless until you learn cycles fire twice a
+    /// second under continuous transcript writes. Reported so the rate can
+    /// never hide behind the throttle again.
+    private var cyclesSinceRoutineLog = 0
     /// Minimum gap between routine log lines. Unusual scans always
     /// log regardless.
     private static let routineLogInterval: TimeInterval = 60
@@ -1833,13 +1839,33 @@ public final class ScanCoordinator {
             return now.timeIntervalSince(last) >= Self.routineLogInterval
         }()
 
+        cyclesSinceRoutineLog += 1
         if isSlow || hasDups {
-            log("scan: \(formatReport(report))")
+            log("scan: \(formatReport(report))\(cycleRateSuffix(now: now))")
             lastRoutineLogAt = now
+            cyclesSinceRoutineLog = 0
         } else if hasInserts && throttleExpired {
-            log("scan: \(formatReport(report))")
+            log("scan: \(formatReport(report))\(cycleRateSuffix(now: now))")
             lastRoutineLogAt = now
+            cyclesSinceRoutineLog = 0
         }
+    }
+
+    /// `  (N cycles in Ms, ~R/s)` — how many cycles the throttle swallowed
+    /// since the last line, and how fast they were arriving.
+    ///
+    /// Without this the log shows a handful of lines a minute and a cycle
+    /// cost of a couple hundred milliseconds, which reads as ~1% CPU. The
+    /// truth under continuous transcript writes is ~2 cycles a second, and
+    /// the same numbers then mean half a core. The rate is the part that
+    /// turns a cost into a problem, and it was the part not being recorded.
+    private func cycleRateSuffix(now: Date) -> String {
+        guard cyclesSinceRoutineLog > 1, let last = lastRoutineLogAt else { return "" }
+        let elapsed = now.timeIntervalSince(last)
+        guard elapsed > 0 else { return "" }
+        let rate = Double(cyclesSinceRoutineLog) / elapsed
+        return String(format: "  (%d cycles in %.0fs, %.1f/s)",
+                      cyclesSinceRoutineLog, elapsed, rate)
     }
 
     /// Compact one-line summary for the daemon log. Caller adds the
