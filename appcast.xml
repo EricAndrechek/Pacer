@@ -830,5 +830,38 @@ download below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="2SYkMuW2NKDCXA8d+kQdKvd/OTyxeh+h57WqdxDWa8j5PKFrcs5EWWLNVQL5JHWjb47ccfdCoryS1YPDLQIaBA==" />
     </item>
+            <item>
+        <title>Version 0.4.12</title>
+        <description><![CDATA[<p>Fixes Pacer burning a CPU core while the Dashboard window is open.</p>
+<h2>The Dashboard was pegging a core</h2>
+<p>If you left the Dashboard window open, Pacer used roughly a full CPU core<br>
+continuously — measured at 103.9% with the window open versus 0.0% with it<br>
+closed. Fans up, battery down, for a background app whose entire job is to<br>
+sit quietly.</p>
+<p>The rate-limit pace charts were reloading eight days of history — about<br>
+25,700 records — every single time anything was written to the database,<br>
+which happens constantly as Pacer records your usage. That work ran on the<br>
+main thread, which is also what draws the window.</p>
+<p>They now reload only when new rate-limit data actually arrives, roughly<br>
+every five minutes. Same charts, same history, same live updates.</p>
+<p>This affected 0.4.1 through 0.4.11. If you keep the Dashboard open, this is<br>
+worth updating for.</p>
+<h2>Also</h2>
+<p>DuckDB's background worker pool is now capped at one thread. It was sizing<br>
+itself to your CPU core count and keeping every one of those threads alive<br>
+for the life of the app, to do work that needs a single thread.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 11:46:49 +0000</pubDate>
+        <sparkle:version>1786448551</sparkle:version>
+        <sparkle:shortVersionString>0.4.12</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.12/Pacer-0.4.12.dmg"
+            length="19958404"
+            type="application/octet-stream"
+            sparkle:edSignature="SYVK5AQYKvn0S1gfEUSvRN232iLgM0o71YYyFcjTgWXWApoK/nK3WSGl8WCo+RMBG+sKpEcEl2bAAANaPMnyDQ==" />
+    </item>
         </channel>
 </rss>
