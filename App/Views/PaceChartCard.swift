@@ -136,25 +136,62 @@ struct PaceChartCard: View {
     /// The cutoff is computed here rather than held from `init` so the window
     /// stays 8 days wide however long Pacer has been open; a stored constant
     /// would keep its launch-day value and widen the query by a day per day.
+    /// Newest sample already loaded. `nil` means nothing has been loaded yet,
+    /// which is the only case that reads all 8 days.
+    @State private var loadedThrough: Date?
+
     @MainActor
     private func reload() {
         let cutoff = Date().addingTimeInterval(-8 * 86400)
 
-        var descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        // Columnar projection: the card reads only these four scalars, so
-        // fetching just them avoids materializing whole rows.
-        descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
-        samples = (try? modelContext.fetch(descriptor)) ?? []
+        // Incremental. A poll adds a handful of rows to an 8-day window of
+        // ~25,700, so re-reading the whole window each time re-materialized
+        // ~25,700 rows to learn about ~3. Once the per-save churn was fixed
+        // this became the largest remaining consumer in the process.
+        //
+        // Newest-first order is preserved by prepending, which is also why the
+        // fetch below is ordered the same way.
+        if let through = loadedThrough {
+            var fresh = FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate<RateLimitSample> { $0.sampledAt > through },
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+            )
+            fresh.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
+            let added = (try? modelContext.fetch(fresh)) ?? []
+            if !added.isEmpty { samples = added + samples }
 
-        var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
-            predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-        scopedHistory = (try? modelContext.fetch(scopedDescriptor)) ?? []
+            var freshScoped = FetchDescriptor<UsageLimitSample>(
+                predicate: #Predicate<UsageLimitSample> { $0.sampledAt > through },
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+            )
+            freshScoped.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
+            let addedScoped = (try? modelContext.fetch(freshScoped)) ?? []
+            if !addedScoped.isEmpty { scopedHistory = addedScoped + scopedHistory }
+
+            // Drop what has aged out, so the window stays 8 days rather than
+            // growing for as long as Pacer is open.
+            samples.removeAll { $0.sampledAt < cutoff }
+            scopedHistory.removeAll { $0.sampledAt < cutoff }
+        } else {
+            var descriptor = FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+            )
+            // Columnar projection: the card reads only these four scalars.
+            descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
+            samples = (try? modelContext.fetch(descriptor)) ?? []
+
+            var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
+                predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+            )
+            scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
+            scopedHistory = (try? modelContext.fetch(scopedDescriptor)) ?? []
+        }
+
+        let newestLoaded = [samples.first?.sampledAt, scopedHistory.first?.sampledAt]
+            .compactMap { $0 }.max()
+        if let newestLoaded { loadedThrough = newestLoaded }
     }
 
     /// Newest scoped rows, whole, capped well above any plausible `limits[]`

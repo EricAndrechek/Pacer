@@ -441,11 +441,19 @@ final class AppBackgroundService {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.checkForGlobalReset()
-                // Refresh the engine BEFORE the burn check so the warning
-                // never reads a stale fit; the engine's own self-eval
-                // recording happens inside recompute (idempotent).
-                await self.recomputeEngineIfDue()
-                await self.checkBurnRateWarning()
+                // The burn check runs only when the engine ACTUALLY refit —
+                // `recomputeEngineIfDue` returns whether it did.
+                //
+                // The warning reads `burnOutlook`, which re-runs a
+                // `DiurnalBurnModel.fit` per window on every call. But its
+                // inputs (`features`, `fit`) only move when the engine
+                // recomputes, so calling it between refits re-derives an
+                // identical answer. Profiled as the single largest consumer
+                // once the refit itself was throttled: `checkBurnRateWarning`
+                // → `burnOutlook` → `DiurnalBurnModel.fit`.
+                if await self.recomputeEngineIfDue() {
+                    await self.checkBurnRateWarning()
+                }
             }
         }
     }
@@ -506,14 +514,17 @@ final class AppBackgroundService {
     /// - Parameter rateLimitsChanged: whether this was prompted by fresh
     ///   rate-limit data (the forecast's real input) rather than by token
     ///   samples alone. Token-only prompts get a much longer floor.
+    /// - Returns: whether a refit actually ran, so callers whose work is only
+    ///   meaningful against a fresh fit can skip themselves when it didn't.
+    @discardableResult
     private func recomputeEngineIfDue(force: Bool = false,
-                                      rateLimitsChanged: Bool = true) async {
+                                      rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
         let floor = rateLimitsChanged
             ? Self.engineRecomputeMinInterval
             : Self.engineRecomputeIdleInterval
         if !force, let last = lastEngineRecomputeAt,
-           now.timeIntervalSince(last) < floor { return }
+           now.timeIntervalSince(last) < floor { return false }
         lastEngineRecomputeAt = now
         // Recompute OFF the main actor. `recomputeEngineIfDue` runs on
         // `@MainActor`, so `await engine.recompute(...)` would resume the
@@ -544,6 +555,7 @@ final class AppBackgroundService {
                                engineRefitTotalMs / max(1, engineRefitCount),
                                duty, floor))
         }
+        return true
     }
 
     /// Upsert the engine's outlook snapshot into `ClaudeCodeMeta` so the

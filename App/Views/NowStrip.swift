@@ -34,56 +34,75 @@ struct NowStrip: View {
     @AppStorage(PacerSettings.Key.costMode, store: PacerSettings.store)
     private var costModeRaw: String = CostMode.auto.rawValue
 
-    @Query private var todayAggregates: [DailyAggregate]
+    // MARK: Fetched on a timer, not via `@Query`
+    //
+    // `@Query` re-evaluates on every model-context change, and Pacer writes
+    // samples on every scan cycle. Six of them here meant the whole strip
+    // re-derived on each save to show numbers that move once a minute. With
+    // the Dashboard left open on a monitor — the normal way this is used —
+    // profiling put `NowStrip.body` at the top of the process once
+    // `ToolbarFreshness` was fixed the same way.
+    //
+    // Building the date-pinned predicates in `refresh()` rather than `init`
+    // also fixes them following the clock: they used to capture "today" and
+    // the current hour at view-construction time and keep them, so the strip
+    // silently read the wrong hour bucket after an hour rolled over.
+    private static let refreshInterval: TimeInterval = 1
+    @Environment(\.modelContext) private var modelContext
+
+    @State private var todayAggregates: [DailyAggregate] = []
     /// Hour buckets for "recent" activity — the two most-recent hour
     /// buckets approximate a rolling last-hour rate (between exactly 1h
     /// and ~2h of span). Cost is baked into HourlyAggregate at recompute
     /// time, so no per-render pricing lookups.
-    @Query private var recentHourlyRows: [HourlyAggregate]
+    @State private var recentHourlyRows: [HourlyAggregate] = []
     /// Most-recent sample (any age) so the quiet state can say "last
     /// activity 3h ago" instead of a flat "no samples".
-    @Query(NowStrip.latestSampleProbe) private var latestSamples: [TokenSample]
+    @State private var latestSamples: [TokenSample] = []
     /// Most-recently-touched session, for the Now tile's session line.
-    @Query(NowStrip.latestSessionProbe) private var latestSessions: [SessionInfo]
-    @Query(NowStrip.recentExtraUsage) private var extraUsages: [ExtraUsageSample]
-    @Query(NowStrip.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
+    @State private var latestSessions: [SessionInfo] = []
+    @State private var extraUsages: [ExtraUsageSample] = []
+    @State private var scanMeta: [ClaudeCodeMeta] = []
 
     @Environment(\.usageEngine) private var engine
 
     init(onTodayTap: (() -> Void)? = nil, onSessionTap: ((String, String) -> Void)? = nil) {
         self.onTodayTap = onTodayTap
         self.onSessionTap = onSessionTap
+    }
+
+    /// Re-read every probe. All are capped or keyed to today, so this is a
+    /// handful of index seeks; the problem was never one refresh's cost, it
+    /// was doing it on every save forever.
+    @MainActor
+    private func refresh() {
         let now = Date()
         let cal = Calendar.current
         let todayString = TokenSample.formatDate(now)
-        _todayAggregates = Query(
-            filter: #Predicate<DailyAggregate> { $0.date == todayString }
-        )
-        // Current hour bucket + the previous one; expressed via the
-        // (date, hour) key range, with the midnight-crossing OR leg.
+
+        todayAggregates = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
+            predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? []
+
+        // Current hour bucket + the previous one, as a (date, hour) range with
+        // the midnight-crossing leg. Built here so it follows the clock.
         let currentHourStart = cal.date(
-            bySettingHour: cal.component(.hour, from: now),
-            minute: 0,
-            second: 0,
-            of: now
-        ) ?? now
+            bySettingHour: cal.component(.hour, from: now), minute: 0, second: 0, of: now) ?? now
         let twoHoursAgoStart = cal.date(byAdding: .hour, value: -1, to: currentHourStart) ?? now
         let yesterdayString = TokenSample.formatDate(twoHoursAgoStart)
         let lowestHour = cal.component(.hour, from: twoHoursAgoStart)
-        if todayString == yesterdayString {
-            _recentHourlyRows = Query(
-                filter: #Predicate<HourlyAggregate> {
-                    $0.date == todayString && $0.hour >= lowestHour
-                }
-            )
-        } else {
-            _recentHourlyRows = Query(
-                filter: #Predicate<HourlyAggregate> {
-                    $0.date == todayString
-                    || ($0.date == yesterdayString && $0.hour >= lowestHour)
-                }
-            )
-        }
+        let hourly: Predicate<HourlyAggregate> = todayString == yesterdayString
+            ? #Predicate<HourlyAggregate> { $0.date == todayString && $0.hour >= lowestHour }
+            : #Predicate<HourlyAggregate> {
+                $0.date == todayString
+                || ($0.date == yesterdayString && $0.hour >= lowestHour)
+            }
+        recentHourlyRows = (try? modelContext.fetch(
+            FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? []
+
+        latestSamples = (try? modelContext.fetch(Self.latestSampleProbe)) ?? []
+        latestSessions = (try? modelContext.fetch(Self.latestSessionProbe)) ?? []
+        extraUsages = (try? modelContext.fetch(Self.recentExtraUsage)) ?? []
+        scanMeta = (try? modelContext.fetch(Self.scanMetaProbe)) ?? []
     }
 
     private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
@@ -187,6 +206,16 @@ struct NowStrip: View {
         HStack(alignment: .top, spacing: 12) {
             nowTile
             costTile
+        }
+        .task {
+            refresh()
+            // Owned by the view's lifetime, so it stops when the Dashboard
+            // closes rather than ticking against a dead view.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.refreshInterval))
+                if Task.isCancelled { break }
+                refresh()
+            }
         }
         .onAppear { refreshFacts() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }

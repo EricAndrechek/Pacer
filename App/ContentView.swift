@@ -442,14 +442,45 @@ private struct SidebarItem: View {
 /// match macOS-native chrome conventions (Linear / Reeder / Things
 /// all surface live state in their toolbars, not their sidebars).
 private struct ToolbarFreshness: View {
-    @Query(ToolbarFreshness.tokenProbe) private var tokens: [TokenSample]
-    @Query(ToolbarFreshness.rateLimitProbe) private var rateLimits: [RateLimitSample]
-    @Query(ToolbarFreshness.sessionProbe) private var sessions: [SessionInfo]
-    @Query private var scanMeta: [ClaudeCodeMeta]
+    // MARK: Why these are fetched on a timer instead of via `@Query`
+    //
+    // `@Query` re-evaluates whenever the model context changes, and Pacer's
+    // context changes constantly — every scan cycle writes samples. This view
+    // held FOUR of them, so its body (and every derived getter) re-ran on each
+    // save to produce a label that changes at most once a minute.
+    //
+    // With the Dashboard open — which is how it's actually used, left up on a
+    // monitor — profiling put `ToolbarFreshness.body` at the top of the whole
+    // process, ahead of the forecast engine.
+    //
+    // `.equatable()` on `PillBody` (below) already stopped the AppKit relayout,
+    // which was the 2026-06-23 fix. It cannot stop the outer body or these
+    // fetches; only not being a `@Query` does that. One second is far finer
+    // than the value's own granularity and costs four capped fetches.
+    private static let refreshInterval: TimeInterval = 1
+    @State private var display: Display = Display(state: .none, label: "", tooltip: "")
+    /// What the derived getters below read. Refreshed by `refresh()`; these
+    /// were `@Query` arrays, and everything downstream is unchanged.
+    @State private var tokens: [TokenSample] = []
+    @State private var rateLimits: [RateLimitSample] = []
+    @State private var sessions: [SessionInfo] = []
+    @State private var scanMeta: [ClaudeCodeMeta] = []
+    @Environment(\.modelContext) private var modelContext
 
-    init() {
+    /// Re-read the four probes and recompute the pill's value.
+    ///
+    /// Each is capped (`fetchLimit = 1`, or a single keyed meta row) and
+    /// `sampledAt` is indexed, so this is four index seeks — the problem was
+    /// never the cost of one refresh, it was doing it on every save forever.
+    @MainActor
+    private func refresh() {
+        tokens = (try? modelContext.fetch(Self.tokenProbe)) ?? []
+        rateLimits = (try? modelContext.fetch(Self.rateLimitProbe)) ?? []
+        sessions = (try? modelContext.fetch(Self.sessionProbe)) ?? []
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        _scanMeta = Query(filter: #Predicate<ClaudeCodeMeta> { $0.key == key })
+        scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))) ?? []
+        display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
     private static let tokenProbe: FetchDescriptor<TokenSample> = {
@@ -571,16 +602,23 @@ private struct ToolbarFreshness: View {
     /// Funnelling the render through this `Equatable` snapshot lets
     /// `EquatableView` skip the relayout on the ~once-a-minute store saves
     /// that don't actually change what the pill shows.
-    private var display: Display {
-        Display(state: freshness, label: label, tooltip: tooltip)
-    }
-
     var body: some View {
-        // `.equatable()` gates the expensive toolbar relayout: SwiftUI
-        // re-evaluates this outer body on every save (that's how `@Query`
-        // works) but only re-renders `PillBody` — and thus only triggers
-        // the NSToolbar AutoLayout pass — when `display` actually changes.
+        // `.equatable()` still gates the toolbar relayout, so a tick that
+        // produces an identical `Display` costs nothing below this point.
+        // The difference now is that this outer body runs on a 1 s timer
+        // rather than on every store save.
         PillBody(display: display).equatable()
+            .task {
+                refresh()
+                // `Task.sleep` rather than a `Timer` publisher so the loop is
+                // owned by the view's lifetime — it stops when the window
+                // closes instead of ticking against a dead view.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(Self.refreshInterval))
+                    if Task.isCancelled { break }
+                    refresh()
+                }
+            }
     }
 
     /// Equatable render payload for the freshness pill. See `display`.
