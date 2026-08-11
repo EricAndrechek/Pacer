@@ -863,5 +863,57 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="SYVK5AQYKvn0S1gfEUSvRN232iLgM0o71YYyFcjTgWXWApoK/nK3WSGl8WCo+RMBG+sKpEcEl2bAAANaPMnyDQ==" />
     </item>
+            <item>
+        <title>Version 0.4.13</title>
+        <description><![CDATA[<p>More CPU. This one is the big one.</p>
+<h2>Pacer was recomputing its whole forecast every 20 seconds</h2>
+<p>0.4.12 fixed the Dashboard window pegging a core. This fixes the rest,<br>
+which showed up as Pacer being busy in bursts even with no Claude Code<br>
+session running.</p>
+<p>The forecasting engine — the thing behind projected fill, time-to-limit<br>
+and the pace bands — was refitting from scratch every time Pacer recorded<br>
+new usage, at most every 20 seconds. Each refit takes about 4.5 seconds of<br>
+real work. That is roughly a quarter of a CPU core, permanently, to<br>
+recompute answers that change over hours.</p>
+<p>It now refits when the data it actually depends on changes — your<br>
+rate-limit windows — rather than every time a token is recorded.</p>
+<p>Measured on a real machine with Claude Code actively running:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th></th>
+<th>CPU</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>before</td>
+<td>~100% of a core</td>
+</tr>
+<tr>
+<td>after 0.4.12</td>
+<td>~16%</td>
+</tr>
+<tr>
+<td>after this release</td>
+<td>~7%</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p>Forecasts are unchanged. They were already being recomputed far more often<br>
+than their answers could move.</p>
+<hr>
+<p>Requires macOS 15 or later. Update via Pacer's built-in updater, or download<br>
+below.</p>]]></description>
+        <pubDate>Tue, 11 Aug 2026 13:40:28 +0000</pubDate>
+        <sparkle:version>1786455354</sparkle:version>
+        <sparkle:shortVersionString>0.4.13</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.4.13/Pacer-0.4.13.dmg"
+            length="19967641"
+            type="application/octet-stream"
+            sparkle:edSignature="4p02DZo1b46NS08EjdoPNo8zGoRDcaQ/Se/JLjxuViWTeFu6qzRg13x0sw+E832Jlrzz+GbmrNQQFJNZkM+JCw==" />
+    </item>
         </channel>
 </rss>
