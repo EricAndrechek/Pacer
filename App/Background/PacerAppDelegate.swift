@@ -341,6 +341,23 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Pacer" prompt is moot. Also preempts a pending request that
         // the prior process scheduled but couldn't fully deliver
         // before SIGKILL during a dev-cycle quit→relaunch.
+        MainWindowPlacement.noteLaunch()
+        // Bring the dashboard back if it was open when we were quit. A dev
+        // install runs many times an hour and `LSUIElement` means nothing
+        // reopens it on its own, so without this the window the maintainer
+        // keeps on a second monitor simply disappears.
+        MainWindowPlacement.reopenIfPreviouslyOpen()
+
+        // Catch a window AppKit restored before the observers above were
+        // installed — the ordering is not guaranteed, and a missed window
+        // keeps SwiftUI's per-instance autosave name for the whole session.
+        Task { @MainActor in
+            for window in NSApp.windows where window.canBecomeMain && !(window is NSPanel) {
+                Self.ensureWindowAutosaves(window)
+                Self.ensureWindowOnScreen(window)
+            }
+        }
+
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
@@ -403,6 +420,40 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func installWindowObservers() {
         let center = NotificationCenter.default
+        // A window that is merely *restored* never becomes key. Relaunching
+        // in the background (`open -g`, which is what a dev install now
+        // does) brings the dashboard back without activating Pacer, so
+        // hanging window setup off `didBecomeKey` alone meant the frame
+        // adoption below simply never ran on exactly the relaunch it was
+        // written for.
+        //
+        // Occlusion state is AppKit's "this window became visible" signal
+        // (there is no `didBecomeVisible` here — that is UIKit) and it fires
+        // whether or not we are frontmost. It is also rare, unlike
+        // `didUpdateNotification`, which fires per event loop per window.
+        let didBecomeVisible = center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let window = note.object as? NSWindow
+            Task { @MainActor in
+                guard let window else { return }
+                // Deliberately does NOT touch the activation policy.
+                // Occlusion fires while a window is still materializing, and
+                // `applyActivationPolicyForCurrentWindows` counts *visible*
+                // windows — so calling it here flipped the app to
+                // `.accessory` mid-creation and the dashboard never
+                // appeared at all. Policy stays owned by the key/close
+                // observers, which fire once the window's state is settled.
+                Self.ensureWindowAutosaves(window)
+                Self.ensureWindowOnScreen(window)
+                if window.canBecomeMain, !(window is NSPanel), window.isVisible {
+                    MainWindowPlacement.wasOpen = true
+                }
+            }
+        }
+        windowObservers.append(didBecomeVisible)
         let didBecomeKey = center.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -431,19 +482,38 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { note in
+                let window = note.object as? NSWindow
+                Task { @MainActor in
+                    guard let window else { return }
+                    MainWindowPlacement.record(window)
+                }
+            }
+            windowObservers.append(observer)
+        }
         let willClose = center.addObserver(
             forName: NSWindow.willCloseNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            let window = note.object as? NSWindow
             // willClose fires before the window leaves NSApp.windows,
             // so dispatching on the main queue lets the count reflect
             // post-close state.
             Task { @MainActor in
                 self?.applyActivationPolicyForCurrentWindows()
+                // A dashboard the user closed should stay closed across a
+                // relaunch — only one they left open comes back.
+                if let window, window.canBecomeMain, !(window is NSPanel) {
+                    MainWindowPlacement.wasOpen = false
+                }
             }
         }
-        windowObservers = [didBecomeKey, willClose]
+        // Append, never assign: the visibility and move/resize observers
+        // registered above are in this array too, and overwriting it
+        // silently dropped them.
+        windowObservers.append(contentsOf: [didBecomeKey, willClose])
     }
 
     /// Fallback AppKit autosave name we install when SwiftUI didn't
@@ -465,11 +535,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// modifiers handle first-launch placement on the SwiftUI side,
     /// so this function doesn't touch the frame.
     private static func ensureWindowAutosaves(_ window: NSWindow) {
-        guard window.canBecomeMain, !(window is NSPanel) else { return }
-        if window.frameAutosaveName.isEmpty {
-            window.setFrameAutosaveName(mainWindowAutosaveName)
-        }
-        applyMenuBarAppBehavior(window)
+        // Placement is owned by `MainWindowPlacement`, not AppKit autosave —
+        // see that type for why sharing the mechanism with SwiftUI could not
+        // be made to work.
+        MainWindowPlacement.adopt(window)
+        MainWindowPlacement.holdPlacement(for: window)
     }
 
     /// Make the main window behave like a tool window for a menu-bar
@@ -490,6 +560,27 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Manager normally).
     private static func applyMenuBarAppBehavior(_ window: NSWindow) {
         window.collectionBehavior.insert(.moveToActiveSpace)
+    }
+
+    /// Undo `applyMenuBarAppBehavior` once the window has been brought
+    /// across.
+    ///
+    /// `.moveToActiveSpace` is not a property of the *gesture*, it is a
+    /// property of the *window* — so leaving it applied means the window
+    /// follows onto the active Space every time it is shown, including on
+    /// the relaunch after a dev install, which is nobody's intent. Pairing
+    /// each apply with a removal keeps the behavior scoped to the moment
+    /// the user asked for the window, and lets it otherwise belong to the
+    /// Space and display they left it on.
+    ///
+    /// Removal is deferred one runloop turn so it lands after AppKit has
+    /// finished ordering the window front; clearing it synchronously can
+    /// race the move it was meant to cause. Once the window is on a Space,
+    /// dropping the behavior does not move it back.
+    private static func releaseMenuBarAppBehavior(_ window: NSWindow) {
+        DispatchQueue.main.async {
+            window.collectionBehavior.remove(.moveToActiveSpace)
+        }
     }
 
     /// macOS persists the main window's frame across launches via the
@@ -860,6 +951,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let target { Self.reposition(window, onto: target) }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
+            // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
+            Self.releaseMenuBarAppBehavior(window)
             return true
         }
         // Cold open: the window doesn't exist yet and will materialize
