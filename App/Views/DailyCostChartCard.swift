@@ -20,7 +20,7 @@ struct DailyCostChartCard: View {
     /// can decide whether to open the day modal locally or stay quiet.
     let onDayTap: ((String) -> Void)?
 
-    init(onDayTap: ((String) -> Void)? = nil) {
+    init(scopeAccountId: String? = nil, onDayTap: ((String) -> Void)? = nil) {
         self.onDayTap = onDayTap
         // Scope the @Query to the chart's display window. Card renders
         // exactly 30 days; the prior unbounded query materialized every
@@ -31,14 +31,34 @@ struct DailyCostChartCard: View {
         let cutoffString = TokenSample.formatDate(
             Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
         )
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
             sort: \DailyAggregate.date,
             order: .reverse
         )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= cutoffString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.date,
+            order: .reverse
+        )
     }
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     /// Singleton-row probe — fires once per scan cycle. Drives the
     /// `Derived` cache refresh so the Dictionary(grouping:) +
     /// `.sorted()` + `.suffix(30)` pipeline runs at most once per

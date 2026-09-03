@@ -14,6 +14,7 @@ import PacerUI
 struct AccountsCard: View {
     @Query(AccountsCard.accountsDescriptor) private var accounts: [Account]
     @State private var totals = AccountTotalsStatus.shared
+    @State private var scope = UsageScope.shared
 
     private static let accountsDescriptor: FetchDescriptor<Account> = {
         FetchDescriptor<Account>(sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
@@ -21,7 +22,7 @@ struct AccountsCard: View {
 
     var body: some View {
         if accounts.count > 1 {
-            PacerCard("Accounts") {
+            PacerCard("Accounts", trailing: { scopePicker }) {
                 VStack(spacing: 0) {
                     ForEach(Array(sortedAccounts.enumerated()), id: \.element.id) { index, account in
                         if index > 0 { Divider().opacity(0.3) }
@@ -41,6 +42,42 @@ struct AccountsCard: View {
         }
     }
 
+    /// Which account the spend and token cards below are showing.
+    ///
+    /// A menu rather than a segmented control: the label has to be an email
+    /// address, and segments sized for those stop being compact at two
+    /// accounts and stop fitting at three.
+    private var scopePicker: some View {
+        Menu {
+            Button { scope.select(nil) } label: {
+                Label("All accounts", systemImage: scope.isAll ? "checkmark" : "")
+            }
+            Divider()
+            ForEach(sortedAccounts, id: \.id) { account in
+                Button { scope.select(account.id) } label: {
+                    Label(account.label,
+                          systemImage: scope.accountId == account.id ? "checkmark" : "")
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Text(scopeLabel)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
+    private var scopeLabel: String {
+        guard let id = scope.accountId else { return "All accounts" }
+        return accounts.first { $0.id == id }?.label ?? "All accounts"
+    }
+
     private var sortedAccounts: [Account] {
         accounts.sorted {
             if $0.isActive != $1.isActive { return $0.isActive }
@@ -49,7 +86,9 @@ struct AccountsCard: View {
     }
 
     private var scopeNote: String {
-        var note = "Limits are per account. Spend and tokens below combine all."
+        var note = scope.isAll
+            ? "Limits are per account. Spend and tokens below combine all."
+            : "Limits are per account. Spend and tokens below show \(scopeLabel)."
         if let orphan = totals.unattributed, orphan.turns > 0 {
             note += " \(orphan.turns.formatted()) turns predate account tracking."
         }

@@ -15,6 +15,10 @@ import PacerUI
 /// updates stay incremental: a new TokenSample only invalidates the
 /// cards that read TokenSample/DailyAggregate, not the rate-limit charts.
 struct DashboardView: View {
+    /// Read here, not inside each card, so a scope change re-runs their
+    /// initialisers — a `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
+
     @State private var modalRoot: PacerModalDestination?
 
     var body: some View {
@@ -59,14 +63,14 @@ struct DashboardView: View {
             // numbers am I looking at? Renders nothing at all for a
             // single-account user, which is almost everyone.
             AccountsCard()
-            TodayDetailsCard()
+            TodayDetailsCard(scopeAccountId: scope.accountId)
             TodayTimelineCard(onTodayTap: openToday)
-            PerModelTodayCard()
-            WeeklyComparisonCard()
-            DailyCostChartCard(onDayTap: { dayKey in
+            PerModelTodayCard(scopeAccountId: scope.accountId)
+            WeeklyComparisonCard(scopeAccountId: scope.accountId)
+            DailyCostChartCard(scopeAccountId: scope.accountId, onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
-            MonthOutlookCard()
+            MonthOutlookCard(scopeAccountId: scope.accountId)
         }
         .pacerModalNavigation(root: $modalRoot)
     }

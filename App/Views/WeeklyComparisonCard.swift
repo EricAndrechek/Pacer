@@ -13,7 +13,19 @@ import PacerUI
 /// We pull a 14-day predicate from SwiftData; the in-view group is
 /// over ≤70 rows (14 × ~5 models/day) so it stays sub-millisecond.
 struct WeeklyComparisonCard: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     @Query(WeeklyComparisonCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Cached totals refreshed on scan-meta tick. Per AGENTS.md, every
@@ -22,7 +34,7 @@ struct WeeklyComparisonCard: View {
     @State private var cachedThisWeek = WeekTotals()
     @State private var cachedLastWeek = WeekTotals()
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         // 14-day window covering this week + last week. Predicate is
         // anchored on the date string format (`YYYY-MM-DD`) so it
         // sorts/compares lexicographically and uses the existing
@@ -31,8 +43,14 @@ struct WeeklyComparisonCard: View {
         let cal = Calendar.current
         let lowerBound = cal.date(byAdding: .day, value: -13, to: now) ?? now
         let lowerStr = TokenSample.formatDate(lowerBound)
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= lowerStr && $0.accountId == acct
+            }
         )
     }
 

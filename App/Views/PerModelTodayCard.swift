@@ -11,15 +11,35 @@ import PacerUI
 /// its own card so the @Query stays scoped (a model-only view doesn't
 /// need to invalidate when the total-cost number changes).
 struct PerModelTodayCard: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     @Query(PerModelTodayCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached: [ModelRow] = []
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         let todayString = TokenSample.formatDate(Date())
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == todayString },
             sort: \.totalCostUSD,
+            order: .reverse
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == todayString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.totalCostUSD,
             order: .reverse
         )
     }
