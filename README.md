@@ -110,6 +110,15 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   today will end at about $X" projection.
 - **Multiple accounts.** Signed into more than one Claude account? Pacer tracks
   each account's usage and limits separately and lets you switch between them.
+  It follows your login: switch accounts with any tool — `/logout` and back in,
+  or a switcher like [claude-swap](https://github.com/realiti4/claude-swap) —
+  and the numbers follow, because Pacer watches Claude Code's own record of who
+  is signed in rather than depending on a particular tool. Tokens and cost are
+  attributed per account as they happen, and sessions pinned to a second
+  account (a `CLAUDE_CONFIG_DIR` profile, so two accounts run at once) are
+  tracked separately rather than folded into whichever login is default.
+  Usage from before Pacer started watching stays marked unattributed rather
+  than being assigned to a guess.
 - **At a glance, always.** A configurable menu-bar readout — an activity-ring
   icon, percent chips, and an explicit choice of which window drives the icon —
   plus home-screen-style widgets, each pickable to whichever window you care
