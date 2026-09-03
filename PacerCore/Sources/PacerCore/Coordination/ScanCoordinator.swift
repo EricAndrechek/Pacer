@@ -107,7 +107,15 @@ public final class ScanCoordinator {
     ///         buckets recomputed since; an existing store needs one rebuild
     ///         to populate it or the per-account view would show a store's
     ///         whole history as belonging to nobody.
-    public static let currentCostRecomputeVersion = "8"
+    /// - "9" — the incremental fast path (`fastPathApply`) adds a sample to an
+    ///         existing `DailyAggregate` rather than rebuilding the bucket,
+    ///         so it never reached `syncAccountRows` and every
+    ///         incrementally-applied sample landed in the global total and
+    ///         nowhere else. Caught within minutes by the cross-rollup check
+    ///         added with "8" — one bucket and $0.99 apart — which is the
+    ///         entire argument for checking two views of one source against
+    ///         each other rather than trusting them.
+    public static let currentCostRecomputeVersion = "9"
 
     /// Generation of the duplicate-turn repair.
     ///

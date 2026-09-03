@@ -180,17 +180,63 @@ public final class AggregateRecomputer {
                 cacheCreation5mTokens: sample.cacheCreation5mTokens,
                 cacheCreation1hTokens: sample.cacheCreation1hTokens
             )
-            existing.totalCostUSD += CostCalculator.cost(
+            let sampleCost = CostCalculator.cost(
                 storedCostUSD: sample.sourceCostUSD,
                 model: sample.model,
                 breakdown: breakdown,
                 mode: mode,
                 snapshot: snapshot
             )
+            existing.totalCostUSD += sampleCost
+
+            // The account row gets the same increment, from the same cost.
+            // Missing this is what made the two rollups drift: this path adds
+            // to an existing row rather than rebuilding it, so it never went
+            // near `syncAccountRows`, and every incrementally-applied sample
+            // landed in the global total and nowhere else.
+            try applyToAccountRow(
+                accountId: sample.accountId ?? AccountDailyAggregate.unattributedKey,
+                date: pair.date, model: pair.model,
+                breakdown: breakdown, cost: sampleCost)
         }
         stats.aggregatesUpserted += 1
         stats.fastPathApplied += 1
         return true
+    }
+
+    /// Add one sample to its `AccountDailyAggregate`, creating the row if this
+    /// account has no usage in the bucket yet.
+    private func applyToAccountRow(
+        accountId: String, date: String, model: String,
+        breakdown: TokenBreakdown, cost: Double
+    ) throws {
+        let key = AccountDailyAggregate.makeKey(
+            accountId: accountId, date: date, model: model)
+        let existing = try context.fetch(
+            FetchDescriptor<AccountDailyAggregate>(
+                predicate: #Predicate<AccountDailyAggregate> {
+                    $0.accountDateModelKey == key
+                }
+            )
+        ).first
+        if let existing {
+            existing.inputTokens += breakdown.inputTokens
+            existing.outputTokens += breakdown.outputTokens
+            existing.cacheReadTokens += breakdown.cacheReadTokens
+            existing.cacheCreation5mTokens += breakdown.cacheCreation5mTokens
+            existing.cacheCreation1hTokens += breakdown.cacheCreation1hTokens
+            existing.totalCostUSD += cost
+        } else {
+            context.insert(AccountDailyAggregate(
+                accountId: accountId, date: date, model: model,
+                inputTokens: breakdown.inputTokens,
+                outputTokens: breakdown.outputTokens,
+                cacheReadTokens: breakdown.cacheReadTokens,
+                cacheCreation5mTokens: breakdown.cacheCreation5mTokens,
+                cacheCreation1hTokens: breakdown.cacheCreation1hTokens,
+                totalCostUSD: cost
+            ))
+        }
     }
 
     private func recomputeOne(pair: DateModelPair, stats: inout Stats) async throws {
