@@ -1312,6 +1312,13 @@ public actor OAuthPoller: TokenPoolTesting {
                 // dashboard reads has changed, so waking every view for a
                 // background account's poll would be pure cost.
             }
+            if isActive, Self.evictionIsDue(now: captured.sampledAt) {
+                let moved = Self.evictStaleLiveRows(context: context, accountId: key)
+                if moved > 0 {
+                    Log.write("OAuthPoller",
+                              "evicted \(moved) live row(s) older than \(Int(Self.liveWindowDays))d to the archive")
+                }
+            }
             do {
                 try context.save()
                 if wroteAnyWindow {
@@ -1323,15 +1330,145 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    /// Test seam for the eviction pass — it is the one piece of the swap
+    /// whose correctness is "nothing was lost", which is worth asserting
+    /// directly rather than through a full poll cycle.
+    @MainActor
+    static func testEvictStaleLiveRows(context: ModelContext, accountId: String) -> Int {
+        evictStaleLiveRows(context: context, accountId: accountId)
+    }
+
+    /// When eviction last ran. In-memory only: re-running once after a
+    /// restart costs one bounded pass and saves persisting a timestamp
+    /// nothing else needs.
+    nonisolated(unsafe) private static var lastEvictionAt: Date?
+
+    private static func evictionIsDue(now: Date) -> Bool {
+        guard let last = lastEvictionAt else {
+            lastEvictionAt = now
+            return true
+        }
+        guard now.timeIntervalSince(last) >= 3600 else { return false }
+        lastEvictionAt = now
+        return true
+    }
+
+    /// Move the active account's live rows older than the window into the
+    /// archive, so the live tables stay a bounded cache.
+    ///
+    /// Without this the bound only applies on a switch, and a single-account
+    /// user — who never switches — accumulates live rows forever. That is
+    /// exactly how this machine reached 90,200 live rate-limit rows: nothing
+    /// was ever wrong, they simply never left.
+    ///
+    /// Eviction, not deletion. Every row is written to the archive before it
+    /// is removed, and the archive is never pruned.
+    @MainActor
+    private static func evictStaleLiveRows(context: ModelContext, accountId: String) -> Int {
+        let cutoff = Date().addingTimeInterval(-liveWindowDays * 86_400)
+        var moved = 0
+
+        let rls = (try? context.fetch(FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for r in rls {
+            context.insert(AccountUsageArchive(
+                accountId: r.accountId ?? accountId,
+                kind: AccountUsageArchive.kindRateLimit,
+                sampledAt: r.sampledAt, window: r.window,
+                usedPercentage: r.usedPercentage, resetsAt: r.resetsAt,
+                source: r.source))
+            context.delete(r)
+            moved += 1
+        }
+
+        let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for e in extras {
+            context.insert(AccountUsageArchive(
+                accountId: e.accountId ?? accountId,
+                kind: AccountUsageArchive.kindExtraUsage,
+                sampledAt: e.sampledAt, amountCents: e.amountCents,
+                source: e.source))
+            context.delete(e)
+            moved += 1
+        }
+
+        let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for l in limits {
+            context.insert(AccountUsageArchive(
+                accountId: l.accountId ?? accountId,
+                kind: AccountUsageArchive.kindUsageLimit,
+                sampledAt: l.sampledAt, usedPercentage: l.percent,
+                resetsAt: l.resetsAt, source: l.source,
+                identity: l.identity, limitKind: l.kind, group: l.group,
+                label: l.label, severity: l.severity, isActive: l.isActive,
+                modelId: l.modelId, modelDisplayName: l.modelDisplayName,
+                surface: l.surface))
+            context.delete(l)
+            moved += 1
+        }
+        return moved
+    }
+
+    /// How much history the live sample tables hold.
+    ///
+    /// The live tables are a *cache of the active account's recent window*,
+    /// not the record — `AccountUsageArchive` is the record and keeps
+    /// everything, so bounding this evicts nothing. The widest reader is the
+    /// forecast engine's 32-day backtest (`fetchRate`/`fetchScopedLimits`);
+    /// every view reads 8 days. 35 days clears both with margin.
+    ///
+    /// Why it has to be bounded at all: the swap moves every row it touches
+    /// through a single `MainActor` block, and this machine had accumulated
+    /// **177,689** archived rows in five months — all of which would have
+    /// been restored into the live tables on the next switch back, on the
+    /// main thread, to satisfy readers that wanted the newest few thousand.
+    /// Unbounded, the freeze grows for as long as the app is installed.
+    static let liveWindowDays: Double = 35
+
     /// Swap which account's timeline the live sample tables hold: archive
     /// the outgoing active account's rows into `AccountUsageArchive`, then
-    /// restore the incoming account's archived rows into the live tables,
-    /// and flip `Account.isActive`. Returns the incoming account's org so
+    /// restore the incoming account's recent window from the archive, and
+    /// flip `Account.isActive`. Returns the incoming account's org so
     /// the caller can update `primaryOrg`. Runs on the main actor.
     private func swapActiveTimeline(from outgoing: String?, to incoming: String) async -> String? {
-        let container = self.container
-        return await MainActor.run {
+        await Self.performSwap(container: container, from: outgoing, to: incoming)
+    }
+
+    /// The swap itself, on `@ScanActor` rather than the main thread.
+    ///
+    /// Measured at the row counts a real machine reaches: restoring one
+    /// account's 35-day window is **107,705 rows and 14.3 seconds** — and
+    /// that is an in-memory store, so on disk it is worse. On `@MainActor`
+    /// that is a fourteen-second frozen dashboard every time the account
+    /// changes, which for anyone running an auto-switcher is several times a
+    /// day. Nothing here needs the main thread: SwiftData propagates a
+    /// background context's saves to `@Query` on its own, which is how the
+    /// whole scan pipeline already works.
+    ///
+    /// Batched and yielding so it does not monopolise the actor either — the
+    /// scan loop shares it, and a fourteen-second block there would stall
+    /// ingestion instead of drawing. The user-visible effect is that history
+    /// fills in over a few seconds while the current reading, which the
+    /// poller writes separately, is correct immediately.
+    @ScanActor
+    private static func performSwap(
+        container: ModelContainer,
+        from outgoing: String?,
+        to incoming: String
+    ) async -> String? {
             let context = ModelContext(container)
+            var pending = 0
+            /// Commit every few thousand rows and let the actor breathe.
+            func flush(force: Bool = false) async {
+                guard force || pending >= 2_000 else { return }
+                pending = 0
+                do { try context.save() } catch {
+                    Log.write("OAuthPoller", "account timeline swap batch failed: \(error)")
+                }
+                await Task.yield()
+            }
 
             // 1. Archive the outgoing active account's live rows.
             if let outgoing {
@@ -1347,6 +1484,8 @@ public actor OAuthPoller: TokenPoolTesting {
                         source: r.source
                     ))
                     context.delete(r)
+                    pending += 1
+                    await flush()
                 }
                 let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>())) ?? []
                 for e in extras {
@@ -1358,6 +1497,8 @@ public actor OAuthPoller: TokenPoolTesting {
                         source: e.source
                     ))
                     context.delete(e)
+                    pending += 1
+                    await flush()
                 }
                 let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>())) ?? []
                 for l in limits {
@@ -1379,12 +1520,20 @@ public actor OAuthPoller: TokenPoolTesting {
                         surface: l.surface
                     ))
                     context.delete(l)
+                    pending += 1
+                    await flush()
                 }
             }
 
-            // 2. Restore the incoming account's archived rows (if any).
+            // 2. Restore the incoming account's recent window from the
+            // archive. Older rows stay archived — they are the permanent
+            // record and nothing reads them from the live tables, so moving
+            // them would be a main-thread freeze that buys nothing.
+            let restoreCutoff = Date().addingTimeInterval(-Self.liveWindowDays * 86_400)
             let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
-                predicate: #Predicate { $0.accountId == incoming }
+                predicate: #Predicate {
+                    $0.accountId == incoming && $0.sampledAt >= restoreCutoff
+                }
             ))) ?? []
             for a in archived {
                 switch a.kind {
@@ -1423,6 +1572,8 @@ public actor OAuthPoller: TokenPoolTesting {
                     ))
                 }
                 context.delete(a)
+                pending += 1
+                await flush()
             }
 
             // 3. Flip active flags.
@@ -1433,16 +1584,16 @@ public actor OAuthPoller: TokenPoolTesting {
                 if acc.id == incoming { incomingOrg = acc.organizationId }
             }
 
-            do {
-                try context.save()
-                // Nudge every @Query consumer to refresh against the swapped
-                // timeline (they auto-refresh on save, but this also drives
-                // the coordination summary the rest of the app listens on).
+            await flush(force: true)
+            // Nudge every @Query consumer to refresh against the swapped
+            // timeline (they auto-refresh on save, but this also drives the
+            // coordination summary the rest of the app listens on). Must be
+            // posted from the main actor — its observers are registered with
+            // `queue: .main`, and posting from a background actor has
+            // previously shown up as multi-second notification phases.
+            Task { @MainActor in
                 postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
-            } catch {
-                Log.write("OAuthPoller", "account timeline swap failed: \(error)")
             }
             return incomingOrg
-        }
     }
 }
