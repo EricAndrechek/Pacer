@@ -81,11 +81,21 @@ public struct PacerAccountRow<Trailing: View>: View {
                 PacerWindowReadout(label: "7d", percent: model.sevenDayPercent)
             }
 
-            // Fixed width so the readouts above line up between rows. Without
-            // it a row carrying an "Active" badge pushes its percentages left
-            // of a row that has none, and the two columns visibly disagree.
-            trailing()
-                .frame(width: 62, alignment: .trailing)
+            // Fixed width so the readouts line up between rows: a row with an
+            // "Active" badge must not push its percentages left of a row
+            // without one.
+            //
+            // The `Color.clear` is load-bearing. A caller writes
+            // `if isActive { Text("Active") }`, which yields a *nil* view for
+            // an inactive row — and a nil view occupies no space no matter
+            // what `.frame` is applied to it, so sizing `trailing()` directly
+            // silently did nothing. The ZStack always has a child that takes
+            // the full width.
+            ZStack(alignment: .trailing) {
+                Color.clear
+                trailing()
+            }
+            .frame(width: 62)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)

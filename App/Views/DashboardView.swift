@@ -39,10 +39,7 @@ struct DashboardView: View {
                 // AdvisorBadges owns the whole header strip now — the notices
                 // *and* the data-source chip flow together in one wrapping
                 // layout, so they spill to a tidy second row when several fire.
-                HStack(spacing: 10) {
-                    AccountScopeControl()
-                    AdvisorBadges()
-                }
+                AdvisorBadges()
             }
         ) {
             WelcomeCard()

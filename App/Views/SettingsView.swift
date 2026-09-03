@@ -329,13 +329,13 @@ struct MenuBarCard: View {
                 }
                 Divider().opacity(0.4)
                 LabeledControlRow(label: "Icon style") {
-                    PacerSelect(
-                        selection: $iconRaw,
-                        options: PacerSettings.MenuBarIconStyle.allCases.map {
-                            .init(value: $0.rawValue, title: $0.label)
-                        },
-                        width: 200
-                    )
+                    Picker("Icon style", selection: $iconRaw) {
+                        ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
+                            Text(style.label).tag(style.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                     .disabled(!iconIsEnabled)
                 }
                 // Single-glyph styles (gauge / ring-fill / dot) are painted by
@@ -346,21 +346,19 @@ struct MenuBarCard: View {
                     ringWindowPicker
                 } else {
                     LabeledControlRow(label: "Icon driver") {
-                        PacerSelect(
-                            selection: driverSelection,
-                            options: windows.map {
-                                .init(value: $0.key, title: driverOptionLabel($0))
+                        Picker("Icon driver", selection: driverSelection) {
+                            ForEach(windows) { window in
+                                Text(driverOptionLabel(window)).tag(window.key)
                             }
                             // A previously-chosen window that's no longer
                             // reported: keep the row so the selection stays
                             // visible and the fallback reads clearly.
-                            + (MenuBarWindows.driverIsResolvable(
-                                    key: driverSelection.wrappedValue, windows: windows)
-                               ? []
-                               : [.init(value: driverSelection.wrappedValue,
-                                        title: "Unavailable — using 5-hour")]),
-                            width: 220
-                        )
+                            if !MenuBarWindows.driverIsResolvable(key: driverSelection.wrappedValue, windows: windows) {
+                                Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
                         .disabled(!iconIsEnabled)
                     }
                     if showsDriverFallbackNote {
@@ -1239,15 +1237,16 @@ private struct CustomRulesCard: View {
             TextField("Name", text: $draftName)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 120)
-            // `PacerSelect`, not `Picker`: the menu-styled picker rendered
-            // its popup detached and mis-scaled into a screen corner here.
-            PacerSelect(
-                selection: $draftMetric,
-                options: AlertRuleMetric.all.map {
-                    .init(value: $0, title: AlertRuleMetric.label(for: $0))
-                },
-                width: 180
-            )
+            // Segmented rather than menu-styled: every popup in this app
+            // currently opens in the wrong place.
+            Picker("", selection: $draftMetric) {
+                ForEach(AlertRuleMetric.all, id: \.self) { metric in
+                    Text(AlertRuleMetric.label(for: metric)).tag(metric)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
             thresholdField
             Spacer()
             Button("Add") {
@@ -1373,11 +1372,17 @@ private struct DailySummaryCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
                 LabeledControlRow(label: "Send at") {
-                    PacerSelect(
-                        selection: $dailySummaryHour,
-                        options: (0..<24).map { .init(value: $0, title: formatHour($0)) },
-                        width: 130
-                    )
+                    // A stepper, not a list: 24 options are too many to
+                    // segment and a popup would open in the wrong place.
+                    Stepper(
+                        value: $dailySummaryHour,
+                        in: 0...23
+                    ) {
+                        Text(formatHour(dailySummaryHour))
+                            .font(.system(size: 12))
+                            .monospacedDigit()
+                            .frame(width: 74, alignment: .leading)
+                    }
                     .disabled(!dailySummaryEnabled)
                 }
             }

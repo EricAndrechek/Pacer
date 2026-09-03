@@ -109,6 +109,14 @@ struct ContentView: View {
                     // sidebar used to host this; moving it to the
                     // toolbar matches Linear / Reeder / Things / etc.
                     // and frees the sidebar to be all-navigation.
+                    // Account scope belongs in the toolbar: it governs every
+                    // view, and it sits beside the title bar's 5h/7d subtitle
+                    // — the ACTIVE account's — so it reads as qualifying
+                    // those numbers. Segmented, because every popup in this
+                    // app currently mis-anchors.
+                    ToolbarItem(placement: .primaryAction) {
+                        AccountScopeControl()
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         ToolbarFreshness()
                     }
