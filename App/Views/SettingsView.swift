@@ -334,7 +334,6 @@ struct MenuBarCard: View {
                             Text(style.label).tag(style.rawValue)
                         }
                     }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
                     .disabled(!iconIsEnabled)
                 }
@@ -357,7 +356,6 @@ struct MenuBarCard: View {
                                 Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
                             }
                         }
-                        .pickerStyle(.segmented)
                         .labelsHidden()
                         .disabled(!iconIsEnabled)
                     }
@@ -1237,16 +1235,13 @@ private struct CustomRulesCard: View {
             TextField("Name", text: $draftName)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 120)
-            // Segmented rather than menu-styled: every popup in this app
-            // currently opens in the wrong place.
             Picker("", selection: $draftMetric) {
                 ForEach(AlertRuleMetric.all, id: \.self) { metric in
                     Text(AlertRuleMetric.label(for: metric)).tag(metric)
                 }
             }
-            .pickerStyle(.segmented)
             .labelsHidden()
-            .fixedSize()
+            .frame(width: 180)
             thresholdField
             Spacer()
             Button("Add") {
@@ -1372,17 +1367,13 @@ private struct DailySummaryCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
                 LabeledControlRow(label: "Send at") {
-                    // A stepper, not a list: 24 options are too many to
-                    // segment and a popup would open in the wrong place.
-                    Stepper(
-                        value: $dailySummaryHour,
-                        in: 0...23
-                    ) {
-                        Text(formatHour(dailySummaryHour))
-                            .font(.system(size: 12))
-                            .monospacedDigit()
-                            .frame(width: 74, alignment: .leading)
+                    Picker("Send at", selection: $dailySummaryHour) {
+                        ForEach(0..<24, id: \.self) { h in
+                            Text(formatHour(h)).tag(h)
+                        }
                     }
+                    .labelsHidden()
+                    .frame(width: 130)
                     .disabled(!dailySummaryEnabled)
                 }
             }

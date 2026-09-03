@@ -93,8 +93,16 @@ enum MainWindowPlacement {
         if !window.frameAutosaveName.isEmpty {
             window.setFrameAutosaveName("")
         }
+        // Position it once. Re-applying on every becomes-key would fight the
+        // user the moment they moved the window, and moves a window while a
+        // menu may be open — see `holdPlacement`.
+        guard !adopted.contains(ObjectIdentifier(window)) else { return }
+        adopted.insert(ObjectIdentifier(window))
         apply(to: window)
     }
+
+    /// Windows already positioned this launch.
+    private static var adopted: Set<ObjectIdentifier> = []
 
     /// Apply the stored frame, if we have a usable one and the window isn't
     /// already there.
@@ -115,12 +123,30 @@ enum MainWindowPlacement {
         wasOpen = true
     }
 
-    /// Re-assert placement across the settle window, so SwiftUI's own restore
-    /// cannot get the last word. Cheap: a handful of no-op comparisons.
+    /// Re-assert placement across the launch settle window, so SwiftUI's own
+    /// restore cannot get the last word.
+    ///
+    /// **Only while settling.** This is called from `didBecomeKey`, which
+    /// fires every time the user clicks into the window — so without the
+    /// guard, every click scheduled five `setFrame` calls over the next two
+    /// seconds. Open a dropdown and one of them lands *while the menu is up*,
+    /// moving the window out from under an anchor the menu had already
+    /// resolved; the menu then draws against stale geometry, which is how
+    /// every popup in the app ended up in a screen corner. It was
+    /// intermittent because whether a `setFrame` fell inside the menu's
+    /// lifetime depended on how fast you clicked, and it sometimes
+    /// self-corrected because a later one triggered a reposition.
+    ///
+    /// Re-asserting a frame is only needed to win a race against SwiftUI's
+    /// restore at launch. After that the window belongs to the user.
     static func holdPlacement(for window: NSWindow) {
+        guard isSettling else { return }
         for delay in [0.0, 0.15, 0.4, 1.0, 2.0] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                MainActor.assumeIsolated { apply(to: window) }
+                MainActor.assumeIsolated {
+                    guard isSettling else { return }
+                    apply(to: window)
+                }
             }
         }
     }
