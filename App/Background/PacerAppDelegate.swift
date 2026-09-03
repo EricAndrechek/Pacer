@@ -341,16 +341,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Pacer" prompt is moot. Also preempts a pending request that
         // the prior process scheduled but couldn't fully deliver
         // before SIGKILL during a dev-cycle quit→relaunch.
-        // Catch a window AppKit restored before the observers above were
-        // installed — the ordering is not guaranteed, and a missed window
-        // keeps SwiftUI's per-instance autosave name for the whole session.
-        Task { @MainActor in
-            for window in NSApp.windows where window.canBecomeMain && !(window is NSPanel) {
-                Self.ensureWindowAutosaves(window)
-                Self.ensureWindowOnScreen(window)
-            }
-        }
-
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
@@ -413,31 +403,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func installWindowObservers() {
         let center = NotificationCenter.default
-        // A window that is merely *restored* never becomes key. Relaunching
-        // in the background (`open -g`, which is what a dev install now
-        // does) brings the dashboard back without activating Pacer, so
-        // hanging window setup off `didBecomeKey` alone meant the frame
-        // adoption below simply never ran on exactly the relaunch it was
-        // written for.
-        //
-        // Occlusion state is AppKit's "this window became visible" signal
-        // (there is no `didBecomeVisible` here — that is UIKit) and it fires
-        // whether or not we are frontmost. It is also rare, unlike
-        // `didUpdateNotification`, which fires per event loop per window.
-        let didBecomeVisible = center.addObserver(
-            forName: NSWindow.didChangeOcclusionStateNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            let window = note.object as? NSWindow
-            Task { @MainActor in
-                guard let self, let window else { return }
-                self.applyActivationPolicyForCurrentWindows()
-                Self.ensureWindowAutosaves(window)
-                Self.ensureWindowOnScreen(window)
-            }
-        }
-        windowObservers.append(didBecomeVisible)
         let didBecomeKey = center.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -501,39 +466,10 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// so this function doesn't touch the frame.
     private static func ensureWindowAutosaves(_ window: NSWindow) {
         guard window.canBecomeMain, !(window is NSPanel) else { return }
-        // Once per window: adopt ONE stable key and stop trusting SwiftUI's.
-        guard window.frameAutosaveName != mainWindowAutosaveName else { return }
-
-        // SwiftUI mints per-instance autosave names — `main`,
-        // `main-AppWindow-1`, `Pacer.ContentView-1-AppWindow-1` — and which
-        // one a relaunched window is given is not stable. This machine had
-        // five saved frames under four different names, spread across two
-        // displays, so "restore the window" meant restoring whichever
-        // display the window had happened to sit on when that particular
-        // name was last written. Pinning our own name collapses that to one
-        // answer.
-        window.setFrameAutosaveName(mainWindowAutosaveName)
-
-        // Restore only a frame worth restoring. A saved frame can be
-        // unusable in two ways that both end with the user staring at
-        // nothing: it can name a display that is no longer connected, and
-        // it can be a degenerate leftover (this machine's stale
-        // `PacerMainWindow` entry was 400×133, written before the key was
-        // used for the real window). Either way, keeping where we are and
-        // seeding the key from it is strictly better than obeying it.
-        let current = window.frame
-        if window.setFrameUsingName(mainWindowAutosaveName), !isUsable(window.frame) {
-            window.setFrame(current, display: false)
+        if window.frameAutosaveName.isEmpty {
+            window.setFrameAutosaveName(mainWindowAutosaveName)
         }
-        // Seed/refresh the key so the next launch has exactly one candidate.
-        window.saveFrame(usingName: mainWindowAutosaveName)
-    }
-
-    /// Whether a restored frame is one the user could actually work with:
-    /// on a connected screen, and not collapsed to a sliver.
-    private static func isUsable(_ frame: NSRect) -> Bool {
-        guard frame.width >= 480, frame.height >= 320 else { return false }
-        return NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        applyMenuBarAppBehavior(window)
     }
 
     /// Make the main window behave like a tool window for a menu-bar
@@ -554,27 +490,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Manager normally).
     private static func applyMenuBarAppBehavior(_ window: NSWindow) {
         window.collectionBehavior.insert(.moveToActiveSpace)
-    }
-
-    /// Undo `applyMenuBarAppBehavior` once the window has been brought
-    /// across.
-    ///
-    /// `.moveToActiveSpace` is not a property of the *gesture*, it is a
-    /// property of the *window* — so leaving it applied means the window
-    /// follows onto the active Space every time it is shown, including on
-    /// the relaunch after a dev install, which is nobody's intent. Pairing
-    /// each apply with a removal keeps the behavior scoped to the moment
-    /// the user asked for the window, and lets it otherwise belong to the
-    /// Space and display they left it on.
-    ///
-    /// Removal is deferred one runloop turn so it lands after AppKit has
-    /// finished ordering the window front; clearing it synchronously can
-    /// race the move it was meant to cause. Once the window is on a Space,
-    /// dropping the behavior does not move it back.
-    private static func releaseMenuBarAppBehavior(_ window: NSWindow) {
-        DispatchQueue.main.async {
-            window.collectionBehavior.remove(.moveToActiveSpace)
-        }
     }
 
     /// macOS persists the main window's frame across launches via the
@@ -945,8 +860,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let target { Self.reposition(window, onto: target) }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
-            // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
-            Self.releaseMenuBarAppBehavior(window)
             return true
         }
         // Cold open: the window doesn't exist yet and will materialize
