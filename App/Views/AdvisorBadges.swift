@@ -10,8 +10,20 @@ import PacerUI
 /// when the underlying conditions are clearly true. Hidden entirely when
 /// no hints fire, so the header stays calm in the common case.
 struct AdvisorBadges: View {
-    @Query private var todayAggregates: [DailyAggregate]
-    @Query private var weekAggregates: [DailyAggregate]
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @Query private var globalWeek: [DailyAggregate]
+    @Query private var scopedWeek: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. A "spending faster than usual" notice about
+    /// usage the user has scoped out of view would be noise.
+    private var todayAggregates: [DailyRow] {
+        scope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
+    private var weekAggregates: [DailyRow] {
+        scope.isAll ? globalWeek.map(\.dailyRow) : scopedWeek.map(\.dailyRow)
+    }
     @Query(AdvisorBadges.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Hints cached behind the scan-meta tick. Without this, the
@@ -35,18 +47,29 @@ struct AdvisorBadges: View {
         let detail: String
     }
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         let today = TokenSample.formatDate(Date())
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         let cal = Calendar.current
         let weekAgo = TokenSample.formatDate(
             cal.date(byAdding: .day, value: -6, to: Date()) ?? Date()
         )
-        _todayAggregates = Query(
+        _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )
-        _weekAggregates = Query(
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
+        )
+        _globalWeek = Query(
             filter: #Predicate<DailyAggregate> {
                 $0.date >= weekAgo && $0.date <= today
+            }
+        )
+        _scopedWeek = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= weekAgo && $0.date <= today && $0.accountId == acct
             }
         )
     }
@@ -65,7 +88,7 @@ struct AdvisorBadges: View {
         )
     }
 
-    private static func toTotals(_ row: DailyAggregate) -> UsageHints.ModelTotals {
+    private static func toTotals(_ row: DailyRow) -> UsageHints.ModelTotals {
         UsageHints.ModelTotals(
             model: row.model,
             costUSD: row.totalCostUSD,

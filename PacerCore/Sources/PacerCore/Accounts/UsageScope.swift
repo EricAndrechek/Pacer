@@ -196,13 +196,16 @@ public extension AccountSessionInfo {
 public final class UsageScope {
     public static let shared = UsageScope()
 
-    private static let key = "PacerUsageScopeAccountId"
+    /// Lives in the App Group suite, not `.standard`: the widget extension is
+    /// a separate process and cannot see the app's standard defaults, so a
+    /// scope stored there would be invisible to every widget by construction.
+    public static let key = "PacerUsageScopeAccountId"
 
     /// nil means every account combined.
     public private(set) var accountId: String?
 
     private init() {
-        accountId = UserDefaults.standard.string(forKey: Self.key)
+        accountId = PacerPreferences.store.string(forKey: Self.key)
     }
 
     public var isAll: Bool { accountId == nil }
@@ -210,10 +213,16 @@ public final class UsageScope {
     public func select(_ accountId: String?) {
         self.accountId = accountId
         if let accountId {
-            UserDefaults.standard.set(accountId, forKey: Self.key)
+            PacerPreferences.store.set(accountId, forKey: Self.key)
         } else {
-            UserDefaults.standard.removeObject(forKey: Self.key)
+            PacerPreferences.store.removeObject(forKey: Self.key)
         }
+    }
+
+    /// The scope as any process can read it, including the widget extension
+    /// which has no `UsageScope` instance of its own.
+    public static var storedAccountId: String? {
+        PacerPreferences.store.string(forKey: key)
     }
 
     /// Stands in for "no account selected" in a scoped `@Query`, so the

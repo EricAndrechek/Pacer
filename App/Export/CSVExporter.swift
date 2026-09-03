@@ -18,12 +18,42 @@ import PacerCore
 @MainActor
 enum CSVExporter {
 
+
+    /// Daily rows for the current scope, normalised so each exporter reads one
+    /// shape. An export should contain what the window was showing — handing
+    /// someone a spreadsheet of all accounts while their screen said one would
+    /// be a silent change of subject, and a CSV outlives the screen that
+    /// produced it.
+    private static func dailyRows(context: ModelContext) throws -> [DailyRow] {
+        if let acct = UsageScope.storedAccountId {
+            return try context.fetch(FetchDescriptor<AccountDailyAggregate>(
+                predicate: #Predicate { $0.accountId == acct },
+                sortBy: [SortDescriptor(\.date), SortDescriptor(\.model)]
+            )).map(\.dailyRow)
+        }
+        return try context.fetch(FetchDescriptor<DailyAggregate>(
+            sortBy: [SortDescriptor(\.date), SortDescriptor(\.model)]
+        )).map(\.dailyRow)
+    }
+
+    /// Project rows for the current scope. Same reasoning as `dailyRows`.
+    private static func projectRows(
+        context: ModelContext
+    ) throws -> [any ProjectDailyReadable] {
+        if let acct = UsageScope.storedAccountId {
+            return try context.fetch(FetchDescriptor<AccountProjectDailyAggregate>(
+                predicate: #Predicate { $0.accountId == acct },
+                sortBy: [SortDescriptor(\.projectPath), SortDescriptor(\.date)]
+            ))
+        }
+        return try context.fetch(FetchDescriptor<ProjectDailyAggregate>(
+            sortBy: [SortDescriptor(\.projectPath), SortDescriptor(\.date)]
+        ))
+    }
+
     static func dailyByModel(context: ModelContext) {
         do {
-            let descriptor = FetchDescriptor<DailyAggregate>(
-                sortBy: [SortDescriptor(\.date), SortDescriptor(\.model)]
-            )
-            let rows = try context.fetch(descriptor)
+            let rows = try dailyRows(context: context)
             var csv = "date,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,total_cost_usd\n"
             for r in rows {
                 csv += "\(r.date),\(escape(r.model)),\(r.inputTokens),\(r.outputTokens),\(r.cacheReadTokens),\(r.cacheCreation5mTokens),\(r.cacheCreation1hTokens),\(format(r.totalCostUSD))\n"
@@ -39,10 +69,7 @@ enum CSVExporter {
 
     static func dailyTotals(context: ModelContext) {
         do {
-            let descriptor = FetchDescriptor<DailyAggregate>(
-                sortBy: [SortDescriptor(\.date)]
-            )
-            let rows = try context.fetch(descriptor)
+            let rows = try dailyRows(context: context)
             // Sum across models within each date.
             struct Acc {
                 var input: Int64 = 0
@@ -86,10 +113,7 @@ enum CSVExporter {
             // `ProjectAggregateRecomputer`, so the CSV matches what
             // the app shows by construction — no per-row pricing call
             // on this code path.
-            let descriptor = FetchDescriptor<ProjectDailyAggregate>(
-                sortBy: [SortDescriptor(\.projectPath), SortDescriptor(\.date)]
-            )
-            let rows = try context.fetch(descriptor)
+            let rows = try projectRows(context: context)
             struct Acc {
                 var input: Int64 = 0
                 var output: Int64 = 0
