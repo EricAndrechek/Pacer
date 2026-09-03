@@ -119,7 +119,9 @@ public final class ScanCoordinator {
     ///          that write `HourlyAggregate`. Existing stores need one
     ///          rebuild to populate it, exactly as "8" did for the daily
     ///          rollup.
-    public static let currentCostRecomputeVersion = "10"
+    /// - "11" — `AccountProjectDailyAggregate` arrived. Same reason as "8"
+    ///          and "10": the rows only exist for buckets recomputed since.
+    public static let currentCostRecomputeVersion = "11"
 
     /// Generation of the duplicate-turn repair.
     ///

@@ -141,6 +141,17 @@ check "account-hourly tokens equal hourly" 0 "$(q "
   WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
 check "account-hourly cost equals hourly" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZHOURLYAGGREGATE")" \
   "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTHOURLYAGGREGATE")"
+# Tokens and cost only. Session and model COUNTS deliberately aren't checked:
+# a session spanning an account switch belongs to both accounts' sets and once
+# to the global one, so the per-account counts legitimately don't sum.
+check "account-project tokens equal project" 0 "$(q "
+  WITH a AS (SELECT ZPROJECTPATH p, ZDATE d, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTPROJECTDAILYAGGREGATE GROUP BY p, d)
+  SELECT COUNT(*) FROM a JOIN ZPROJECTDAILYAGGREGATE g
+    ON g.ZPROJECTPATH=a.p AND g.ZDATE=a.d
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account-project cost equals project" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTPROJECTDAILYAGGREGATE")"
 
 # Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
 # to prevent — it means the same turn was counted twice, inflating tokens and

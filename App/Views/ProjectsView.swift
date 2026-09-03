@@ -16,6 +16,9 @@ import PacerUI
 /// `UserDefaults` under per-view keys so Models doesn't share state
 /// with Projects.
 struct ProjectsView: View {
+    /// Read here so a scope change re-runs the child initialiser — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
     @AppStorage("pacer.projects.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
@@ -80,6 +83,7 @@ struct ProjectsView: View {
         ) {
             ProjectsContent(
                 range: range,
+                scopeAccountId: scope.accountId,
                 sort: sort,
                 descending: sortDescending,
                 overviewMetric: overviewMetric,
@@ -216,7 +220,16 @@ enum ProjectMetric: String, CaseIterable, Identifiable {
 }
 
 private struct ProjectsContent: View {
-    @Query private var aggregates: [ProjectDailyAggregate]
+    @Query private var globalAggregates: [ProjectDailyAggregate]
+    /// The same rollup sliced to one account; `scope` picks which is read.
+    @Query private var scopedAggregates: [AccountProjectDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [any ProjectDailyReadable] {
+        scope.isAll ? globalAggregates : scopedAggregates
+    }
     /// Singleton-row probe that fires exactly once per completed scan
     /// cycle. Drives the cache refresh below — far cheaper than
     /// recomputing `allRows` on every SwiftData notification.
@@ -298,6 +311,7 @@ private struct ProjectsContent: View {
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: ProjectSort,
         descending: Bool,
         overviewMetric: ProjectMetric,
@@ -338,12 +352,21 @@ private struct ProjectsContent: View {
         self.onNewCollection = onNewCollection
         self.onManageCollections = onManageCollections
         self.onEditCollection = onEditCollection
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let cutoffString {
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                }
+            )
         } else {
-            _aggregates = Query()
+            _globalAggregates = Query()
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> { $0.accountId == acct }
+            )
         }
     }
 

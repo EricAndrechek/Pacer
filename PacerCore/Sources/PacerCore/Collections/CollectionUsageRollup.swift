@@ -33,7 +33,7 @@ public enum CollectionUsageRollup {
 
     /// Per-leaf-path totals, computed once. O(aggregates).
     public static func perPathTotals(
-        from aggregates: [ProjectDailyAggregate]
+        from aggregates: [any ProjectDailyReadable]
     ) -> [String: ProjectUsageTotals] {
         var map: [String: ProjectUsageTotals] = [:]
         map.reserveCapacity(aggregates.count)
@@ -75,7 +75,7 @@ public enum CollectionUsageRollup {
     /// and `totals` agree.
     public static func resolveAll(
         collections: [ProjectCollection],
-        aggregates: [ProjectDailyAggregate]
+        aggregates: [any ProjectDailyReadable]
     ) -> [CollectionRollupResult] {
         let perPath = perPathTotals(from: aggregates)
         let knownPaths = Array(perPath.keys)
