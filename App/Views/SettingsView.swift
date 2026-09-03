@@ -329,12 +329,13 @@ struct MenuBarCard: View {
                 }
                 Divider().opacity(0.4)
                 LabeledControlRow(label: "Icon style") {
-                    Picker("Icon style", selection: $iconRaw) {
-                        ForEach(PacerSettings.MenuBarIconStyle.allCases) { style in
-                            Text(style.label).tag(style.rawValue)
-                        }
-                    }
-                    .labelsHidden()
+                    PacerSelect(
+                        selection: $iconRaw,
+                        options: PacerSettings.MenuBarIconStyle.allCases.map {
+                            .init(value: $0.rawValue, title: $0.label)
+                        },
+                        width: 200
+                    )
                     .disabled(!iconIsEnabled)
                 }
                 // Single-glyph styles (gauge / ring-fill / dot) are painted by
@@ -345,18 +346,21 @@ struct MenuBarCard: View {
                     ringWindowPicker
                 } else {
                     LabeledControlRow(label: "Icon driver") {
-                        Picker("Icon driver", selection: driverSelection) {
-                            ForEach(windows) { window in
-                                Text(driverOptionLabel(window)).tag(window.key)
+                        PacerSelect(
+                            selection: driverSelection,
+                            options: windows.map {
+                                .init(value: $0.key, title: driverOptionLabel($0))
                             }
                             // A previously-chosen window that's no longer
                             // reported: keep the row so the selection stays
                             // visible and the fallback reads clearly.
-                            if !MenuBarWindows.driverIsResolvable(key: driverSelection.wrappedValue, windows: windows) {
-                                Text("Unavailable — using 5-hour").tag(driverSelection.wrappedValue)
-                            }
-                        }
-                        .labelsHidden()
+                            + (MenuBarWindows.driverIsResolvable(
+                                    key: driverSelection.wrappedValue, windows: windows)
+                               ? []
+                               : [.init(value: driverSelection.wrappedValue,
+                                        title: "Unavailable — using 5-hour")]),
+                            width: 220
+                        )
                         .disabled(!iconIsEnabled)
                     }
                     if showsDriverFallbackNote {
@@ -1369,13 +1373,11 @@ private struct DailySummaryCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("Send a daily summary banner", isOn: $dailySummaryEnabled)
                 LabeledControlRow(label: "Send at") {
-                    Picker("Send at", selection: $dailySummaryHour) {
-                        ForEach(0..<24, id: \.self) { h in
-                            Text(formatHour(h)).tag(h)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
+                    PacerSelect(
+                        selection: $dailySummaryHour,
+                        options: (0..<24).map { .init(value: $0, title: formatHour($0)) },
+                        width: 130
+                    )
                     .disabled(!dailySummaryEnabled)
                 }
             }

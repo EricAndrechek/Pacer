@@ -109,13 +109,6 @@ struct ContentView: View {
                     // sidebar used to host this; moving it to the
                     // toolbar matches Linear / Reeder / Things / etc.
                     // and frees the sidebar to be all-navigation.
-                    // Account scope sits beside the freshness pill and next
-                    // to the title bar's 5h/7d subtitle — which is the ACTIVE
-                    // account's — so the scope is next to the numbers it
-                    // qualifies. Renders nothing with one account.
-                    ToolbarItem(placement: .primaryAction) {
-                        ToolbarAccountScope()
-                    }
                     ToolbarItem(placement: .primaryAction) {
                         ToolbarFreshness()
                     }

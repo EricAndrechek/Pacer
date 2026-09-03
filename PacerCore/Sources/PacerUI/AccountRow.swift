@@ -76,12 +76,16 @@ public struct PacerAccountRow<Trailing: View>: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 14) {
                 PacerWindowReadout(label: "5h", percent: model.fiveHourPercent)
                 PacerWindowReadout(label: "7d", percent: model.sevenDayPercent)
             }
 
+            // Fixed width so the readouts above line up between rows. Without
+            // it a row carrying an "Active" badge pushes its percentages left
+            // of a row that has none, and the two columns visibly disagree.
             trailing()
+                .frame(width: 62, alignment: .trailing)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)
@@ -100,9 +104,20 @@ public struct PacerAccountRow<Trailing: View>: View {
 
 /// One rate-limit window as a label and a percentage, coloured by
 /// `UsageBand` — the app's single definition of what a percentage means.
+/// One rate-limit window: label, a bar, and the number.
+///
+/// The bar carries one encoding only — length is utilisation, colour is the
+/// `UsageBand` that utilisation falls in. Nothing else is folded in, so it
+/// cannot say two things at once.
+///
+/// The label is `.secondary` rather than `.tertiary`: tertiary on a dark card
+/// sits well under the contrast Apple's own guidance asks for, and these are
+/// the only thing telling you which window a number belongs to.
 public struct PacerWindowReadout: View {
     public let label: String
     public let percent: Double?
+
+    private static let barWidth: CGFloat = 44
 
     public init(label: String, percent: Double?) {
         self.label = label
@@ -110,15 +125,27 @@ public struct PacerWindowReadout: View {
     }
 
     public var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Capsule()
+                .fill(Color.primary.opacity(0.12))
+                .frame(width: Self.barWidth, height: 4)
+                .overlay(alignment: .leading) {
+                    if let percent {
+                        Capsule()
+                            .fill(UsageBand(percentage: percent).color)
+                            .frame(
+                                width: max(2, Self.barWidth * min(1, percent / 100)),
+                                height: 4)
+                    }
+                }
             Text(percent.map { "\(Int($0.rounded()))%" } ?? "—")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11, weight: .semibold))
                 .monospacedDigit()
                 .foregroundStyle(percent.map { UsageBand(percentage: $0).color } ?? .secondary)
+                .frame(width: 34, alignment: .trailing)
         }
-        .frame(width: 52, alignment: .leading)
     }
 }

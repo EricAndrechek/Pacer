@@ -102,7 +102,23 @@ public struct PacerChoiceList<Value: Hashable>: View {
         self.onPick = onPick
     }
 
+    /// Beyond this many rows the popover would run off the screen — the
+    /// "Send at" hour picker has 24. A computed property because a generic
+    /// type cannot hold a static stored one.
+    private var scrollThreshold: Int { 10 }
+
     public var body: some View {
+        Group {
+            if options.count > scrollThreshold {
+                ScrollView { rows }.frame(maxHeight: 260)
+            } else {
+                rows
+            }
+        }
+        .padding(6)
+    }
+
+    private var rows: some View {
         VStack(alignment: .leading, spacing: 1) {
             ForEach(options) { option in
                 let selected = isSelected(option.value)
@@ -131,6 +147,5 @@ public struct PacerChoiceList<Value: Hashable>: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(6)
     }
 }
