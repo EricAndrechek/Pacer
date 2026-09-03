@@ -81,7 +81,17 @@ struct MenuBarLabel: View {
 
     /// Today's aggregates for cost / tokens chips. Filtered by date so
     /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
-    @Query private var todayAggregates: [DailyAggregate]
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @State private var menuScope = UsageScope.shared
+
+    /// Follows the window's account scope. The menu bar is ambient, so an
+    /// argument exists for it always showing every account — but two numbers
+    /// on screen at once disagreeing about "today's cost" is worse than
+    /// either answer, and the scope is a deliberate choice the user made.
+    private var todayAggregates: [DailyRow] {
+        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
 
     /// Single most recent TokenSample, for the active-model chip. Cap
     /// to 1 — we never need any other field besides `model`.
@@ -96,8 +106,18 @@ struct MenuBarLabel: View {
 
     init() {
         let today = TokenSample.formatDate(Date())
-        _todayAggregates = Query(
+        // Read from the shared store rather than taken as a parameter: the
+        // menu bar is constructed by AppKit, not by a parent view that could
+        // pass it down. A scope change is picked up on the next construction,
+        // which for a menu is every time it opens.
+        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
+        )
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
         )
     }
 
@@ -464,7 +484,17 @@ private struct MenuBarLabelContent: View, Equatable {
 struct MenuStatusContent: View {
     @Query(MenuStatusContent.recentDescriptor)
     private var rateLimits: [RateLimitSample]
-    @Query private var todayAggregates: [DailyAggregate]
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @State private var menuScope = UsageScope.shared
+
+    /// Follows the window's account scope. The menu bar is ambient, so an
+    /// argument exists for it always showing every account — but two numbers
+    /// on screen at once disagreeing about "today's cost" is worse than
+    /// either answer, and the scope is a deliberate choice the user made.
+    private var todayAggregates: [DailyRow] {
+        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
 
     /// Recent scoped `limits[]` rows — the source of the dynamic per-model
     /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
@@ -508,8 +538,18 @@ struct MenuStatusContent: View {
 
     init() {
         let today = TokenSample.formatDate(Date())
-        _todayAggregates = Query(
+        // Read from the shared store rather than taken as a parameter: the
+        // menu bar is constructed by AppKit, not by a parent view that could
+        // pass it down. A scope change is picked up on the next construction,
+        // which for a menu is every time it opens.
+        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
+        )
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
         )
     }
 

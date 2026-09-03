@@ -95,6 +95,18 @@ struct NotificationsHost: View {
         return d
     }()
 
+    /// **Deliberately global, unlike every display surface.**
+    ///
+    /// A view shows what you asked to see; an alert tells you something you
+    /// did not ask about. Making a spend threshold conditional on a view
+    /// filter means real overspend goes unreported because of an unrelated UI
+    /// choice — you scope the dashboard to work in the morning and stop being
+    /// told about personal spend for the rest of the day. A budget alarm that
+    /// a display preference can silence is a footgun, so these rules always
+    /// evaluate across every account.
+    ///
+    /// Per-account *rules* are a reasonable feature; inheriting the window's
+    /// scope is not the way to get them.
     init() {
         let today = TokenSample.formatDate(Date())
         let weekAgo = TokenSample.formatDate(

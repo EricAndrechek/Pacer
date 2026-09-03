@@ -12,6 +12,14 @@ import SwiftData
 /// Dates encode as ISO-8601 strings; durations are integer seconds-from-now.
 /// Bump `schemaVersion` on a breaking change; additive fields don't require a
 /// bump.
+/// **Deliberately does not follow the app's account scope.**
+///
+/// The scope is a *display* preference for one window. A scripted consumer —
+/// the `usage-guard` skill, a status bar, a CI gate — wants to say what it
+/// means, and would otherwise get different numbers depending on what a
+/// human last clicked in an app it cannot see. So this reports every account,
+/// always. Per-account figures belong behind an explicit request parameter,
+/// which is a feature to add rather than a preference to inherit.
 public struct PacerSnapshotPayload: Codable, Sendable {
     public let schemaVersion: Int
     public let generatedAt: Date

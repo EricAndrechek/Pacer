@@ -111,11 +111,20 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
             let cutoff = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
             )
-            let descriptor = FetchDescriptor<ProjectDailyAggregate>(
-                predicate: #Predicate<ProjectDailyAggregate> { $0.date >= cutoff },
-                sortBy: [SortDescriptor(\.date, order: .reverse)]
-            )
-            let inRange = try context.fetch(descriptor)
+            // Follows the window's account scope, read from App Group
+            // defaults.
+            let inRange: [any ProjectDailyReadable]
+            if let acct = UsageScope.storedAccountId {
+                inRange = try context.fetch(FetchDescriptor<AccountProjectDailyAggregate>(
+                    predicate: #Predicate<AccountProjectDailyAggregate> {
+                        $0.date >= cutoff && $0.accountId == acct
+                    },
+                    sortBy: [SortDescriptor(\.date, order: .reverse)]))
+            } else {
+                inRange = try context.fetch(FetchDescriptor<ProjectDailyAggregate>(
+                    predicate: #Predicate<ProjectDailyAggregate> { $0.date >= cutoff },
+                    sortBy: [SortDescriptor(\.date, order: .reverse)]))
+            }
 
             // Pinned-project focus mode: filter to that project's rows
             // only, build a per-day series for the sparkline.

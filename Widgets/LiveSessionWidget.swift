@@ -59,11 +59,21 @@ struct LiveSessionProvider: TimelineProvider {
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
-            var descriptor = FetchDescriptor<SessionInfo>(
-                sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
-            )
-            descriptor.fetchLimit = 1
-            let rows = try context.fetch(descriptor)
+            // Follows the window's account scope: the most recent session
+            // *in that scope*, not the most recent overall.
+            let rows: [SessionRow]
+            if let acct = UsageScope.storedAccountId {
+                var d = FetchDescriptor<AccountSessionInfo>(
+                    predicate: #Predicate<AccountSessionInfo> { $0.accountId == acct },
+                    sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
+                d.fetchLimit = 1
+                rows = try context.fetch(d).map(\.sessionRow)
+            } else {
+                var d = FetchDescriptor<SessionInfo>(
+                    sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
+                d.fetchLimit = 1
+                rows = try context.fetch(d).map(\.sessionRow)
+            }
             guard let s = rows.first else {
                 return LiveSessionEntry(date: Date(), session: nil)
             }

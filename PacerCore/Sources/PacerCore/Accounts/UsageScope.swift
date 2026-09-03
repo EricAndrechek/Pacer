@@ -199,7 +199,7 @@ public final class UsageScope {
     /// Lives in the App Group suite, not `.standard`: the widget extension is
     /// a separate process and cannot see the app's standard defaults, so a
     /// scope stored there would be invisible to every widget by construction.
-    public static let key = "PacerUsageScopeAccountId"
+    public nonisolated static let key = "PacerUsageScopeAccountId"
 
     /// nil means every account combined.
     public private(set) var accountId: String?
@@ -221,7 +221,11 @@ public final class UsageScope {
 
     /// The scope as any process can read it, including the widget extension
     /// which has no `UsageScope` instance of its own.
-    public static var storedAccountId: String? {
+    ///
+    /// `nonisolated` because it is a plain defaults read with no shared
+    /// mutable state, and its callers — the widget timelines and the CSV
+    /// exporter — run outside the main actor.
+    public nonisolated static var storedAccountId: String? {
         PacerPreferences.store.string(forKey: key)
     }
 
@@ -229,5 +233,29 @@ public final class UsageScope {
     /// predicate is always well-formed. Matches nothing — when the scope is
     /// "all accounts" the card reads the global table instead, and the scoped
     /// query costs an indexed miss.
-    public static let noAccountSentinel = "\u{0000}none"
+    public nonisolated static let noAccountSentinel = "\u{0000}none"
+}
+
+/// Scope-aware reads for processes with no `UsageScope` instance — the widget
+/// extension and the CSV exporter both run outside the app's view tree.
+///
+/// The scope lives in App Group defaults precisely so these can see it: a
+/// widget showing every account while the window beside it shows one would be
+/// two answers to the same question on one screen.
+public enum ScopedReads {
+    /// Daily rows for the stored scope, normalised to `DailyRow`.
+    public static func daily(
+        _ context: ModelContext,
+        wherePredicate globalPredicate: Predicate<DailyAggregate>? = nil,
+        scopedPredicate: (String) -> Predicate<AccountDailyAggregate>
+    ) -> [DailyRow] {
+        if let acct = UsageScope.storedAccountId {
+            var d = FetchDescriptor<AccountDailyAggregate>(predicate: scopedPredicate(acct))
+            d.sortBy = [SortDescriptor(\.date, order: .reverse)]
+            return ((try? context.fetch(d)) ?? []).map(\.dailyRow)
+        }
+        var d = FetchDescriptor<DailyAggregate>(predicate: globalPredicate)
+        d.sortBy = [SortDescriptor(\.date, order: .reverse)]
+        return ((try? context.fetch(d)) ?? []).map(\.dailyRow)
+    }
 }
