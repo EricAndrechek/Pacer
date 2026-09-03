@@ -167,6 +167,7 @@ public final class AggregateRecomputer {
         ).first
         guard let existing else { return false }
 
+        var perAccount: [String: (sum: TokenBreakdown, cost: Double)] = [:]
         for sample in pending {
             existing.inputTokens += sample.inputTokens
             existing.outputTokens += sample.outputTokens
@@ -194,10 +195,24 @@ public final class AggregateRecomputer {
             // to an existing row rather than rebuilding it, so it never went
             // near `syncAccountRows`, and every incrementally-applied sample
             // landed in the global total and nowhere else.
+            //
+            // Accumulated here and written once per account below. Writing it
+            // per sample cost a fetch each time, and a fetch against a context
+            // holding many uncommitted inserts has to merge them — which
+            // showed up not here but in the *session* recomputer later in the
+            // same cycle, at 36 ms to 1,300 ms. Pending-change churn is
+            // charged to whoever fetches next.
+            let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
+            var bucket = perAccount[accountKey] ?? (TokenBreakdown(), 0)
+            bucket.sum.add(breakdown)
+            bucket.cost += sampleCost
+            perAccount[accountKey] = bucket
+        }
+
+        for (accountId, bucket) in perAccount {
             try applyToAccountRow(
-                accountId: sample.accountId ?? AccountDailyAggregate.unattributedKey,
-                date: pair.date, model: pair.model,
-                breakdown: breakdown, cost: sampleCost)
+                accountId: accountId, date: pair.date, model: pair.model,
+                breakdown: bucket.sum, cost: bucket.cost)
         }
         stats.aggregatesUpserted += 1
         stats.fastPathApplied += 1
