@@ -408,10 +408,15 @@ public final class SamplePersister {
         // switch, and stamping those with the current account would move
         // usage across the boundary that just occurred.
         //
-        // rootPath is nil because only the default login's transcripts are
-        // scanned today; see `AccountTrailRecorder.poll` for what has to
-        // change before that stops being true.
-        sample.accountId = accountTrail.accountId(at: sample.sampledAt, rootPath: nil)
+        // The entry's own root decides, not the default login. A root no
+        // activation has claimed falls back to the default-login spans, so
+        // the ordinary single-profile case is unaffected — but a session
+        // pinned to its own `CLAUDE_CONFIG_DIR` is now separable, which is
+        // the whole point: with two accounts live at once the timestamp
+        // alone has two answers.
+        sample.accountId = accountTrail.accountId(
+            at: sample.sampledAt, rootPath: entry.rootPath
+        )
         context.insert(sample)
         if sample.sampledAt > indexWatermark { indexWatermark = sample.sampledAt }
         indexNeedsWrite = true
