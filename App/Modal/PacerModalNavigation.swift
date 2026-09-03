@@ -1,4 +1,5 @@
 import SwiftUI
+import PacerCore
 import AppKit
 import PacerUI
 
@@ -131,21 +132,28 @@ public extension EnvironmentValues {
 /// Resolves a `PacerModalDestination` to its concrete view.
 struct PacerModalRouter: View {
     let destination: PacerModalDestination
+    /// Drill-downs inherit the scope of the view they were opened from —
+    /// clicking a bar in a scoped chart and getting all-accounts detail
+    /// would be a silent change of subject. Read here so a scope change
+    /// re-runs the child initialisers.
+    @State private var scope = UsageScope.shared
 
     var body: some View {
         switch destination {
         case .day(let date):
-            DayDetailView(date: date)
+            DayDetailView(date: date, scopeAccountId: scope.accountId)
         case .project(let path, let displayName, let since):
             ProjectDetailView(
                 projectPath: path,
                 displayName: displayName,
-                since: since
+                since: since,
+                scopeAccountId: scope.accountId
             )
         case .session(let sessionId, let projectDisplayName):
             SessionDetailView(
                 sessionId: sessionId,
-                projectDisplayName: projectDisplayName
+                projectDisplayName: projectDisplayName,
+                scopeAccountId: scope.accountId
             )
         case .projection(let window):
             ProjectionCompareModal(windowKey: window)

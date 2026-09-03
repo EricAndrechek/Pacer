@@ -219,6 +219,9 @@ public protocol ProjectDailyReadable {
     var sessionCount: Int { get }
     var modelCount: Int { get }
     var lastActive: Date { get }
+    /// The per-model side-tables the project detail view breaks down by.
+    var modelTokensJSON: Data { get }
+    var modelCostJSON: Data { get }
 }
 
 extension ProjectDailyAggregate: ProjectDailyReadable {}

@@ -107,6 +107,82 @@ public extension AccountHourlyAggregate {
     }
 }
 
+/// One session, independent of which table it came from.
+///
+/// Completes the set alongside `DailyRow` and `HourlyRow` so the drill-down
+/// modals can render either the global or the per-account session table.
+public struct SessionRow: Sendable, Equatable, Identifiable {
+    public let sessionId: String
+    public let firstSeenAt: Date
+    public let lastSeenAt: Date
+    public let projectPath: String
+    public let ccVersion: String?
+    public let cumulativeCostUSD: Double
+    public let cumulativeInputTokens: Int64
+    public let cumulativeOutputTokens: Int64
+    public let cumulativeCacheReadTokens: Int64
+    public let cumulativeCacheCreation5mTokens: Int64
+    public let cumulativeCacheCreation1hTokens: Int64
+    public let topModel: String
+
+    public var id: String { sessionId }
+    public var totalTokens: Int64 {
+        cumulativeInputTokens + cumulativeOutputTokens + cumulativeCacheReadTokens
+            + cumulativeCacheCreation5mTokens + cumulativeCacheCreation1hTokens
+    }
+
+    public init(
+        sessionId: String, firstSeenAt: Date, lastSeenAt: Date, projectPath: String,
+        ccVersion: String?, cumulativeCostUSD: Double,
+        cumulativeInputTokens: Int64, cumulativeOutputTokens: Int64,
+        cumulativeCacheReadTokens: Int64, cumulativeCacheCreation5mTokens: Int64,
+        cumulativeCacheCreation1hTokens: Int64, topModel: String
+    ) {
+        self.sessionId = sessionId
+        self.firstSeenAt = firstSeenAt
+        self.lastSeenAt = lastSeenAt
+        self.projectPath = projectPath
+        self.ccVersion = ccVersion
+        self.cumulativeCostUSD = cumulativeCostUSD
+        self.cumulativeInputTokens = cumulativeInputTokens
+        self.cumulativeOutputTokens = cumulativeOutputTokens
+        self.cumulativeCacheReadTokens = cumulativeCacheReadTokens
+        self.cumulativeCacheCreation5mTokens = cumulativeCacheCreation5mTokens
+        self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
+        self.topModel = topModel
+    }
+}
+
+public extension SessionInfo {
+    var sessionRow: SessionRow {
+        SessionRow(
+            sessionId: sessionId, firstSeenAt: firstSeenAt, lastSeenAt: lastSeenAt,
+            projectPath: projectPath, ccVersion: ccVersion,
+            cumulativeCostUSD: cumulativeCostUSD,
+            cumulativeInputTokens: cumulativeInputTokens,
+            cumulativeOutputTokens: cumulativeOutputTokens,
+            cumulativeCacheReadTokens: cumulativeCacheReadTokens,
+            cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
+            cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
+            topModel: topModel)
+    }
+}
+
+public extension AccountSessionInfo {
+    var sessionRow: SessionRow {
+        SessionRow(
+            sessionId: sessionId, firstSeenAt: firstSeenAt, lastSeenAt: lastSeenAt,
+            projectPath: projectPath, ccVersion: ccVersion,
+            cumulativeCostUSD: cumulativeCostUSD,
+            cumulativeInputTokens: cumulativeInputTokens,
+            cumulativeOutputTokens: cumulativeOutputTokens,
+            cumulativeCacheReadTokens: cumulativeCacheReadTokens,
+            cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
+            cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
+            topModel: topModel)
+    }
+}
+
 /// Which account's usage the cost and token views are showing.
 ///
 /// Rate limits are always the active account's — they are a property of the

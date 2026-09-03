@@ -20,22 +20,38 @@ struct SessionDetailView: View {
     /// session's `projectPath` at this layer.
     let projectDisplayName: String
 
-    @Query private var sessions: [SessionInfo]
+    @Query private var globalSessions: [SessionInfo]
+    @Query private var scopedSessions: [AccountSessionInfo]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. A session spanning a switch has real usage on
+    /// both sides, so the scoped row is that account's share of it.
+    private var sessions: [SessionRow] {
+        scope.isAll
+            ? globalSessions.map(\.sessionRow)
+            : scopedSessions.map(\.sessionRow)
+    }
     @State private var transcriptURL: URL?
 
-    init(sessionId: String, projectDisplayName: String) {
+    init(sessionId: String, projectDisplayName: String, scopeAccountId: String? = nil) {
         self.sessionId = sessionId
         self.projectDisplayName = projectDisplayName
         let id = sessionId
-        _sessions = Query(
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _globalSessions = Query(
             filter: #Predicate<SessionInfo> { $0.sessionId == id }
+        )
+        _scopedSessions = Query(
+            filter: #Predicate<AccountSessionInfo> {
+                $0.sessionId == id && $0.accountId == acct
+            }
         )
     }
 
     /// The looked-up SessionInfo, or nil while SwiftData hasn't
     /// hydrated the query yet (and the very-rare case where the
     /// session has been deleted since the modal opened).
-    private var session: SessionInfo? { sessions.first }
+    private var session: SessionRow? { sessions.first }
 
     var body: some View {
         PacerModalContent(
@@ -113,7 +129,7 @@ struct SessionDetailView: View {
     // MARK: - Summary
 
     @ViewBuilder
-    private func summaryCard(for session: SessionInfo) -> some View {
+    private func summaryCard(for session: SessionRow) -> some View {
         PacerCard("Summary") {
             LazyVGrid(
                 columns: Array(
@@ -140,7 +156,7 @@ struct SessionDetailView: View {
     /// `firstSeen → lastSeen`. Compact ("3h 12m"); hour granularity for
     /// long-running sessions, second granularity for sub-minute hits so
     /// "0m" is never the answer.
-    private static func durationLabel(for session: SessionInfo) -> String {
+    private static func durationLabel(for session: SessionRow) -> String {
         let seconds = max(0, session.lastSeenAt.timeIntervalSince(session.firstSeenAt))
         if seconds < 60 { return "\(Int(seconds))s" }
         let minutes = Int(seconds / 60)
@@ -156,7 +172,7 @@ struct SessionDetailView: View {
     // MARK: - Tokens
 
     @ViewBuilder
-    private func tokensCard(for session: SessionInfo) -> some View {
+    private func tokensCard(for session: SessionRow) -> some View {
         PacerCard("Tokens") {
             VStack(alignment: .leading, spacing: 8) {
                 tokenRow("Input", session.cumulativeInputTokens, hint: "uncached prompt bytes")
@@ -191,7 +207,7 @@ struct SessionDetailView: View {
     // MARK: - Metadata
 
     @ViewBuilder
-    private func metadataCard(for session: SessionInfo) -> some View {
+    private func metadataCard(for session: SessionRow) -> some View {
         PacerCard("Details") {
             VStack(alignment: .leading, spacing: 10) {
                 metadataRow(

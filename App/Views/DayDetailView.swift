@@ -12,7 +12,25 @@ struct DayDetailView: View {
     let date: String  // YYYY-MM-DD
 
     @Environment(\.pacerModalPush) private var push
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one — drilling into a day should show the same
+    /// scope the chart you clicked was showing.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+    private var projectAggregatesForDay: [any ProjectDailyReadable] {
+        scope.isAll ? globalProjectsForDay : scopedProjectsForDay
+    }
+    private var sessionRows: [SessionRow] {
+        scope.isAll
+            ? globalSessionRows.map(\.sessionRow)
+            : scopedSessionRows.map(\.sessionRow)
+    }
     /// Per-project rollup for this day. `ProjectDailyAggregate` is keyed
     /// `(projectPath, date)` and already carries the per-bucket sums the
     /// Projects card needs — we used to materialize every TokenSample
@@ -21,30 +39,51 @@ struct DayDetailView: View {
     /// scan tick. The rollup is maintained by `ProjectAggregateRecomputer`
     /// with the same cost mode the recomputers everywhere use, so the
     /// numbers stay consistent with Projects / ProjectDetail.
-    @Query private var projectAggregatesForDay: [ProjectDailyAggregate]
-    @Query private var sessionRows: [SessionInfo]
+    @Query private var globalProjectsForDay: [ProjectDailyAggregate]
+    @Query private var scopedProjectsForDay: [AccountProjectDailyAggregate]
+    @Query private var globalSessionRows: [SessionInfo]
+    @Query private var scopedSessionRows: [AccountSessionInfo]
     @Query(DayDetailView.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     @State private var cached = Cached()
 
-    init(date: String) {
+    init(date: String, scopeAccountId: String? = nil) {
         self.date = date
-        _aggregates = Query(
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == date }
         )
-        _projectAggregatesForDay = Query(
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == date && $0.accountId == acct
+            }
+        )
+        _globalProjectsForDay = Query(
             filter: #Predicate<ProjectDailyAggregate> { $0.date == date }
+        )
+        _scopedProjectsForDay = Query(
+            filter: #Predicate<AccountProjectDailyAggregate> {
+                $0.date == date && $0.accountId == acct
+            }
         )
         // Sessions that touched this day: overlap on [dayStart, dayEnd].
         // A session spanning multiple days shows up on every day it was
         // active. Filter via lastSeenAt ≥ dayStart AND firstSeenAt < dayEnd.
         let dayStart = Self.startOfDay(for: date)
         let dayEnd = dayStart.addingTimeInterval(86400)
-        _sessionRows = Query(
+        _globalSessionRows = Query(
             filter: #Predicate<SessionInfo> {
                 $0.lastSeenAt >= dayStart && $0.firstSeenAt < dayEnd
             },
             sort: \.lastSeenAt,
+            order: .reverse
+        )
+        _scopedSessionRows = Query(
+            filter: #Predicate<AccountSessionInfo> {
+                $0.accountId == acct
+                && $0.lastSeenAt >= dayStart && $0.firstSeenAt < dayEnd
+            },
+            sort: \AccountSessionInfo.lastSeenAt,
             order: .reverse
         )
     }
@@ -86,13 +125,13 @@ struct DayDetailView: View {
     private struct Cached {
         var totals = Totals()
         var projectRows: [ProjectRow] = []
-        var sortedAggregates: [DailyAggregate] = []
+        var sortedAggregates: [DailyRow] = []
         var sortedProjectRows: [ProjectRow] = []
     }
 
     private var totals: Totals { cached.totals }
     private var projectRows: [ProjectRow] { cached.projectRows }
-    private var sortedAggregates: [DailyAggregate] { cached.sortedAggregates }
+    private var sortedAggregates: [DailyRow] { cached.sortedAggregates }
     private var sortedProjectRows: [ProjectRow] { cached.sortedProjectRows }
 
     @MainActor
@@ -131,7 +170,7 @@ struct DayDetailView: View {
         // ticks are O(rows) over an already-built array.
         let sortedByCost = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
         var running = 0.0
-        var built: [(agg: DailyAggregate, max: Double)] = []
+        var built: [(agg: DailyRow, max: Double)] = []
         built.reserveCapacity(sortedByCost.count)
         for agg in sortedByCost {
             running += agg.totalCostUSD
@@ -153,13 +192,13 @@ struct DayDetailView: View {
         )
     }
 
-    private func applyModelsSort(to source: [DailyAggregate]) -> [DailyAggregate] {
-        let primary: (DailyAggregate, DailyAggregate) -> Bool
+    private func applyModelsSort(to source: [DailyRow]) -> [DailyRow] {
+        let primary: (DailyRow, DailyRow) -> Bool
         switch modelsSort {
         case .name:
             primary = { $0.model < $1.model }
         case .tokens:
-            let totalTokens: (DailyAggregate) -> Int64 = {
+            let totalTokens: (DailyRow) -> Int64 = {
                 $0.inputTokens + $0.outputTokens
             }
             primary = { totalTokens($0) < totalTokens($1) }
@@ -371,8 +410,8 @@ struct DayDetailView: View {
     /// Recomputed in `refreshCache()`; hover lookups walk the table
     /// without re-sorting. Without this every hover tick was an
     /// N·log(N) sort + a fresh `cumulative += ...` loop.
-    @State private var sortedAggsByCost: [DailyAggregate] = []
-    @State private var aggCumulative: [(agg: DailyAggregate, max: Double)] = []
+    @State private var sortedAggsByCost: [DailyRow] = []
+    @State private var aggCumulative: [(agg: DailyRow, max: Double)] = []
 
     /// VoiceOver summary of the per-model donut for this day.
     private var modelsAccessibilitySummary: String {
@@ -384,7 +423,7 @@ struct DayDetailView: View {
         }.joined(separator: ", ")
     }
 
-    private var hoveredAgg: DailyAggregate? {
+    private var hoveredAgg: DailyRow? {
         guard let angle = hoveredAggAngle, !aggCumulative.isEmpty else { return nil }
         for entry in aggCumulative where angle <= entry.max {
             return entry.agg
@@ -452,7 +491,7 @@ struct DayDetailView: View {
                     }
                     Divider().padding(.vertical, 2)
                     let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                    ForEach(sortedAggregates, id: \.dateModelKey) { agg in
+                    ForEach(sortedAggregates) { agg in
                         HStack(alignment: .firstTextBaseline) {
                             Circle()
                                 .fill(pacerModelColor(agg.model))
