@@ -450,6 +450,7 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 }
 
 private struct TopDaysCard: View {
+    @State private var scope = UsageScope.shared
     let range: TimeRange
     let onDayTap: (String) -> Void
 
@@ -469,13 +470,14 @@ private struct TopDaysCard: View {
         // matching comment on LifetimeSummaryCard for why.
         TopDaysContent(
             range: range,
+            scopeAccountId: scope.accountId,
             sort: sort,
             descending: descending,
             onDayTap: onDayTap,
             sortBinding: sortBinding,
             descendingBinding: $descending
         )
-        .id("top-days-\(range.rawValue)")
+        .id("top-days-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
 }
 
@@ -487,10 +489,21 @@ private struct TopDaysContent: View {
     let sortBinding: Binding<TopDaysSort>
     let descendingBinding: Binding<Bool>
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: TopDaysSort,
         descending: Bool,
         onDayTap: @escaping (String) -> Void,
@@ -503,16 +516,28 @@ private struct TopDaysContent: View {
         self.onDayTap = onDayTap
         self.sortBinding = sortBinding
         self.descendingBinding = descendingBinding
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \DailyAggregate.date,
                 order: .reverse
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date,
+                order: .reverse
+            )
         } else {
-            _aggregates = Query(
+            _globalAggregates = Query(
                 sort: \DailyAggregate.date, order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date, order: .reverse
             )
         }
     }

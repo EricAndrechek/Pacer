@@ -50,12 +50,17 @@ struct NowStrip: View {
     private static let refreshInterval: TimeInterval = 1
     @Environment(\.modelContext) private var modelContext
 
-    @State private var todayAggregates: [DailyAggregate] = []
+    /// Normalised so the strip renders whichever table the scope selects.
+    /// Fetched rather than `@Query`-bound, so unlike the card views these
+    /// predicates are rebuilt on every refresh and pick up a scope change
+    /// without needing the scope threaded through an initialiser.
+    @State private var todayAggregates: [DailyRow] = []
+    @State private var scope = UsageScope.shared
     /// Hour buckets for "recent" activity — the two most-recent hour
     /// buckets approximate a rolling last-hour rate (between exactly 1h
     /// and ~2h of span). Cost is baked into HourlyAggregate at recompute
     /// time, so no per-render pricing lookups.
-    @State private var recentHourlyRows: [HourlyAggregate] = []
+    @State private var recentHourlyRows: [HourlyRow] = []
     /// Most-recent sample (any age) so the quiet state can say "last
     /// activity 3h ago" instead of a flat "no samples".
     @State private var latestSamples: [TokenSample] = []
@@ -80,8 +85,18 @@ struct NowStrip: View {
         let cal = Calendar.current
         let todayString = TokenSample.formatDate(now)
 
-        todayAggregates = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
-            predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? []
+        let acct = scope.accountId
+        if let acct {
+            todayAggregates = ((try? modelContext.fetch(
+                FetchDescriptor<AccountDailyAggregate>(
+                    predicate: #Predicate<AccountDailyAggregate> {
+                        $0.date == todayString && $0.accountId == acct
+                    }))) ?? []).map(\.dailyRow)
+        } else {
+            todayAggregates = ((try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
+                predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? [])
+                .map(\.dailyRow)
+        }
 
         // Current hour bucket + the previous one, as a (date, hour) range with
         // the midnight-crossing leg. Built here so it follows the clock.
@@ -96,8 +111,25 @@ struct NowStrip: View {
                 $0.date == todayString
                 || ($0.date == yesterdayString && $0.hour >= lowestHour)
             }
-        recentHourlyRows = (try? modelContext.fetch(
-            FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? []
+        if let acct {
+            let scopedHourly: Predicate<AccountHourlyAggregate> =
+                todayString == yesterdayString
+                ? #Predicate<AccountHourlyAggregate> {
+                    $0.accountId == acct && $0.date == todayString && $0.hour >= lowestHour
+                  }
+                : #Predicate<AccountHourlyAggregate> {
+                    $0.accountId == acct
+                    && ($0.date == todayString
+                        || ($0.date == yesterdayString && $0.hour >= lowestHour))
+                  }
+            recentHourlyRows = ((try? modelContext.fetch(
+                FetchDescriptor<AccountHourlyAggregate>(predicate: scopedHourly))) ?? [])
+                .map(\.hourlyRow)
+        } else {
+            recentHourlyRows = ((try? modelContext.fetch(
+                FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? [])
+                .map(\.hourlyRow)
+        }
 
         latestSamples = (try? modelContext.fetch(Self.latestSampleProbe)) ?? []
         latestSessions = (try? modelContext.fetch(Self.latestSessionProbe)) ?? []

@@ -71,17 +71,23 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     public let inputTokens: Int64
     public let outputTokens: Int64
     public let totalCostUSD: Double
+    /// Turns in the bucket. The global rollup stores it; the per-account one
+    /// does not, so a scoped row reports 0 — used only for a "quiet hour"
+    /// hint, never for a number the user reads.
+    public let sampleCount: Int
 
     public var id: String { "\(date)|\(hour)|\(model)" }
 
     public init(date: String, hour: Int, model: String,
-                inputTokens: Int64, outputTokens: Int64, totalCostUSD: Double) {
+                inputTokens: Int64, outputTokens: Int64, totalCostUSD: Double,
+                sampleCount: Int = 0) {
         self.date = date
         self.hour = hour
         self.model = model
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.totalCostUSD = totalCostUSD
+        self.sampleCount = sampleCount
     }
 }
 
@@ -89,7 +95,7 @@ public extension HourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
-                  totalCostUSD: totalCostUSD)
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
     }
 }
 

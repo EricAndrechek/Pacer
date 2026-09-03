@@ -8,6 +8,9 @@ import PacerUI
 /// name. Useful for "is sonnet doing the bulk of work or am I always
 /// reaching for opus?" / "did I switch off haiku 3 months ago?"
 struct ModelsView: View {
+    /// Read here so a scope change re-runs the child initialiser — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
     @AppStorage("pacer.models.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
@@ -74,6 +77,7 @@ struct ModelsView: View {
         ) {
             ModelsContent(
                 range: range,
+                scopeAccountId: scope.accountId,
                 sort: sort,
                 descending: sortDescending,
                 metric: metric,
@@ -155,7 +159,17 @@ enum ModelGrouping: String, CaseIterable, Identifiable {
 }
 
 private struct ModelsContent: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     /// Singleton-row probe that fires exactly once per completed scan
     /// cycle. Drives the cache refresh below so the O(aggregates)
     /// rollup runs at most once per cycle instead of once per body
@@ -187,6 +201,7 @@ private struct ModelsContent: View {
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: ModelsSort,
         descending: Bool,
         metric: ModelMetric,
@@ -206,16 +221,26 @@ private struct ModelsContent: View {
         self.sortDescendingBinding = sortDescendingBinding
         self.metricBinding = metricBinding
         self.onSelectDay = onSelectDay
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
             )
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \.date
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date
+            )
         } else {
-            _aggregates = Query(sort: \DailyAggregate.date)
+            _globalAggregates = Query(sort: \DailyAggregate.date)
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date)
         }
     }
 
