@@ -54,6 +54,11 @@ struct DashboardView: View {
             PaceChartCard(onCompare: { window in
                 modalRoot = .projection(window: window)
             })
+            // Directly under the pace chart, because it answers the question
+            // that chart raises the moment a second account exists: whose
+            // numbers am I looking at? Renders nothing at all for a
+            // single-account user, which is almost everyone.
+            AccountsCard()
             TodayDetailsCard()
             TodayTimelineCard(onTodayTap: openToday)
             PerModelTodayCard()

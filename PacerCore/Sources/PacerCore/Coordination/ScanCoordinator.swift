@@ -1239,11 +1239,31 @@ public final class ScanCoordinator {
         activePersister.writeDedupIndexIfNeeded()
         phase.saveCursorsMs = tickMs()
 
+        // Per-account lifetime totals. Throttled hard inside the store (a
+        // full projection of TokenSample), and only ever worth computing when
+        // there is more than one account to compare — a single-account user
+        // already has this number on every other card.
+
         let cycleStats = SamplePersister.Stats(
             inserted: activePersister.stats.inserted - beforeStats.inserted,
             skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate
         )
         lastCycleInsertedCount = cycleStats.inserted
+
+        // Two gates, both necessary. The TTL alone would re-project the whole
+        // sample table every few minutes on an idle machine to produce a
+        // byte-identical answer — the shape of background work that turned
+        // into a quarter of a core the last time it went unmeasured. Gating
+        // on inserts alone would never refresh the very first time, when the
+        // cache is empty and nothing has arrived yet.
+        let accountCount = try context.fetchCount(FetchDescriptor<Account>())
+        let totalsWorthComputing = accountCount > 1
+            && (cycleStats.inserted > 0 || AccountTotalsStore.shared.hasNeverComputed)
+        if totalsWorthComputing,
+           AccountTotalsStore.shared.refreshIfNeeded(container: container) {
+            let totals = AccountTotalsStore.shared.snapshot()
+            Task { @MainActor in AccountTotalsStatus.shared.publish(totals) }
+        }
 
         let recomputer = AggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
