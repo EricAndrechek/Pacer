@@ -118,12 +118,21 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // while the real Pacer is going, and would otherwise just exit. It
         // also skips the stderr redirect so its report lands on the
         // terminal instead of the log file.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
+            || AccountAssignMode.isActive {
             PacerSettings.registerDefaults()
             do {
-                // The backfill reads the REAL store (read-only); the cold-start
-                // probe wants an empty one.
-                container = (ArchiveBackfill.isActive || ArchiveRoundTrip.isActive)
+                // Which store a mode gets is part of its contract, so
+                // spell it out: the archive modes READ the real store,
+                // account assignment READS AND WRITES it, and the
+                // cold-start probe wants an empty one. A mode omitted
+                // here silently gets an in-memory store and reports
+                // confidently on no data — which looks like a clean
+                // result rather than a mistake.
+                let needsRealStore = ArchiveBackfill.isActive
+                    || ArchiveRoundTrip.isActive
+                    || AccountAssignMode.isActive
+                container = needsRealStore
                     ? try PacerStore.makeModelContainer()
                     : try PacerStore.makeInMemoryContainer()
             } catch {
@@ -301,10 +310,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Cold-start measurement harness — see `ColdStartProbe`.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
+        //
+        // Every mode below must be listed here as well as in the early-exit
+        // gate above. Missing one doesn't fail loudly — it falls through to
+        // `backgroundService.start()` and the mode's work then queues behind
+        // the scan pipeline on `@ScanActor`, where it can wait out a whole
+        // multi-second cycle before running.
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
+            || AccountAssignMode.isActive {
             NSApp.setActivationPolicy(.accessory)
             Task { @MainActor in
-                if ArchiveBackfill.isActive {
+                if AccountAssignMode.isActive {
+                    await AccountAssignMode.run(container: container)
+                } else if ArchiveBackfill.isActive {
                     await ArchiveBackfill.run(container: container)
                 } else if ArchiveRoundTrip.isActive {
                     await ArchiveRoundTrip.run(

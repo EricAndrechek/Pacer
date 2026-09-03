@@ -122,6 +122,7 @@ public enum PacerStore {
         TokenLaneMeta.self,
         Account.self,
         AccountUsageArchive.self,
+        AccountActivation.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

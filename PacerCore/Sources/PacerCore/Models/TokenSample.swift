@@ -42,7 +42,8 @@ public final class TokenSample {
         [\.sessionId],
         [\.date, \.model],
         [\.projectPath],
-        [\.sampledAt]
+        [\.sampledAt],
+        [\.accountId]
     )
 
     public var sampledAt: Date
@@ -108,6 +109,23 @@ public final class TokenSample {
     /// `-1` means "written before this field existed"; readers fall back to
     /// deriving it, and the `costRecomputeVersion` walk backfills.
     public var localHour: Int = -1
+
+    /// Which account this turn was billed to (`Account.id` — the org id),
+    /// or nil when Pacer could not tell.
+    ///
+    /// Nil is a real, expected, permanent state, not a bug to be tidied
+    /// away: every row written before the account trail existed has no
+    /// account, and no amount of re-reading the transcripts can recover it
+    /// (Claude Code's JSONL carries no account identity on billable turns).
+    /// Read sites must show unattributed usage as unattributed. Folding it
+    /// into whichever account is convenient would produce a per-account cost
+    /// split that is confidently wrong — the `$0`-for-a-missing-price
+    /// failure shape, where a legal-looking number means nothing ever
+    /// revisits it.
+    ///
+    /// Set at insert by `SamplePersister` from `AccountTrail`; see
+    /// `AccountActivation` for why attribution has to be recorded live.
+    public var accountId: String?
 
     public init(
         sampledAt: Date,

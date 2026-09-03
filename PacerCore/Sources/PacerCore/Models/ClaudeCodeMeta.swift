@@ -103,6 +103,11 @@ public enum ClaudeCodeMetaKey {
     /// Independent of `pathCanonicalizationVersion` because it only
     /// touches a UI-facing flag, never re-attributes samples.
     public static let aliasOriginClassificationVersion = "alias_origin_classification_version"
+    /// Which generation of the one-time account backfill has run. Only
+    /// ever does anything for a store with exactly one known account, where
+    /// "every unattributed turn is that account's" is a fact rather than a
+    /// guess. See `AccountBackfill.backfillIfUnambiguous`.
+    public static let accountBackfillVersion = "account_backfill_version"
 
     /// Bumped to force a one-time backfill that records a stable color
     /// seed (`ProjectMeta.colorSeed`) for every existing project.
