@@ -223,6 +223,14 @@ import Testing
     /// Switching the active account swaps which timeline the shared tables
     /// hold — org B's usage drives display afterward — and switching back
     /// restores org A's timeline intact (neither is lost).
+    ///
+    /// It also lands on the readings gathered *while B was secondary*. That
+    /// used to be an empty table: a secondary account's polls updated its
+    /// cached "latest" and were then discarded, so switching to an account
+    /// Pacer had been watching for hours still showed a blank chart until
+    /// the next poll of the now-active token. The isolation property is
+    /// unchanged — B's rows still never appear in A's timeline — but
+    /// isolation was being bought with data loss it never needed.
     @Test func switchingActiveAccountSwapsTimelineWithoutLoss() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
@@ -246,10 +254,12 @@ import Testing
         _ = await poller.runOnce()   // orgB secondary tracked
         let laneBId = OAuthPoller.laneId("tokB")
 
-        // Switch to org B: A's timeline is archived, B's (empty) restored.
+        // Switch to org B: A's timeline is archived, B's restored — and B
+        // has something to restore, because its secondary poll was kept.
         await poller.setActiveAccount(id: "orgB")
         var rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.isEmpty)                                // A archived out, B has none yet
+        #expect(rows.contains { $0.usedPercentage == 99.0 })  // gathered while secondary
+        #expect(!rows.contains { $0.usedPercentage == 10.0 }) // A archived out, not mixed in
         #expect(await poller.snapshot().activeAccountKey == "orgB")
 
         // Poll B now that it's active → it writes the shared timeline.
@@ -264,6 +274,7 @@ import Testing
         rows = try await Self.fetchSampleSummaries(in: container)
         #expect(rows.contains { $0.usedPercentage == 10.0 })
         #expect(!rows.contains { $0.usedPercentage == 77.0 })   // B's rows aren't in A's timeline
+        #expect(!rows.contains { $0.usedPercentage == 99.0 })   // nor its secondary-era ones
         #expect(await poller.snapshot().activeAccountKey == "orgA")
     }
 
@@ -300,14 +311,18 @@ import Testing
         _ = await poller.runOnce()   // orgB secondary → must NOT write scoped rows
 
         var scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.count == 1)                                  // only A's row
+        #expect(scoped.count == 1)                                  // only A's row is LIVE
         #expect(scoped.first?.percent == 40)
         #expect(scoped.allSatisfy { $0.accountId == "orgA" })       // stamped + gated
 
-        // Switch to B: A's scoped rows archive out, live table empties.
+        // Switch to B: A's scoped rows archive out, and B's Fable@88 —
+        // gathered while it was secondary — comes in. Both accounts have a
+        // "Fable" weekly at the same identity, so this is the exact mixing
+        // hazard: the live table must hold B's 88 and none of A's 40.
         await poller.setActiveAccount(id: "orgB")
         scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.isEmpty)
+        #expect(scoped.contains { $0.percent == 88 && $0.accountId == "orgB" })
+        #expect(!scoped.contains { $0.percent == 40 })
 
         // Poll B active → its Fable@66 lands, stamped orgB.
         if case .success = await poller.testLane(id: OAuthPoller.laneId("tokB")) {} else {
@@ -322,6 +337,7 @@ import Testing
         scoped = try await Self.fetchScopedSummaries(in: container)
         #expect(scoped.contains { $0.percent == 40 && $0.accountId == "orgA" })
         #expect(!scoped.contains { $0.percent == 66 })
+        #expect(!scoped.contains { $0.percent == 88 })   // nor B's secondary-era row
     }
 
     /// A single-account user with pre-existing (accountId == nil) history

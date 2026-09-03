@@ -1241,6 +1241,76 @@ public actor OAuthPoller: TokenPoolTesting {
                     ))
                     wroteAnyWindow = true
                 }
+            } else {
+                // A non-active account's readings go straight to the archive
+                // — the same place the timeline swap puts them — instead of
+                // being thrown away after updating the cached "latest".
+                //
+                // Without this, switching to an account Pacer had been
+                // watching for hours still restored nothing, because nothing
+                // had been kept: the dashboard went blank and stayed blank
+                // until the next poll of the newly-active token, measured at
+                // about five minutes. The readings were already being
+                // fetched; only the decision to keep them was missing.
+                //
+                // These rows are never visible while the account is
+                // secondary. `swapActiveTimeline` restores them (and deletes
+                // them from the archive) if and when it becomes active, so a
+                // switch now lands on real history rather than an empty
+                // chart.
+                if let window = captured.fiveHour {
+                    context.insert(AccountUsageArchive(
+                        accountId: key,
+                        kind: AccountUsageArchive.kindRateLimit,
+                        sampledAt: captured.sampledAt,
+                        window: RateLimitWindowName.fiveHour,
+                        usedPercentage: window.usedPercentage,
+                        resetsAt: window.resetsAt,
+                        source: RateLimitSource.oauth
+                    ))
+                }
+                if let window = captured.sevenDay {
+                    context.insert(AccountUsageArchive(
+                        accountId: key,
+                        kind: AccountUsageArchive.kindRateLimit,
+                        sampledAt: captured.sampledAt,
+                        window: RateLimitWindowName.sevenDay,
+                        usedPercentage: window.usedPercentage,
+                        resetsAt: window.resetsAt,
+                        source: RateLimitSource.oauth
+                    ))
+                }
+                if let cents = captured.extraUsageCents {
+                    context.insert(AccountUsageArchive(
+                        accountId: key,
+                        kind: AccountUsageArchive.kindExtraUsage,
+                        sampledAt: captured.sampledAt,
+                        amountCents: cents,
+                        source: RateLimitSource.oauth
+                    ))
+                }
+                for limit in captured.limits {
+                    context.insert(AccountUsageArchive(
+                        accountId: key,
+                        kind: AccountUsageArchive.kindUsageLimit,
+                        sampledAt: captured.sampledAt,
+                        usedPercentage: limit.percent,
+                        resetsAt: limit.resetsAt,
+                        source: RateLimitSource.oauth,
+                        identity: limit.identity,
+                        limitKind: limit.kind,
+                        group: limit.group,
+                        label: limit.label,
+                        severity: limit.severity.raw,
+                        isActive: limit.isActive,
+                        modelId: limit.scope?.model?.id,
+                        modelDisplayName: limit.scope?.model?.displayName,
+                        surface: limit.scope?.surface
+                    ))
+                }
+                // Deliberately does NOT set `wroteAnyWindow`: nothing the
+                // dashboard reads has changed, so waking every view for a
+                // background account's poll would be pure cost.
             }
             do {
                 try context.save()

@@ -70,13 +70,13 @@ verify-archive:  ## Prove the DuckDB archive can give back every field it was gi
 	@osascript -e 'quit app "Pacer"' 2>/dev/null || true
 	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
 	@PACER_ARCHIVE_ROUNDTRIP=1 /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep roundtrip || true
-	@open -a Pacer
+	@open -g -a Pacer
 
 assign-accounts:  ## Assign historical usage to an account. SPEC='<accountId>|<fromISO|->|<throughISO|->[;…]' or SPEC=list. Quits Pacer for the store, then restarts it.
 	@osascript -e 'quit app "Pacer"' 2>/dev/null || true
 	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
 	@PACER_ACCOUNT_ASSIGN='$(SPEC)' /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep -E "^(assign|accounts|unattributed|every|activation|  )" || true
-	@open -a Pacer
+	@open -g -a Pacer
 
 verify-data:  ## Check every rollup against the raw samples in the REAL store. Read-only; exits non-zero on any inconsistency.
 	@$(REPO_ROOT)/bin/dev-verify-data.sh
