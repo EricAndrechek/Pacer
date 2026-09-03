@@ -50,7 +50,7 @@ struct HistoryView: View {
             }
         ) {
             LifetimeSummaryCard(range: range)
-            HeatmapCard { dayKey in
+            HeatmapCard(scopeAccountId: scope.accountId) { dayKey in
                 modalRoot = .day(date: dayKey)
             }
             MonthlyChartCard(scopeAccountId: scope.accountId)

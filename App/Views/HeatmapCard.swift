@@ -13,6 +13,14 @@ import PacerUI
 /// 11×11 cells with 2pt gaps, and "Mon" / "Wed" / "Fri" weekday
 /// labels at left were ported over after staring at the GitHub
 /// reference screenshot side-by-side.
+/// The only two fields the heatmap needs from a session, so it can render
+/// either the global or the per-account table without knowing which.
+private struct SessionSpan {
+    let sessionId: String
+    let firstSeenAt: Date
+    let lastSeenAt: Date
+}
+
 struct HeatmapCard: View {
     let weekCount: Int
     let onDayTap: (String) -> Void
@@ -24,7 +32,28 @@ struct HeatmapCard: View {
     /// history was loading every old row into `refreshCache` only to
     /// bucket-and-discard them when no cell matched. Sub-leading
     /// `date` index makes the cutoff a range scan.
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both pairs of queries are live, so switching is
+    /// a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+    private var sessions: [SessionSpan] {
+        scope.isAll
+            ? globalSessions.map {
+                SessionSpan(sessionId: $0.sessionId,
+                            firstSeenAt: $0.firstSeenAt, lastSeenAt: $0.lastSeenAt)
+              }
+            : scopedSessions.map {
+                SessionSpan(sessionId: $0.sessionId,
+                            firstSeenAt: $0.firstSeenAt, lastSeenAt: $0.lastSeenAt)
+              }
+    }
     /// Real distinct-session count per day comes from SessionInfo,
     /// the same source the day-detail modal pulls from. Iterating
     /// every session once and bucketing across the day(s) it touched
@@ -36,7 +65,8 @@ struct HeatmapCard: View {
     /// materialized every session in the table on every view
     /// creation — including on tab-switch back into History, where
     /// it dominated the re-mount cost.
-    @Query private var sessions: [SessionInfo]
+    @Query private var globalSessions: [SessionInfo]
+    @Query private var scopedSessions: [AccountSessionInfo]
     @Query(HeatmapCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
     /// Suppress the decorative tooltip fade when the user has Reduce
@@ -56,7 +86,11 @@ struct HeatmapCard: View {
         ProjectMetric(rawValue: metricRaw) ?? .cost
     }
 
-    init(weekCount: Int = 52, onDayTap: @escaping (String) -> Void) {
+    init(
+        weekCount: Int = 52,
+        scopeAccountId: String? = nil,
+        onDayTap: @escaping (String) -> Void
+    ) {
         self.weekCount = weekCount
         self.onDayTap = onDayTap
         // Bound both queries to the visible heatmap window. The default
@@ -69,13 +103,26 @@ struct HeatmapCard: View {
         let cutoffDate = cal.date(byAdding: .day, value: -(weekCount * 7 + 7), to: Date())
             ?? Date(timeIntervalSince1970: 0)
         let cutoffString = TokenSample.formatDate(cutoffDate)
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
             sort: \.date,
             order: .reverse
         )
-        _sessions = Query(
+        _globalSessions = Query(
             filter: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoffDate }
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= cutoffString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.date,
+            order: .reverse
+        )
+        _scopedSessions = Query(
+            filter: #Predicate<AccountSessionInfo> {
+                $0.lastSeenAt >= cutoffDate && $0.accountId == acct
+            }
         )
     }
 

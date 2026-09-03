@@ -121,7 +121,12 @@ public final class ScanCoordinator {
     ///          rollup.
     /// - "11" — `AccountProjectDailyAggregate` arrived. Same reason as "8"
     ///          and "10": the rows only exist for buckets recomputed since.
-    public static let currentCostRecomputeVersion = "11"
+    /// - "13" — `AccountSessionInfo` arrived, completing the per-account
+    ///          rollups. Version 12 shipped it with a session fast path that
+    ///          re-derived account rows from a fetch that could not see the
+    ///          cycle's pending inserts, leaving them one batch behind; this
+    ///          rebuild repairs those rows.
+    public static let currentCostRecomputeVersion = "13"
 
     /// Generation of the duplicate-turn repair.
     ///
