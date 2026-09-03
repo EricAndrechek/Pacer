@@ -468,8 +468,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard window.canBecomeMain, !(window is NSPanel) else { return }
         if window.frameAutosaveName.isEmpty {
             window.setFrameAutosaveName(mainWindowAutosaveName)
+            // Naming the window does NOT apply the frame already saved
+            // under that name — it only starts saving from here. A window
+            // named this late has therefore already been placed by the
+            // scene's `.defaultPosition(.center)`, and without this it
+            // would open centered on the primary display every launch
+            // while faithfully saving that same wrong frame back.
+            window.setFrameUsingName(mainWindowAutosaveName)
         }
-        applyMenuBarAppBehavior(window)
     }
 
     /// Make the main window behave like a tool window for a menu-bar
@@ -490,6 +496,27 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Manager normally).
     private static func applyMenuBarAppBehavior(_ window: NSWindow) {
         window.collectionBehavior.insert(.moveToActiveSpace)
+    }
+
+    /// Undo `applyMenuBarAppBehavior` once the window has been brought
+    /// across.
+    ///
+    /// `.moveToActiveSpace` is not a property of the *gesture*, it is a
+    /// property of the *window* — so leaving it applied means the window
+    /// follows onto the active Space every time it is shown, including on
+    /// the relaunch after a dev install, which is nobody's intent. Pairing
+    /// each apply with a removal keeps the behavior scoped to the moment
+    /// the user asked for the window, and lets it otherwise belong to the
+    /// Space and display they left it on.
+    ///
+    /// Removal is deferred one runloop turn so it lands after AppKit has
+    /// finished ordering the window front; clearing it synchronously can
+    /// race the move it was meant to cause. Once the window is on a Space,
+    /// dropping the behavior does not move it back.
+    private static func releaseMenuBarAppBehavior(_ window: NSWindow) {
+        DispatchQueue.main.async {
+            window.collectionBehavior.remove(.moveToActiveSpace)
+        }
     }
 
     /// macOS persists the main window's frame across launches via the
@@ -860,6 +887,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let target { Self.reposition(window, onto: target) }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
+            // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
+            Self.releaseMenuBarAppBehavior(window)
             return true
         }
         // Cold open: the window doesn't exist yet and will materialize
