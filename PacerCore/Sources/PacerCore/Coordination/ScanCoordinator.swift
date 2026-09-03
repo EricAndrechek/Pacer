@@ -126,7 +126,11 @@ public final class ScanCoordinator {
     ///          re-derived account rows from a fetch that could not see the
     ///          cycle's pending inserts, leaving them one batch behind; this
     ///          rebuild repairs those rows.
-    public static let currentCostRecomputeVersion = "13"
+    /// - "14" — and 13 shipped with `recomputeOne` never calling
+    ///          `syncAccountSessionRows` at all, so only the bulk path
+    ///          maintained the session account rows. This rebuild repairs
+    ///          them.
+    public static let currentCostRecomputeVersion = "14"
 
     /// Generation of the duplicate-turn repair.
     ///

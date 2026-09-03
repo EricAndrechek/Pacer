@@ -197,6 +197,9 @@ public final class SessionInfoRecomputer {
                 predicate: #Predicate<SessionInfo> { $0.sessionId == sid }
             )
         ).first
+        try syncAccountSessionRows(
+            context: context, sessionId: sid, samples: samples,
+            mode: mode, snapshot: snapshot)
         Self.applySamples(
             sessionId: sid,
             samples: samples,
