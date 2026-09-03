@@ -839,8 +839,23 @@ public final class ScanCoordinator {
         // Costs one `stat` when the config hasn't been rewritten.
         let recorder = accountTrailRecorder ?? AccountTrailRecorder(context: context)
         if accountTrailRecorder == nil { accountTrailRecorder = recorder }
-        recorder.poll()
+        let observedAccount = recorder.poll()
         activePersister.accountTrail = recorder.trail()
+
+        // Follow the login. Pacer's headline numbers should describe the
+        // account the user's NEXT message will be billed to, and until now
+        // nothing connected the two: `setActiveAccount` was reachable only
+        // from the Tokens settings switcher, so a login change outside the
+        // app left Pacer reporting an account that had stopped serving
+        // requests — a 100% weekly window belonging to an account that was
+        // no longer in use, which is worse than no number at all.
+        //
+        // Idempotent (the poller no-ops when the id already matches) and
+        // fire-and-forget, because switching swaps sample timelines and
+        // that is not work to run inside the scan's budget.
+        if let observedAccount, let oauthPoller {
+            Task { await oauthPoller.setActiveAccount(id: observedAccount) }
+        }
 
         // One-time, and only for the unambiguous case: a store that has
         // only ever seen one account can attribute its whole history to it
