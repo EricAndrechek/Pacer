@@ -507,7 +507,10 @@ public actor OAuthPoller: TokenPoolTesting {
                     AccountStatusSummary(
                         id: a.id,
                         organizationId: a.organizationId,
-                        displayName: a.displayName,
+                        // `label`, not `displayName`: two accounts on the
+                        // same plan derive the identical placeholder, and a
+                        // switcher is exactly the setup that produces two.
+                        displayName: a.label,
                         isActive: a.isActive || a.id == activeKey,
                         subscriptionType: a.subscriptionType,
                         fiveHourPct: a.latestFiveHourPct,

@@ -70,7 +70,60 @@ public final class AccountTrailRecorder {
         }
         record(observation, now: now, source: AccountActivation.sourceObserved,
                evidence: "oauthAccount in \(url.lastPathComponent)")
+        applyLabels(from: observation)
+        enrichUnlabelledAccounts()
         return observation.accountKey
+    }
+
+    /// Attach the live login's real identity to its `Account` row.
+    ///
+    /// Claude Code already knows the email and org name of whoever is signed
+    /// in, so there is no reason for Pacer to show a UUID-derived placeholder
+    /// for the one account it can always name.
+    private func applyLabels(from observation: ActiveAccountObserver.Observation) {
+        guard let account = account(id: observation.accountKey) else { return }
+        var changed = false
+        if let email = observation.emailAddress, !email.isEmpty,
+           account.emailAddress != email {
+            account.emailAddress = email
+            changed = true
+        }
+        if let org = observation.organizationName, !org.isEmpty,
+           account.organizationName != org {
+            account.organizationName = org
+            changed = true
+        }
+        if changed { try? context.save() }
+    }
+
+    /// Borrow labels from an external switcher for accounts we have never
+    /// seen logged in — the only accounts whose name Claude Code's own config
+    /// cannot supply, because `oauthAccount` describes one account at a time.
+    ///
+    /// Gated on there being an unlabelled account, so the common case (every
+    /// account already named) does one in-memory check and no file read.
+    /// A user-chosen `displayName` is never touched.
+    private func enrichUnlabelledAccounts() {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let unlabelled = accounts.filter { $0.emailAddress == nil && $0.organizationName == nil }
+        guard !unlabelled.isEmpty else { return }
+
+        let directory = ExternalAccountDirectory.discover()
+        guard !directory.isEmpty else { return }
+
+        var changed = false
+        for account in unlabelled {
+            guard let entry = directory.entries[account.id] else { continue }
+            account.emailAddress = entry.emailAddress
+            account.organizationName = entry.organizationName
+            changed = true
+        }
+        if changed { try? context.save() }
+    }
+
+    private func account(id: String) -> Account? {
+        let descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.id == id })
+        return (try? context.fetch(descriptor))?.first
     }
 
     /// Apply an observation to the trail, opening and closing activations as

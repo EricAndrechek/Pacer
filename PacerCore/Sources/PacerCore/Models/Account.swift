@@ -51,6 +51,20 @@ public final class Account {
     /// lets the switcher hint the plan.
     public var subscriptionType: String?
 
+    // MARK: - Human identity
+    //
+    // The org id is stable but unreadable, and two accounts on the same plan
+    // derive the *same* default name ("Claude account (max)") — which is
+    // exactly the case a switcher creates, so the one place the label has to
+    // work is the one place it didn't. These carry whatever real identity we
+    // can observe, from Claude Code's own `oauthAccount` for the live login
+    // and from an external switcher's roster for the others.
+
+    /// The account's email, when known. Nil until observed.
+    public var emailAddress: String?
+    /// The org's display name, when known (e.g. "Acme's Organization").
+    public var organizationName: String?
+
     // MARK: - Cached latest readings (for the switcher; non-active accounts
     // don't write history rows, so this is where their current usage lives)
     public var latestFiveHourPct: Double?
@@ -59,6 +73,28 @@ public final class Account {
     public var latestSevenDayResetsAt: Date?
     public var latestExtraUsageCents: Int?
     public var latestPolledAt: Date?
+
+    /// What to show a person. Prefers real observed identity over the
+    /// org-derived placeholder, and falls back through everything we might
+    /// know before landing on the raw id — so this is never empty and never
+    /// the same string for two different accounts that we have any way to
+    /// tell apart.
+    public var label: String {
+        if let emailAddress, !emailAddress.isEmpty { return emailAddress }
+        if let organizationName, !organizationName.isEmpty { return organizationName }
+        if !displayName.isEmpty { return displayName }
+        return id
+    }
+
+    /// Whether `displayName` is still one of the auto-derived placeholders
+    /// rather than something a person chose. Guards the observer from
+    /// overwriting a deliberate rename.
+    public var hasDerivedName: Bool {
+        displayName.hasPrefix("Claude account (")
+            || displayName.hasPrefix("Account ")
+            || displayName == "Primary account"
+            || displayName.isEmpty
+    }
 
     /// Sentinel id for the account whose org the server never returned.
     public static let defaultKey = "default"
@@ -71,6 +107,8 @@ public final class Account {
         firstSeenAt: Date,
         lastSeenAt: Date,
         subscriptionType: String? = nil,
+        emailAddress: String? = nil,
+        organizationName: String? = nil,
         latestFiveHourPct: Double? = nil,
         latestFiveHourResetsAt: Date? = nil,
         latestSevenDayPct: Double? = nil,
@@ -85,6 +123,8 @@ public final class Account {
         self.firstSeenAt = firstSeenAt
         self.lastSeenAt = lastSeenAt
         self.subscriptionType = subscriptionType
+        self.emailAddress = emailAddress
+        self.organizationName = organizationName
         self.latestFiveHourPct = latestFiveHourPct
         self.latestFiveHourResetsAt = latestFiveHourResetsAt
         self.latestSevenDayPct = latestSevenDayPct
