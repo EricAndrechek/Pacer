@@ -21,6 +21,9 @@ import PacerUI
 /// felt like one picker was controlling the other.
 struct HistoryView: View {
     @State private var modalRoot: PacerModalDestination?
+    /// Read here so a scope change re-runs the child initialisers — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
 
     @AppStorage("pacer.history.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.all.rawValue
@@ -50,7 +53,7 @@ struct HistoryView: View {
             HeatmapCard { dayKey in
                 modalRoot = .day(date: dayKey)
             }
-            MonthlyChartCard()
+            MonthlyChartCard(scopeAccountId: scope.accountId)
             TopDaysCard(range: range) { dayKey in
                 modalRoot = .day(date: dayKey)
             }
@@ -74,6 +77,7 @@ struct HistoryView: View {
 /// predicate into the fetch layer instead of filtering 700+ rows in
 /// memory on every scan tick.
 private struct LifetimeSummaryCard: View {
+    @State private var scope = UsageScope.shared
     let range: TimeRange
 
     var body: some View {
@@ -83,23 +87,41 @@ private struct LifetimeSummaryCard: View {
         // card and TopDaysContent (which also re-init on range change)
         // as the same view and dropped one — the bottom of the page
         // was just empty space where TopDays should have rendered.
-        LifetimeSummaryContent(range: range)
-            .id("lifetime-summary-\(range.rawValue)")
+        LifetimeSummaryContent(range: range, scopeAccountId: scope.accountId)
+            .id("lifetime-summary-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
 }
 
 private struct LifetimeSummaryContent: View {
     let range: TimeRange
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
 
-    init(range: TimeRange) {
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+
+    init(range: TimeRange, scopeAccountId: String? = nil) {
         self.range = range
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \DailyAggregate.date,
+                order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date,
                 order: .reverse
             )
         } else {
@@ -107,8 +129,12 @@ private struct LifetimeSummaryContent: View {
             // "lifetime since YYYY-MM-DD" without it. Acceptable
             // because (a) .all is opt-in, and (b) it's still cached
             // behind a scan-meta tick so the walk runs once per cycle.
-            _aggregates = Query(
+            _globalAggregates = Query(
                 sort: \DailyAggregate.date, order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date, order: .reverse
             )
         }
     }
@@ -222,17 +248,33 @@ private struct MonthlyChartCard: View {
     /// just so `refreshMonthly()` could group, sort, and `.suffix(12)`.
     /// 13 months of leeway covers any partial first month inside the
     /// chart's leftmost bar.
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    init() {
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+
+    init(scopeAccountId: String? = nil) {
         let cutoffString = TokenSample.formatDate(
             Calendar.current.date(byAdding: .month, value: -13, to: Date()) ?? .distantPast
         )
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
             sort: \DailyAggregate.date,
+            order: .reverse
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= cutoffString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.date,
             order: .reverse
         )
     }
