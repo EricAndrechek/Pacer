@@ -1235,13 +1235,15 @@ private struct CustomRulesCard: View {
             TextField("Name", text: $draftName)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 120)
-            Picker("", selection: $draftMetric) {
-                ForEach(AlertRuleMetric.all, id: \.self) { metric in
-                    Text(AlertRuleMetric.label(for: metric)).tag(metric)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 180)
+            // `PacerSelect`, not `Picker`: the menu-styled picker rendered
+            // its popup detached and mis-scaled into a screen corner here.
+            PacerSelect(
+                selection: $draftMetric,
+                options: AlertRuleMetric.all.map {
+                    .init(value: $0, title: AlertRuleMetric.label(for: $0))
+                },
+                width: 180
+            )
             thresholdField
             Spacer()
             Button("Add") {

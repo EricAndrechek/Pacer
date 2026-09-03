@@ -54,50 +54,22 @@ struct ToolbarAccountScope: View {
         return accounts.first { $0.id == id }?.label ?? "All accounts"
     }
 
+    /// Shares `PacerChoiceList` with `PacerSelect` so the rows behave
+    /// identically; only the trigger differs, because a toolbar control has
+    /// to be compact where a form field should look like a field.
     private var picker: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            choice(name: "All accounts", plan: nil, selected: scope.isAll) {
-                scope.select(nil)
+        PacerChoiceList(
+            options: [.init(value: nil as String?, title: "All accounts")]
+                + accounts.map {
+                    .init(value: $0.id as String?, title: $0.label,
+                          detail: $0.subscriptionType)
+                },
+            isSelected: { $0 == scope.accountId },
+            onPick: { id in
+                scope.select(id)
+                showing = false
             }
-            Divider().padding(.vertical, 2)
-            ForEach(accounts, id: \.id) { account in
-                choice(name: account.label,
-                       plan: account.subscriptionType,
-                       selected: scope.accountId == account.id) {
-                    scope.select(account.id)
-                }
-            }
-        }
-        .padding(8)
+        )
         .frame(width: 260)
-    }
-
-    private func choice(
-        name: String, plan: String?, selected: Bool, action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            action()
-            showing = false
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
-                Text(name)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 4)
-                if let plan, !plan.isEmpty {
-                    Text(plan)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .contentShape(Rectangle())
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-        }
-        .buttonStyle(.plain)
     }
 }
