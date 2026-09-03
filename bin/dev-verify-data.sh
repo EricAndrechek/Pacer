@@ -133,6 +133,14 @@ check "account cost equals daily" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM 
 check "no account row without a daily row" 0 "$(q "
   SELECT COUNT(*) FROM (SELECT DISTINCT ZDATE d, ZMODEL m FROM ZACCOUNTDAILYAGGREGATE)
   WHERE NOT EXISTS (SELECT 1 FROM ZDAILYAGGREGATE g WHERE g.ZDATE=d AND g.ZMODEL=m)")"
+check "account-hourly tokens equal hourly" 0 "$(q "
+  WITH a AS (SELECT ZDATE d, ZHOUR h, ZMODEL m, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTHOURLYAGGREGATE GROUP BY d, h, m)
+  SELECT COUNT(*) FROM a JOIN ZHOURLYAGGREGATE g
+    ON g.ZDATE=a.d AND g.ZHOUR=a.h AND g.ZMODEL=a.m
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account-hourly cost equals hourly" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZHOURLYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTHOURLYAGGREGATE")"
 
 # Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
 # to prevent — it means the same turn was counted twice, inflating tokens and

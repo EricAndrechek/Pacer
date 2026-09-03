@@ -62,6 +62,45 @@ public extension AccountDailyAggregate {
     }
 }
 
+/// One row of an hourly rollup, independent of which table it came from.
+/// The hourly counterpart to `DailyRow`.
+public struct HourlyRow: Sendable, Equatable, Identifiable {
+    public let date: String
+    public let hour: Int
+    public let model: String
+    public let inputTokens: Int64
+    public let outputTokens: Int64
+    public let totalCostUSD: Double
+
+    public var id: String { "\(date)|\(hour)|\(model)" }
+
+    public init(date: String, hour: Int, model: String,
+                inputTokens: Int64, outputTokens: Int64, totalCostUSD: Double) {
+        self.date = date
+        self.hour = hour
+        self.model = model
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.totalCostUSD = totalCostUSD
+    }
+}
+
+public extension HourlyAggregate {
+    var hourlyRow: HourlyRow {
+        HourlyRow(date: date, hour: hour, model: model,
+                  inputTokens: inputTokens, outputTokens: outputTokens,
+                  totalCostUSD: totalCostUSD)
+    }
+}
+
+public extension AccountHourlyAggregate {
+    var hourlyRow: HourlyRow {
+        HourlyRow(date: date, hour: hour, model: model,
+                  inputTokens: inputTokens, outputTokens: outputTokens,
+                  totalCostUSD: totalCostUSD)
+    }
+}
+
 /// Which account's usage the cost and token views are showing.
 ///
 /// Rate limits are always the active account's — they are a property of the

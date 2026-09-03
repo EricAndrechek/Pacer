@@ -64,7 +64,7 @@ struct DashboardView: View {
             // single-account user, which is almost everyone.
             AccountsCard()
             TodayDetailsCard(scopeAccountId: scope.accountId)
-            TodayTimelineCard(onTodayTap: openToday)
+            TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scope.accountId)
             PerModelTodayCard(scopeAccountId: scope.accountId)
             WeeklyComparisonCard(scopeAccountId: scope.accountId)
             DailyCostChartCard(scopeAccountId: scope.accountId, onDayTap: { dayKey in

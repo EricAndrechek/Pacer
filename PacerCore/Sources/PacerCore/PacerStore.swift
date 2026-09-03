@@ -124,6 +124,7 @@ public enum PacerStore {
         AccountUsageArchive.self,
         AccountActivation.self,
         AccountDailyAggregate.self,
+        AccountHourlyAggregate.self,
     ]
 
     public static func makeModelContainer() throws -> ModelContainer {

@@ -115,7 +115,11 @@ public final class ScanCoordinator {
     ///         added with "8" — one bucket and $0.99 apart — which is the
     ///         entire argument for checking two views of one source against
     ///         each other rather than trusting them.
-    public static let currentCostRecomputeVersion = "9"
+    /// - "10" — `AccountHourlyAggregate` arrived, written by the same passes
+    ///          that write `HourlyAggregate`. Existing stores need one
+    ///          rebuild to populate it, exactly as "8" did for the daily
+    ///          rollup.
+    public static let currentCostRecomputeVersion = "10"
 
     /// Generation of the duplicate-turn repair.
     ///
