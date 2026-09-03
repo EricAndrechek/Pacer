@@ -89,7 +89,20 @@ public final class ScanCoordinator {
     ///         rollup for one day — the entire `claude-fable-5` share.
     ///         The scan now warms pricing before recomputing anything;
     ///         this rebuild clears the zeros already written.
-    public static let currentCostRecomputeVersion = "6"
+    /// - "7" — the embedded snapshot had gone two months stale, so models
+    ///         released since (claude-opus-5, claude-fable-5-1) were absent
+    ///         from it entirely and priced at $0 until the network refresh
+    ///         landed. Buckets rebuilt inside that window kept the zero.
+    ///         Same shape as "6" — a warm-up race — but the cause was the
+    ///         *contents* of the snapshot rather than the timing of the
+    ///         cache, so warming it earlier could not have helped.
+    ///         Surfaced as `make verify-data` reporting hourly $4.78 above
+    ///         daily for one day, entirely `claude-fable-5-1`: identical
+    ///         tokens, two different prices, because the two rollups were
+    ///         computed either side of the refresh. The snapshot is now
+    ///         regenerated (2,931 → 3,518 models) and gap-filled from a
+    ///         third catalog; this rebuild re-prices what was written blind.
+    public static let currentCostRecomputeVersion = "7"
 
     /// Generation of the duplicate-turn repair.
     ///

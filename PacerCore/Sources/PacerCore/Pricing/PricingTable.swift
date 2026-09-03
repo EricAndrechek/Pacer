@@ -109,10 +109,19 @@ public actor PricingTable {
             do {
                 modelsDevData = try await urlSession.data(from: ModelsDevCatalog.url).0
             } catch {
-                Log.write("PricingTable", "models.dev fetch failed (\(error)) — LiteLLM-only refresh")
+                Log.write("PricingTable", "models.dev fetch failed (\(error)) — skipping that source")
+            }
+            var catwalkData: Data?
+            do {
+                catwalkData = try await urlSession.data(from: CatwalkCatalog.url).0
+            } catch {
+                Log.write("PricingTable", "catwalk fetch failed (\(error)) — skipping that source")
             }
             let mergedJSON = Self.gapFill(
-                modelsDevData: modelsDevData,
+                sources: [
+                    ("models.dev", modelsDevData.map(ModelsDevCatalog.anthropicEntries(from:))),
+                    ("catwalk", catwalkData.map(CatwalkCatalog.anthropicEntries(from:))),
+                ],
                 into: rawJSON,
                 covered: liteDecoded
             )
@@ -153,23 +162,38 @@ public actor PricingTable {
     /// dictionaries across an isolation boundary. Best-effort: nil or
     /// unparseable data returns the input unchanged.
     static func gapFill(
-        modelsDevData: Data?,
+        sources: [(name: String, entries: [String: [String: Any]]?)],
         into rawJSON: [String: Any],
         covered: [String: LiteLLMModelPricing]
     ) -> [String: Any] {
-        guard let modelsDevData else { return rawJSON }
-        let entries = ModelsDevCatalog.anthropicEntries(from: modelsDevData)
         var merged = rawJSON
-        var added: [String] = []
-        for (id, entry) in entries where liteLLMMatch(id, in: covered) == nil {
-            merged[id] = entry
-            added.append(id)
-        }
-        if !added.isEmpty {
-            Log.write(
-                "PricingTable",
-                "models.dev gap-fill: +\(added.count) model(s) LiteLLM lacks: \(added.sorted().joined(separator: ", "))"
-            )
+        // Ids filled by an earlier source in this chain. Kept separately
+        // from `covered` because a synthesized entry is raw JSON, not a
+        // decoded `LiteLLMModelPricing` — and re-decoding between every
+        // source to answer "is this covered yet" would be pure ceremony.
+        var filled: Set<String> = []
+
+        for source in sources {
+            guard let entries = source.entries else { continue }
+            var added: [String] = []
+            for (id, entry) in entries {
+                // Order is the whole contract: a later source may only
+                // supply a price nobody had, never replace one an earlier
+                // source already gave. That keeps LiteLLM authoritative and
+                // makes adding a fourth catalog a strictly additive change.
+                guard liteLLMMatch(id, in: covered) == nil else { continue }
+                guard !filled.contains(id) else { continue }
+                merged[id] = entry
+                filled.insert(id)
+                added.append(id)
+            }
+            if !added.isEmpty {
+                Log.write(
+                    "PricingTable",
+                    "\(source.name) gap-fill: +\(added.count) model(s) not already priced: "
+                        + added.sorted().joined(separator: ", ")
+                )
+            }
         }
         return merged
     }
