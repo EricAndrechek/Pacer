@@ -32,11 +32,14 @@ public struct SampleSnapshot: Sendable {
         public let ccVersion: String?
         public let breakdown: TokenBreakdown
         public let sourceCostUSD: Double?
+        /// `TokenSample.accountId`. nil for turns recorded before the
+        /// activation trail existed — see `AccountActivation`.
+        public let accountId: String?
 
         public init(
             date: String, model: String, projectPath: String?, sessionId: String?,
             sampledAt: Date, localHour: Int, ccVersion: String?, breakdown: TokenBreakdown,
-            sourceCostUSD: Double?
+            sourceCostUSD: Double?, accountId: String? = nil
         ) {
             self.date = date
             self.model = model
@@ -47,6 +50,7 @@ public struct SampleSnapshot: Sendable {
             self.ccVersion = ccVersion
             self.breakdown = breakdown
             self.sourceCostUSD = sourceCostUSD
+            self.accountId = accountId
         }
     }
 
@@ -74,7 +78,8 @@ public struct SampleSnapshot: Sendable {
                     cacheReadTokens: sample.cacheReadTokens,
                     cacheCreation5mTokens: sample.cacheCreation5mTokens,
                     cacheCreation1hTokens: sample.cacheCreation1hTokens),
-                sourceCostUSD: sample.sourceCostUSD)
+                sourceCostUSD: sample.sourceCostUSD,
+                accountId: sample.accountId)
         })
     }
 }
@@ -131,6 +136,11 @@ public protocol AggregatableSample {
     var projectPath: String? { get }
     /// Needed for the Claude Code version the session rollup records.
     var ccVersion: String? { get }
+    /// Which account paid for this turn, or nil if it predates the trail.
+    /// Lives on the shared protocol for the same reason cost does: the
+    /// per-bucket and bulk paths must split by account identically or the
+    /// two rollups disagree depending on which path last touched a bucket.
+    var accountId: String? { get }
 }
 
 extension SampleSnapshot.Row: AggregatableSample {}

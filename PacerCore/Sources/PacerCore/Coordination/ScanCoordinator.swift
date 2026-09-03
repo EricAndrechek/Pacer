@@ -102,7 +102,12 @@ public final class ScanCoordinator {
     ///         computed either side of the refresh. The snapshot is now
     ///         regenerated (2,931 → 3,518 models) and gap-filled from a
     ///         third catalog; this rebuild re-prices what was written blind.
-    public static let currentCostRecomputeVersion = "7"
+    /// - "8" — `AccountDailyAggregate` arrived. It is written by the same
+    ///         pass that writes `DailyAggregate`, so it only exists for
+    ///         buckets recomputed since; an existing store needs one rebuild
+    ///         to populate it or the per-account view would show a store's
+    ///         whole history as belonging to nobody.
+    public static let currentCostRecomputeVersion = "8"
 
     /// Generation of the duplicate-turn repair.
     ///

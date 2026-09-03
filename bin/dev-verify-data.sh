@@ -118,6 +118,22 @@ check "hourly cost equals daily"  "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOS
 check "project cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")"
 check "session cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")"
 
+# The per-account rollup is a second view of the same samples, kept so the app
+# can show one account or all of them without recomputing. Two rollups over one
+# source can drift, so they are checked against each other: every account row
+# must sum to its DailyAggregate counterpart, to the cent and to the token.
+printf '\n%s==>%s Per-account rollup — must sum to the global one\n' "$B" "$X"
+check "account tokens equal daily" 0 "$(q "
+  WITH a AS (SELECT ZDATE d, ZMODEL m, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTDAILYAGGREGATE GROUP BY d, m)
+  SELECT COUNT(*) FROM a JOIN ZDAILYAGGREGATE g ON g.ZDATE=a.d AND g.ZMODEL=a.m
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account cost equals daily" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZDAILYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTDAILYAGGREGATE")"
+check "no account row without a daily row" 0 "$(q "
+  SELECT COUNT(*) FROM (SELECT DISTINCT ZDATE d, ZMODEL m FROM ZACCOUNTDAILYAGGREGATE)
+  WHERE NOT EXISTS (SELECT 1 FROM ZDAILYAGGREGATE g WHERE g.ZDATE=d AND g.ZMODEL=m)")"
+
 # Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
 # to prevent — it means the same turn was counted twice, inflating tokens and
 # cost for whatever day it lands on. Reported, never auto-repaired: raw samples
