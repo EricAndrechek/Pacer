@@ -2028,27 +2028,14 @@ private struct AccountSwitchRow: View {
     let onSwitch: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(account.displayName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    if let plan = account.subscriptionType, !plan.isEmpty {
-                        Text(plan)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Text(subtitle)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            usageReadout
-
+        PacerAccountRow(model: .init(
+            name: account.displayName,
+            plan: account.subscriptionType,
+            subtitle: subtitle,
+            fiveHourPercent: account.fiveHourPct,
+            sevenDayPercent: account.sevenDayPct,
+            isActive: account.isActive
+        )) {
             if account.isActive {
                 Text("Active")
                     .font(.system(size: 10, weight: .medium))
@@ -2064,16 +2051,6 @@ private struct AccountSwitchRow: View {
                     .frame(width: 60)
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(account.isActive ? Color.accentColor.opacity(0.12) : Color.clear)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(account.isActive ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
-                )
-        )
     }
 
     private var subtitle: String {
@@ -2081,30 +2058,6 @@ private struct AccountSwitchRow: View {
         if let org = account.organizationId, !org.isEmpty { parts.append("org …\(String(org.suffix(4)))") }
         parts.append("\(account.laneCount) token\(account.laneCount == 1 ? "" : "s")")
         return parts.joined(separator: " · ")
-    }
-
-    private var usageReadout: some View {
-        HStack(spacing: 10) {
-            windowReadout("5h", account.fiveHourPct)
-            windowReadout("7d", account.sevenDayPct)
-        }
-    }
-
-    private func windowReadout(_ label: String, _ pct: Double?) -> some View {
-        HStack(spacing: 4) {
-            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
-            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(pct.map(Self.color(forPct:)) ?? .secondary)
-                .monospacedDigit()
-        }
-        .frame(width: 52, alignment: .leading)
-    }
-
-    private static func color(forPct pct: Double) -> Color {
-        if pct >= 85 { return .red }
-        if pct >= 50 { return .orange }
-        return .green
     }
 }
 

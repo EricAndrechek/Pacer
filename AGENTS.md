@@ -98,6 +98,38 @@ These are subtle, easy to miss, and break user-visible numbers:
   lags by hours and has fewer categories than JSONL. Use only as a
   sanity-check probe.
 
+## UI components live in PacerUI — check before you build one
+
+**Before writing any view that shows something the app already shows
+somewhere, search `PacerCore/Sources/PacerUI/` for it.** If it exists, use it.
+If it nearly exists, extend it. Only write a new one when nothing fits, and
+put that new one in PacerUI if a second screen could plausibly want it.
+
+This is not a tidiness preference. Two hand-rolled copies of the same thing do
+not merely look different, they *disagree*: the Tokens settings account row and
+the dashboard's Accounts card both showed 5h/7d utilisation, and the settings
+copy carried its own colour thresholds (`>=85` red, `>=50` orange, else green)
+against `UsageBand`'s canonical mapping (`<50` green, `<75` yellow, `<90`
+orange). 60% rendered orange on one screen and yellow on the other — the same
+number, two answers, depending which screen you were on. Nobody decided that;
+it is just what happens to a copy.
+
+Rules that follow from it:
+
+- **Never re-derive a mapping that exists in `PacerCore`.** `UsageBand`,
+  `PaceBand`, `PacerModelPalette`, the project colour hash — these are the
+  definition, not a suggestion. A local `if pct >= 85` is a bug in waiting.
+- **A shared component takes a plain value, not a model type.** `PacerAccountRow`
+  takes its own `Model` struct rather than `Account` or `AccountStatusSummary`,
+  because the moment a third caller holds neither, a component typed on one of
+  them stops being shareable and gets copied instead.
+- **Give it a trailing slot rather than a mode flag.** Screens differ in what
+  they put on the right (an Active badge, a Switch button, a turn count); a
+  `@ViewBuilder` slot absorbs that without the component growing branches.
+- **Extending a shared component changes every caller.** That is the point, and
+  it also means a visual change needs the same sign-off any shared view does —
+  flag it, don't slip it in as a side effect of unrelated work.
+
 ## Conventions
 
 - Bundle ID: `com.ericandrechek.pacer`. App Group: `YZXWMJ5VBY.com.ericandrechek.pacer`

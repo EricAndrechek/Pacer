@@ -9,8 +9,12 @@ import PacerUI
 /// construction, so "how close is my other account to its weekly cap" had no
 /// answer anywhere in the app.
 ///
-/// **Renders nothing with one account.** A roster of one repeats what the
-/// rest of the dashboard already says.
+/// Rows come from `PacerAccountRow`, the same component the Tokens settings
+/// switcher uses. They were two hand-rolled layouts showing the same facts,
+/// which is how they ended up disagreeing about what colour 60% is.
+///
+/// **Renders nothing with one account.** A roster of one repeats what the rest
+/// of the dashboard already says.
 struct AccountsCard: View {
     @Query(AccountsCard.accountsDescriptor) private var accounts: [Account]
     @State private var totals = AccountTotalsStatus.shared
@@ -22,60 +26,32 @@ struct AccountsCard: View {
 
     var body: some View {
         if accounts.count > 1 {
-            PacerCard("Accounts", trailing: { scopePicker }) {
-                VStack(spacing: 0) {
-                    ForEach(Array(sortedAccounts.enumerated()), id: \.element.id) { index, account in
-                        if index > 0 { Divider().opacity(0.3) }
-                        AccountRow(
-                            account: account,
-                            turns: totals.totals.first { $0.accountId == account.id }?.turns
-                        )
-                        .padding(.vertical, 7)
+            PacerCard("Accounts") {
+                VStack(spacing: 4) {
+                    ForEach(sortedAccounts, id: \.id) { account in
+                        PacerAccountRow(model: .init(
+                            name: account.label,
+                            plan: account.subscriptionType,
+                            subtitle: subtitle(for: account),
+                            fiveHourPercent: account.latestFiveHourPct,
+                            sevenDayPercent: account.latestSevenDayPct,
+                            isActive: account.isActive
+                        )) {
+                            if account.isActive {
+                                Text("Active")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.green.opacity(0.16)))
+                            }
+                        }
                     }
                 }
             } footer: {
-                // Scope, stated once. The pace chart above is the active
-                // account's; every cost and token rollup predates accounts
-                // and has no account dimension, so it sums all of them.
                 Text(scopeNote)
             }
         }
-    }
-
-    /// Which account the spend and token cards below are showing.
-    ///
-    /// A menu rather than a segmented control: the label has to be an email
-    /// address, and segments sized for those stop being compact at two
-    /// accounts and stop fitting at three.
-    private var scopePicker: some View {
-        Menu {
-            Button { scope.select(nil) } label: {
-                Label("All accounts", systemImage: scope.isAll ? "checkmark" : "")
-            }
-            Divider()
-            ForEach(sortedAccounts, id: \.id) { account in
-                Button { scope.select(account.id) } label: {
-                    Label(account.label,
-                          systemImage: scope.accountId == account.id ? "checkmark" : "")
-                }
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Text(scopeLabel)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(.secondary)
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-    }
-
-    private var scopeLabel: String {
-        guard let id = scope.accountId else { return "All accounts" }
-        return accounts.first { $0.id == id }?.label ?? "All accounts"
     }
 
     private var sortedAccounts: [Account] {
@@ -85,96 +61,41 @@ struct AccountsCard: View {
         }
     }
 
+    private func subtitle(for account: Account) -> String? {
+        guard let totals = totals.totals.first(where: { $0.accountId == account.id }),
+              totals.turns > 0
+        else { return nil }
+        var parts = ["\(totals.turns.formatted()) turns"]
+        if let first = totals.firstTurnAt, let last = totals.lastTurnAt {
+            parts.append(Calendar.current.isDate(first, inSameDayAs: last)
+                ? Self.dayMonth(last)
+                : "\(Self.dayMonth(first)) – \(Self.dayMonth(last))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static let dayMonthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .autoupdatingCurrent
+        f.setLocalizedDateFormatFromTemplate("d MMM")
+        return f
+    }()
+
+    private static func dayMonth(_ date: Date) -> String {
+        dayMonthFormatter.string(from: date)
+    }
+
+    /// Which account the spend and token cards are showing. The control that
+    /// changes it lives in the toolbar — it governs every view, so it belongs
+    /// in window chrome rather than inside one card.
     private var scopeNote: String {
-        var note = scope.isAll
-            ? "Limits are per account. Spend and tokens below combine all."
-            : "Limits are per account. Spend and tokens below show \(scopeLabel)."
+        let shown = scope.isAll
+            ? "all accounts"
+            : (accounts.first { $0.id == scope.accountId }?.label ?? "all accounts")
+        var note = "Limits are per account. Spend and tokens below show \(shown)."
         if let orphan = totals.unattributed, orphan.turns > 0 {
             note += " \(orphan.turns.formatted()) turns predate account tracking."
         }
         return note
-    }
-}
-
-/// One account on one line: identity left, limits and volume right.
-private struct AccountRow: View {
-    let account: Account
-    let turns: Int?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(account.isActive ? Color.accentColor : Color.secondary.opacity(0.35))
-                .frame(width: 6, height: 6)
-
-            Text(account.label)
-                .font(.system(size: 12, weight: account.isActive ? .medium : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(account.isActive ? .primary : .secondary)
-
-            Spacer(minLength: 12)
-
-            if let turns {
-                Text(turns.formatted())
-                    .font(.system(size: 11, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                    .help("\(turns.formatted()) turns recorded")
-            }
-
-            WindowMeter(label: "5h",
-                        percent: account.latestFiveHourPct,
-                        resetsAt: account.latestFiveHourResetsAt)
-            WindowMeter(label: "7d",
-                        percent: account.latestSevenDayPct,
-                        resetsAt: account.latestSevenDayResetsAt)
-        }
-    }
-}
-
-/// One rate-limit window: a bar and its number.
-///
-/// One encoding per bar — length is utilisation, colour is the band it falls
-/// in — so the bar can never say two things at once.
-private struct WindowMeter: View {
-    let label: String
-    let percent: Double?
-    let resetsAt: Date?
-
-    private static let barWidth: CGFloat = 46
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(label)
-                .font(.system(size: 9, weight: .semibold, design: .rounded))
-                .foregroundStyle(.tertiary)
-            if let percent {
-                Capsule()
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(width: Self.barWidth, height: 4)
-                    .overlay(alignment: .leading) {
-                        Capsule()
-                            .fill(UsageBand(percentage: percent).color)
-                            .frame(width: max(2, Self.barWidth * min(1, percent / 100)), height: 4)
-                    }
-                Text("\(Int(percent.rounded()))%")
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .trailing)
-            } else {
-                Text("—")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: Self.barWidth + 35, alignment: .trailing)
-            }
-        }
-        .help(helpText)
-    }
-
-    private var helpText: String {
-        guard let resetsAt else { return "\(label) window" }
-        return "\(label) resets \(pacerRelative(resetsAt))"
     }
 }
