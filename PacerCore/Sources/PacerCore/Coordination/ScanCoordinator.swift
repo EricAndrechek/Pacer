@@ -324,6 +324,9 @@ public final class ScanCoordinator {
     /// trail that gives every `TokenSample` its `accountId`. Lazily built
     /// because it needs the scan context, which is born on `@ScanActor`.
     private var accountTrailRecorder: AccountTrailRecorder?
+    /// The login this process last saw, so account-following reacts to a
+    /// change rather than re-asserting the same answer every cycle.
+    private var lastObservedLoginAccount: String?
     private var scanInFlight = false
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
@@ -897,8 +900,21 @@ public final class ScanCoordinator {
         // Idempotent (the poller no-ops when the id already matches) and
         // fire-and-forget, because switching swaps sample timelines and
         // that is not work to run inside the scan's budget.
-        if let observedAccount, let oauthPoller {
-            Task { await oauthPoller.setActiveAccount(id: observedAccount) }
+        if let observedAccount, observedAccount != lastObservedLoginAccount {
+            let previous = lastObservedLoginAccount
+            lastObservedLoginAccount = observedAccount
+            // Only on a *transition*. Following the steady state instead would
+            // make the Tokens settings switcher useless — a manual pick would
+            // be silently reverted on the next cycle, roughly every twenty
+            // seconds. Pacer should follow the login when the login moves, and
+            // otherwise respect what the user asked to look at.
+            //
+            // `previous == nil` is the first observation of this process, not
+            // a switch: acting on it would override a deliberate choice made
+            // before the last restart.
+            if previous != nil, let oauthPoller {
+                Task { await oauthPoller.setActiveAccount(id: observedAccount) }
+            }
         }
 
         // One-time, and only for the unambiguous case: a store that has

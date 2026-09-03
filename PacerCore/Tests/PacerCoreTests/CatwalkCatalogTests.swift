@@ -61,60 +61,124 @@ struct CatwalkCatalogTests {
     }
 }
 
-@Suite("Pricing source chain")
-struct PricingGapFillChainTests {
+@Suite("Pricing consensus")
+struct PricingConsensusTests {
 
-    private func entries(_ id: String, input: Double) -> [String: [String: Any]] {
-        [id: ["input_cost_per_token": input]]
+    private func entry(_ input: Double? = nil, output: Double? = nil,
+                       write: Double? = nil, read: Double? = nil) -> [String: Any] {
+        var e: [String: Any] = [:]
+        if let input { e["input_cost_per_token"] = input }
+        if let output { e["output_cost_per_token"] = output }
+        if let write { e["cache_creation_input_token_cost"] = write }
+        if let read { e["cache_read_input_token_cost"] = read }
+        return e
     }
 
-    /// Order is the contract: a later source may only supply a price nobody
-    /// had. If a secondary could overwrite, adding a source would silently
-    /// re-price history — the thing that must never happen quietly.
-    @Test("an earlier source wins; a later one only fills gaps")
-    func laterSourcesOnlyFillGaps() {
-        let merged = PricingTable.gapFill(
-            sources: [
-                ("models.dev", entries("model-a", input: 1)),
-                ("catwalk", entries("model-a", input: 999)),
+    /// Decode rather than construct: `LiteLLMModelPricing` has a wide
+    /// initialiser and the tests only care that the key is *covered*.
+    private func covered(_ raw: [String: Any]) -> [String: LiteLLMModelPricing] {
+        PricingTable.decode(json: raw)
+    }
+
+    /// The reason consensus exists at all: tiering can only fill a gap, so a
+    /// wrong price in the primary survives forever — and downstream a wrong
+    /// price is indistinguishable from a right one.
+    @Test("two sources outvote a wrong primary")
+    func majorityOverridesThePrimary() {
+        let merged = PricingTable.reconcile(
+            secondaries: [
+                ("models.dev", ["m": entry(2)]),
+                ("catwalk", ["m": entry(2)]),
             ],
-            into: [:],
-            covered: [:]
+            into: ["m": entry(99)],
+            covered: covered(["m": entry(1)])
         )
-        let a = merged["model-a"] as? [String: Any]
-        #expect(a?["input_cost_per_token"] as? Double == 1)
+        #expect((merged["m"] as? [String: Any])?["input_cost_per_token"] as? Double == 2)
     }
 
-    @Test("a later source supplies a model no earlier source had")
-    func laterSourceAddsNewModels() {
-        let merged = PricingTable.gapFill(
-            sources: [
-                ("models.dev", entries("model-a", input: 1)),
-                ("catwalk", entries("model-b", input: 2)),
+    @Test("a unanimous table is left exactly as it was")
+    func unanimityChangesNothing() {
+        let merged = PricingTable.reconcile(
+            secondaries: [("models.dev", ["m": entry(2)]), ("catwalk", ["m": entry(2)])],
+            into: ["m": entry(2)],
+            covered: covered(["m": entry(1)])
+        )
+        #expect((merged["m"] as? [String: Any])?["input_cost_per_token"] as? Double == 2)
+    }
+
+    /// An arbitrary tie-break dressed up as consensus is worse than a
+    /// known-provenance number, so a three-way split keeps the primary.
+    @Test("no majority keeps the primary rather than inventing a winner")
+    func threeWaySplitKeepsPrimary() {
+        let merged = PricingTable.reconcile(
+            secondaries: [("models.dev", ["m": entry(2)]), ("catwalk", ["m": entry(3)])],
+            into: ["m": entry(1)],
+            covered: covered(["m": entry(1)])
+        )
+        #expect((merged["m"] as? [String: Any])?["input_cost_per_token"] as? Double == 1)
+    }
+
+    /// Coverage is ragged — a catalog may publish input/output and omit the
+    /// cache tiers. Voting per field keeps its votes on the fields it has.
+    @Test("votes are counted per field, not per model")
+    func consensusIsPerField() {
+        let merged = PricingTable.reconcile(
+            secondaries: [
+                ("models.dev", ["m": entry(2, output: 20)]),
+                ("catwalk", ["m": entry(2)]),          // no output at all
             ],
-            into: [:],
-            covered: [:]
+            into: ["m": entry(99, output: 20)],
+            covered: covered(["m": entry(1)])
         )
-        #expect(merged.count == 2)
-        #expect((merged["model-b"] as? [String: Any])?["input_cost_per_token"] as? Double == 2)
+        let m = merged["m"] as? [String: Any]
+        #expect(m?["input_cost_per_token"] as? Double == 2)    // 2 of 3 agree
+        #expect(m?["output_cost_per_token"] as? Double == 20)  // uncontested
     }
 
-    @Test("a failed source is skipped, not fatal")
-    func nilSourceIsSkipped() {
-        let merged = PricingTable.gapFill(
-            sources: [("models.dev", nil), ("catwalk", entries("model-b", input: 2))],
-            into: [:],
-            covered: [:]
+    @Test("a model no primary covers is added outright")
+    func newModelsAreAdded() {
+        let merged = PricingTable.reconcile(
+            secondaries: [("catwalk", ["brand-new": entry(7, output: 70)])],
+            into: [:], covered: [:]
         )
-        #expect(merged.count == 1)
-        #expect(merged["model-b"] != nil)
+        let m = merged["brand-new"] as? [String: Any]
+        #expect(m?["input_cost_per_token"] as? Double == 7)
+        #expect(m?["output_cost_per_token"] as? Double == 70)
     }
 
-    @Test("no sources at all leaves the primary table untouched")
-    func emptyChainIsIdentity() {
-        let base: [String: Any] = ["kept": ["input_cost_per_token": 5.0]]
-        let merged = PricingTable.gapFill(sources: [], into: base, covered: [:])
-        #expect(merged.count == 1)
-        #expect(merged["kept"] != nil)
+    /// The primary keys entries under names Claude Code never emits, so a
+    /// vote must land on the key a lookup resolves to — not the bare id, or
+    /// the corrected price would sit in a row nothing reads.
+    @Test("a correction lands on the key a lookup actually resolves to")
+    func correctionsFollowFuzzyMatching() {
+        let merged = PricingTable.reconcile(
+            secondaries: [
+                ("models.dev", ["claude-x": entry(2)]),
+                ("catwalk", ["claude-x": entry(2)]),
+            ],
+            into: ["anthropic/claude-x": entry(99)],
+            covered: covered(["anthropic/claude-x": entry(1)])
+        )
+        #expect((merged["anthropic/claude-x"] as? [String: Any])?["input_cost_per_token"] as? Double == 2)
+        #expect(merged["claude-x"] == nil)   // not duplicated under the bare id
+    }
+
+    @Test("a source that failed to fetch simply does not vote")
+    func nilSourceDoesNotVote() {
+        let merged = PricingTable.reconcile(
+            secondaries: [("models.dev", nil), ("catwalk", ["m": entry(2)])],
+            into: ["m": entry(99)], covered: covered(["m": entry(1)])
+        )
+        // One vote each, no majority → primary stands.
+        #expect((merged["m"] as? [String: Any])?["input_cost_per_token"] as? Double == 99)
+    }
+
+    @Test("zero and negative readings are not votes")
+    func placeholdersDoNotVote() {
+        let merged = PricingTable.reconcile(
+            secondaries: [("models.dev", ["m": entry(0)]), ("catwalk", ["m": entry(0)])],
+            into: ["m": entry(5)], covered: covered(["m": entry(1)])
+        )
+        #expect((merged["m"] as? [String: Any])?["input_cost_per_token"] as? Double == 5)
     }
 }
