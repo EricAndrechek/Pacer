@@ -60,6 +60,50 @@ public struct ExternalAccountDirectory: Sendable {
         return ExternalAccountDirectory(entries: merged)
     }
 
+    /// Per-account profile directories an external switcher has created —
+    /// the ones a session pins `CLAUDE_CONFIG_DIR` to so a second account
+    /// can run in parallel with the default login.
+    ///
+    /// These are outside `~/.claude` entirely, so `ClaudePathResolver` has no
+    /// way to find them: it resolves roots from *Pacer's* environment, and
+    /// Pacer is a background agent that never has `CLAUDE_CONFIG_DIR` set.
+    /// The turns written there are consequently invisible — not
+    /// misattributed, which would be worse, but absent, which is still a
+    /// silent hole in someone's cost history.
+    ///
+    /// Only directories that already contain a `projects/` subdirectory are
+    /// returned, matching what `ClaudePathResolver` requires of any root: a
+    /// profile that exists but has never been used has nothing to scan and
+    /// should not be presented as a root.
+    public static func discoverProfileRoots(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        let sessionParents = [
+            homeDirectory.appendingPathComponent(".claude-swap-backup/sessions"),
+            homeDirectory.appendingPathComponent(".local/share/claude-swap/sessions"),
+        ]
+        var out: [URL] = []
+        var seen = Set<String>()
+        for parent in sessionParents {
+            guard let entries = try? fileManager.contentsOfDirectory(
+                at: parent, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for entry in entries.sorted(by: { $0.path < $1.path }) {
+                var isDir: ObjCBool = false
+                let projects = entry.appendingPathComponent("projects")
+                guard fileManager.fileExists(atPath: projects.path, isDirectory: &isDir),
+                      isDir.boolValue
+                else { continue }
+                let standardized = entry.standardizedFileURL
+                guard seen.insert(standardized.path).inserted else { continue }
+                out.append(standardized)
+            }
+        }
+        return out
+    }
+
     /// claude-swap keeps its roster in `sequence.json` under its backup root.
     ///
     /// The macOS/Windows location is `~/.claude-swap-backup`; Linux/WSL

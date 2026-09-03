@@ -52,6 +52,32 @@ public final class AccountTrailRecorder {
     /// two changes have to land together: adding a root to the scan requires
     /// carrying its path through `ParsedUsageEntry` into
     /// `AccountTrail.accountId(at:rootPath:)`, which already takes it.
+    /// Poll every pinned session profile, so a root that a terminal has
+    /// bound to a second account is attributed to that account rather than
+    /// to whoever happens to be the default login.
+    ///
+    /// A profile's binding is effectively permanent — the switcher creates
+    /// one directory per account — so these activations are opened once and
+    /// left open. There is no reliable way to tell from outside whether a
+    /// session is still running, and it does not matter: any turn ever
+    /// written under that root belongs to that account whenever it happened.
+    public func pollPinnedRoots(_ roots: [URL], now: Date = Date()) {
+        for root in roots {
+            guard let (url, modified) = observer.currentConfig(
+                forRoot: root, homeDirectory: homeDirectory
+            ) else { continue }
+            let key = url.path
+            if let seen = lastModified[key], seen == modified { continue }
+            lastModified[key] = modified
+            guard let observation = observer.read(
+                configAt: url, rootPath: root.standardizedFileURL.path
+            ) else { continue }
+            record(observation, now: now, source: AccountActivation.sourceExternal,
+                   evidence: "session profile \(root.lastPathComponent)")
+            applyLabels(from: observation)
+        }
+    }
+
     @discardableResult
     public func poll(now: Date = Date()) -> String? {
         guard let (url, modified) = observer.currentConfig(

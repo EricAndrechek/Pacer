@@ -419,7 +419,7 @@ public final class ScanCoordinator {
     @discardableResult
     public func runOnce() async throws -> ScanReport {
         if resolvedRoots.isEmpty {
-            resolvedRoots = try resolver.resolve()
+            resolvedRoots = try resolveAllRoots()
         }
         return try await runScanCycle()
     }
@@ -511,10 +511,36 @@ public final class ScanCoordinator {
         return report
     }
 
+    /// Session-profile roots found this resolution pass, kept so the trail
+    /// recorder can bind each to its account without re-walking the disk.
+    private var sessionProfileRoots: [ClaudePathResolver.ResolvedRoot] = []
+
+    /// Every root worth scanning: the environment's, plus any per-account
+    /// session profile an external switcher has created.
+    ///
+    /// Those profiles are outside `~/.claude` and Pacer never has
+    /// `CLAUDE_CONFIG_DIR` set, so `resolve()` structurally cannot find them
+    /// — a second account running in a pinned terminal was invisible, its
+    /// tokens and cost simply missing rather than misattributed. Discovery is
+    /// best-effort and additive: a switcher that is not installed contributes
+    /// nothing, and a path that fails validation is dropped rather than
+    /// breaking the scan.
+    private func resolveAllRoots() throws -> [ClaudePathResolver.ResolvedRoot] {
+        let primary = try resolver.resolve()
+        let discovered = resolver.resolveAdditional(
+            ExternalAccountDirectory.discoverProfileRoots()
+        )
+        sessionProfileRoots = discovered.filter { !primary.contains($0) }
+        if !sessionProfileRoots.isEmpty {
+            log("roots: +\(sessionProfileRoots.count) session profile(s)")
+        }
+        return primary + sessionProfileRoots
+    }
+
     /// Runs the initial scan, then blocks watching for change events.
     /// Returns when the watcher stream ends (typically on `stop()`).
     public func runForever() async throws {
-        resolvedRoots = try resolver.resolve()
+        resolvedRoots = try resolveAllRoots()
         let stream = await watcher.triggers()
         // One-shot stale-cursor prune: walk the JSONLFileCursor table
         // and drop rows whose paths no longer exist on disk. On the
@@ -839,6 +865,11 @@ public final class ScanCoordinator {
         // Costs one `stat` when the config hasn't been rewritten.
         let recorder = accountTrailRecorder ?? AccountTrailRecorder(context: context)
         if accountTrailRecorder == nil { accountTrailRecorder = recorder }
+        // Bind each session profile to its account before anything under it
+        // is attributed. Runs first so a profile discovered this cycle is
+        // already in the trail when its transcripts are parsed below —
+        // otherwise its first batch of turns would come out unattributed.
+        recorder.pollPinnedRoots(sessionProfileRoots.map(\.root))
         let observedAccount = recorder.poll()
         activePersister.accountTrail = recorder.trail()
 
