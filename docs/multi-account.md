@@ -175,19 +175,59 @@ A menu in the window toolbar selects "all accounts" or one, persisted in **App
 Group** defaults so the widget extension — a separate process — can read it
 too. It renders nothing when only one account exists.
 
-**Follows the scope** (23 surfaces): every dashboard card, history, projects
-and collections, models, the heatmap, all three drill-down modals, the menu
-bar, all four data widgets, the advisor badges, and CSV export.
+**Follows the scope**: every dashboard card, history, projects and
+collections, models, the heatmap, all three drill-down modals, the menu bar,
+all four data widgets, the advisor badges, CSV export — and, since the
+per-account rate-limit work below, the pace chart, the menu-bar gauges, the
+window subtitle and the toolbar freshness pill.
 
 **Deliberately doesn't:**
 
 | surface | why |
 |---|---|
-| Rate limits (pace chart, menu-bar gauges) | A property of the *login*, not a view preference. They are always the active account's. |
 | Alerts | A view shows what you asked to see; an alert tells you what you didn't. A spend threshold a display filter can silence is a footgun — scope to work in the morning, stop hearing about personal spend all day. Per-account *rules* are a fine feature; inheriting the window's scope is not the way to get them. |
 | The HTTP API | A scripted consumer wants to say what it means, not get different numbers depending on what a human last clicked in an app it cannot see. Per-account figures live behind an explicit parameter instead — see below. |
 | `ToolbarFreshness` | Data freshness, not usage. |
 | Project management (merge sheet, collections manager, alias manager) | They list *paths*; totals are ordering context. Scoping could hide a project you are trying to merge. |
+
+### Rate limits are per account too
+
+They were not, for a while, and the reason is worth keeping: the live sample
+tables held exactly *one* account's rows by construction. Switching accounts
+*moved rows* — the outgoing login's went to `AccountUsageArchive`, the
+incoming login's came back. Every read site could then ignore accounts
+entirely, which is a real benefit, but it was bought with the other account's
+history: 45,973 archived rate-limit rows on the machine this was built for,
+current to the minute, that nothing in the app could draw. The swap also
+measured 107,705 rows and 14.3 seconds, several times a day for anyone running
+an auto-switcher.
+
+Now every account writes the live tables, stamped with `accountId`, and
+switching is a flag flip. `OAuthPoller.foldArchiveIntoLiveTables` brought the
+archived history back on first launch; the archive keeps its other job, cold
+storage past `liveWindowDays`.
+
+**`LimitScope` is not optional.** A read that forgets to scope returns two
+logins' windows interleaved and shows whichever sorted first — no crash, no
+empty state, just someone else's number. With `fetchLimit`, which most of these
+reads use, the newest eight rows can be entirely the other account's. And
+`UsageLimitSample` is worse still: two accounts routinely report a window under
+the *same* identity string, so nothing but the stamp tells the rows apart and
+an unscoped read draws two series as one line. Use the descriptor builders.
+
+Which account a surface reads depends on what it is for:
+
+| | resolves to | why |
+|---|---|---|
+| Displays — pace chart, menu bar, widgets, subtitle, freshness | `UsageScope.limitAccountId`: the picked scope, else the active login | "All accounts" is not a number. Two 5-hour windows do not sum into a third, so unscoped falls back to the active login — exactly what every gauge showed before accounts existed. |
+| Decisions — forecast engine, alerts, global-reset detector, `/v1/snapshot` | the active login alone | An alarm a display filter can silence is a footgun, and a scripted consumer must not get different numbers because a human clicked something in an app it cannot see. |
+
+**The forecast overlay is honest rather than silently wrong.** The engine fits
+one login's history — its parameters, snapshot trail and golden fixtures are
+all the active account's — so scoping the chart to a different account hides
+the projection and the model-comparison fan, and says so: *History only.
+Forecasts follow the active account.* A per-account engine is real work and
+remains undone.
 
 ### Naming an account
 

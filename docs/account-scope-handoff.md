@@ -4,7 +4,7 @@ Operational companion to [`multi-account.md`](multi-account.md), which holds the
 *design*. This one holds the **state, the invariants, and the traps** — written
 so a session picking this up cold does not re-learn them the expensive way.
 
-Branch `feat/account-attribution`, 42 commits, 763 tests, `make verify-data`
+Branch `feat/account-attribution`, 44 commits, 772 tests, `make verify-data`
 green. Schema at 28 models, cost recompute version **14**.
 
 ---
@@ -147,16 +147,22 @@ follow-the-login), four per-account rollups, and **23 scoped surfaces**: every
 dashboard card, history, projects, collections, models, heatmap, the three
 drill-down modals, the menu bar, four widgets, advisor badges, CSV export.
 
-Deliberately **not** scoped, with reasons in `multi-account.md`: rate limits
-(a property of the login), alerts (a display filter must not silence a budget
-alarm), the HTTP API (scripted consumers want explicit control),
-`ToolbarFreshness`, and the three project-management views.
+**Rate limits are per account now too** — the big item on the old list. Every
+account writes the live sample tables stamped with `accountId`, switching is a
+flag flip rather than 107,705 rows moving, and `LimitScope` scopes every read.
+Read the "Rate limits are per account too" section of `multi-account.md` before
+touching any of it; the short version is that a read which forgets to scope is
+silently wrong, not empty.
 
-The API's half of that decision is now built: `GET /v1/accounts` lists the ids,
-`/v1/usage/daily` and `/v1/usage/models` take `?account=`, and `/metrics` emits
-per-account series. Unscoped output is unchanged. Accounts can also be renamed
-(Settings → Tokens), and a typed name outranks the observed email in
-`Account.label`.
+The API asks explicitly: `GET /v1/accounts` lists the ids, `/v1/usage/daily`
+and `/v1/usage/models` take `?account=`, and `/metrics` emits per-account
+series. Unscoped output is unchanged. Accounts can be renamed (Settings →
+Tokens), and a typed name outranks the observed email in `Account.label`.
+
+Deliberately **not** scoped, with reasons in `multi-account.md`: alerts (a
+display filter must not silence a budget alarm), the HTTP snapshot (scripted
+consumers get the active login and are told which it is), and the three
+project-management views.
 
 Verified on the real store: a mixed day splits `$70.78` (work) + `$1,187.71`
 (personal) = `$1,258.49` (global). Fresh-install cold start builds all 28 models
@@ -166,18 +172,12 @@ and 108,660 entries in 22.8 s with no migration.
 
 ## What is next, with honest sizing
 
-**1. Rate-limit history per account — big, risky, not started.**
-Still swap-based: switching archives one account's samples and restores the
-other's, so the non-active account's pace chart does not exist. Making it
-per-account is **45 read sites, 13 of them compile-time `static let`
-descriptors**, across the menu bar, widgets, alerts, the API and the forecast
-engine — the most load-bearing path in the app. Do not start it casually.
-
-The narrower win: the archive already holds the other account's history
-(**45,943 rows per window, current to now**, because secondary accounts archive
-their readings). A per-account sparkline in the Accounts card would surface the
-trend without touching that path — but it is new UI, and Eric's rule is rendered
-options and sign-off before building visual work.
+**1. A per-account forecast engine.** The one real gap the rate-limit work left.
+The engine fits the active login's history — parameters, snapshot trail and
+golden fixtures all assume one series — so the pace chart hides its projection
+when you scope to another account rather than drawing a confident wrong line.
+Closing this means per-account `EngineParams` and a second snapshot trail, and
+it has to stay byte-identical on the golden gate for the active account.
 
 **2. Per-account alert rules.** A feature, not a fix. Inheriting the window's
 scope is explicitly the wrong way to get it.
@@ -201,3 +201,35 @@ assertion is "this output never contains X", the fixture that proves it is the
 one taken from the real store, not the one that reads nicely in a diff. There is
 now a test using an email-derived org name, and `metricsName` falls back past
 everything observed to `Account <last 4 of id>`.
+
+---
+
+## Three more, from the rate-limit work
+
+**A migration that under-drains must be repeatable, not guarded.** The one-time
+fold moved 111,250 archived rows and then reported 1,250 still recent — rows a
+`sampledAt >= cutoff` fetch should plainly have returned. I never explained it.
+A meta-key guard would have made that a permanent hole in the chart; running
+the pass every launch cost three index probes and fixed it on the next start.
+When a one-shot migration's correctness is not provable, make it idempotent and
+let it run again.
+
+**A mirror in defaults will drift, so repair it rather than trusting it.** The
+active account id is mirrored into App Group defaults for the widget process.
+`publishStatus` wrote the poller's in-memory `activeAccountKey`, which is
+`Account.defaultKey` until a response carries an org header — so defaults said
+`"default"` while the store said a uuid, and every read scoped to it matched
+nothing. The failure mode is the dangerous kind: no error, no empty state, the
+gauges just stopped having a value. Both ends now publish only ids the store
+knows, and `reconcileScopeMirror` repairs whatever is there at launch.
+
+**`defaults read` lies.** It served a stale value for minutes after the app had
+written the correct one. Read the plist under the group container
+(`plutil -p ~/Library/Group\ Containers/<group>/Library/Preferences/<group>.plist`)
+before concluding a write did not happen.
+
+**Tests write to the machine's real App Group suite.** `PacerPreferences.store`
+resolves to the live group container in the test process too, so a test that
+sets a scope leaves a fixture id where the running app reads it. Capture and
+restore, and mark the suite `.serialized` — parallel tests otherwise clobber
+each other's restore.
