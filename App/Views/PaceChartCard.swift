@@ -24,7 +24,10 @@ struct PaceChartCard: View {
     /// `"seven_day"` for the fixed blocks, or a scoped `limits[]` identity for a
     /// per-model window. Wired by the dashboard to its modal-navigation root, so
     /// every column (fixed + scoped) presents through the same house modal.
-    let onCompare: ((String) -> Void)?
+    /// Window key plus the account it belongs to — the all-accounts view can
+    /// show two accounts' 5-hour columns at once, and they open different
+    /// comparisons.
+    let onCompare: ((String, String?) -> Void)?
 
     /// 8-day window of fixed rate-limit samples. Body never reads the array —
     /// pre-bucketed by window in `bucketed` so neither fixed column does its
@@ -40,7 +43,22 @@ struct PaceChartCard: View {
     ///
     /// Rate-limit rows only change when the OAuth poller writes, roughly every
     /// five minutes, so `newestSignal` (one row) decides when to reload.
-    @State private var samples: [LimitSamplePoint] = []
+    /// One account's loaded series. Usually there is exactly one — a picked
+    /// scope, or a machine that runs its accounts one at a time — and then
+    /// `label` is nil and nothing is decorated. Under "all accounts" on a
+    /// machine that runs them in parallel there is one per account, and the
+    /// columns say whose they are.
+    struct AccountSeries: Identifiable {
+        let accountId: String?
+        let label: String?
+        var fixed: [LimitSamplePoint] = []
+        var scoped: [ScopedSamplePoint] = []
+        var windows: [ScopedWindowRow] = []
+        var loadedThrough: Date?
+        var id: String { accountId ?? "" }
+    }
+
+    @State private var series: [AccountSeries] = []
 
     /// The newest scoped `limits[]` rows, newest first — just enough to resolve
     /// the latest poll's batch, which is what decides the scoped column set.
@@ -56,7 +74,6 @@ struct PaceChartCard: View {
     /// three columns re-laid out as a lopsided 2+1 and stayed that way. Loading
     /// it here means the card has no account-dependent query at all, needs no
     /// identity change, and keeps its layout.
-    @State private var scopedLatest: [ScopedWindowRow] = []
 
     /// For naming whose windows these are. Two rows, so the query is free.
     @Query private var accounts: [Account]
@@ -69,6 +86,7 @@ struct PaceChartCard: View {
     private var limitOwnerNote: String? {
         guard accounts.count > 1, limitAccountId != nil else { return nil }
         guard UsageScope.shared.accountId == nil else { return nil }   // a picked scope names itself
+        guard series.count <= 1 else { return nil }                    // both are on screen
         let owner = accounts.first { $0.id == limitAccountId }?.label ?? "the active account"
         return "Rate limits are one login's — showing \(owner). Pick an account above for its own."
     }
@@ -85,7 +103,6 @@ struct PaceChartCard: View {
     /// window — so the scoped line rendered as a stub near "now" no matter how
     /// long the cycle had been running. The 8-day cutoff bounds it by time
     /// instead, which is the bound that matches what the chart draws.
-    @State private var scopedHistory: [ScopedSamplePoint] = []
 
     /// One row: the newest rate-limit sample. Cheap to re-run on every save —
     /// which is exactly what `@Query` will do — and its timestamp is the
@@ -130,7 +147,7 @@ struct PaceChartCard: View {
     /// it first appeared.
     let limitAccountId: String?
 
-    init(limitAccountId: String? = nil, onCompare: ((String) -> Void)? = nil) {
+    init(limitAccountId: String? = nil, onCompare: ((String, String?) -> Void)? = nil) {
         self.limitAccountId = limitAccountId
         self.onCompare = onCompare
         // Only the signal is a `@Query`. One row, so re-running it on every
@@ -172,11 +189,13 @@ struct PaceChartCard: View {
     /// would keep its launch-day value and widen the query by a day per day.
     /// Newest sample already loaded. `nil` means nothing has been loaded yet,
     /// which is the only case that reads all 8 days.
-    @State private var loadedThrough: Date?
     /// True only while the first, full-window fetch for this account is in
     /// flight — so the card says "loading" rather than showing the cold-start
     /// empty state, which reads as "this account has no data".
     @State private var isLoading = false
+    /// Whether this machine runs its accounts in parallel — recomputed with the
+    /// series, since it decides how many there are.
+    @State private var isParallel = false
 
     /// Load the two 8-day series **off the main actor**.
     ///
@@ -194,68 +213,90 @@ struct PaceChartCard: View {
     /// renders whatever it has meanwhile.
     private func reload() async {
         guard let container = try? PacerStore.sharedModelContainer() else { return }
-        let account = limitAccountId
-
-        // Seed from the cross-rebuild cache before deciding what to fetch: a
-        // scope flip back to an account already loaded this session becomes an
-        // incremental top-up instead of another full window.
-        if loadedThrough == nil {
-            let cached = PaceSeriesCache.shared.series(for: account)
-            if cached.loadedThrough != nil {
-                samples = cached.fixed
-                scopedHistory = cached.scoped
-                scopedLatest = cached.windows
-                loadedThrough = cached.loadedThrough
-            }
-        }
-
-        let through = loadedThrough
+        isParallel = AccountParallelism.isParallel(context: modelContext)
+        let targets = loadTargets()
         let started = Date()
-        isLoading = through == nil
+        isLoading = series.isEmpty
 
-        let loaded = await Task.detached(priority: .userInitiated) {
-            await Self.load(container: container, account: account, through: through)
-        }.value
+        var next: [AccountSeries] = []
+        for target in targets {
+            var entry = series.first { $0.accountId == target.accountId }
+                ?? AccountSeries(accountId: target.accountId, label: target.label)
+            entry = AccountSeries(accountId: target.accountId, label: target.label,
+                                  fixed: entry.fixed, scoped: entry.scoped,
+                                  windows: entry.windows, loadedThrough: entry.loadedThrough)
+
+            // Seed from the cross-rebuild cache before deciding what to fetch:
+            // flipping back to an account already loaded this session becomes
+            // an incremental top-up rather than another full window.
+            if entry.loadedThrough == nil {
+                let cached = PaceSeriesCache.shared.series(for: target.accountId)
+                if cached.loadedThrough != nil {
+                    entry.fixed = cached.fixed
+                    entry.scoped = cached.scoped
+                    entry.windows = cached.windows
+                    entry.loadedThrough = cached.loadedThrough
+                }
+            }
+
+            let through = entry.loadedThrough
+            let account = target.accountId
+            let loaded = await Task.detached(priority: .userInitiated) {
+                await Self.load(container: container, account: account, through: through)
+            }.value
+
+            if through != nil {
+                // Incremental. A poll adds a handful of rows to an 8-day window
+                // of ~31,000, so re-reading the whole window each time would
+                // re-materialize all of them to learn about three. Newest-first
+                // order is preserved by prepending, which is why the fetch is
+                // ordered the same way.
+                if !loaded.fixed.isEmpty { entry.fixed = loaded.fixed + entry.fixed }
+                if !loaded.scoped.isEmpty { entry.scoped = loaded.scoped + entry.scoped }
+                if !loaded.windows.isEmpty { entry.windows = loaded.windows }
+                // Drop what has aged out, so the window stays 8 days rather
+                // than growing for as long as Pacer is open.
+                entry.fixed.removeAll { $0.sampledAt < loaded.cutoff }
+                entry.scoped.removeAll { $0.sampledAt < loaded.cutoff }
+            } else {
+                entry.fixed = loaded.fixed
+                entry.scoped = loaded.scoped
+                entry.windows = loaded.windows
+            }
+
+            entry.loadedThrough = [entry.fixed.first?.sampledAt, entry.scoped.first?.sampledAt]
+                .compactMap { $0 }.max() ?? entry.loadedThrough
+            PaceSeriesCache.shared.store(
+                .init(fixed: entry.fixed, scoped: entry.scoped, windows: entry.windows,
+                      loadedThrough: entry.loadedThrough),
+                for: target.accountId)
+            next.append(entry)
+        }
+
         isLoading = false
+        series = next
 
-        if let through, loadedThrough == through {
-            // Incremental. A poll adds a handful of rows to an 8-day window of
-            // ~31,000, so re-reading the whole window each time would
-            // re-materialize all of them to learn about three.
-            //
-            // Newest-first order is preserved by prepending, which is also why
-            // the fetch is ordered the same way.
-            if !loaded.fixed.isEmpty { samples = loaded.fixed + samples }
-            if !loaded.scoped.isEmpty { scopedHistory = loaded.scoped + scopedHistory }
-            if !loaded.windows.isEmpty { scopedLatest = loaded.windows }
-            // Drop what has aged out, so the window stays 8 days rather than
-            // growing for as long as Pacer is open.
-            samples.removeAll { $0.sampledAt < loaded.cutoff }
-            scopedHistory.removeAll { $0.sampledAt < loaded.cutoff }
-        } else if through == nil {
-            samples = loaded.fixed
-            scopedHistory = loaded.scoped
-            scopedLatest = loaded.windows
-        } else {
-            // The scope changed while this load was in flight; its rows belong
-            // to the previous account. Drop them rather than mixing.
-            return
+        Log.write("PaceChartCard",
+                  "loaded \(next.count) series in "
+                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms ["
+                    + next.map { ($0.accountId.map { String($0.suffix(4)) } ?? "all")
+                                 + ":" + String($0.fixed.count + $0.scoped.count) }
+                        .joined(separator: " ") + "]")
+    }
+
+    /// Which accounts this card should draw.
+    ///
+    /// A picked scope draws that account alone. "All accounts" draws the active
+    /// login alone on a machine that runs its accounts one at a time — that
+    /// account's limits are the only ones binding — and every account when they
+    /// run in parallel, because then they all are. See `AccountParallelism`.
+    private func loadTargets() -> [(accountId: String?, label: String?)] {
+        guard UsageScope.shared.accountId == nil, accounts.count > 1, isParallel else {
+            return [(limitAccountId, nil)]
         }
-
-        let newestLoaded = [samples.first?.sampledAt, scopedHistory.first?.sampledAt]
-            .compactMap { $0 }.max()
-        if let newestLoaded { loadedThrough = newestLoaded }
-        PaceSeriesCache.shared.store(
-            .init(fixed: samples, scoped: scopedHistory, windows: scopedLatest,
-                  loadedThrough: loadedThrough),
-            for: account)
-
-        if through == nil {
-            Log.write("PaceChartCard",
-                      "loaded \(samples.count) fixed + \(scopedHistory.count) scoped row(s) "
-                        + "in \(Int(Date().timeIntervalSince(started) * 1000))ms"
-                        + " [account \(account.map { String($0.suffix(4)) } ?? "all")]")
-        }
+        return accounts
+            .sorted { $0.isActive != $1.isActive ? $0.isActive : $0.id < $1.id }
+            .map { (accountId: Optional($0.id), label: Optional($0.label)) }
     }
 
     private struct Loaded: Sendable {
@@ -390,7 +431,13 @@ struct PaceChartCard: View {
     /// is a fixed block (`RateLimitSample`) or a scoped per-model cap
     /// (`UsageLimitSample`). The column view is source-agnostic.
     struct Column: Identifiable, Equatable {
-        let id: String            // window key / scoped identity
+        /// `"<accountId>|<windowKey>"`. Composite because the all-accounts view
+        /// can list several accounts' windows at once and two of them share a
+        /// window key — without the account, projections and taps would land on
+        /// the wrong column.
+        let id: String
+        let accountId: String?
+        let windowKey: String
         let title: String
         let duration: TimeInterval
         /// Latest reading (nil ⇒ no sample yet — the genuine cold start).
@@ -422,9 +469,9 @@ struct PaceChartCard: View {
     /// Derived synchronously from `samples` so the first render already has the
     /// real layout — see the perf note in git history for why this isn't
     /// `@State` + `.onAppear`.
-    private var bucketed: Bucketed {
+    private func bucketed(_ entry: AccountSeries) -> Bucketed {
         var b = Bucketed()
-        for s in samples {
+        for s in entry.fixed {
             if s.window == RateLimitWindowName.fiveHour { b.fiveHour.append(s) }
             else if s.window == RateLimitWindowName.sevenDay { b.sevenDay.append(s) }
             if s.sampledAt > (b.latest?.sampledAt ?? .distantPast) { b.latest = s }
@@ -432,15 +479,21 @@ struct PaceChartCard: View {
         return b
     }
 
+    /// True once any series has a reading — the card's "there is something to
+    /// draw" test, replacing the single-account `b.latest != nil`.
+    private var hasAnyReading: Bool {
+        series.contains { bucketed($0).latest != nil || !$0.windows.latestBatch().isEmpty }
+    }
+
     /// The scoped rows to render, one per model/surface-scoped identity in the
     /// latest poll, ordered active-first then hottest (the `latestBatch` order).
     /// Account-wide `session`/`weekly_all` rows are excluded — the fixed 5h/7d
     /// hero columns already own those (Decision C).
-    private var scopedRows: [ScopedWindowRow] {
-        // Already filtered to model/surface-scoped identities by the loader —
-        // the account-wide `session`/`weekly_all` rows the fixed 5h/7d heroes
-        // own are excluded in the fetch predicate (Decision C).
-        scopedLatest.latestBatch()
+    /// Already filtered to model/surface-scoped identities by the loader — the
+    /// account-wide `session`/`weekly_all` rows the fixed 5h/7d heroes own are
+    /// excluded in the fetch predicate (Decision C).
+    private func scopedRows(_ entry: AccountSeries) -> [ScopedWindowRow] {
+        entry.windows.latestBatch()
     }
 
     /// Fixed 5-hour / 7-day durations — the anchors both the sort (which side a
@@ -456,46 +509,74 @@ struct PaceChartCard: View {
     /// always outside the adjacent `.fiveHour`/`.sevenDay` ranks
     /// (`PaceColumnLayout.scopedSide`). With no scoped rows this yields exactly
     /// `[5h, 7d]`, unchanged.
-    private func columns(_ b: Bucketed, now: Date) -> [Column] {
+    /// Every column, across every account being drawn.
+    ///
+    /// Within an account the existing order is unchanged. Across accounts the
+    /// groups stay whole — an account's windows are read together, and
+    /// interleaving 5h(work), 5h(personal), 7d(work)… would make the card a
+    /// puzzle. The active login leads.
+    private func columns(now: Date) -> [Column] {
         typealias Side = PaceColumnLayout.Side
-        var tagged: [(side: Side, col: Column)] = [
-            (.fiveHour, fixedColumn(title: "5-hour", key: RateLimitWindowName.fiveHour,
-                                    duration: Self.fiveHourDuration, samples: b.fiveHour, now: now)),
-            (.sevenDay, fixedColumn(title: "7-day", key: RateLimitWindowName.sevenDay,
-                                    duration: Self.sevenDayDuration, samples: b.sevenDay, now: now)),
-        ]
-        for row in scopedRows {
-            let duration = WindowSpec.scopedDuration(group: row.group)
-            let severity: Column.SeverityTag? = row.severityValue.isElevated
-                ? .init(text: row.severity.lowercased(), band: row.displayBand)
-                : nil
-            let side = PaceColumnLayout.scopedSide(
-                group: row.group, duration: duration,
-                fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
-            tagged.append((side, Column(
-                id: row.identity, title: row.label, duration: duration,
-                usedPct: row.percent, resetsAt: row.resetsAt,
-                baseChart: .cycle(scoped: row, history: scopedHistory,
-                                  duration: duration, now: now),
-                isActive: row.isActive, severity: severity, isScoped: true)))
-        }
-        return tagged
-            .sorted { lhs, rhs in
-                if lhs.side != rhs.side { return lhs.side < rhs.side }
-                if lhs.col.duration != rhs.col.duration { return lhs.col.duration < rhs.col.duration }
-                if lhs.col.title != rhs.col.title {
-                    return lhs.col.title.localizedCaseInsensitiveCompare(rhs.col.title) == .orderedAscending
-                }
-                return lhs.col.id < rhs.col.id
+        var out: [Column] = []
+        for entry in series {
+            let b = bucketed(entry)
+            var tagged: [(side: Side, col: Column)] = [
+                (.fiveHour, fixedColumn(entry, title: "5-hour", key: RateLimitWindowName.fiveHour,
+                                        duration: Self.fiveHourDuration, samples: b.fiveHour, now: now)),
+                (.sevenDay, fixedColumn(entry, title: "7-day", key: RateLimitWindowName.sevenDay,
+                                        duration: Self.sevenDayDuration, samples: b.sevenDay, now: now)),
+            ]
+            for row in scopedRows(entry) {
+                let duration = WindowSpec.scopedDuration(group: row.group)
+                let severity: Column.SeverityTag? = row.severityValue.isElevated
+                    ? .init(text: row.severity.lowercased(), band: row.displayBand)
+                    : nil
+                let side = PaceColumnLayout.scopedSide(
+                    group: row.group, duration: duration,
+                    fiveHourDuration: Self.fiveHourDuration, sevenDayDuration: Self.sevenDayDuration)
+                tagged.append((side, Column(
+                    id: Self.columnID(entry.accountId, row.identity),
+                    accountId: entry.accountId, windowKey: row.identity,
+                    title: Self.decorate(row.label, with: entry.label),
+                    duration: duration,
+                    usedPct: row.percent, resetsAt: row.resetsAt,
+                    baseChart: .cycle(scoped: row, history: entry.scoped,
+                                      duration: duration, now: now),
+                    isActive: row.isActive, severity: severity, isScoped: true)))
             }
-            .map(\.col)
+            out += tagged
+                .sorted { lhs, rhs in
+                    if lhs.side != rhs.side { return lhs.side < rhs.side }
+                    if lhs.col.duration != rhs.col.duration { return lhs.col.duration < rhs.col.duration }
+                    if lhs.col.title != rhs.col.title {
+                        return lhs.col.title.localizedCaseInsensitiveCompare(rhs.col.title) == .orderedAscending
+                    }
+                    return lhs.col.id < rhs.col.id
+                }
+                .map(\.col)
+        }
+        return out
     }
 
-    private func fixedColumn(title: String, key: String, duration: TimeInterval,
+    static func columnID(_ accountId: String?, _ windowKey: String) -> String {
+        "\(accountId ?? "")|\(windowKey)"
+    }
+
+    /// Only decorated when more than one account is on screen — a single
+    /// account's card reads exactly as it always did.
+    private static func decorate(_ title: String, with label: String?) -> String {
+        guard let label else { return title }
+        return "\(title) · \(label)"
+    }
+
+    private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
+                             duration: TimeInterval,
                              samples: [LimitSamplePoint], now: Date) -> Column {
         let latest = samples.first
         return Column(
-            id: key, title: title, duration: duration,
+            id: Self.columnID(entry.accountId, key),
+            accountId: entry.accountId, windowKey: key,
+            title: Self.decorate(title, with: entry.label), duration: duration,
             usedPct: latest?.usedPercentage, resetsAt: latest?.resetsAt,
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
             isActive: false, severity: nil, isScoped: false)
@@ -508,40 +589,63 @@ struct PaceChartCard: View {
     /// outlook caption. Runs OFF the main actor (awaiting the `@ModelActor`
     /// engine from `@MainActor` would otherwise resume the heavy forecast fit
     /// inline on the main thread).
-    private func refreshProjections(scopedIdentities: [String]) async {
-        guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
+    private func refreshProjections() async {
+        guard let engines else { return }
         let started = Date()
-        let computed = await Task.detached(priority: .userInitiated) { [engine] in
-            var nextSelected: [String: WindowProjection] = [:]
-            var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-            var nextEnds: [String: Estimate] = [:]
-            func absorb(key: String, outlook: UsageIntelligenceEngine.BurnOutlook?,
-                        end: Estimate, list: [BurnTrajectory.ScoredTrajectory]) {
-                if let outlook { nextOutlooks[key] = outlook }
-                nextEnds[key] = end
-                if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
-                    nextSelected[key] = WindowProjection(trajectory: chosen.trajectory)
+        // One ask per account, against that account's own fit. Keys are the
+        // composite column ids, so two accounts' 5-hour answers cannot
+        // overwrite each other.
+        let plan: [(accountId: String?, scoped: [String])] = series.map {
+            ($0.accountId, scopedRows($0).map(\.identity))
+        }
+        var nextSelected: [String: WindowProjection] = [:]
+        var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+        var nextEnds: [String: Estimate] = [:]
+
+        for entry in plan {
+            let engine = engines.engine(forAccount: entry.accountId)
+            let account = entry.accountId
+            let scoped = entry.scoped
+            let computed = await askEngine {
+                () -> ([String: WindowProjection],
+                       [String: UsageIntelligenceEngine.BurnOutlook],
+                       [String: Estimate]) in
+                var sel: [String: WindowProjection] = [:]
+                var out: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+                var ends: [String: Estimate] = [:]
+                func absorb(key: String, outlook: UsageIntelligenceEngine.BurnOutlook?,
+                            end: Estimate, list: [BurnTrajectory.ScoredTrajectory]) {
+                    let id = Self.columnID(account, key)
+                    if let outlook { out[id] = outlook }
+                    ends[id] = end
+                    if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
+                        sel[id] = WindowProjection(trajectory: chosen.trajectory)
+                    }
                 }
+                for window in RateLimitWindowKind.allCases {
+                    absorb(key: window.rawValue,
+                           outlook: await engine.burnOutlook(window: window),
+                           end: await engine.ask(.rateLimitOutlook(window)),
+                           list: await engine.rateLimitTrajectories(window: window))
+                }
+                for id in scoped {
+                    absorb(key: id,
+                           outlook: await engine.burnOutlook(windowKey: id),
+                           end: await engine.ask(.scopedOutlook(id)),
+                           list: await engine.rateLimitTrajectories(windowKey: id))
+                }
+                return (sel, out, ends)
             }
-            for window in RateLimitWindowKind.allCases {
-                absorb(key: window.rawValue,
-                       outlook: await engine.burnOutlook(window: window),
-                       end: await engine.ask(.rateLimitOutlook(window)),
-                       list: await engine.rateLimitTrajectories(window: window))
-            }
-            for id in scopedIdentities {
-                absorb(key: id,
-                       outlook: await engine.burnOutlook(windowKey: id),
-                       end: await engine.ask(.scopedOutlook(id)),
-                       list: await engine.rateLimitTrajectories(windowKey: id))
-            }
-            return (nextSelected, nextOutlooks, nextEnds)
-        }.value
-        projections = computed.0
-        outlooks = computed.1
-        endEstimates = computed.2
+            nextSelected.merge(computed.0) { _, new in new }
+            nextOutlooks.merge(computed.1) { _, new in new }
+            nextEnds.merge(computed.2) { _, new in new }
+        }
+
+        projections = nextSelected
+        outlooks = nextOutlooks
+        endEstimates = nextEnds
         Log.write("PaceChartCard",
-                  "projections for \(2 + scopedIdentities.count) window(s) in "
+                  "projections for \(nextEnds.count) window(s) across \(plan.count) account(s) in "
                     + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
     }
 
@@ -549,18 +653,17 @@ struct PaceChartCard: View {
 
     var body: some View {
         let t0 = Date()
-        let b = bucketed
         let now = Date()
-        let cols = columns(b, now: now)
+        let cols = columns(now: now)
         let buildMs = Int(Date().timeIntervalSince(t0) * 1000)
         if buildMs >= 100 {
+            let points = series.reduce(0) { $0 + $1.fixed.count + $1.scoped.count }
             Log.write("PaceChartCard",
-                      "body build \(buildMs)ms for \(samples.count)+\(scopedHistory.count) point(s)"
+                      "body build \(buildMs)ms for \(points) point(s)"
                         + " → \(cols.map { $0.baseChart?.points.count ?? 0 }) plotted")
         }
-        let scopedIds = scopedRows.map(\.identity)
         // Stable key so `.task(id:)` re-runs the engine ask when the window set
-        // changes (a scoped window appears / disappears).
+        // changes (a scoped window appears / disappears, or an account joins).
         let windowKey = cols.map(\.id).joined(separator: ",")
         let hasScoped = cols.contains { $0.isScoped }
 
@@ -568,9 +671,9 @@ struct PaceChartCard: View {
         // (`RateLimitSourceChip` in DashboardView) — it describes the whole
         // dashboard's data feed, not this card alone.
         return PacerCard("Rate-limit pace") {
-            if isLoading && b.latest == nil {
+            if isLoading && !hasAnyReading {
                 loadingState
-            } else if b.latest == nil && scopedRows.isEmpty {
+            } else if !hasAnyReading {
                 emptyState
             } else if cols.count <= 2 {
                 // Exactly the fixed pair — reproduce the original two-column
@@ -610,15 +713,12 @@ struct PaceChartCard: View {
         // grid width and re-laid the columns out lopsided — so it clears its
         // own state instead.
         .onChange(of: limitAccountId) {
-            samples = []
-            scopedHistory = []
-            scopedLatest = []
-            loadedThrough = nil
+            series = []
             Task { await reload() }
         }
-        .task(id: windowKey) { await refreshProjections(scopedIdentities: scopedIds) }
+        .task(id: windowKey) { await refreshProjections() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshProjections(scopedIdentities: scopedIds) }
+            Task { await refreshProjections() }
         }
     }
 
@@ -681,7 +781,7 @@ private struct PaceColumn: View {
     var endEstimate: Estimate?
     /// Opens the compare-models modal (threaded from the dashboard's
     /// modal-navigation root), keyed by this window's key / identity.
-    var onCompare: ((String) -> Void)?
+    var onCompare: ((String, String?) -> Void)?
 
     /// Share affordance state. `hovering` reveals the share button only while
     /// the cursor is over the column (Linear/Things idiom); `sharing` drives the
@@ -689,7 +789,7 @@ private struct PaceColumn: View {
     @State private var hovering = false
     @State private var sharing = false
 
-    private var windowKey: String { column.id }
+    private var windowKey: String { column.windowKey }
     private var title: String { column.title }
     private var duration: TimeInterval { column.duration }
 
@@ -801,7 +901,7 @@ private struct PaceColumn: View {
     @ViewBuilder
     private func compareButton(chartData: PaceChartView.Data?) -> some View {
         if let onCompare, cycle?.isAwaiting == false, chartData != nil, projection != nil {
-            Button { onCompare(windowKey) } label: {
+            Button { onCompare(windowKey, column.accountId) } label: {
                 Image(systemName: "chart.xyaxis.line")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)

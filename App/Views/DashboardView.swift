@@ -55,8 +55,8 @@ struct DashboardView: View {
             // first-class, identically-treated columns. `window` is the fixed
             // window name or the scoped `limits[]` identity; the projection
             // modal accepts both.
-            PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window in
-                modalRoot = .projection(window: window)
+            PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window, account in
+                modalRoot = .projection(window: window, accountId: account)
             })
             // Directly under the pace chart, because it answers the question
             // that chart raises the moment a second account exists: whose

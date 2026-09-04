@@ -52,15 +52,19 @@ public enum PacerModalDestination: Hashable, Identifiable {
     /// One session's full transcript metadata.
     case session(sessionId: String, projectDisplayName: String)
     /// The compare-models projection detail for one rate-limit window
-    /// ("five_hour" / "seven_day").
-    case projection(window: String)
+    /// ("five_hour" / "seven_day", or a scoped identity).
+    ///
+    /// Carries the account because the all-accounts view can list several
+    /// accounts' windows side by side, and two of those columns share a window
+    /// key. Without it, tapping personal's 5-hour column would open work's.
+    case projection(window: String, accountId: String?)
 
     public var id: String {
         switch self {
         case .day(let d):                return "day:\(d)"
         case .project(let path, _, _):   return "project:\(path)"
         case .session(let sid, _):       return "session:\(sid)"
-        case .projection(let w):         return "projection:\(w)"
+        case .projection(let w, let a):  return "projection:\(a ?? "all"):\(w)"
         }
     }
 }
@@ -155,8 +159,9 @@ struct PacerModalRouter: View {
                 projectDisplayName: projectDisplayName,
                 scopeAccountId: scope.accountId
             )
-        case .projection(let window):
-            ProjectionCompareModal(windowKey: window, limitAccountId: scope.limitAccountId)
+        case .projection(let window, let accountId):
+            ProjectionCompareModal(windowKey: window,
+                                   limitAccountId: accountId ?? scope.limitAccountId)
         }
     }
 }
