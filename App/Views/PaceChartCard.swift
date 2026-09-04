@@ -89,7 +89,7 @@ struct PaceChartCard: View {
     /// trajectories (the dashed overlay; the compare-models modal asks the
     /// engine itself), with each model's accuracy coming from the engine's
     /// persisted per-user track record.
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
 
     /// Forecast trajectory per window, refreshed when the engine refits. Keyed
     /// by window key (fixed name or scoped identity) — the fixed and scoped key
@@ -162,18 +162,6 @@ struct PaceChartCard: View {
     /// flight — so the card says "loading" rather than showing the cold-start
     /// empty state, which reads as "this account has no data".
     @State private var isLoading = false
-
-    /// Whether the forecast overlay applies to what is on screen.
-    ///
-    /// The engine fits one login's history — its parameters, snapshot trail
-    /// and golden fixtures are all the active account's — so a projection
-    /// drawn over another account's series would be a confident line about the
-    /// wrong data. Making the engine per-account is a real piece of work and
-    /// not this one; until then the chart is honest about showing history
-    /// alone when you scope away from the active login.
-    private var showsProjections: Bool {
-        limitAccountId == nil || limitAccountId == UsageScope.shared.activeAccountId
-    }
 
     /// Load the two 8-day series **off the main actor**.
     ///
@@ -506,12 +494,7 @@ struct PaceChartCard: View {
     /// engine from `@MainActor` would otherwise resume the heavy forecast fit
     /// inline on the main thread).
     private func refreshProjections(scopedIdentities: [String]) async {
-        guard showsProjections else {
-            projections = [:]
-            outlooks = [:]
-            return
-        }
-        guard let engine else { return }
+        guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
         let started = Date()
         let computed = await Task.detached(priority: .userInitiated) { [engine] in
             var nextSelected: [String: WindowProjection] = [:]
@@ -597,9 +580,6 @@ struct PaceChartCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 if hasScoped {
                     Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
-                }
-                if !showsProjections {
-                    Text("History only. Forecasts follow the active account.")
                 }
             }
         }

@@ -229,29 +229,48 @@ the projection and the model-comparison fan, and says so: *History only.
 Forecasts follow the active account.* A per-account engine is real work and
 remains undone.
 
-### What is per-account, and what is one series
+### The engine is per account too
 
-The rollups are per account, so anything that is *arithmetic over them* can be
-scoped: today's spend, the 30-day chart, the model mix, the heatmap, and the
-"yesterday was your Nth-highest day" ranking (`DailyBaseline`, shared with the
-engine so the scoped and unscoped answers are the same code).
+Everything is scoped now, predictions included. The rollups were the easy half;
+the engine was the one that mattered, because it *learns* — hour-of-day and
+weekday profiles, per-cut model pools, conformal bands, a self-evaluation
+scoreboard that decides which model gets used. With two accounts that learning
+was a blend of two habits, and every number it produced quietly described both.
 
-The **forecast engine is not**. Its parameters, snapshot trail, self-evaluation
-records and golden fixtures all assume one series, and it reads the *global*
-daily and hourly rollups. So every fitted number — projected spend by tonight,
-the pace percentile, the evening track record, the rate-limit trajectory
-overlay — describes every account, whichever account is on screen.
+**One engine instance per scope**, not one engine filtered. `EngineScope` is
+either `.allAccounts` or `.account(id)`, and `EngineHost` owns the instances.
+`.allAccounts` is always live — the menu bar's gauges, alerts, the HTTP API and
+the widgets read it whatever the window shows. A per-account engine is created
+the first time a view asks for one and then kept warm.
 
-The rule this settles on: **scope what can be scoped, and withhold the rest
-rather than mislabel it.** Under a per-account view the Now tile drops its
-projection and says *Forecasts follow all accounts*, the pace badge does not
-fire, and the pace chart hides its overlay with *History only. Forecasts follow
-the active account.* A number quietly describing every account under a
-per-account heading is worse than no number.
+Three things make that affordable and safe:
 
-Making the engine per-account is the remaining piece and a real one: per-account
-`EngineParams`, a second snapshot trail and self-eval record, and the golden
-gate has to stay byte-identical for the unscoped case.
+- **A refit is closed-form over pre-aggregated rows** — ~1.1 s per scope per
+  five-minute cycle. Two scopes is under 1% duty, and the engines are separate
+  actors so their refits overlap rather than queue.
+- **`.allAccounts` is byte-identical to what shipped before.** It reads the same
+  global rollups, writes the same unsuffixed surface ids, and keeps the same
+  snapshot export key — so the accumulated scoreboard, the prediction trail and
+  the golden fixtures all carry over untouched. Per-account scopes are purely
+  additive: new rows under `<surface>#<accountId>`.
+- **Scopes cannot read each other.** Qualification happens at exactly two
+  points, `fetchAllEvalRows` in and `persist` out, so everything between works
+  in base surface ids; and `.allAccounts` claims *only* unsuffixed ids, so a
+  scoped row can never be mistaken for a global one. There is a test in both
+  directions.
+
+Rate limits are the one asymmetry. `.allAccounts` has no rate-limit meaning —
+two 5-hour windows do not sum — so the global engine keeps fitting the *active*
+login's windows, exactly as before. A per-account engine fits its own.
+
+**Never `await engine.x()` from a view.** Swift's uncontended-actor
+optimisation runs the callee inline on the caller's thread, and a background
+actor idle between five-minute refits is always uncontended — so a
+`.task { await engine.ask(...) }` in a view body executes the forecast fit on
+the main thread. This cost a measured **7.9 second** launch stall, with
+`MenuStatusContent → burnOutlook → DiurnalBurnModel.fit` at the top of the
+profile. Every engine ask from a view goes through `askEngine`, which is a
+`Task.detached`. Launch stall after: 239 ms.
 
 ### Naming an account
 

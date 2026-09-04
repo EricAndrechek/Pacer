@@ -73,6 +73,15 @@ public enum EngineQuestion: Sendable, Equatable {
 @ModelActor
 public actor UsageIntelligenceEngine {
 
+    /// Which usage this instance is fitted to. `@ModelActor` generates the
+    /// `init(modelContainer:)`, so the scope is adopted immediately after —
+    /// `EngineHost` is the only thing that constructs engines and it always
+    /// does both. Defaulting to `.allAccounts` means every existing call site
+    /// (the screenshot harness, tests) keeps today's behaviour untouched.
+    public private(set) var scope: EngineScope = .allAccounts
+
+    public func adopt(scope: EngineScope) { self.scope = scope }
+
     /// The most recent feature snapshot, or nil before the first recompute.
     private var features: EngineFeatures?
     /// The per-user fit derived from `features`.
@@ -1153,7 +1162,7 @@ public actor UsageIntelligenceEngine {
             let sig = d.signature
             guard Self.shouldRecordSnapshot(prev: lastSnapshotSig[d.surface], now: now, signature: sig) else { continue }
             modelContext.insert(PredictionSnapshot(
-                recordedAt: now, surface: d.surface, method: d.method,
+                recordedAt: now, surface: scope.qualify(d.surface), method: d.method,
                 paramsVersion: EngineParams.version, engineVersion: engineVersion,
                 periodKey: d.periodKey, periodEnd: d.periodEnd,
                 value: d.value, lo80: d.lo80, hi80: d.hi80, lo50: d.lo50, hi50: d.hi50,
@@ -1183,28 +1192,46 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Store reads
 
+    /// Whose rate-limit history this instance fits: its own account, or the
+    /// active login when it is the all-accounts instance.
+    private var limitAccountId: String? {
+        scope.accountId ?? Account.activeId(in: modelContext)
+    }
+
     private func fetchDaily() -> [EngineFeatures.DailyRow] {
-        let rows = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+        guard let account = scope.accountId else {
+            let rows = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+            return rows.map { .init(date: $0.date, cost: $0.totalCostUSD) }
+        }
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountDailyAggregate>(
+            predicate: #Predicate { $0.accountId == account }))) ?? []
         return rows.map { .init(date: $0.date, cost: $0.totalCostUSD) }
     }
 
     private func fetchHourly() -> [EngineFeatures.HourlyRow] {
-        let rows = (try? modelContext.fetch(FetchDescriptor<HourlyAggregate>())) ?? []
-        return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: $0.sampleCount) }
+        guard let account = scope.accountId else {
+            let rows = (try? modelContext.fetch(FetchDescriptor<HourlyAggregate>())) ?? []
+            return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: $0.sampleCount) }
+        }
+        // The per-account hourly rollup carries no `sampleCount` — see
+        // `HourlyRow`. Nothing in the fit reads it; it is carried for a
+        // "quiet hour" affordance that does not exist yet.
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountHourlyAggregate>(
+            predicate: #Predicate { $0.accountId == account }))) ?? []
+        return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: 0) }
     }
 
     /// ~32 days of rate-limit samples — enough to hold several complete 7-day
     /// cycles for the backtest while staying a small read.
     private func fetchRate(now: Date) -> [EngineFeatures.RateRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
-        // The **active** account, not the window's scope. The engine's
-        // projections drive alerts and the menu bar, which must not change
-        // because someone filtered a chart; and its params, snapshot trail and
-        // golden fixtures are all one login's history. Scoping it to a
-        // non-active account would silently re-fit against a different series.
+        // This instance's account. `.allAccounts` has no rate-limit meaning —
+        // two 5-hour windows do not sum — so it keeps reading the *active*
+        // login, exactly as it did before scopes existed, which is what makes
+        // the global fit byte-identical.
         var descriptor = FetchDescriptor<RateLimitSample>(
             predicate: LimitScope.rateLimitPredicate(
-                account: Account.activeId(in: modelContext), since: cutoff))
+                account: limitAccountId, since: cutoff))
         descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
@@ -1223,7 +1250,7 @@ public actor UsageIntelligenceEngine {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
         var descriptor = FetchDescriptor<UsageLimitSample>(
             predicate: LimitScope.usageLimitPredicate(
-                account: Account.activeId(in: modelContext), since: cutoff))
+                account: limitAccountId, since: cutoff))
         descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         guard let newest = rows.map(\.sampledAt).max() else { return [] }
@@ -1246,12 +1273,25 @@ public actor UsageIntelligenceEngine {
     // MARK: - Self-eval persistence
 
     /// One pass over the whole eval table — `recompute` slices it in memory.
+    /// This scope's scoreboard rows, with the scope suffix stripped.
+    ///
+    /// Scoping happens at exactly two points — here on the way in and in
+    /// `persist` on the way out — so everything between them works in base
+    /// surface ids and needs no notion of accounts at all.
     private func fetchAllEvalRows() -> [(key: String, surface: String, record: EngineSelfEval.Record)] {
         let rows = (try? modelContext.fetch(FetchDescriptor<EngineEvalOutcome>())) ?? []
-        return rows.map {
-            ($0.key, $0.surface,
-             EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
-                                   predicted: $0.predicted, truth: $0.truth))
+        return rows.compactMap { row in
+            guard let base = scope.unqualify(row.surface) else { return nil }
+            // The *base* key, not the persisted one. `existing` is compared
+            // against keys built from base surfaces, so returning the stored
+            // key would never match for a scoped engine and every refit would
+            // try to re-persist the whole scoreboard.
+            let key = EngineEvalOutcome.makeKey(surface: base, method: row.method,
+                                                bucket: row.bucket, periodKey: row.periodKey)
+            return (key, base,
+                    EngineSelfEval.Record(method: row.method, bucket: row.bucket,
+                                          periodKey: row.periodKey,
+                                          predicted: row.predicted, truth: row.truth))
         }
     }
 
@@ -1259,7 +1299,8 @@ public actor UsageIntelligenceEngine {
         guard !news.isEmpty else { return }
         for n in news {
             modelContext.insert(EngineEvalOutcome(
-                surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                surface: scope.qualify(n.surface), method: n.method, bucket: n.bucket,
+                periodKey: n.periodKey,
                 predicted: n.predicted, truth: n.truth, recordedAt: now))
         }
         try? modelContext.save()

@@ -586,26 +586,40 @@ struct MenuStatusContent: View {
     /// projected) and the fixed Outlook row (projection once actionable,
     /// pace-vs-normal before). Row COUNT stays constant — NSMenuItem.view
     /// is measured at attach time, so conditional rows would clip.
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
 
     private func refreshEngine(scopedIdentities: [String]) async {
-        guard let engine else { return }
-        var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-        for w in RateLimitWindowKind.allCases {
-            if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+        // The menu bar follows the window's scope for spend, so its outlook
+        // captions come from the same scope's engine — otherwise the dropdown
+        // would show one account's cost above every account's projection.
+        guard let engine = engines?.engine(forAccount: UsageScope.storedAccountId) else { return }
+        // Off the main actor — `burnOutlook` runs `DiurnalBurnModel.fit`, and a
+        // launch-time profile found it doing exactly that on the main thread
+        // from here. See `askEngine`.
+        let ids = scopedIdentities
+        let computed = await askEngine {
+            () -> (outlooks: [String: UsageIntelligenceEngine.BurnOutlook],
+                   eod: Estimate, pace: Estimate) in
+            var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+            for w in RateLimitWindowKind.allCases {
+                if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+            }
+            // Scoped per-model windows ask the SAME forecast surface, keyed by
+            // identity — so each dynamic row gets the same "limit in N hr"
+            // caption.
+            for id in ids {
+                if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
+            }
+            return (next,
+                    await engine.ask(.projectedCost(.today)),
+                    await engine.ask(.pace))
         }
-        // Scoped per-model windows ask the SAME forecast surface, keyed by
-        // identity — so each dynamic row gets the same "limit in N hr" caption.
-        for id in scopedIdentities {
-            if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
-        }
-        outlooks = next
-        todayEOD = await engine.ask(.projectedCost(.today))
-        let pace = await engine.ask(.pace)
-        pacePercentile = pace.isInsufficient ? nil : pace.value
+        outlooks = computed.outlooks
+        todayEOD = computed.eod
+        pacePercentile = computed.pace.isInsufficient ? nil : computed.pace.value
     }
 
     init() {

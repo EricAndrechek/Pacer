@@ -18,7 +18,7 @@ struct ProjectionCompareModal: View {
     /// generically by window key either way.
     let windowKey: String
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @Query private var samples: [RateLimitSample]
     @Query private var scopedSamples: [UsageLimitSample]
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
@@ -142,18 +142,19 @@ struct ProjectionCompareModal: View {
     }
 
     private func refresh() async {
-        // The engine fits the active login's history, so a model comparison
-        // drawn over another account's actuals would be scoring the wrong
-        // series. Show the actuals alone instead of a confident wrong fan.
-        guard limitAccountId == nil || limitAccountId == UsageScope.shared.activeAccountId else {
-            trajectories = []
-            accuracy = nil
+        // This scope's engine, so the fan being compared was fitted to the
+        // actuals underneath it.
+        guard let engine = engines?.engine(forAccount: limitAccountId) else {
             loaded = true
             return
         }
-        guard let engine else { loaded = true; return }
-        trajectories = await engine.rateLimitTrajectories(windowKey: windowKey)
-        accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(windowKey))
+        let key = windowKey
+        let computed = await askEngine { () -> ([BurnTrajectory.ScoredTrajectory], EngineSelfEval.Accuracy?) in
+            (await engine.rateLimitTrajectories(windowKey: key),
+             await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)))
+        }
+        trajectories = computed.0
+        accuracy = computed.1
         loaded = true
     }
 }

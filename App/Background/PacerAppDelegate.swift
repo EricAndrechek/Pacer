@@ -868,6 +868,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     MenuStatusContent()
                         .modelContainer(self.container)
                         .environment(\.usageEngine, self.backgroundService.engine)
+                        .environment(\.usageEngines, self.backgroundService.engines)
                 }
             )
         )

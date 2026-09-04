@@ -24,7 +24,7 @@ struct MonthOutlookCard: View {
     }
     @Query(MonthOutlookCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
 
     @State private var cached = MonthFacts()
     @State private var projection: Estimate?
@@ -80,8 +80,10 @@ struct MonthOutlookCard: View {
     }
 
     private func refreshProjection() async {
-        guard let engine else { return }
-        projection = await engine.ask(.projectedCost(.thisMonth))
+        // This card's scope, so the month-end projection is the account the
+        // rest of the card is counting.
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
+        projection = await askEngine { await engine.ask(.projectedCost(.thisMonth)) }
     }
 
     var body: some View {

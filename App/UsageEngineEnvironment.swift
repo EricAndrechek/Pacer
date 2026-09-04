@@ -11,9 +11,24 @@ private struct UsageEngineKey: EnvironmentKey {
     static let defaultValue: UsageIntelligenceEngine? = nil
 }
 
+/// The per-scope engines. A view that follows the account scope resolves its
+/// own here; `usageEngine` remains the all-accounts instance for everything
+/// that must not follow the window.
+private struct UsageEngineHostKey: EnvironmentKey {
+    // `nonisolated(unsafe)` because the value is a constant `nil`; the host
+    // itself is `@MainActor`, and every read of this key happens in a view
+    // body, which is too.
+    nonisolated(unsafe) static let defaultValue: EngineHost? = nil
+}
+
 extension EnvironmentValues {
     var usageEngine: UsageIntelligenceEngine? {
         get { self[UsageEngineKey.self] }
         set { self[UsageEngineKey.self] = newValue }
+    }
+
+    var usageEngines: EngineHost? {
+        get { self[UsageEngineHostKey.self] }
+        set { self[UsageEngineHostKey.self] = newValue }
     }
 }
