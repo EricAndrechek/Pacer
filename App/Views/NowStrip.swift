@@ -69,7 +69,7 @@ struct NowStrip: View {
     @State private var extraUsages: [ExtraUsageSample] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
 
     init(onTodayTap: (() -> Void)? = nil, onSessionTap: ((String, String) -> Void)? = nil) {
         self.onTodayTap = onTodayTap
@@ -188,26 +188,21 @@ struct NowStrip: View {
         cached = next
     }
 
+    /// This view's own engine — fitted to the account on screen, or to every
+    /// account. Not a filtered global answer: the projection, the pace ladder
+    /// and the track record all come out of a fit trained on *this* series.
     private func refreshEngine() async {
-        // Every value below comes from the engine's fit, which is trained on one
-        // series — all accounts' daily and hourly costs. Under a per-account
-        // view they would be someone else's projection wearing this account's
-        // label, so the tile shows the measured numbers alone instead. The
-        // ranking badge in the header is arithmetic and *is* scoped; these are
-        // not, and cannot be until the engine itself is per-account.
-        guard scope.isAll else {
-            todayEOD = nil
-            record = nil
-            paceVsNow = nil
-            pacePercentile = nil
-            return
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
+        let answers = await askEngine {
+            (eod: await engine.ask(.projectedCost(.today)),
+             record: await engine.eveningTrackRecord(),
+             vsNow: await engine.ask(.paceVsNow),
+             pace: await engine.ask(.pace))
         }
-        guard let engine else { return }
-        todayEOD = await engine.ask(.projectedCost(.today))
-        record = await engine.eveningTrackRecord()
-        let vsNow = await engine.ask(.paceVsNow)
-        paceVsNow = vsNow.isInsufficient ? nil : vsNow.value
-        let pace = await engine.ask(.pace)
+        todayEOD = answers.eod
+        record = answers.record
+        paceVsNow = answers.vsNow.isInsufficient ? nil : answers.vsNow.value
+        let pace = answers.pace
         pacePercentile = pace.isInsufficient ? nil : pace.value
         if let p = pacePercentile {
             heldLadder = IntelligenceFormatting.heldIndex(p, held: heldLadder)
@@ -464,11 +459,6 @@ struct NowStrip: View {
                 }
                 if dailyBudgetEnabled, dailyBudgetUSD > 0 {
                     budgetBar
-                }
-                if !scope.isAll {
-                    Text("Forecasts follow all accounts.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
                 }
             }
         }

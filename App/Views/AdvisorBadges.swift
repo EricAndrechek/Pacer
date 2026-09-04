@@ -39,7 +39,7 @@ struct AdvisorBadges: View {
     /// on your heaviest pace in weeks). Counting statements against the
     /// user's own history — they only fire when clearly notable, matching
     /// this card's hidden-when-calm contract.
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @State private var engineHints: [EngineHint] = []
 
     struct EngineHint: Identifiable {
@@ -141,19 +141,12 @@ struct AdvisorBadges: View {
     /// it ranked in the user's top few; today's pace fires only at the
     /// ladder's top rungs (≥85th percentile of their own days).
     private func refreshEngineHints() async {
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
         var next: [EngineHint] = []
 
-        // The ranking is arithmetic over daily costs, so it can be answered for
-        // whichever account is on screen — from the engine when the view shows
-        // every account (which is what the engine fits), and from this
-        // account's own rollup rows otherwise. Same code either way, so the two
-        // cannot drift.
-        let ranked: (cost: Double, rankFromTop: Int, of: Int)?
-        if scope.isAll {
-            ranked = await engine?.yesterdayRank()
-        } else {
-            ranked = DailyBaseline.yesterdayRank(rows: scopedAllDays.map(\.dailyRow))
-        }
+        // Both notices come from this scope's own fit, so they describe the
+        // account on screen rather than a blend of every account.
+        let ranked = await askEngine { await engine.yesterdayRank() }
         if let y = ranked, y.rankFromTop <= max(3, y.of / 10), y.of >= 14 {
             let weeks = max(1, Int((Double(y.of) / 7.0).rounded()))
             next.append(EngineHint(
@@ -163,17 +156,7 @@ struct AdvisorBadges: View {
                 title: "Yesterday: \(IntelligenceFormatting.ordinal(y.rankFromTop))-highest in \(weeks)w",
                 detail: "\(pacerCostExact(y.cost)) — higher than \(y.of - y.rankFromTop) of your \(y.of) tracked days."))
         }
-        // The pace percentile comes from the engine's *fit*, not from
-        // arithmetic — hour-of-day and weekday profiles trained on one series.
-        // There is no honest way to state it for a single account until the
-        // engine itself is per-account, and a number quietly describing every
-        // account under a per-account view is worse than no badge. Same rule
-        // the pace chart's forecast overlay follows.
-        guard scope.isAll, let engine else {
-            engineHints = next
-            return
-        }
-        let pace = await engine.ask(.pace)
+        let pace = await askEngine { await engine.ask(.pace) }
         if !pace.isInsufficient, IntelligenceFormatting.ladderIndex(pace.value) >= 3 {
             let dayName = Date().formatted(.dateTime.weekday(.wide))
             next.append(EngineHint(

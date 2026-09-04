@@ -124,6 +124,13 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
     /// `ClaudeCodeMeta` key the snapshot is stored under.
     public static let metaKey = "engineOutlookSnapshot"
 
+    /// The export key for one scope. `.allAccounts` keeps the original key, so
+    /// an older widget build (or a reader that predates scopes) finds exactly
+    /// what it always did.
+    public static func metaKey(for scope: EngineScope) -> String {
+        scope.qualify(metaKey)
+    }
+
     /// Snapshots older than this are ignored by readers (the app may not be
     /// running; a stale projection is worse than none).
     public static let maxAge: TimeInterval = 30 * 60
