@@ -154,6 +154,22 @@ Read the "Rate limits are per account too" section of `multi-account.md` before
 touching any of it; the short version is that a read which forgets to scope is
 silently wrong, not empty.
 
+**The forecast engine is per account too** — this was the last item on the
+"what is next" list. `EngineHost` keeps one `UsageIntelligenceEngine` per
+`EngineScope`; `.allAccounts` is byte-identical to what shipped (its surfaces
+stay unsuffixed) and each account's surfaces are suffixed `#<accountId>`.
+Everything the engine feeds is therefore scoped: the Now tile, the pace
+projections and their bands, the advisor badges, the outlook chips.
+
+Two traps live in there. `await engine.x()` called from a `@MainActor` type
+runs the callee **inline on the main thread** — Swift's uncontended-actor
+optimisation — and so does a plain `Task {}` started from one; `askEngine`
+(`Task.detached`) exists because five call sites had that shape and cost 7.9 s
+of launch stall between them. And a projection refresh must be gated on
+*starting*, not debounced: the engine's ~14 s launch refit serializes every
+pending pass behind it, so they all complete in the same second no matter how
+long you delayed each one.
+
 The API asks explicitly: `GET /v1/accounts` lists the ids, `/v1/usage/daily`
 and `/v1/usage/models` take `?account=`, and `/metrics` emits per-account
 series. Unscoped output is unchanged. Accounts can be renamed (Settings →
@@ -172,17 +188,10 @@ and 108,660 entries in 22.8 s with no migration.
 
 ## What is next, with honest sizing
 
-**1. A per-account forecast engine.** The one real gap the rate-limit work left.
-The engine fits the active login's history — parameters, snapshot trail and
-golden fixtures all assume one series — so the pace chart hides its projection
-when you scope to another account rather than drawing a confident wrong line.
-Closing this means per-account `EngineParams` and a second snapshot trail, and
-it has to stay byte-identical on the golden gate for the active account.
-
-**2. Per-account alert rules.** A feature, not a fix. Inheriting the window's
+**1. Per-account alert rules.** A feature, not a fix. Inheriting the window's
 scope is explicitly the wrong way to get it.
 
-**3. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
+**2. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
 this branch has no CI signal.
 
 ---
@@ -246,14 +255,44 @@ the cost was somewhere else entirely. `MainThreadStallWatchdog` plus a
 one view's body were two fetches. Three plausible culprits reasoned from the
 code, all three wrong.
 
-**SwiftData does not add indexes to an existing store.** The `#Index` entries
-for `accountId` are declared on all three sample models and do not exist in
-the store on disk — lightweight migration ignored them. Check with
-`sqlite3 <store> "SELECT name FROM sqlite_master WHERE type='index'"` before
-assuming a new index is doing anything. It happens not to matter yet (SQLite
-serves these from the `sampledAt` index in under a millisecond) but it will as
-the tables grow, and a fresh install gets different query plans from an
-upgraded one.
+**SwiftData does not add indexes to an existing store.** `#Index` is applied
+when SwiftData *creates a table*; lightweight migration adds columns and
+silently skips the indexes. So the four rollup tables created new have theirs
+and every pre-existing table gained an `accountId` predicate on every read with
+nothing backing it. A fresh install and an upgraded one get *different query
+plans*, which makes a performance report impossible to reproduce.
+
+`StoreIndexRepair` fixes this: raw `CREATE INDEX` at launch, `pacer_ix_`-named,
+skipping anything already covered by a leading prefix, never dropping. **Adding
+an `#Index` to a model is only half the change** — add the same entry to
+`StoreIndexRepair.desired` and to the `make verify-data` index check, or it
+exists only for people who install fresh. Check with
+`sqlite3 <store> "SELECT name FROM sqlite_master WHERE type='index'"`.
+
+**A conditional body cannot start its own `.task`.** SwiftUI does not run
+lifecycle modifiers on an `EmptyView`, so a view whose body is `if let x { … }`
+with `.task { load x }` attached to it never loads: the task waits for a view
+that only exists once the task has run. This is a live hazard for exactly the
+pattern this work introduced everywhere — replacing a `@Query` (data present on
+the first body evaluation) with `@State` + a keyed fetch. Wrap the content in a
+real container before attaching the modifiers. It cost the dashboard's
+"via oauth · 1m ago" chip, which was simply absent for the whole branch.
+
+**Scoping is not finished until the *live* probes are scoped.** The rollups
+were the visible half. The invisible half is every "newest row in the table"
+fetch — last turn, last session, last sample — which under a scope reports
+whoever wrote last. The Now tile read "Nothing running." and "Last activity 15s
+ago" at the same time, one from scoped hourly rows and the other from the other
+account's newest turn, with a "live" chip from a third unscoped probe. Grep for
+`FetchDescriptor<TokenSample>` / `<SessionInfo>` before believing a surface is
+scoped.
+
+**A donut's legend and its hover index must walk one array.** Three cards had a
+metric picker (or a fixed metric) on the chart and a *separate* sort control on
+the table beside it, and took `rows.prefix(n)` from the table's order — so
+"Top projects" listed five arbitrary projects and hovering a wedge named the
+wrong model. Same class: a bar whose length is one metric under a heading that
+names another (History's "Heaviest token days" drew cost).
 
 **Tests write to the machine's real App Group suite.** `PacerPreferences.store`
 resolves to the live group container in the test process too, so a test that
