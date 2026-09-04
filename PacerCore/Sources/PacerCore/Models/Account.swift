@@ -143,6 +143,19 @@ public final class Account {
         self.latestPolledAt = latestPolledAt
     }
 
+    /// The active account as read from the store rather than from defaults.
+    ///
+    /// The engine uses this: it owns a `ModelContext` and nothing else, runs on
+    /// its own actor, and lives long enough that a value captured at init could
+    /// go stale. Reading the flag it is already keeping is self-contained —
+    /// and it means a store with no accounts (a fresh install, or a test
+    /// fixture) resolves to nil and reads unscoped, which is correct in both.
+    public static func activeId(in context: ModelContext) -> String? {
+        var d = FetchDescriptor<Account>(predicate: #Predicate { $0.isActive })
+        d.fetchLimit = 1
+        return (try? context.fetch(d))?.first?.id
+    }
+
     /// The account key for an observed org id — the org itself, or the
     /// header-less sentinel. Single-sourced so the poller and the account
     /// bookkeeping agree.

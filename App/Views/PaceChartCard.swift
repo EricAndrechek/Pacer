@@ -46,7 +46,7 @@ struct PaceChartCard: View {
     /// the latest poll's batch, which is what decides the scoped column set.
     /// Whole rows: the label, group→duration, binding flag and severity all
     /// read fields a columnar projection wouldn't fetch.
-    @Query(PaceChartCard.scopedLatestDescriptor) private var scopedLatest: [UsageLimitSample]
+    @Query private var scopedLatest: [UsageLimitSample]
 
     /// Scoped rows over the same 8-day window the fixed query uses — the
     /// actual-usage line under each scoped column. Separate from the batch
@@ -104,21 +104,32 @@ struct PaceChartCard: View {
         var trajectory: BurnTrajectory.Trajectory
     }
 
-    init(onCompare: ((String) -> Void)? = nil) {
+    /// Which account's windows this chart draws — the picked scope, else the
+    /// active login. Taken as a parameter, not read from `UsageScope` in here:
+    /// a `@Query` predicate is captured once at init, so a card that read the
+    /// scope itself would stay pinned to whichever account was selected when
+    /// it first appeared.
+    let limitAccountId: String?
+
+    init(limitAccountId: String? = nil, onCompare: ((String) -> Void)? = nil) {
+        self.limitAccountId = limitAccountId
         self.onCompare = onCompare
         // Only the signal is a `@Query`. One row, so re-running it on every
         // save costs nothing; the series it guards are loaded in `reload()`.
-        var signal = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        signal.fetchLimit = 1
+        //
+        // Scoped like everything else here: with every account writing the
+        // live tables, the newest row is whichever login polled last, so an
+        // unscoped signal would fire a reload for the other account's poll and
+        // — worse — sit still when this one's poll was the older of the two.
+        var signal = LimitScope.rateLimits(account: limitAccountId, limit: 1)
         signal.propertiesToFetch = [\.sampledAt]
         _newestSignal = Query(signal)
 
-        var scopedSignal = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedSignal.fetchLimit = 1
+        var scopedSignal = LimitScope.usageLimits(account: limitAccountId, limit: 1)
         scopedSignal.propertiesToFetch = [\.sampledAt]
         _newestScopedSignal = Query(scopedSignal)
+
+        _scopedLatest = Query(LimitScope.usageLimits(account: limitAccountId, limit: 120))
     }
 
     /// Newest timestamp across both sources — the trigger for a reload.
@@ -140,6 +151,18 @@ struct PaceChartCard: View {
     /// which is the only case that reads all 8 days.
     @State private var loadedThrough: Date?
 
+    /// Whether the forecast overlay applies to what is on screen.
+    ///
+    /// The engine fits one login's history — its parameters, snapshot trail
+    /// and golden fixtures are all the active account's — so a projection
+    /// drawn over another account's series would be a confident line about the
+    /// wrong data. Making the engine per-account is a real piece of work and
+    /// not this one; until then the chart is honest about showing history
+    /// alone when you scope away from the active login.
+    private var showsProjections: Bool {
+        limitAccountId == nil || limitAccountId == UsageScope.shared.activeAccountId
+    }
+
     @MainActor
     private func reload() {
         let cutoff = Date().addingTimeInterval(-8 * 86400)
@@ -152,8 +175,11 @@ struct PaceChartCard: View {
         // Newest-first order is preserved by prepending, which is also why the
         // fetch below is ordered the same way.
         if let through = loadedThrough {
+            let account = limitAccountId
             var fresh = FetchDescriptor<RateLimitSample>(
-                predicate: #Predicate<RateLimitSample> { $0.sampledAt > through },
+                predicate: account == nil
+                    ? #Predicate<RateLimitSample> { $0.sampledAt > through }
+                    : #Predicate<RateLimitSample> { $0.sampledAt > through && $0.accountId == account },
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
             )
             fresh.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
@@ -161,7 +187,9 @@ struct PaceChartCard: View {
             if !added.isEmpty { samples = added + samples }
 
             var freshScoped = FetchDescriptor<UsageLimitSample>(
-                predicate: #Predicate<UsageLimitSample> { $0.sampledAt > through },
+                predicate: account == nil
+                    ? #Predicate<UsageLimitSample> { $0.sampledAt > through }
+                    : #Predicate<UsageLimitSample> { $0.sampledAt > through && $0.accountId == account },
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
             )
             freshScoped.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
@@ -173,18 +201,12 @@ struct PaceChartCard: View {
             samples.removeAll { $0.sampledAt < cutoff }
             scopedHistory.removeAll { $0.sampledAt < cutoff }
         } else {
-            var descriptor = FetchDescriptor<RateLimitSample>(
-                predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
+            var descriptor = LimitScope.rateLimits(account: limitAccountId, since: cutoff)
             // Columnar projection: the card reads only these four scalars.
             descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
             samples = (try? modelContext.fetch(descriptor)) ?? []
 
-            var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
-                predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
+            var scopedDescriptor = LimitScope.usageLimits(account: limitAccountId, since: cutoff)
             scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
             scopedHistory = (try? modelContext.fetch(scopedDescriptor)) ?? []
         }
@@ -194,15 +216,6 @@ struct PaceChartCard: View {
         if let newestLoaded { loadedThrough = newestLoaded }
     }
 
-    /// Newest scoped rows, whole, capped well above any plausible `limits[]`
-    /// count so one poll's batch always fits.
-    private static let scopedLatestDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 120
-        return d
-    }()
 
     // MARK: - Column model
 
@@ -330,6 +343,11 @@ struct PaceChartCard: View {
     /// engine from `@MainActor` would otherwise resume the heavy forecast fit
     /// inline on the main thread).
     private func refreshProjections(scopedIdentities: [String]) async {
+        guard showsProjections else {
+            projections = [:]
+            outlooks = [:]
+            return
+        }
         guard let engine else { return }
         let computed = await Task.detached(priority: .userInitiated) { [engine] in
             var nextSelected: [String: WindowProjection] = [:]
@@ -414,14 +432,29 @@ struct PaceChartCard: View {
                 .onPreferenceChange(PaceGridWidthKey.self) { gridWidth = $0 }
             }
         } footer: {
-            if hasScoped {
-                Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
+            VStack(alignment: .leading, spacing: 4) {
+                if hasScoped {
+                    Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
+                }
+                if !showsProjections {
+                    Text("History only. Forecasts follow the active account.")
+                }
             }
         }
         // Reload the 8-day series when a NEW rate-limit sample lands (the
         // poller writes roughly every five minutes), not on every context
         // change. `.task(id:)` also fires once on appear, which seeds them.
         .task(id: reloadSignal) { reload() }
+        // A scope change invalidates the loaded series wholesale. `reload()`
+        // is incremental off `loadedThrough`, so without this it would keep
+        // the previous account's rows and top them up with the new one's.
+        .onChange(of: limitAccountId) {
+            samples = []
+            scopedHistory = []
+            loadedThrough = nil
+            reload()
+            Task { await refreshProjections(scopedIdentities: scopedIds) }
+        }
         .task(id: windowKey) { await refreshProjections(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshProjections(scopedIdentities: scopedIds) }

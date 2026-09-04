@@ -95,10 +95,10 @@ enum PaceWindowResolver {
     private static func scopedEntities() -> [PaceWindowEntity] {
         guard let container = try? PacerStore.sharedModelContainer() else { return [] }
         let context = ModelContext(container)
-        var descriptor = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        descriptor.fetchLimit = 200
-        let rows = (try? context.fetch(descriptor)) ?? []
+        // The account the widgets will draw, so the picker never offers a
+        // window they cannot render.
+        let rows = (try? context.fetch(
+            LimitScope.usageLimits(account: UsageScope.storedLimitAccountId, limit: 200))) ?? []
         return rows.latestBatch()
             .filter {
                 ($0.modelId?.isEmpty == false)
@@ -124,6 +124,9 @@ enum PaceWindowResolver {
                 return PaceWindowEntity(id: id, displayName: id)
             }
             let context = ModelContext(container)
+            // Deliberately unscoped: this is a best-effort label for a stored
+            // id that is not in the live set, and a name is a name whichever
+            // account last reported it.
             var d = FetchDescriptor<UsageLimitSample>(
                 predicate: #Predicate<UsageLimitSample> { $0.identity == id },
                 sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])

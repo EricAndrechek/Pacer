@@ -14,7 +14,7 @@ import SwiftData
 /// rows.
 @Model
 public final class ExtraUsageSample {
-    #Index<ExtraUsageSample>([\.sampledAt])
+    #Index<ExtraUsageSample>([\.sampledAt], [\.accountId, \.sampledAt])
 
     public var sampledAt: Date
     /// USD cents. Use cents-as-Int so float drift across many polls
@@ -23,9 +23,9 @@ public final class ExtraUsageSample {
     /// `"oauth"` for now — mirrors `RateLimitSample.source` so a
     /// future statusline/pushed source can be distinguished.
     public var source: String
-    /// Which account (`Account.id`) this sample belongs to. Optional +
-    /// additive, same contract as `RateLimitSample.accountId`: nil ⇒ the
-    /// active account. See `Account`.
+    /// Which account (`Account.id`) this sample belongs to. Same contract as
+    /// `RateLimitSample.accountId`, including that every read must filter on
+    /// it — read that doc comment before adding one.
     public var accountId: String?
 
     public init(sampledAt: Date, amountCents: Int, source: String, accountId: String? = nil) {

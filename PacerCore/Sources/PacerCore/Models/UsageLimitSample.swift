@@ -22,10 +22,15 @@ public final class UsageLimitSample {
     // The read path fetches "the most recent poll's rows" (sort by
     // sampledAt desc, then take the top batch) and occasionally "one
     // identity's history over time". Both are served by these indexes.
+    // Both are now also filtered by `accountId` — two accounts can report a
+    // window under the same identity, so the account is part of every key
+    // that has to be selective.
     #Index<UsageLimitSample>(
         [\.sampledAt],
         [\.sampledAt, \.identity],
-        [\.identity, \.sampledAt]
+        [\.identity, \.sampledAt],
+        [\.accountId, \.sampledAt],
+        [\.accountId, \.identity, \.sampledAt]
     )
 
     public var sampledAt: Date
@@ -73,13 +78,15 @@ public final class UsageLimitSample {
     /// source can be distinguished.
     public var source: String
 
-    /// Which account (`Account.id`) this scoped sample belongs to. Optional +
-    /// additive: existing rows decode as nil (they were the single account's
-    /// history). The multi-account poller stamps this going forward, and the
-    /// active-account timeline swap (`OAuthPoller.swapActiveTimeline`) archives/
-    /// restores this table alongside `RateLimitSample`, so it holds exactly the
-    /// active account's scoped rows and two accounts that share a model identity
-    /// (e.g. both have a "Fable" weekly) never mix. See `Account`.
+    /// Which account (`Account.id`) this scoped sample belongs to.
+    ///
+    /// **Every read must filter on this**, and this table is where forgetting
+    /// hurts most: two accounts routinely report a window under the *same*
+    /// `identity` (both have a "Fable" weekly), so nothing else tells the rows
+    /// apart. An unscoped read does not look wrong — it interleaves two series
+    /// into one line. `LimitScope` exists so no call site has to remember.
+    ///
+    /// Optional only for the migration; see `RateLimitSample.accountId`.
     public var accountId: String?
 
     public init(

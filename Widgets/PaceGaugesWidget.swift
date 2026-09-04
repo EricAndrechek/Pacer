@@ -115,14 +115,16 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
-            var descriptor = FetchDescriptor<RateLimitSample>(
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-            descriptor.fetchLimit = 50
-            let rows = try context.fetch(descriptor)
+            // The window's scope, else the active login, from App Group
+            // defaults — the widget is a separate process. Scoping is what
+            // makes `fetchLimit: 50` correct again: with every account writing
+            // the live table, the newest fifty rows can be one login's, and
+            // `rows.first { window == ... }` would then gauge the wrong one.
+            let account = UsageScope.storedLimitAccountId
+            let rows = try context.fetch(LimitScope.rateLimits(account: account, limit: 50))
             let five = rows.first { $0.window == "five_hour" }
             let seven = rows.first { $0.window == "seven_day" }
-            let scoped = Self.scopedGauges(context: context)
+            let scoped = Self.scopedGauges(context: context, account: account)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceGaugesEntry(
                 date: Date(),
@@ -141,11 +143,10 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     /// The scoped per-model windows as gauges, active-first then hottest. Reads
     /// the latest poll's model/surface-scoped `limits[]` rows — fully dynamic,
     /// empty when the account has none.
-    private static func scopedGauges(context: ModelContext) -> [PaceGaugesEntry.ScopedGauge] {
-        var descriptor = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        descriptor.fetchLimit = 200
-        let rows = (try? context.fetch(descriptor)) ?? []
+    private static func scopedGauges(context: ModelContext,
+                                     account: String?) -> [PaceGaugesEntry.ScopedGauge] {
+        let rows = (try? context.fetch(
+            LimitScope.usageLimits(account: account, limit: 200))) ?? []
         return rows.latestBatch()
             .filter {
                 ($0.modelId?.isEmpty == false)

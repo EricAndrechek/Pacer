@@ -69,32 +69,37 @@ struct ContentView: View {
         )
     }
 
-    /// Cap the @Query so the window-title computation doesn't fan
-    /// out to thousands of rows — we just need the most recent
-    /// sample per window.
-    @Query(ContentView.recentRateLimitDescriptor)
-    private var recentRateLimits: [RateLimitSample]
-
-    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
+    /// Every account's latest readings, cached on its own row by the poller.
+    ///
+    /// Reads `Account` rather than the last N `RateLimitSample`s, which is
+    /// what this used to do. With one account in the live table a
+    /// `fetchLimit: 8` reliably held the newest of each window; with every
+    /// account in it, the newest eight rows can be one login's and the
+    /// subtitle then reports the wrong account's pacing. Two rows of cached
+    /// latest-readings answer the question exactly, and cost nothing.
+    @Query private var accounts: [Account]
+    @State private var scope = UsageScope.shared
 
     /// Composed window subtitle — "5h 23% • 7d 41%". When dragged to
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
     private var windowSubtitle: String {
-        let fiveHour = recentRateLimits.first { $0.window == "five_hour" }
-        let sevenDay = recentRateLimits.first { $0.window == "seven_day" }
+        guard let account = scopedAccount else { return "" }
         let parts: [String?] = [
-            fiveHour.map { "5h \(Int($0.usedPercentage.rounded()))%" },
-            sevenDay.map { "7d \(Int($0.usedPercentage.rounded()))%" }
+            account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
+            account.latestSevenDayPct.map { "7d \(Int($0.rounded()))%" }
         ]
         return parts.compactMap { $0 }.joined(separator: " • ")
+    }
+
+    /// The account the window is showing limits for: the picked scope, else
+    /// the active login — and on a single-account install, the only one.
+    private var scopedAccount: Account? {
+        if let id = scope.limitAccountId, let match = accounts.first(where: { $0.id == id }) {
+            return match
+        }
+        return accounts.first { $0.isActive } ?? accounts.first
     }
 
     var body: some View {
@@ -483,7 +488,11 @@ private struct ToolbarFreshness: View {
     @MainActor
     private func refresh() {
         tokens = (try? modelContext.fetch(Self.tokenProbe)) ?? []
-        rateLimits = (try? modelContext.fetch(Self.rateLimitProbe)) ?? []
+        // Scoped: the pill answers "is *this* data flowing", and with every
+        // account in the live table an unscoped newest-row would report the
+        // other login's poll as this one's freshness.
+        rateLimits = (try? modelContext.fetch(
+            LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
         sessions = (try? modelContext.fetch(Self.sessionProbe)) ?? []
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
         scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
@@ -493,12 +502,6 @@ private struct ToolbarFreshness: View {
 
     private static let tokenProbe: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        d.fetchLimit = 1
-        return d
-    }()
-
-    private static let rateLimitProbe: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         d.fetchLimit = 1
         return d
     }()

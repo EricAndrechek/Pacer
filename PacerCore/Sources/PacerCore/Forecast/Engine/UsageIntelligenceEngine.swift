@@ -1209,25 +1209,34 @@ public actor UsageIntelligenceEngine {
     /// cycles for the backtest while staying a small read.
     private func fetchRate(now: Date) -> [EngineFeatures.RateRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
-        let descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        // The **active** account, not the window's scope. The engine's
+        // projections drive alerts and the menu bar, which must not change
+        // because someone filtered a chart; and its params, snapshot trail and
+        // golden fixtures are all one login's history. Scoping it to a
+        // non-active account would silently re-fit against a different series.
+        var descriptor = FetchDescriptor<RateLimitSample>(
+            predicate: LimitScope.rateLimitPredicate(
+                account: Account.activeId(in: modelContext), since: cutoff))
+        descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
     }
 
     /// ~32 days of scoped `limits[]` samples (`UsageLimitSample`) mapped to the
     /// engine's `ScopedRow` — the per-model weekly windows the driver forecasts
-    /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`. The poller keeps
-    /// this table holding only the active account's rows (the archive-swap
-    /// parity added in Decision D), so no accountId filter is applied here.
+    /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`, including its
+    /// active-account scope — and needs it more: two accounts can hold a
+    /// weekly window under the *same* identity string, so unscoped this table
+    /// would interleave two series into one and the driver would fit the
+    /// resulting sawtooth.
     /// `inLatestBatch` marks the most-recent poll's rows (the staleness guard:
     /// a limit that vanished from the latest response goes quiet).
     private func fetchScopedLimits(now: Date) -> [EngineFeatures.ScopedRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
-        let descriptor = FetchDescriptor<UsageLimitSample>(
-            predicate: #Predicate { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        var descriptor = FetchDescriptor<UsageLimitSample>(
+            predicate: LimitScope.usageLimitPredicate(
+                account: Account.activeId(in: modelContext), since: cutoff))
+        descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         guard let newest = rows.map(\.sampledAt).max() else { return [] }
         let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance

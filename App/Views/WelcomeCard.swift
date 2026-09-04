@@ -16,6 +16,8 @@ struct WelcomeCard: View {
     // an empty-store check would still materialize the full table on
     // every SwiftData save in steady state.
     @Query(WelcomeCard.tokenProbe) private var tokenSamples: [TokenSample]
+    /// Deliberately unscoped: the question is "has this install ever received
+    /// anything", and any account's row answers it.
     @Query(WelcomeCard.rateLimitProbe) private var rateLimits: [RateLimitSample]
 
     private static let tokenProbe: FetchDescriptor<TokenSample> = {

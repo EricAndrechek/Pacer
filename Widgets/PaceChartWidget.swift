@@ -164,10 +164,13 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // burst: a stuck poller or a backfill event won't blow up
             // widget refresh memory.
             let cutoff = Date().addingTimeInterval(-8 * 86400)
-            var descriptor = FetchDescriptor<RateLimitSample>(
-                predicate: #Predicate<RateLimitSample> { $0.sampledAt >= cutoff },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
+            // The window's scope, else the active login — read from App Group
+            // defaults, which is why the scope lives there: this is a separate
+            // process and cannot see the app's standard defaults. A widget
+            // charting a different account from the window beside it would be
+            // two answers to one question on one screen.
+            let account = UsageScope.storedLimitAccountId
+            var descriptor = LimitScope.rateLimits(account: account, since: cutoff)
             descriptor.fetchLimit = 6000
             let rows = try context.fetch(descriptor)
             // The engine's exported outlook (the app writes it after every
@@ -178,7 +181,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                                    outlook: snapshot?.fiveHour)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
                                     outlook: snapshot?.sevenDay)
-            let scoped = Self.scopedStates(context: context, snapshot: snapshot)
+            let scoped = Self.scopedStates(context: context, snapshot: snapshot, account: account)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceChartEntry(
                 date: Date(), fiveHour: five, sevenDay: seven,
@@ -198,13 +201,15 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     /// `limits[]` rows the poller persisted, keeps only the model/surface-scoped
     /// ones (Decision C), and layers the engine's exported per-identity
     /// projection. Empty (⇒ every layout unchanged) when the account has none.
-    private static func scopedStates(context: ModelContext, snapshot: EngineSnapshot?) -> [PaceChartEntry.ScopedState] {
+    private static func scopedStates(context: ModelContext, snapshot: EngineSnapshot?,
+                                     account: String?) -> [PaceChartEntry.ScopedState] {
         // The latest poll's rows decide the column set — a small cap is all
-        // that's needed, since `latestBatch` only reads one poll's worth.
-        var latest = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        latest.fetchLimit = 120
-        guard let newest = try? context.fetch(latest) else { return [] }
+        // that's needed, since `latestBatch` only reads one poll's worth. It
+        // has to be one account's cap, though: two logins can report a weekly
+        // window under the *same* identity string, so an unscoped batch would
+        // charts the other account's cap under this one's name.
+        guard let newest = try? context.fetch(
+            LimitScope.usageLimits(account: account, limit: 120)) else { return [] }
         let batch = newest.latestBatch().filter {
             ($0.modelId?.isEmpty == false)
                 || ($0.modelDisplayName?.isEmpty == false)
@@ -220,7 +225,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         // by what's actually plotted.
         return batch.compactMap { row in
             Self.scopedWindow(
-                history: Self.scopedHistory(context: context, row: row),
+                history: Self.scopedHistory(context: context, row: row, account: account),
                 row: row, outlook: outlookByIdentity[row.identity])
         }
     }
@@ -229,12 +234,11 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     /// scalars the actual line plots. `fetchLimit` is a burst backstop (a
     /// stuck poller or a backfill shouldn't blow up widget memory), not a
     /// coverage limit: at the real cadence a 7-day cycle holds ~11k rows.
-    private static func scopedHistory(context: ModelContext, row: UsageLimitSample) -> [UsageLimitSample] {
+    private static func scopedHistory(context: ModelContext, row: UsageLimitSample,
+                                      account: String?) -> [UsageLimitSample] {
         guard let resetsAt = row.resetsAt else { return [] }
         let cutoff = resetsAt.addingTimeInterval(-WindowSpec.scopedDuration(group: row.group))
-        var d = FetchDescriptor<UsageLimitSample>(
-            predicate: #Predicate<UsageLimitSample> { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        var d = LimitScope.usageLimits(account: account, since: cutoff)
         d.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
         d.fetchLimit = 20000
         return (try? context.fetch(d)) ?? []

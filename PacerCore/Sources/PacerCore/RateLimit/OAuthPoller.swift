@@ -260,11 +260,14 @@ public actor OAuthPoller: TokenPoolTesting {
         stopping = false
         // Let the Settings "Tokens" section route Test clicks back here.
         Task { await MainActor.run { TokenPoolStatus.shared.tester = self } }
-        // Off the loop task on purpose: the fold is a one-time pass over tens
-        // of thousands of rows and polling must not wait on it. It guards
-        // itself with a meta key, so a second `start()` costs one fetch.
+        // Off the loop task on purpose: the fold is a pass over tens of
+        // thousands of rows on first run and polling must not wait on it. In
+        // steady state it is a handful of index probes.
         let container = self.container
-        Task.detached { await Self.foldArchiveIntoLiveTables(container: container) }
+        Task.detached {
+            await Self.reconcileScopeMirror(container: container)
+            await Self.foldArchiveIntoLiveTables(container: container)
+        }
         loopTask = Task { [weak self] in
             await self?.loop()
         }
@@ -515,7 +518,13 @@ public actor OAuthPoller: TokenPoolTesting {
             laneCounts[Account.key(forOrg: lane.resolvedOrg), default: 0] += 1
         }
         let accounts = await accountSummaries(laneCounts: laneCounts)
-        let activeId = accounts.first(where: \.isActive)?.id ?? activeAccountKey
+        // Only ever an id the *store* knows. `activeAccountKey` is the poller's
+        // in-memory guess and is `Account.defaultKey` until a response carries
+        // an org header — publishing that wrote "default" into App Group
+        // defaults, and every read scoped to it matched nothing at all. Not an
+        // empty chart you would notice as a bug: just gauges that stopped
+        // having a value.
+        let activeId = accounts.first(where: \.isActive)?.id
         await MainActor.run {
             UsageScope.shared.setActiveAccount(activeId)
             TokenPoolStatus.shared.publish(
@@ -1304,6 +1313,22 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    /// Whether any live row predates `accountId`. One indexed count per table,
+    /// so the steady-state cost of re-running the fold every launch is three
+    /// index probes.
+    @ScanActor
+    private static func hasUnstampedLiveRows(_ context: ModelContext) -> Bool {
+        let rl = (try? context.fetchCount(FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        if rl > 0 { return true }
+        let ul = (try? context.fetchCount(FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        if ul > 0 { return true }
+        let eu = (try? context.fetchCount(FetchDescriptor<ExtraUsageSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        return eu > 0
+    }
+
     /// Test seam for the eviction pass — it is the one piece of the swap
     /// whose correctness is "nothing was lost", which is worth asserting
     /// directly rather than through a full poll cycle.
@@ -1426,7 +1451,29 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    /// Bring every account's recent history back out of the archive, once.
+    /// Point App Group defaults at the account the *store* says is active.
+    ///
+    /// The store's `isActive` flag is the truth; defaults are a mirror of it so
+    /// the widget process — which cannot see the app's standard defaults — can
+    /// resolve the same scope. A mirror that has drifted scopes every read to
+    /// an account with no rows, which is not an empty chart anyone files as a
+    /// bug: the gauges just quietly stop having a value.
+    ///
+    /// It drifted the first time this shipped. `publishStatus` was writing the
+    /// poller's in-memory `activeAccountKey`, which is `Account.defaultKey`
+    /// until a response carries an org header — so defaults held `"default"`
+    /// while the store held a uuid. Both ends now publish only ids the store
+    /// knows, and this runs at every launch to repair whatever is there.
+    @ScanActor
+    static func reconcileScopeMirror(container: ModelContainer) async {
+        let context = ModelContext(container)
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        guard let active = accounts.first(where: \.isActive)?.id ?? accounts.first?.id
+        else { return }
+        await MainActor.run { UsageScope.shared.setActiveAccount(active) }
+    }
+
+    /// Bring every account's recent history back out of the archive.
     ///
     /// Before per-account reads, a non-active account's samples lived only in
     /// `AccountUsageArchive` — on this machine 45,973 rate-limit rows spanning
@@ -1440,16 +1487,26 @@ public actor OAuthPoller: TokenPoolTesting {
     ///
     /// Runs on `@ScanActor`, batched and yielding, for the same reason the
     /// swap did — it is tens of thousands of rows and the scan loop shares the
-    /// actor. Guarded by a meta key so it happens exactly once per store.
+    /// actor.
+    ///
+    /// **Runs every launch, not once.** It was written with a meta-key guard,
+    /// and the first real run moved 111,250 rows in 20.8 s but left 1,250
+    /// behind — the newest four hours, which a `sampledAt >= cutoff` fetch
+    /// should plainly have included. A one-shot pass turns whatever caused
+    /// that into a permanent hole in the chart; a pass that repeats fixes it
+    /// on the next launch and keeps costing nothing, because steady state is
+    /// one indexed predicate returning zero rows. `evictStaleLiveRows` moves
+    /// rows the other way only once they are *older* than the same window, so
+    /// the two can never trade the same row back and forth.
+    ///
+    /// The meta key is still written — it records when the first fold ran.
     @ScanActor
     static func foldArchiveIntoLiveTables(container: ModelContainer, now: Date = Date()) async {
         let context = ModelContext(container)
-        let metaKey = ClaudeCodeMetaKey.archiveFoldedIntoLive
-        let existing = (try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate { $0.key == metaKey })))?.first
-        guard existing == nil else { return }
-
         let started = Date()
+
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let storeActiveId = accounts.first(where: \.isActive)?.id ?? accounts.first?.id
         let cutoff = now.addingTimeInterval(-liveWindowDays * 86_400)
         let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
             predicate: #Predicate { $0.sampledAt >= cutoff }))) ?? []
@@ -1463,6 +1520,8 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             await Task.yield()
         }
+
+        guard !archived.isEmpty || hasUnstampedLiveRows(context) else { return }
 
         for row in archived {
             switch row.kind {
@@ -1502,11 +1561,58 @@ public actor OAuthPoller: TokenPoolTesting {
             await flush()
         }
 
-        context.insert(ClaudeCodeMeta(key: metaKey, value: ISO8601DateFormatter().string(from: now)))
+        // Adopt any unstamped live rows.
+        //
+        // They predate `accountId` entirely, which means they predate Pacer
+        // knowing about more than one account — so they are the active
+        // account's by definition. Stamping them here is what lets every read
+        // site be a plain `accountId == x` instead of carrying a "…or nil, but
+        // only when x is the active one" clause fifty times over.
+        if let activeId = storeActiveId {
+            var adopted = 0
+            for row in (try? context.fetch(FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            for row in (try? context.fetch(FetchDescriptor<UsageLimitSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            for row in (try? context.fetch(FetchDescriptor<ExtraUsageSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            if adopted > 0 {
+                Log.write("OAuthPoller", "adopted \(adopted) unstamped live row(s) as \(activeId)")
+            }
+        }
+
+        let metaKey = ClaudeCodeMetaKey.archiveFoldedIntoLive
+        let recorded = (try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == metaKey })))?.first
+        if recorded == nil {
+            context.insert(ClaudeCodeMeta(
+                key: metaKey, value: ISO8601DateFormatter().string(from: now)))
+        }
         await flush(force: true)
+
+        // Say so when the pass did not fully drain, rather than leaving a
+        // silent gap. The next launch will pick up whatever is named here.
+        let leftover = (try? context.fetchCount(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.sampledAt >= cutoff }))) ?? 0
         Log.write("OAuthPoller",
                   "folded \(archived.count) archived row(s) back into the live tables in "
-                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
+                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms"
+                    + (leftover > 0 ? " — \(leftover) recent row(s) still archived" : ""))
 
         Task { @MainActor in
             postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))

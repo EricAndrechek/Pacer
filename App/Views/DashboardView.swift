@@ -55,7 +55,7 @@ struct DashboardView: View {
             // first-class, identically-treated columns. `window` is the fixed
             // window name or the scoped `limits[]` identity; the projection
             // modal accepts both.
-            PaceChartCard(onCompare: { window in
+            PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window in
                 modalRoot = .projection(window: window)
             })
             // Directly under the pace chart, because it answers the question
@@ -91,15 +91,21 @@ struct DashboardView: View {
 /// than one card. Goes yellow with a warning triangle when an OAuth feed
 /// stalls past 15 minutes — commonly an expired Claude Code token.
 struct RateLimitSourceChip: View {
-    @Query(RateLimitSourceChip.newestSample) private var newest: [RateLimitSample]
+    @Query private var newest: [RateLimitSample]
 
-    private static let newestSample: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 1
-        return d
-    }()
+    /// Taken as a parameter rather than read from `UsageScope` in here: a
+    /// `@Query` predicate is captured once at init, so a chip that read the
+    /// scope itself would keep reporting the freshness of whichever account
+    /// was selected when it first appeared.
+    ///
+    /// It has to be scoped at all because `fetchLimit: 1` and "every account
+    /// writes the live table" do not compose: the newest row is whoever polled
+    /// last, which on an idle login is the *other* account, and the chip would
+    /// call stale data fresh.
+    init(limitAccountId: String?) {
+        _newest = Query(LimitScope.rateLimits(account: limitAccountId, limit: 1),
+                        animation: .default)
+    }
 
     var body: some View {
         if let latest = newest.first {

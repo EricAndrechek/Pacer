@@ -115,7 +115,7 @@ struct AdvisorBadges: View {
             ForEach(cachedHints.indices, id: \.self) { idx in
                 hintBadge(cachedHints[idx])
             }
-            RateLimitSourceChip()
+            RateLimitSourceChip(limitAccountId: scope.limitAccountId)
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }

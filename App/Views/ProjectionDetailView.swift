@@ -25,19 +25,37 @@ struct ProjectionCompareModal: View {
     @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
 
-    init(windowKey: String) {
+    /// The account whose actuals to plot, inherited from the card that opened
+    /// the modal — a drill-down that changed scope on the way in would be
+    /// showing a different question's answer.
+    let limitAccountId: String?
+
+    init(windowKey: String, limitAccountId: String? = nil) {
         self.windowKey = windowKey
+        self.limitAccountId = limitAccountId
         let cutoff = Date().addingTimeInterval(-8 * 86400)
+        let account = limitAccountId
         _samples = Query(
-            filter: #Predicate<RateLimitSample> {
-                $0.window == windowKey && $0.sampledAt >= cutoff
-            },
+            filter: account == nil
+                ? #Predicate<RateLimitSample> {
+                    $0.window == windowKey && $0.sampledAt >= cutoff
+                }
+                : #Predicate<RateLimitSample> {
+                    $0.window == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
+                },
             sort: \.sampledAt
         )
+        // Two accounts can report a scoped window under the *same* identity,
+        // so this one is not merely tidier — unscoped it would interleave two
+        // series into one line.
         _scopedSamples = Query(
-            filter: #Predicate<UsageLimitSample> {
-                $0.identity == windowKey && $0.sampledAt >= cutoff
-            },
+            filter: account == nil
+                ? #Predicate<UsageLimitSample> {
+                    $0.identity == windowKey && $0.sampledAt >= cutoff
+                }
+                : #Predicate<UsageLimitSample> {
+                    $0.identity == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
+                },
             sort: \.sampledAt
         )
     }
@@ -124,6 +142,15 @@ struct ProjectionCompareModal: View {
     }
 
     private func refresh() async {
+        // The engine fits the active login's history, so a model comparison
+        // drawn over another account's actuals would be scoring the wrong
+        // series. Show the actuals alone instead of a confident wrong fan.
+        guard limitAccountId == nil || limitAccountId == UsageScope.shared.activeAccountId else {
+            trajectories = []
+            accuracy = nil
+            loaded = true
+            return
+        }
         guard let engine else { loaded = true; return }
         trajectories = await engine.rateLimitTrajectories(windowKey: windowKey)
         accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(windowKey))

@@ -156,7 +156,7 @@ struct PacerModalRouter: View {
                 scopeAccountId: scope.accountId
             )
         case .projection(let window):
-            ProjectionCompareModal(windowKey: window)
+            ProjectionCompareModal(windowKey: window, limitAccountId: scope.limitAccountId)
         }
     }
 }

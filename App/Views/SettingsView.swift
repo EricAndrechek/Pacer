@@ -196,16 +196,18 @@ struct MenuBarCard: View {
 
     /// Recent samples so the driver picker can offer the live window set —
     /// 5h / 7d plus every scoped per-model window currently reported.
-    @Query(MenuBarCard.recentRateDescriptor) private var rateSamples: [RateLimitSample]
-    @Query(MenuBarWindowSource.recentScopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    @Query private var rateSamples: [RateLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
 
-    private static let recentRateDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
+    /// The **active** login's windows, not the dashboard's scope. This picker
+    /// configures what the menu bar draws; which windows exist is a property
+    /// of the login you are signed in as, and a settings screen that reshuffled
+    /// itself because a chart elsewhere was filtered would be a surprise.
+    init() {
+        let account = UsageScope.storedActiveAccountId
+        _rateSamples = Query(LimitScope.rateLimits(account: account, limit: 8))
+        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: account))
+    }
 
     /// The live window set the picker chooses from (ordered like the dashboard).
     private var windows: [MenuBarWindowItem] {
@@ -801,19 +803,20 @@ struct RateLimitAlertsCard: View {
     /// Latest-poll scoped `limits[]` rows (active account) so the card can
     /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
     /// so the query never scans the full append-only history.
-    @Query(RateLimitAlertsCard.scopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
     /// All alert rules — filtered to this card's `rateLimitPct` scoped rules,
     /// which back the per-window threshold lists and let a window that's gone
     /// missing surface as dormant (rules kept, not deleted).
     @Query private var alertRules: [AlertRule]
 
-    private static let scopedDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 200
-        return d
-    }()
+    /// The **active** login's scoped windows. Alerts evaluate against the
+    /// active account and never against the window's scope — an alarm a
+    /// display filter could silence is a footgun — so the card that configures
+    /// them lists the same account's windows the evaluator will see.
+    init() {
+        _scopedSamples = Query(
+            LimitScope.usageLimits(account: UsageScope.storedActiveAccountId, limit: 200))
+    }
 
     /// The per-model windows present in the latest poll, active-first then
     /// hottest (the dashboard's `latestBatch` order), excluding the account-wide

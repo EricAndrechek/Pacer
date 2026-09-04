@@ -45,13 +45,13 @@ enum MenuBarWindowSource {
     /// resolve the latest poll's batch without scanning the append-only table.
     /// One poll writes a handful of scoped rows; 64 covers far more scoped
     /// windows than an account realistically has.
-    static let recentScopedDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 64
-        return d
-    }()
+    /// A function rather than a `static let` because the bound and the scope
+    /// have to be applied together. With every account writing this table, an
+    /// unscoped "newest 64" can be entirely the other login's rows, and the
+    /// caller would render its windows as this account's.
+    static func recentScoped(account: String?) -> FetchDescriptor<UsageLimitSample> {
+        LimitScope.usageLimits(account: account, limit: 64)
+    }
 }
 
 /// What renders in the menu bar status item. The displayed content is
@@ -76,8 +76,7 @@ struct MenuBarLabel: View {
     /// Cap the fetch — we only ever look at the most-recent sample per
     /// window. Without the cap, every SwiftData save materialized the
     /// full ~4k-row history just to fire the menu-bar label re-render.
-    @Query(MenuBarLabel.recentRateLimitDescriptor)
-    private var rateSamples: [RateLimitSample]
+    @Query private var rateSamples: [RateLimitSample]
 
     /// Today's aggregates for cost / tokens chips. Filtered by date so
     /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
@@ -101,8 +100,7 @@ struct MenuBarLabel: View {
     /// Recent scoped `limits[]` rows — the source of the per-model windows the
     /// icon driver can point at. Bounded so this always-visible label never
     /// scans the append-only scoped history.
-    @Query(MenuBarWindowSource.recentScopedDescriptor)
-    private var scopedSamples: [UsageLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
 
     init() {
         let today = TokenSample.formatDate(Date())
@@ -119,15 +117,13 @@ struct MenuBarLabel: View {
                 $0.date == today && $0.accountId == acct
             }
         )
+        // Rate limits resolve differently from spend: "all accounts" is not a
+        // number two 5-hour windows can be added into, so it falls back to the
+        // active login rather than to every account.
+        let limitAcct = UsageScope.storedLimitAccountId
+        _rateSamples = Query(LimitScope.rateLimits(account: limitAcct, limit: 8))
+        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: limitAcct))
     }
-
-    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
 
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
@@ -482,8 +478,7 @@ private struct MenuBarLabelContent: View, Equatable {
 /// chip level via @AppStorage; this view is reactive at the data
 /// level via @Query.
 struct MenuStatusContent: View {
-    @Query(MenuStatusContent.recentDescriptor)
-    private var rateLimits: [RateLimitSample]
+    @Query private var rateLimits: [RateLimitSample]
     @Query private var globalToday: [DailyAggregate]
     @Query private var scopedToday: [AccountDailyAggregate]
     @State private var menuScope = UsageScope.shared
@@ -498,8 +493,7 @@ struct MenuStatusContent: View {
 
     /// Recent scoped `limits[]` rows — the source of the dynamic per-model
     /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
-    @Query(MenuBarWindowSource.recentScopedDescriptor)
-    private var scopedSamples: [UsageLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
 
     /// Engine answers for the outlook touches: per-window crossing (the
     /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
@@ -528,14 +522,6 @@ struct MenuStatusContent: View {
         pacePercentile = pace.isInsufficient ? nil : pace.value
     }
 
-    private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
-
     init() {
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
@@ -551,6 +537,12 @@ struct MenuStatusContent: View {
                 $0.date == today && $0.accountId == acct
             }
         )
+        // Rate limits resolve differently from spend: "all accounts" is not a
+        // number two 5-hour windows can be added into, so it falls back to the
+        // active login rather than to every account.
+        let limitAcct = UsageScope.storedLimitAccountId
+        _rateLimits = Query(LimitScope.rateLimits(account: limitAcct, limit: 8))
+        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: limitAcct))
     }
 
     private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }

@@ -18,15 +18,12 @@ struct NotificationsHost: View {
     /// invalidation materialized every `RateLimitSample` row in the
     /// store just to read one float — the same kind of cost
     /// MenuBarLabel already addressed.
-    @Query(NotificationsHost.recentRateLimitDescriptor)
-    private var samples: [RateLimitSample]
+    @Query private var samples: [RateLimitSample]
 
-    /// Recent scoped `limits[]` rows (active account only — the table holds the
-    /// active account's rows after the OAuth poller's timeline swap), newest
-    /// first, bounded. Drives the scoped per-model threshold alerts through the
-    /// same crossing logic as the fixed 5h/7d windows.
-    @Query(NotificationsHost.recentScopedDescriptor)
-    private var scopedSamples: [UsageLimitSample]
+    /// Recent scoped `limits[]` rows for the **active** account, newest first,
+    /// bounded. Drives the scoped per-model threshold alerts through the same
+    /// crossing logic as the fixed 5h/7d windows.
+    @Query private var scopedSamples: [UsageLimitSample]
 
     @Query private var todayAggregates: [DailyAggregate]
     /// Per-project rollups for the last 7 days — covers both the
@@ -76,24 +73,20 @@ struct NotificationsHost: View {
     /// re-fires that resolve to the same poll.
     @State private var lastConsideredScopedId: PersistentIdentifier?
 
-    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
-
-    /// Bounded scoped-sample window — enough to resolve the latest poll's batch
-    /// (all rows share a `sampledAt`) plus a little history, without scanning
-    /// the full append-only table on every save (same pattern as PaceChartCard).
-    private static let recentScopedDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 200
-        return d
-    }()
+    /// Both limit queries are scoped to the **active login**, never to the
+    /// window's scope — the same rule the spend alerts below already follow,
+    /// and for the same reason. A view shows what you asked to see; an alert
+    /// tells you what you did not. A threshold a display filter could silence
+    /// is a footgun: scope the dashboard to work in the morning and stop
+    /// hearing about the other account's cap all day.
+    ///
+    /// Scoping to *something* is not optional, though. With every account
+    /// writing the live table, an unscoped "newest 8" is whichever login polled
+    /// last, so the crossing detector would compare one account's utilisation
+    /// against the other's and fire on the difference.
+    ///
+    /// Per-account alert *rules* remain a fine feature; inheriting a display
+    /// scope is not the way to get them.
 
     /// **Deliberately global, unlike every display surface.**
     ///
@@ -123,6 +116,9 @@ struct NotificationsHost: View {
                 $0.date >= weekAgo && $0.date <= today
             }
         )
+        let account = UsageScope.storedActiveAccountId
+        _samples = Query(LimitScope.rateLimits(account: account, limit: 8))
+        _scopedSamples = Query(LimitScope.usageLimits(account: account, limit: 200))
     }
 
     // Compute the change-detection fingerprints in computed properties

@@ -592,12 +592,21 @@ final class AppBackgroundService {
 
         for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {
             let cutoff = Date().addingTimeInterval(-globalResetLookback(forWindow: window))
+            // The **active** login's, like every other decision surface: a
+            // global reset is something to be told about, not a view. Scoping
+            // is also load-bearing here — an unscoped series would interleave
+            // two accounts' utilisation and the collapse detector would read
+            // the gap between them as a reset.
+            let account = Account.activeId(in: context)
             let descriptor = FetchDescriptor<RateLimitSample>(
-                predicate: #Predicate {
-                    $0.source == oauthSource
-                        && $0.window == window
-                        && $0.sampledAt >= cutoff
-                },
+                predicate: account == nil
+                    ? #Predicate<RateLimitSample> {
+                        $0.source == oauthSource && $0.window == window && $0.sampledAt >= cutoff
+                    }
+                    : #Predicate<RateLimitSample> {
+                        $0.source == oauthSource && $0.window == window
+                            && $0.sampledAt >= cutoff && $0.accountId == account
+                    },
                 sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
             )
             guard let rows = try? context.fetch(descriptor) else { continue }

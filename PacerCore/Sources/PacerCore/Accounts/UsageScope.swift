@@ -228,14 +228,16 @@ public final class UsageScope {
     public var limitAccountId: String? { accountId ?? activeAccountId }
 
     /// Called by the poller when the active login changes.
+    ///
+    /// A nil is "we do not know yet", not "there is no active account", so it
+    /// leaves the stored value alone. The poller publishes before its first
+    /// response resolves an org, and clearing on that would blank every gauge
+    /// on the widget side of the app group for the first few seconds of every
+    /// launch — for no gain, since the previous value is still the right one.
     public func setActiveAccount(_ id: String?) {
-        guard id != activeAccountId else { return }
+        guard let id, id != activeAccountId else { return }
         activeAccountId = id
-        if let id {
-            PacerPreferences.store.set(id, forKey: Self.activeKey)
-        } else {
-            PacerPreferences.store.removeObject(forKey: Self.activeKey)
-        }
+        PacerPreferences.store.set(id, forKey: Self.activeKey)
     }
 
     public var isAll: Bool { accountId == nil }
@@ -261,7 +263,18 @@ public final class UsageScope {
 
     /// The rate-limit scope for those same out-of-process readers.
     public nonisolated static var storedLimitAccountId: String? {
-        storedAccountId ?? PacerPreferences.store.string(forKey: activeKey)
+        storedAccountId ?? storedActiveAccountId
+    }
+
+    /// The active login alone, ignoring what the window is showing.
+    ///
+    /// What a *decision* reads, as opposed to a display: the forecast engine
+    /// and the alert evaluator both use this. An alert that a display filter
+    /// could silence is a footgun — scope the window to work in the morning
+    /// and stop hearing about personal spend all day — and the engine's
+    /// projections are the active login's by construction.
+    public nonisolated static var storedActiveAccountId: String? {
+        PacerPreferences.store.string(forKey: activeKey)
     }
 
     /// Stands in for "no account selected" in a scoped `@Query`, so the

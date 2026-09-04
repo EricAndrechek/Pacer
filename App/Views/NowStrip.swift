@@ -133,7 +133,7 @@ struct NowStrip: View {
 
         latestSamples = (try? modelContext.fetch(Self.latestSampleProbe)) ?? []
         latestSessions = (try? modelContext.fetch(Self.latestSessionProbe)) ?? []
-        extraUsages = (try? modelContext.fetch(Self.recentExtraUsage)) ?? []
+        extraUsages = (try? modelContext.fetch(LimitScope.extraUsage(account: scope.limitAccountId, limit: 1))) ?? []
         scanMeta = (try? modelContext.fetch(Self.scanMetaProbe)) ?? []
     }
 
@@ -148,14 +148,6 @@ struct NowStrip: View {
     private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
         var d = FetchDescriptor<SessionInfo>(
             sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
-        )
-        d.fetchLimit = 1
-        return d
-    }()
-
-    private static let recentExtraUsage: FetchDescriptor<ExtraUsageSample> = {
-        var d = FetchDescriptor<ExtraUsageSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d

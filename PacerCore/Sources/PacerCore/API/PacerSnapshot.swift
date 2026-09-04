@@ -118,10 +118,14 @@ public enum PacerSnapshotBuilder {
         let calendar = Calendar.current
 
         // --- Rate-limit samples (latest per window + freshest overall) ---
-        var rlDescriptor = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        rlDescriptor.fetchLimit = 16
-        let rlRows = (try? context.fetch(rlDescriptor)) ?? []
+        //
+        // The **active** login's, never the window's scope: a scripted
+        // consumer must not get different numbers because a human clicked
+        // something in an app it cannot see. `/v1/accounts` reports
+        // `activeAccountId` so the caller knows whose limits these are.
+        let limitAccount = UsageScope.storedActiveAccountId
+        let rlRows = (try? context.fetch(
+            LimitScope.rateLimits(account: limitAccount, limit: 16))) ?? []
         let latestFive = rlRows.first { $0.window == fiveHourKey }
         let latestSeven = rlRows.first { $0.window == sevenDayKey }
         let freshestSample = rlRows.first
@@ -181,10 +185,8 @@ public enum PacerSnapshotBuilder {
         }
 
         // --- Extra (overage) usage ---
-        var extraDescriptor = FetchDescriptor<ExtraUsageSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        extraDescriptor.fetchLimit = 1
-        let overageUSD = (try? context.fetch(extraDescriptor))?.first?.amountUSD ?? 0
+        let overageUSD = (try? context.fetch(
+            LimitScope.extraUsage(account: limitAccount, limit: 1)))?.first?.amountUSD ?? 0
 
         let dataSource = PacerSnapshotPayload.DataSource(
             source: freshestSample?.source,
