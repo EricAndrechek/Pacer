@@ -103,7 +103,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ScreenshotMode.isActive {
             PacerSettings.registerDefaults()
             do {
-                container = try PacerStore.makeInMemoryContainer()
+                // The live renderer is the same off-screen path pointed at the
+                // real store, read-only — see `LiveRenderMode`. Everything else
+                // about screenshot mode applies: no scan, no menu bar, no
+                // single-instance gate, exit when done.
+                container = LiveRenderMode.isActive
+                    ? try LiveRenderMode.container()
+                    : try PacerStore.makeInMemoryContainer()
             } catch {
                 Self.showFatalContainerError(error)
             }
@@ -299,11 +305,31 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Screenshot/demo mode: skip scan, menu bar, hotkey, and Dock
         // policy. Seed synthetic data, capture the views off-screen, exit.
         if ScreenshotMode.isActive {
-            NSApp.setActivationPolicy(.accessory)
+            // `.prohibited` for the live renderer, not `.accessory`.
+            //
+            // It runs as a *second process of the same bundle* beside the app
+            // the user is working in, and `.accessory` still lets macOS treat
+            // it as an activatable instance: launching it pulled the real
+            // Pacer's window to the active Space and left it out of place when
+            // the render exited. `.prohibited` means "not a UI app" — it cannot
+            // activate, cannot own the menu bar, and cannot take a Space with
+            // it. Off-screen `NSWindow` rendering still works, because that is
+            // drawing rather than presentation.
+            //
+            // The README screenshot run keeps `.accessory`: it is invoked
+            // deliberately by `make screenshots`, not alongside a live app.
+            NSApp.setActivationPolicy(LiveRenderMode.isActive ? .prohibited : .accessory)
+            // Suppress any window macOS restores for the bundle — the same
+            // guard the other diagnostic modes carry.
+            Self.suppressWindowsWhileDiagnosticRuns()
             Task { @MainActor in
                 await SampleCostCache.reload()
-                ScreenshotMode.seed(into: container)
-                await ScreenshotMode.captureAll(container: container)
+                if LiveRenderMode.isActive {
+                    await LiveRenderMode.run(container: container)
+                } else {
+                    ScreenshotMode.seed(into: container)
+                    await ScreenshotMode.captureAll(container: container)
+                }
                 exit(0)
             }
             return

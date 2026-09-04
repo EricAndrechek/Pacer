@@ -175,3 +175,10 @@ clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for c
 	else \
 		echo "Cancelled."; \
 	fi
+
+.PHONY: render-live
+## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).
+## Usage: make render-live            (all accounts + each account)
+##        make render-live SCOPES=all
+render-live:
+	@bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"

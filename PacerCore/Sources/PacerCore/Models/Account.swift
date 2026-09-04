@@ -90,6 +90,32 @@ public final class Account {
         return id
     }
 
+    /// A label short enough to sit in a column heading.
+    ///
+    /// `label` is for places with room — a settings row, a menu. Rendered as a
+    /// pace-column title beside "5-hour ·" it is a disaster: two real accounts
+    /// gave `5-HOUR · SOMEBODY@EXAMPLE.COM` wrapping onto three lines and
+    /// pushing every chart down.
+    ///
+    /// So: a name the user typed (they chose it, and it is theirs to keep
+    /// short), else an email's local part, else the org name, else the id tail.
+    /// Capped, because a long org name is the same problem.
+    public var shortLabel: String {
+        let candidate: String
+        if !Self.isDerivedName(displayName) {
+            candidate = displayName
+        } else if let emailAddress, let local = emailAddress.split(separator: "@").first,
+                  !local.isEmpty {
+            candidate = String(local)
+        } else if let organizationName, !organizationName.isEmpty,
+                  !organizationName.contains("@") {
+            candidate = organizationName
+        } else {
+            candidate = "Account \(id.suffix(4))"
+        }
+        return candidate.count > 18 ? String(candidate.prefix(17)) + "…" : candidate
+    }
+
     /// Whether `displayName` is still one of the auto-derived placeholders
     /// rather than something a person chose. Guards the observer from
     /// overwriting a deliberate rename.

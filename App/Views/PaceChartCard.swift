@@ -296,7 +296,7 @@ struct PaceChartCard: View {
         }
         return accounts
             .sorted { $0.isActive != $1.isActive ? $0.isActive : $0.id < $1.id }
-            .map { (accountId: Optional($0.id), label: Optional($0.label)) }
+            .map { (accountId: Optional($0.id), label: Optional($0.shortLabel)) }
     }
 
     private struct Loaded: Sendable {

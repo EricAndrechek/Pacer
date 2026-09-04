@@ -98,6 +98,43 @@ These are subtle, easy to miss, and break user-visible numbers:
   lags by hours and has fewer categories than JSONL. Use only as a
   sanity-check probe.
 
+## Look at the UI yourself — `make render-live`
+
+Pacer can render its own cards, against the real store, to PNGs:
+
+```sh
+make render-live                 # all-accounts plus every account
+make render-live SCOPES=all      # or name scopes explicitly
+```
+
+They land in `screenshots/live/` (gitignored) and an agent can open them. Use
+this before asking a human whether something looks right — several rounds of
+"does this look wrong to you?" in the account work could each have been one
+render and a look. It found two things no amount of reading the code would
+have: a `5-HOUR · SOMEBODY@EXAMPLE.COM` heading wrapping onto three lines,
+and a card confidently reporting "a quiet Friday so far" on the account's
+biggest day.
+
+It is **not** `make screenshots`. That one seeds synthetic data because its
+output ships in the README; this one shows what the user is actually seeing.
+
+Three things it does so you do not have to remember them, all in
+`LiveRenderMode` and `bin/dev-render-live.sh`:
+
+- **Read-only store.** A second process writing the live store while the app
+  runs is not something to discover later.
+- **`.prohibited` activation policy.** It runs as a second process of the *same
+  bundle* beside the app the user is working in. With `.accessory` macOS still
+  treats it as an activatable instance — launching it pulled the real window
+  onto the active Space and left it out of place. `.prohibited` cannot activate
+  at all.
+- **The real app is re-opened on the way out**, on success, failure or Ctrl-C.
+
+The view scope is set *ephemerally* while walking scopes — `UsageScope.select`
+persists to App Group defaults, which the running app reads, so walking scopes
+with it would leave the user's dashboard on whichever account the render
+stopped at.
+
 ## UI components live in PacerUI — check before you build one
 
 **Before writing any view that shows something the app already shows

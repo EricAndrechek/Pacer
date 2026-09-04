@@ -251,6 +251,17 @@ public final class UsageScope {
         }
     }
 
+    /// Set the scope for this process only, without persisting it.
+    ///
+    /// The diagnostic renderer runs as a second instance against the real
+    /// store: it has to look at the dashboard through each scope in turn, and
+    /// `select` would write every one of those into the App Group defaults the
+    /// *running* app reads — leaving the user's scope wherever the render
+    /// happened to stop.
+    public func selectEphemeral(_ accountId: String?) {
+        self.accountId = accountId
+    }
+
     /// The scope as any process can read it, including the widget extension
     /// which has no `UsageScope` instance of its own.
     ///

@@ -75,3 +75,6 @@ Vendor/
 
 Vendor/DuckDB.xcframework/
 Vendor/DuckDB.xcframework.zip
+
+# Live-render diagnostic output (bin/dev-render-live.sh)
+screenshots/live/

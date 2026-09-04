@@ -721,9 +721,17 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Pace vs norm
 
+    /// Days of history a percentile needs before it means anything. The same
+    /// floor `paceVsNow` and `yesterdayRank` already use — `pace` was the one
+    /// that only checked the baseline was *non-empty*, so a two-day-old account
+    /// got a confident percentile computed against a single prior day. Rendered
+    /// live, that read as "**a quiet Friday so far**" on the account's biggest
+    /// day: $545 and 1.4M tokens.
+    static let minPaceBaselineDays = 7
+
     static func pace(_ f: EngineFeatures, _ fit: Fit) -> Estimate {
         let projected = projectedCostToday(f, fit).value
-        guard projected.isFinite, !fit.dailyBaseline.isEmpty,
+        guard projected.isFinite, fit.dailyBaseline.count >= minPaceBaselineDays,
               let rank = UsageNorms.paceRank(value: projected, baseline: fit.dailyBaseline) else {
             return .insufficient(method: "pace-rank", note: "not enough history to judge pace",
                                  support: fit.dailyBaseline.count)
