@@ -261,6 +261,29 @@ else
   done
 fi
 
+# --- Rate-limit tables: every row scoped, nothing stranded -------------------
+#
+# Both of these caught a real bug the day per-account limits shipped.
+#
+# An unstamped row is invisible to every read: they all filter on `accountId`
+# now, so a row with none belongs to no account and simply stops existing.
+# `OAuthPoller.foldArchiveIntoLiveTables` adopts them into the active account
+# on launch; a non-zero count here means that pass is not running.
+#
+# A *recent* row still in the archive is the other half of the same pass. The
+# first real fold left 1,250 behind, which is four hours missing from the
+# chart and nothing on screen to suggest it. The window is `liveWindowDays`
+# (35) — anything older belongs in the archive and is not counted.
+printf '\n%s==>%s Rate-limit rows are account-scoped\n' "$B" "$X"
+rl_cut="strftime('%s','now','-35 days')-978307200"
+for t in ZRATELIMITSAMPLE:rate-limit ZUSAGELIMITSAMPLE:scoped-limit ZEXTRAUSAGESAMPLE:extra-usage; do
+  tbl="${t%%:*}"; name="${t##*:}"
+  check "every ${name} row carries an account" 0 \
+    "$(q "SELECT COUNT(*) FROM ${tbl} WHERE ZACCOUNTID IS NULL")"
+done
+check "no recent row left in the archive" 0 \
+  "$(q "SELECT COUNT(*) FROM ZACCOUNTUSAGEARCHIVE WHERE ZSAMPLEDAT >= ${rl_cut}")"
+
 printf '\n%s==>%s Store\n' "$B" "$X"
 printf '    %s rows · %s daily · %s hourly · %s project · %s sessions\n' \
   "$(q 'SELECT COUNT(*) FROM ZTOKENSAMPLE')" \
