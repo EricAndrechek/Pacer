@@ -227,6 +227,14 @@ public actor UsageIntelligenceEngine {
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
 
+    // MARK: - Diagnostics (see `EngineScopeProbe`)
+
+    public func windowSpecsForProbe() -> [WindowSpec] { features?.windows ?? [] }
+    public func rateLimitHistoryCountForProbe(_ key: String) -> Int {
+        features?.rateLimit[key]?.count ?? 0
+    }
+    public func rateLimitCyclesForProbe(_ key: String) -> Int { fit.rl[key]?.cyclesObserved ?? 0 }
+
     /// The scoped per-model windows the engine is currently forecasting —
     /// discovered dynamically from the latest poll's model/surface-scoped
     /// `limits[]` rows. The dashboard's pace card renders one first-class
@@ -807,8 +815,23 @@ public actor UsageIntelligenceEngine {
             // "measured null" on the 5h block gets re-tested by the accumulating
             // record instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
-            let table = DiurnalBurnModel.rateTable(cycles: history, calendar: f.calendar, prior: f.activityGrid)
-            roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
+            // ...but only once there is a completed cycle to learn a shape
+            // from. With none, `rateTable` is the activity prior alone, and on
+            // a thin history that prior is zero in almost every (weekday, hour)
+            // cell — so integrating it forward yields no growth and the model
+            // draws a **flat line** through a window that is visibly climbing.
+            //
+            // Seen on a two-day-old account: the 7-day and weekly-scoped
+            // windows projected 88% → 88% while the same windows under the
+            // all-accounts scope, where a simpler model won, projected
+            // 88% → 92% → 95% → 99%. A model with nothing to say should not be
+            // in the tournament; its own doc comment already scopes it to
+            // "rests on few completed 7-day cycles".
+            if !history.isEmpty {
+                let table = DiurnalBurnModel.rateTable(
+                    cycles: history, calendar: f.calendar, prior: f.activityGrid)
+                roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
+            }
 
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default

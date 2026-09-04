@@ -165,3 +165,56 @@ struct EngineScopeTests {
         #expect(surfaces.allSatisfy { $0.hasSuffix("#work") })
     }
 }
+
+/// The diurnal model learns its accrual *shape* from completed cycles. With
+/// none it is the activity prior alone, and on a thin history that prior is
+/// zero in almost every (weekday, hour) cell — so integrating it forward
+/// projects no growth at all.
+///
+/// Seen on a two-day-old account: the weekly window projected 88% → 88% flat
+/// while the same window under a scope with more history projected
+/// 88% → 92% → 95% → 99%. A model with nothing to say should not compete.
+@Suite("The diurnal model needs a completed cycle")
+struct DiurnalRosterGateTests {
+
+    private func features(cycles: Int, now: Date) -> EngineFeatures {
+        let duration: TimeInterval = 7 * 86_400
+        var samples: [(at: Date, usedPercentage: Double, resetsAt: Date)] = []
+        // `cycles` complete cycles behind us, then a partial one.
+        for c in stride(from: cycles, through: 1, by: -1) {
+            let resets = now.addingTimeInterval(-Double(c - 1) * duration - 3600)
+            for step in 0..<12 {
+                samples.append((at: resets.addingTimeInterval(-duration + Double(step) * duration / 12),
+                                usedPercentage: Double(step) * 8, resetsAt: resets))
+            }
+        }
+        let currentReset = now.addingTimeInterval(duration / 2)
+        for step in 0..<6 {
+            samples.append((at: now.addingTimeInterval(-Double(6 - step) * 3600),
+                            usedPercentage: Double(step) * 10, resetsAt: currentReset))
+        }
+        return EngineFeatures.build(
+            now: now, calendar: .current,
+            daily: [], hourly: [], rate: samples.map {
+                .init(window: RateLimitWindowName.sevenDay, at: $0.at,
+                      usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt)
+            },
+            lastArrivalAt: now, scoped: [])
+    }
+
+    private func rosterIds(cycles: Int) -> [String] {
+        let now = Date()
+        let fit = UsageIntelligenceEngine.makeFit(features(cycles: cycles, now: now))
+        return fit.rl[RateLimitWindowName.sevenDay]?.roster.map(\.id) ?? []
+    }
+
+    @Test func itSitsOutWithNoCompletedCycle() {
+        let ids = rosterIds(cycles: 0)
+        #expect(!ids.isEmpty)                      // the simple models still compete
+        #expect(!ids.contains("diurnal-rate"))
+    }
+
+    @Test func itCompetesOnceThereIsOne() {
+        #expect(rosterIds(cycles: 3).contains("diurnal-rate"))
+    }
+}

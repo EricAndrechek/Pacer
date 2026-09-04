@@ -478,6 +478,7 @@ private struct ToolbarFreshness: View {
     @State private var rateLimits: [RateLimitSample] = []
     @State private var sessions: [SessionInfo] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
+    @State private var scope = UsageScope.shared
     @Environment(\.modelContext) private var modelContext
 
     /// Re-read the four probes and recompute the pill's value.
@@ -632,6 +633,10 @@ private struct ToolbarFreshness: View {
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
                 refreshRateLimitProbe()
             }
+            // The probe is scoped, so a scope change invalidates it — otherwise
+            // the pill reports the other account's freshness until the next
+            // scan cycle happens to fire.
+            .onChange(of: scope.limitAccountId) { _, _ in refreshRateLimitProbe() }
             .task {
                 refreshRateLimitProbe()
                 refresh()
