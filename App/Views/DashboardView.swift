@@ -110,8 +110,17 @@ struct RateLimitSourceChip: View {
         let source: String
     }
 
+    /// The container is not decoration.
+    ///
+    /// `content` is `if let latest { … }`, so before the first fetch this
+    /// view's body IS an `EmptyView` — and SwiftUI does not run lifecycle
+    /// modifiers on an `EmptyView`. Attached directly, `.task` was waiting for
+    /// a view that only existed once the task had run: the chip never
+    /// appeared, on any scope, from the moment this stopped being a `@Query`
+    /// and became `@State` + a keyed fetch. An `HStack` is a real view with a
+    /// real (zero-sized) identity, so its modifiers fire.
     var body: some View {
-        content
+        HStack(spacing: 0) { content }
             .task(id: limitAccountId) { refresh() }
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
                 refresh()
