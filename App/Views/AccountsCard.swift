@@ -19,6 +19,11 @@ struct AccountsCard: View {
     @Query(AccountsCard.accountsDescriptor) private var accounts: [Account]
     @State private var totals = AccountTotalsStatus.shared
     @State private var scope = UsageScope.shared
+    @Environment(\.modelContext) private var modelContext
+    /// Whether the accounts are ever used at the same time — the same test
+    /// `PaceChartCard` uses to decide whether "all accounts" draws one set of
+    /// limit cards or every account's. See `AccountParallelism`.
+    @State private var isParallel = false
 
     private static let accountsDescriptor: FetchDescriptor<Account> = {
         FetchDescriptor<Account>(sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
@@ -51,7 +56,16 @@ struct AccountsCard: View {
             } footer: {
                 Text(scopeNote)
             }
+            .task { refreshParallelism() }
+            .onChange(of: scope.accountId) { _, _ in refreshParallelism() }
+            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+                refreshParallelism()
+            }
         }
+    }
+
+    private func refreshParallelism() {
+        isParallel = AccountParallelism.isParallel(context: modelContext)
     }
 
     /// The switcher's order when there is one, so the list matches the tool the
@@ -84,14 +98,28 @@ struct AccountsCard: View {
         dayMonthFormatter.string(from: date)
     }
 
-    /// Which account the spend and token cards are showing. The control that
-    /// changes it lives in the toolbar — it governs every view, so it belongs
-    /// in window chrome rather than inside one card.
+    /// What the cards below this one are showing. The control that changes it
+    /// lives in the toolbar — it governs every view, so it belongs in window
+    /// chrome rather than inside one card.
+    ///
+    /// Spend and limits answer the scope differently and the note has to say
+    /// so: costs from two accounts add up, two 5-hour windows do not. Under
+    /// "all accounts" the pace cards therefore show either every account's
+    /// windows side by side (when the accounts run in parallel) or just the
+    /// active login's. The note used to say a flat "Limits are per account",
+    /// which was true of the world and told you nothing about the screen.
     private var scopeNote: String {
-        let shown = scope.isAll
-            ? "all accounts"
-            : (accounts.first { $0.id == scope.accountId }?.label ?? "all accounts")
-        var note = "Limits are per account. Spend and tokens below show \(shown)."
+        var note: String
+        if let picked = accounts.first(where: { $0.id == scope.accountId }) {
+            note = "Spend, tokens and limits below show \(picked.label)."
+        } else if isParallel {
+            note = "Spend and tokens below cover all accounts; limits are shown per account."
+        } else {
+            let live = accounts.first { $0.id == scope.limitAccountId }?.label
+            note = live.map {
+                "Spend and tokens below cover all accounts; limits show \($0)."
+            } ?? "Spend and tokens below cover all accounts."
+        }
         if let orphan = totals.unattributed, orphan.turns > 0 {
             note += " \(orphan.turns.formatted()) turns predate account tracking."
         }

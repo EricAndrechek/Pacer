@@ -205,6 +205,17 @@ struct PaceChartCard: View {
     /// series, since it decides how many there are.
     @State private var isParallel = false
 
+    /// The `scopeKey` the loaded (or in-flight) `series` belongs to.
+    ///
+    /// Mount used to load the card twice. `.task(id:)` resolves `isParallel`
+    /// before its first `reload()`, and `isParallel` is part of `scopeKey` —
+    /// so on any machine that runs accounts in parallel, the key changed
+    /// during mount, the `.onChange` below fired, and it threw away the load
+    /// that was still in flight and started an identical one. Recording the
+    /// key at the top of `reload()` (synchronously, before the first
+    /// suspension) makes that second pass a no-op.
+    @State private var loadedScopeKey: String?
+
     /// Load the two 8-day series **off the main actor**.
     ///
     /// This used to be `@MainActor` and fetch `@Model` rows straight into
@@ -221,6 +232,9 @@ struct PaceChartCard: View {
     /// renders whatever it has meanwhile.
     private func reload() async {
         guard let container = try? PacerStore.sharedModelContainer() else { return }
+        // Before the first `await`, so a `scopeKey` change caused by this call
+        // itself cannot race ahead of it. See `loadedScopeKey`.
+        loadedScopeKey = scopeKey
         let targets = loadTargets()
         let started = Date()
         isLoading = series.isEmpty
@@ -732,7 +746,8 @@ struct PaceChartCard: View {
         // both resolve `limitAccountId` to work, so switching between them
         // changed nothing and the card kept showing three columns where it
         // should have shown six.
-        .onChange(of: scopeKey) {
+        .onChange(of: scopeKey) { _, key in
+            guard key != loadedScopeKey else { return }
             series = []
             Task { await reload() }
         }

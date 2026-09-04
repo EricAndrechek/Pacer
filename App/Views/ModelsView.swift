@@ -279,6 +279,10 @@ private struct ModelsContent: View {
         /// avoid paying on every hover.
         var trendDayCount: Int = 0
         var trendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
+        /// `rows` re-sorted by the metric the donut is *showing*, largest
+        /// first. The donut, its legend and its hover table all read this one
+        /// array — see `shareCumulative` for what happens when they don't.
+        var shareRows: [ModelRow] = []
         var shareCumulative: [(row: ModelRow, max: Double)] = []
     }
 
@@ -386,12 +390,20 @@ private struct ModelsContent: View {
         }
         let rows: [ModelRow] = descending ? sorted.reversed() : sorted
 
+        // The donut is drawn largest-wedge-first, which is not the table's
+        // sort — the table can be ordered by name, or by days, or ascending.
+        // Both the wedges and the cumulative-angle table below must walk the
+        // SAME array: when they disagreed, hovering a wedge named whichever
+        // model happened to sort first in the table.
+        let shareRows = Self.foldedShareRows(
+            rows.sorted { metricValue($0) > metricValue($1) })
+
         // Share-donut cumulative-angle table, sized by the chosen metric so a
         // per-hover `body` doesn't have to walk it.
         var running = 0.0
         var cumulative: [(row: ModelRow, max: Double)] = []
-        cumulative.reserveCapacity(rows.count)
-        for r in rows {
+        cumulative.reserveCapacity(shareRows.count)
+        for r in shareRows {
             running += metricValue(r)
             cumulative.append((r, running))
         }
@@ -434,8 +446,43 @@ private struct ModelsContent: View {
             dailyMix: dailyMix,
             trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
+            shareRows: shareRows,
             shareCumulative: cumulative
         )
+    }
+
+    /// How many models the share legend names before it starts folding.
+    private static let shareLegendCap = 8
+
+    /// The legend used to stop at `shareLegendCap` while the donut kept
+    /// drawing every row, so with nine models the ninth was an unlabelled
+    /// sliver and the legend's percentages summed to less than 100. The tail
+    /// is now one real wedge, so the two always agree.
+    ///
+    /// Folding a *single* row into "Other" would be worse than showing it, so
+    /// the fold only starts once at least two rows would be hidden.
+    /// Both metrics are summed, so the folded row is correct whichever one
+    /// the picker is showing.
+    private static func foldedShareRows(_ ordered: [ModelRow]) -> [ModelRow] {
+        guard ordered.count > shareLegendCap + 1 else { return ordered }
+        let head = Array(ordered.prefix(shareLegendCap))
+        let tail = ordered.dropFirst(shareLegendCap)
+        let other = ModelRow(
+            key: "__other__",
+            model: "",
+            displayName: "Other",
+            subtitle: "\(tail.count) models",
+            color: .secondary,
+            cost: tail.reduce(0) { $0 + $1.cost },
+            inputTokens: tail.reduce(0) { $0 + $1.inputTokens },
+            outputTokens: tail.reduce(0) { $0 + $1.outputTokens },
+            cacheReadTokens: tail.reduce(0) { $0 + $1.cacheReadTokens },
+            totalTokens: tail.reduce(0) { $0 + $1.totalTokens },
+            activeDays: 0,
+            firstSeen: tail.map(\.firstSeen).min() ?? "",
+            lastSeen: tail.map(\.lastSeen).max() ?? ""
+        )
+        return head + [other]
     }
 
     /// The metric that sizes the donut for a row.
@@ -519,7 +566,7 @@ private struct ModelsContent: View {
     private var shareSummary: String {
         let total = shareTotal
         guard total > 0 else { return "no data yet" }
-        return rows.prefix(5).map { r in
+        return derived.shareRows.prefix(5).map { r in
             let pct = Int(metricValue(r) / total * 100)
             return "\(r.displayName) \(pct) percent"
         }.joined(separator: ", ")
@@ -571,7 +618,7 @@ private struct ModelsContent: View {
                 // sorted by cost while this showed tokens, so the legend read
                 // 5.6B, 661M, 795M — a list of token counts in cost order,
                 // which just looks broken.
-                let shareRows = rows.sorted { metricValue($0) > metricValue($1) }
+                let shareRows = derived.shareRows
                 PacerDonut(
                     slices: shareRows.map {
                         PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
@@ -583,7 +630,7 @@ private struct ModelsContent: View {
                     accessibilityValue: shareSummary
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(shareRows.prefix(8)) { row in
+                    ForEach(shareRows) { row in
                         PacerDonutLegendRow(
                             color: row.color,
                             label: row.displayName
