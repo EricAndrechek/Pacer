@@ -272,6 +272,12 @@ private struct ModelsContent: View {
     private struct DerivedData {
         var rows: [ModelRow] = []
         var dailyMix: [DailyMix] = []
+        /// Distinct days in `dailyMix` — the bar-width input. Cached with the
+        /// mix rather than derived from it at render time: computed in the
+        /// chart's `ForEach` it was O(n²) over (days × models) and beachballed
+        /// the tab, and even hoisted it is an O(n) pass this cache exists to
+        /// avoid paying on every hover.
+        var trendDayCount: Int = 0
         var trendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
         var shareCumulative: [(row: ModelRow, max: Double)] = []
     }
@@ -287,9 +293,21 @@ private struct ModelsContent: View {
 
     private var rows: [ModelRow] { derived.rows }
     private var dailyMix: [DailyMix] { derived.dailyMix }
+    private var trendDayCount: Int { derived.trendDayCount }
 
     private func refreshDerived() {
+        let started = Date()
         cachedDerived = computeDerived()
+        // The trend chart is the heaviest thing on this page and it is rebuilt
+        // from here. A regression that put an O(n) pass inside the chart's
+        // `ForEach` made the tab beachball and left no trace beyond a run of
+        // main-thread stalls; this says which page it was.
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if ms >= 100 {
+            Log.write("ModelsView",
+                      "derived \(ms)ms for \(cachedDerived?.dailyMix.count ?? 0) mark(s) "
+                        + "across \(cachedDerived?.trendDayCount ?? 0) day(s)")
+        }
     }
 
     /// Pure computation over `aggregates` + `sort` + `descending`.
@@ -414,6 +432,7 @@ private struct ModelsContent: View {
         return DerivedData(
             rows: rows,
             dailyMix: dailyMix,
+            trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
             shareCumulative: cumulative
         )
@@ -636,13 +655,18 @@ private struct ModelsContent: View {
             }
         }) {
             VStack(alignment: .leading, spacing: 8) {
+                // Hoisted out of the `ForEach`, which is the whole point.
+                // Inside it, this rebuilt a Set of every date once *per bar* —
+                // O(n²) over (days × models), so ~1,350 marks on a full history
+                // meant well over a million operations per render, on every
+                // hover and every state change. It beachballed the Models tab.
+                let barWidth = PacerSparseBars.width(count: trendDayCount)
                 Chart {
                     ForEach(dailyMix) { d in
-                        // Capped: two days of history drew two slabs.
                         BarMark(
                             x: .value("Date", d.date),
                             y: .value("Tokens", d.tokens),
-                            width: PacerSparseBars.width(count: Set(dailyMix.map(\.date)).count)
+                            width: barWidth
                         )
                         .foregroundStyle(by: .value("Model", d.displayName))
                         .cornerRadius(1.5)
