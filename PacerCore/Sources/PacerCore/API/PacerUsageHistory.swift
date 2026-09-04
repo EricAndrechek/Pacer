@@ -21,6 +21,10 @@ func pacerAPIEncodedJSON<T: Encodable>(_ value: T) throws -> String {
 public struct PacerDailyUsage: Codable, Sendable {
     public let schemaVersion: Int
     public let generatedAt: Date
+    /// The `?account=` this was built for, echoed back; absent when the rows
+    /// cover every account. Present so a consumer holding a saved response
+    /// can tell which question it answered.
+    public let account: String?
     /// Local-day key for "today" — the `inProgress` row, if any usage so far.
     public let today: String
     public let rows: [Row]
@@ -46,6 +50,8 @@ public struct PacerDailyUsage: Codable, Sendable {
 public struct PacerModelUsage: Codable, Sendable {
     public let schemaVersion: Int
     public let generatedAt: Date
+    /// The `?account=` this was built for; absent when it covers every one.
+    public let account: String?
     public let models: [Row]
 
     public struct Row: Codable, Sendable {
@@ -70,7 +76,13 @@ public enum PacerUsageBuilder {
 
     /// Per-day, per-model rows for the last `days` local days (inclusive of
     /// today). `days` is clamped to 1…3650.
-    public nonisolated static func daily(days: Int, now: Date = Date()) throws -> PacerDailyUsage {
+    ///
+    /// `account` is a **resolved rollup key** — pass `PacerAccountsBuilder`'s
+    /// output, not a raw query parameter. Nil means every account, which is
+    /// the default on purpose: a scripted consumer must not get different
+    /// numbers depending on what a human last clicked in the dashboard.
+    public nonisolated static func daily(days: Int, account: String? = nil,
+                                         now: Date = Date()) throws -> PacerDailyUsage {
         let span = min(max(days, 1), 3650)
         let container = try PacerStore.sharedModelContainer()
         let context = ModelContext(container)
@@ -79,7 +91,7 @@ public enum PacerUsageBuilder {
         let cutoffDate = calendar.date(byAdding: .day, value: -(span - 1), to: now) ?? now
         let cutoffKey = TokenSample.formatDate(cutoffDate)
 
-        let all = (try? context.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+        let all = dailyRows(context, account: account)
         let filtered = all.filter { $0.date >= cutoffKey }
         let sorted = filtered.sorted { $0.date != $1.date ? $0.date < $1.date : $0.model < $1.model }
         var rows: [PacerDailyUsage.Row] = []
@@ -96,20 +108,48 @@ public enum PacerUsageBuilder {
                 costUSD: agg.totalCostUSD,
                 inProgress: agg.date == todayKey))
         }
-        return PacerDailyUsage(schemaVersion: 1, generatedAt: now, today: todayKey, rows: rows)
+        return PacerDailyUsage(schemaVersion: 1, generatedAt: now, account: account.map(publicKey),
+                               today: todayKey, rows: rows)
+    }
+
+    /// The daily rollup for one account or for all of them, normalised to
+    /// `DailyRow` so the two tables render through one code path.
+    ///
+    /// `AccountDailyAggregate` is a sibling of `DailyAggregate`, not a
+    /// replacement — see its doc comment for why. That means "all accounts"
+    /// reads the global table rather than summing the per-account one, so the
+    /// unscoped answer stays byte-identical to what it was before accounts
+    /// existed.
+    private nonisolated static func dailyRows(_ context: ModelContext,
+                                              account: String?) -> [DailyRow] {
+        guard let account else {
+            return ((try? context.fetch(FetchDescriptor<DailyAggregate>())) ?? []).map(\.dailyRow)
+        }
+        let scoped = FetchDescriptor<AccountDailyAggregate>(
+            predicate: #Predicate { $0.accountId == account })
+        return ((try? context.fetch(scoped)) ?? []).map(\.dailyRow)
+    }
+
+    /// The rollup key as a caller would have typed it — the U+0000 sentinel
+    /// echoed back verbatim would be unreadable and un-resendable.
+    private nonisolated static func publicKey(_ key: String) -> String {
+        key == AccountDailyAggregate.unattributedKey
+            ? PacerAccountsBuilder.unattributedAlias : key
     }
 
     /// Today's per-model rows only — the live, in-progress slice. Used for the
     /// `pacer_model_*` Prometheus series.
-    public nonisolated static func todayByModel(now: Date = Date()) throws -> [PacerDailyUsage.Row] {
-        try daily(days: 1, now: now).rows.filter { $0.inProgress }
+    public nonisolated static func todayByModel(account: String? = nil,
+                                                now: Date = Date()) throws -> [PacerDailyUsage.Row] {
+        try daily(days: 1, account: account, now: now).rows.filter { $0.inProgress }
     }
 
     /// Per-model lifetime totals across all retained daily history.
-    public nonisolated static func models(now: Date = Date()) throws -> PacerModelUsage {
+    public nonisolated static func models(account: String? = nil,
+                                          now: Date = Date()) throws -> PacerModelUsage {
         let container = try PacerStore.sharedModelContainer()
         let context = ModelContext(container)
-        let all = (try? context.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+        let all = dailyRows(context, account: account)
 
         struct Accumulator {
             var input: Int64 = 0, output: Int64 = 0, cacheRead: Int64 = 0
@@ -138,6 +178,7 @@ public enum PacerUsageBuilder {
                     costUSD: acc.cost, firstDate: acc.firstDate, lastDate: acc.lastDate)
             }
             .sorted { $0.costUSD > $1.costUSD }
-        return PacerModelUsage(schemaVersion: 1, generatedAt: now, models: models)
+        return PacerModelUsage(schemaVersion: 1, generatedAt: now,
+                               account: account.map(publicKey), models: models)
     }
 }

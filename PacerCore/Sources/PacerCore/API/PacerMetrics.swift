@@ -44,8 +44,29 @@ public struct PacerMetric: Sendable, Equatable {
 public struct PacerMetrics: Sendable {
     public let points: [PacerMetric]
 
+    /// One account's slice of today, ready to render as a series.
+    ///
+    /// Carries the API row rather than an `Account` so `PacerCore`'s metric
+    /// layer stays free of SwiftData — the same reason `PacerMetrics` takes a
+    /// `PacerSnapshotPayload` and not a store.
+    public struct AccountToday: Sendable {
+        public let account: PacerAccountList.Row
+        public let models: [PacerDailyUsage.Row]
+
+        public init(account: PacerAccountList.Row, models: [PacerDailyUsage.Row]) {
+            self.account = account
+            self.models = models
+        }
+
+        var costUSD: Double { models.reduce(0) { $0 + $1.costUSD } }
+        func tokens(_ kind: (PacerDailyUsage.Row) -> Int) -> Double {
+            Double(models.reduce(0) { $0 + kind($1) })
+        }
+    }
+
     public init(snapshot s: PacerSnapshotPayload,
                 todayModels: [PacerDailyUsage.Row] = [],
+                todayAccounts: [AccountToday] = [],
                 version: String, build: String) {
         var m: [PacerMetric] = []
 
@@ -122,6 +143,38 @@ public struct PacerMetrics: Sendable {
                                  labels: [("model", row.model), ("kind", "output")]))
             m.append(PacerMetric("pacer_model_tokens", Double(row.cacheRead), help: modelTokHelp,
                                  labels: [("model", row.model), ("kind", "cache_read")]))
+        }
+
+        // Per-account breakdown for today (omitted on a single-account
+        // install, where every series would duplicate the totals above).
+        //
+        // The series label is the account **id**, not its display label: the
+        // label is an email address whenever Pacer has observed one, and a
+        // metrics endpoint is the one surface whose output routinely gets
+        // shipped to a hosted TSDB. The `_info` series carries a name to join
+        // on — see `metricsName` for how far it goes to keep an address out
+        // of it.
+        if todayAccounts.count > 1 {
+            let acctCostHelp = "Today's spend per account in USD."
+            let acctTokHelp = "Today's token counts per account by kind."
+            for entry in todayAccounts {
+                let id = entry.account.id
+                m.append(PacerMetric("pacer_account_cost_usd", entry.costUSD, help: acctCostHelp,
+                                     labels: [("account", id)]))
+                m.append(PacerMetric("pacer_account_tokens", entry.tokens(\.input), help: acctTokHelp,
+                                     labels: [("account", id), ("kind", "input")]))
+                m.append(PacerMetric("pacer_account_tokens", entry.tokens(\.output), help: acctTokHelp,
+                                     labels: [("account", id), ("kind", "output")]))
+                m.append(PacerMetric("pacer_account_tokens", entry.tokens(\.cacheRead), help: acctTokHelp,
+                                     labels: [("account", id), ("kind", "cache_read")]))
+            }
+            for entry in todayAccounts {
+                m.append(PacerMetric("pacer_account_info", 1,
+                                     help: "Account identity; value is always 1. `active` marks the login whose rate limits pacer_rate_limit_* describe.",
+                                     labels: [("account", entry.account.id),
+                                              ("name", entry.account.metricsName),
+                                              ("active", entry.account.isActive ? "true" : "false")]))
+            }
         }
 
         m.append(PacerMetric("pacer_up", 1, help: "Always 1 while the Pacer API is responding."))

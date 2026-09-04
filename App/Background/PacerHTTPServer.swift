@@ -37,6 +37,7 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 ///
 /// Endpoints (all `GET`):
 /// - `/v1/snapshot` — the full `PacerSnapshotPayload` as JSON.
+/// - `/v1/accounts`  — the accounts Pacer tracks, and the ids `?account=` takes.
 /// - `/metrics`     — Prometheus text exposition (0.0.4).
 /// - `/v1/stream`   — Server-Sent Events; a `snapshot` event on connect and on
 ///                    every engine recompute, plus `:keepalive` comments.
@@ -252,16 +253,38 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/accounts":
+            guard authorized(headers) else { return unauthorized(client) }
+            guard let list = try? PacerAccountsBuilder.list(), let json = try? list.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/usage/daily":
             guard authorized(headers) else { return unauthorized(client) }
             let days = query["days"].flatMap { Int($0) } ?? 30
-            guard let usage = try? PacerUsageBuilder.daily(days: days), let json = try? usage.encodedJSON() else {
+            let account: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: account = nil
+            case .scoped(let key): account = key
+            }
+            guard let usage = try? PacerUsageBuilder.daily(days: days, account: account),
+                  let json = try? usage.encodedJSON() else {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/usage/models":
             guard authorized(headers) else { return unauthorized(client) }
-            guard let usage = try? PacerUsageBuilder.models(), let json = try? usage.encodedJSON() else {
+            let account: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: account = nil
+            case .scoped(let key): account = key
+            }
+            guard let usage = try? PacerUsageBuilder.models(account: account),
+                  let json = try? usage.encodedJSON() else {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
@@ -280,7 +303,15 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("# no data yet\n".utf8))
             }
             let todayModels = (try? PacerUsageBuilder.todayByModel()) ?? []
+            let accounts = (try? PacerAccountsBuilder.list())?.accounts ?? []
+            let todayAccounts = accounts.compactMap { account -> PacerMetrics.AccountToday? in
+                guard let rows = try? PacerUsageBuilder.todayByModel(
+                    account: account.unattributed ? AccountDailyAggregate.unattributedKey : account.id)
+                else { return nil }
+                return PacerMetrics.AccountToday(account: account, models: rows)
+            }
             let text = PacerMetrics(snapshot: payload, todayModels: todayModels,
+                                    todayAccounts: todayAccounts,
                                     version: appVersion, build: appBuild).prometheusText()
             respond(client, status: 200, contentType: "text/plain; version=0.0.4; charset=utf-8", body: Data(text.utf8))
         case "/v1/stream":
@@ -288,6 +319,29 @@ final class PacerHTTPServer: @unchecked Sendable {
             startSSE(client)
         default:
             respond(client, status: 404, contentType: "text/plain", body: Data("Not Found\n".utf8))
+        }
+    }
+
+    /// Resolve an optional `?account=` into a rollup key.
+    ///
+    /// Absent means every account — the default, because a consumer that did
+    /// not ask to be scoped must not be. An id that does not exist is a 400
+    /// naming the legal values rather than an empty 200, which would look
+    /// exactly like an account that simply had a quiet month.
+    enum AccountQuery {
+        case all
+        case scoped(String)
+        case rejected(String)
+    }
+
+    private func resolveAccount(_ query: [String: String]) -> AccountQuery {
+        guard let raw = query["account"], !raw.isEmpty else { return .all }
+        do {
+            return .scoped(try PacerAccountsBuilder.resolve(raw))
+        } catch let PacerAccountsBuilder.ResolveError.unknownAccount(known) {
+            return .rejected("Unknown account \"\(raw)\". Known: \(known.joined(separator: ", "))\n")
+        } catch {
+            return .rejected("Could not read accounts\n")
         }
     }
 
@@ -429,7 +483,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)

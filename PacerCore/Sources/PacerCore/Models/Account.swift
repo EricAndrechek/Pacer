@@ -89,11 +89,17 @@ public final class Account {
     /// Whether `displayName` is still one of the auto-derived placeholders
     /// rather than something a person chose. Guards the observer from
     /// overwriting a deliberate rename.
-    public var hasDerivedName: Bool {
-        displayName.hasPrefix("Claude account (")
-            || displayName.hasPrefix("Account ")
-            || displayName == "Primary account"
-            || displayName.isEmpty
+    public var hasDerivedName: Bool { Self.isDerivedName(displayName) }
+
+    /// The same test against a bare string, for callers that hold a display
+    /// name without the model — the API's Prometheus exporter, which has to
+    /// tell "the user named this" from "we made it up" to decide whether the
+    /// name is worth putting in a metric label.
+    public static func isDerivedName(_ name: String) -> Bool {
+        name.hasPrefix("Claude account (")
+            || name.hasPrefix("Account ")
+            || name == "Primary account"
+            || name.isEmpty
     }
 
     /// Sentinel id for the account whose org the server never returned.

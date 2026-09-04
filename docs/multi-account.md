@@ -185,9 +185,43 @@ bar, all four data widgets, the advisor badges, and CSV export.
 |---|---|
 | Rate limits (pace chart, menu-bar gauges) | A property of the *login*, not a view preference. They are always the active account's. |
 | Alerts | A view shows what you asked to see; an alert tells you what you didn't. A spend threshold a display filter can silence is a footgun — scope to work in the morning, stop hearing about personal spend all day. Per-account *rules* are a fine feature; inheriting the window's scope is not the way to get them. |
-| The HTTP API | A scripted consumer wants to say what it means, not get different numbers depending on what a human last clicked in an app it cannot see. Per-account figures belong behind an explicit parameter. |
+| The HTTP API | A scripted consumer wants to say what it means, not get different numbers depending on what a human last clicked in an app it cannot see. Per-account figures live behind an explicit parameter instead — see below. |
 | `ToolbarFreshness` | Data freshness, not usage. |
 | Project management (merge sheet, collections manager, alias manager) | They list *paths*; totals are ordering context. Scoping could hide a project you are trying to merge. |
+
+### The HTTP API asks explicitly
+
+`GET /v1/accounts` lists what Pacer tracks — id, label, lifetime usage, each
+account's latest window readings, and `activeAccountId` (the login whose limits
+`/v1/snapshot` describes). Those ids are what `/v1/usage/daily` and
+`/v1/usage/models` accept as `?account=`; both default to every account, so an
+existing consumer sees no change. The payloads echo the scope back, so a saved
+response says which question it answered.
+
+Two details worth knowing:
+
+- **`unattributed` is a row, not a remainder.** Turns recorded before the
+  activation trail existed can never be attributed, and hiding them would make
+  a consumer's per-account sum quietly disagree with the unscoped total. It is
+  also the URL-safe alias for a rollup key that starts with U+0000 precisely so
+  nobody could type it.
+- **An unknown id is a `400` naming the legal values**, not an empty `200` —
+  which would be indistinguishable from an account that had a quiet month.
+
+`/metrics` gains `pacer_account_cost_usd` and `pacer_account_tokens`, labelled
+by account **id**, plus a `pacer_account_info` join series. The id rather than
+the display label because a metrics endpoint is the one surface whose output
+routinely ends up in a hosted time-series database, and the label is an email
+address whenever Pacer has observed one. Both are omitted on a single-account
+install, where they would only restate the totals.
+
+The `_info` series' `name` deserves its own note, because the obvious
+implementation is wrong and shipped for about ten minutes. Falling back to
+`organizationName` looks safe and is not: Anthropic derives the org name from
+the account's email, so it reads `"<someone>@<domain>'s Organization"` for
+every real account. `metricsName` publishes a name the *user* typed verbatim —
+they chose it knowing where it goes — and otherwise falls back past anything
+observed to `Account <last 4 of the id>`.
 
 ### How a view becomes scope-aware
 
