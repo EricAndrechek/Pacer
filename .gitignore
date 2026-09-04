@@ -76,5 +76,13 @@ Vendor/
 Vendor/DuckDB.xcframework/
 Vendor/DuckDB.xcframework.zip
 
-# Live-render diagnostic output (bin/dev-render-live.sh)
-screenshots/live/
+# Live-render diagnostic output (bin/dev-render-live.sh).
+#
+# Glob, not the one default path: these renders are the REAL store — real
+# project names, real account labels, real spend — and this is a public repo.
+# `screenshots/live/` alone covered the default `make render-live` output and
+# nothing else, so passing an outdir (`bin/dev-render-live.sh all out/`) put
+# them straight in reach of the next `git add -A`. Anything named `live*`
+# under screenshots/ is diagnostic and never committed; the README set is
+# generated from fake data by `make screenshots`.
+screenshots/live*/

@@ -3,19 +3,6 @@
 Things worth doing eventually but not blocking. Captured here so a
 future session can pick them up cold without rediscovery.
 
-## The 5-hour pace chart clips its last x-axis label
-
-Reported twice, seen in every render of the pace card: the right-most tick
-reads `9|` rather than `9p` — the label is centred on the final band and half
-of it falls outside the plot. Only the 5-hour column shows it, because only it
-uses a time-of-day axis; the day/month axes (`pacerDateAxis`) already exclude
-their edge bands for exactly this reason, with a comment saying so.
-
-The fix is presumably the same idea — drop or inset the trailing tick — but it
-lives in the shared `PaceChartView` that the dashboard, the compare modal and
-the widget all draw, so it wants a render check across the three rather than a
-quick edit. `make render-live SCOPES=all` shows it.
-
 ## Hover-for-exact: extend the pattern beyond cost / tokens
 
 The compact/exact pair landed for `pacerCost` / `pacerTokens` in
