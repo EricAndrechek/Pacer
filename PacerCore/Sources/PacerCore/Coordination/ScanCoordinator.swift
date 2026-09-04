@@ -130,7 +130,18 @@ public final class ScanCoordinator {
     ///          `syncAccountSessionRows` at all, so only the bulk path
     ///          maintained the session account rows. This rebuild repairs
     ///          them.
-    public static let currentCostRecomputeVersion = "14"
+    /// - "15" — `AccountHourlyAggregate` gained `sampleCount`. The global
+    ///          hourly rollup always carried it and the per-account one did
+    ///          not, on the reasoning that nothing user-facing read it — but
+    ///          the dashboard's Now tile gates its entire contents on it, so
+    ///          under any per-account scope it read "Nothing running." however
+    ///          hard you were working. Existing rows carry 0 until rebuilt.
+    /// - "16" — 15 shipped with the field added and *nothing writing it*: an
+    ///          edit to both hourly write paths was staged in a script that
+    ///          aborted on an unrelated assertion, so the rebuild produced
+    ///          1,936 account rows with real tokens and a zero count. The
+    ///          check in `make verify-data` is what caught it, one bump late.
+    public static let currentCostRecomputeVersion = "16"
 
     /// Generation of the duplicate-turn repair.
     ///

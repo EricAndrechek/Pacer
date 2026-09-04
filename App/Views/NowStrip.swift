@@ -292,7 +292,11 @@ struct NowStrip: View {
             tapHelp: "Open this session's details",
             header: { freshnessChip(stats: s) }
         ) {
-            if s.sampleCount == 0 {
+            // Gated on whether anything was *spent* this hour, not on the
+            // turn count. The count is the more precise signal and it is back
+            // in the per-account rollup — but a tile that goes blank the moment
+            // one rollup field is missing is a tile that will go blank again.
+            if s.tokensLastHour == 0 && s.costLastHour == 0 {
                 nowQuietState
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -318,7 +322,9 @@ struct NowStrip: View {
                             .truncationMode(.middle)
                             .help("Session total \(pacerCostExact(session.cumulativeCostUSD)) since \(session.firstSeenAt.formatted(date: .omitted, time: .shortened))")
                     } else {
-                        Text("\(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s") this hour")
+                        Text(s.sampleCount > 0
+                             ? "\(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s") this hour"
+                             : "\(pacerTokens(s.tokensLastHour)) tokens this hour")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

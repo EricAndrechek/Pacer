@@ -71,9 +71,9 @@ public struct HourlyRow: Sendable, Equatable, Identifiable {
     public let inputTokens: Int64
     public let outputTokens: Int64
     public let totalCostUSD: Double
-    /// Turns in the bucket. The global rollup stores it; the per-account one
-    /// does not, so a scoped row reports 0 — used only for a "quiet hour"
-    /// hint, never for a number the user reads.
+    /// Turns in the bucket. Both rollups store it — the per-account one
+    /// gained it when the Now tile turned out to gate its whole contents on
+    /// this field, and read "Nothing running." under every scope.
     public let sampleCount: Int
 
     public var id: String { "\(date)|\(hour)|\(model)" }
@@ -103,7 +103,7 @@ public extension AccountHourlyAggregate {
     var hourlyRow: HourlyRow {
         HourlyRow(date: date, hour: hour, model: model,
                   inputTokens: inputTokens, outputTokens: outputTokens,
-                  totalCostUSD: totalCostUSD)
+                  totalCostUSD: totalCostUSD, sampleCount: sampleCount)
     }
 }
 

@@ -141,6 +141,12 @@ check "account-hourly tokens equal hourly" 0 "$(q "
   WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
 check "account-hourly cost equals hourly" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZHOURLYAGGREGATE")" \
   "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTHOURLYAGGREGATE")"
+# Turn counts, which the per-account hourly rollup only started carrying in
+# recompute version 15. It is checked because something *reads* it: the Now
+# tile gates its whole contents on it, and while it was silently 0 the tile
+# said "Nothing running." under every per-account scope.
+check "account-hourly turns equal hourly" "$(q "SELECT SUM(ZSAMPLECOUNT) FROM ZHOURLYAGGREGATE")" \
+  "$(q "SELECT SUM(ZSAMPLECOUNT) FROM ZACCOUNTHOURLYAGGREGATE")"
 # Tokens and cost only. Session and model COUNTS deliberately aren't checked:
 # a session spanning an account switch belongs to both accounts' sets and once
 # to the global one, so the per-account counts legitimately don't sum.

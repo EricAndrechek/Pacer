@@ -62,7 +62,12 @@ enum OffscreenRenderer {
 
         // Spin the run loop so SwiftUI mounts, @Query fetches land, the
         // @State scan-tick caches refresh, and Charts lay out.
-        await settle(seconds: 2.6)
+        //
+        // Generous, and deliberately so: at 2.6 s the Now tile captured before
+        // its engine answers arrived, so the render showed a bare card and
+        // sent me looking for a bug the live app did not have. A renderer that
+        // under-waits does not fail — it lies.
+        await settle(seconds: 5.0)
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
         await settle(seconds: 1.0)

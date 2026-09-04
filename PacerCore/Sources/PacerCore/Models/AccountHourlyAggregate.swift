@@ -30,6 +30,18 @@ public final class AccountHourlyAggregate {
     public var cacheCreation5mTokens: Int64
     public var cacheCreation1hTokens: Int64
     public var totalCostUSD: Double
+    /// Turns in the bucket.
+    ///
+    /// The global rollup always had this; the per-account one did not, on the
+    /// reasoning that it was "only a quiet-hour hint, never a number the user
+    /// reads". That was wrong — the dashboard's Now tile gates its *entire*
+    /// contents on it, so under any per-account scope the tile read
+    /// "Nothing running." however hard you were working.
+    ///
+    /// Defaulted rather than optional so every read is a plain `Int`; rows
+    /// written before this existed report 0 until the recompute-version bump
+    /// rebuilds them.
+    public var sampleCount: Int = 0
 
     #Index<AccountHourlyAggregate>(
         [\.accountDateHourModelKey],
@@ -47,7 +59,8 @@ public final class AccountHourlyAggregate {
         accountId: String, date: String, hour: Int, model: String,
         inputTokens: Int64, outputTokens: Int64, cacheReadTokens: Int64,
         cacheCreation5mTokens: Int64, cacheCreation1hTokens: Int64,
-        totalCostUSD: Double
+        totalCostUSD: Double,
+        sampleCount: Int = 0
     ) {
         self.accountDateHourModelKey = Self.makeKey(
             accountId: accountId, date: date, hour: hour, model: model)
@@ -61,5 +74,6 @@ public final class AccountHourlyAggregate {
         self.cacheCreation5mTokens = cacheCreation5mTokens
         self.cacheCreation1hTokens = cacheCreation1hTokens
         self.totalCostUSD = totalCostUSD
+        self.sampleCount = sampleCount
     }
 }
