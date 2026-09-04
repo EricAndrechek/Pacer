@@ -63,3 +63,29 @@ struct DateAxisTests {
         #expect(!axis.values.contains("2026-06-24"))
     }
 }
+
+/// Sparse ranges got no axis at all, because the label picker deliberately
+/// skips the two edge bands and a two-band chart is nothing but edges.
+@Suite("A very short range still gets labels")
+struct ShortRangeAxisTests {
+
+    @Test func twoDaysAreBothLabelled() {
+        let axis = pacerDateAxis(["2026-09-03", "2026-09-04"])
+        #expect(axis.values == ["2026-09-03", "2026-09-04"])
+    }
+
+    @Test func threeDaysAreAllLabelled() {
+        let axis = pacerDateAxis(["2026-09-02", "2026-09-03", "2026-09-04"])
+        #expect(axis.values.count == 3)
+    }
+
+    /// The interior rule still governs once there is an interior to pick from,
+    /// so a long range is unchanged.
+    @Test func aLongerRangeStillSkipsTheEdges() {
+        let days = (1...20).map { String(format: "2026-09-%02d", $0) }
+        let axis = pacerDateAxis(days)
+        #expect(!axis.values.contains(days.first!))
+        #expect(!axis.values.contains(days.last!))
+        #expect(!axis.values.isEmpty)
+    }
+}

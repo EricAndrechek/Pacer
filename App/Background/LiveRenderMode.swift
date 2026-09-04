@@ -39,6 +39,40 @@ enum LiveRenderMode {
         !(ProcessInfo.processInfo.environment["PACER_RENDER_LIVE"] ?? "").isEmpty
     }
 
+    /// What to render. Whole tabs by default; `PACER_RENDER_PAGES` takes a
+    /// comma-separated subset when iterating on one of them.
+    enum Page: String, CaseIterable {
+        case dashboard, history, projects, models, now, pace, badges
+
+        /// Wide enough that the balanced grids take their many-column layout —
+        /// a narrow render exercises a fallback the user is not looking at.
+        var width: CGFloat {
+            switch self {
+            case .dashboard, .history, .projects, .models: return 1200
+            case .pace: return 1100
+            case .now, .badges: return 900
+            }
+        }
+
+        @MainActor @ViewBuilder var view: some View {
+            switch self {
+            case .dashboard: DashboardView()
+            case .history:   HistoryView()
+            case .projects:  ProjectsView()
+            case .models:    ModelsView()
+            case .now:       NowStrip()
+            case .pace:      PaceChartCard(limitAccountId: UsageScope.shared.limitAccountId)
+            case .badges:    AdvisorBadges(scopeAccountId: UsageScope.shared.accountId)
+            }
+        }
+    }
+
+    static var pages: [Page] {
+        let raw = ProcessInfo.processInfo.environment["PACER_RENDER_PAGES"] ?? ""
+        guard !raw.isEmpty else { return Page.allCases }
+        return raw.split(separator: ",").compactMap { Page(rawValue: String($0)) }
+    }
+
     /// The scopes to render, from `PACER_RENDER_LIVE`.
     static func scopes(in context: ModelContext) -> [(label: String, accountId: String?)] {
         let raw = ProcessInfo.processInfo.environment["PACER_RENDER_LIVE"] ?? ""
@@ -84,20 +118,16 @@ enum LiveRenderMode {
             // nothing about the thing being diagnosed.
 
 
-            await OffscreenRenderer.render(
-                name: "live-now-\(target.label)", width: 900, scheme: .dark,
-                container: container, engines: host
-            ) { NowStrip() }
-
-            await OffscreenRenderer.render(
-                name: "live-pace-\(target.label)", width: 1100, scheme: .dark,
-                container: container, engines: host
-            ) { PaceChartCard(limitAccountId: UsageScope.shared.limitAccountId) }
-
-            await OffscreenRenderer.render(
-                name: "live-badges-\(target.label)", width: 900, scheme: .dark,
-                container: container, engines: host
-            ) { AdvisorBadges(scopeAccountId: target.accountId) }
+            // Whole tabs, not individual cards: a sweep wants everything the
+            // user can see, including the parts nobody has thought to suspect.
+            // `PACER_RENDER_PAGES` narrows it when iterating on one.
+            for page in pages {
+                await OffscreenRenderer.render(
+                    name: "live-\(page.rawValue)-\(target.label)",
+                    width: page.width, scheme: .dark,
+                    container: container, engines: host
+                ) { page.view }
+            }
         }
         UsageScope.shared.selectEphemeral(UsageScope.storedAccountId)
         log("done")

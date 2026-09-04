@@ -132,7 +132,11 @@ public final class AccountTrailRecorder {
     private func enrichUnlabelledAccounts() {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let unlabelled = accounts.filter { $0.emailAddress == nil && $0.organizationName == nil }
-        guard !unlabelled.isEmpty else { return }
+        // An account can be fully identified and still be waiting for a *name*:
+        // everything Pacer observes is email-derived, so the derived
+        // placeholder stands until someone chooses something.
+        let unnamed = accounts.filter(\.hasDerivedName)
+        guard !unlabelled.isEmpty || !unnamed.isEmpty else { return }
 
         let directory = ExternalAccountDirectory.discover()
         guard !directory.isEmpty else { return }
@@ -142,6 +146,18 @@ public final class AccountTrailRecorder {
             guard let entry = directory.entries[account.id] else { continue }
             account.emailAddress = entry.emailAddress
             account.organizationName = entry.organizationName
+            changed = true
+        }
+        // Adopt the switcher's alias as the name — `cswap alias 1 work` is the
+        // user saying what this account is called, and having to say it twice
+        // is the kind of thing that makes two tools feel like two tools.
+        //
+        // Only over a *derived* name: a rename typed into Pacer outranks it,
+        // for the same reason it outranks the observed email.
+        for account in unnamed {
+            guard let alias = directory.entries[account.id]?.alias,
+                  !alias.isEmpty, account.displayName != alias else { continue }
+            account.displayName = alias
             changed = true
         }
         if changed { try? context.save() }

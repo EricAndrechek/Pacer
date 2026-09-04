@@ -64,6 +64,40 @@ struct AccountLabelTests {
     }
 }
 
+/// `cswap alias <n> <name>` is the one thing the switcher's roster holds that
+/// Pacer cannot observe for itself — everything else (email, org uuid, org
+/// name) it already sees, and the org name is email-derived anyway.
+@Suite("Borrowing the switcher's alias")
+struct ExternalAliasTests {
+
+    private func writeRoster(_ json: String) throws -> URL {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let dir = home.appendingPathComponent(".claude-swap-backup")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try json.write(to: dir.appendingPathComponent("sequence.json"),
+                       atomically: true, encoding: .utf8)
+        return home
+    }
+
+    @Test func anAliasIsRead() throws {
+        let home = try writeRoster("""
+        {"accounts":{"1":{"email":"a@example.com","organizationUuid":"org-a",
+          "organizationName":"a@example.com's Organization","alias":"work"}}}
+        """)
+        let entry = ExternalAccountDirectory.discover(homeDirectory: home).entries["org-a"]
+        #expect(entry?.alias == "work")
+        #expect(entry?.emailAddress == "a@example.com")
+    }
+
+    @Test func noAliasIsNilRatherThanEmpty() throws {
+        let home = try writeRoster("""
+        {"accounts":{"1":{"organizationUuid":"org-a","alias":""}}}
+        """)
+        #expect(ExternalAccountDirectory.discover(homeDirectory: home).entries["org-a"]?.alias == nil)
+    }
+}
+
 @Suite("External account directory")
 struct ExternalAccountDirectoryTests {
 

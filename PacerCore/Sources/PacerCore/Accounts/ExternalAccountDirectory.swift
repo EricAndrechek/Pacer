@@ -22,15 +22,26 @@ public struct ExternalAccountDirectory: Sendable {
         public let organizationId: String
         public let emailAddress: String?
         public let organizationName: String?
+        /// The nickname the user set with `cswap alias <n> <name>`.
+        ///
+        /// The only piece of the roster that is *chosen* rather than observed —
+        /// everything else cswap stores (email, org uuid, org name) Pacer
+        /// already sees for itself, and the org name is email-derived anyway.
+        /// So this is the one field worth borrowing: someone who has already
+        /// told their switcher these are "work" and "personal" should not have
+        /// to tell Pacer too.
+        public let alias: String?
         /// The tool's own slot/label for the account, for provenance in
         /// diagnostics (e.g. "cswap slot 2").
         public let source: String
 
         public init(organizationId: String, emailAddress: String?,
-                    organizationName: String?, source: String) {
+                    organizationName: String?, alias: String? = nil,
+                    source: String) {
             self.organizationId = organizationId
             self.emailAddress = emailAddress
             self.organizationName = organizationName
+            self.alias = alias
             self.source = source
         }
     }
@@ -132,6 +143,7 @@ public struct ExternalAccountDirectory: Sendable {
                     emailAddress: (fields["email"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                     organizationName: (fields["organizationName"] as? String)
                         .flatMap { $0.isEmpty ? nil : $0 },
+                    alias: (fields["alias"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                     source: "claude-swap slot \(slot)"
                 ))
             }

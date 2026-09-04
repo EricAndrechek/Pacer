@@ -547,8 +547,14 @@ private struct ModelsContent: View {
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
+                // Ordered by the metric the donut is *showing*, not by the
+                // table's sort. They are different controls: the table was
+                // sorted by cost while this showed tokens, so the legend read
+                // 5.6B, 661M, 795M — a list of token counts in cost order,
+                // which just looks broken.
+                let shareRows = rows.sorted { metricValue($0) > metricValue($1) }
                 PacerDonut(
-                    slices: rows.map {
+                    slices: shareRows.map {
                         PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
                     },
                     size: 180,
@@ -558,7 +564,7 @@ private struct ModelsContent: View {
                     accessibilityValue: shareSummary
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(rows.prefix(8)) { row in
+                    ForEach(shareRows.prefix(8)) { row in
                         PacerDonutLegendRow(
                             color: row.color,
                             label: row.displayName
@@ -632,9 +638,11 @@ private struct ModelsContent: View {
             VStack(alignment: .leading, spacing: 8) {
                 Chart {
                     ForEach(dailyMix) { d in
+                        // Capped: two days of history drew two slabs.
                         BarMark(
                             x: .value("Date", d.date),
-                            y: .value("Tokens", d.tokens)
+                            y: .value("Tokens", d.tokens),
+                            width: .fixed(44)
                         )
                         .foregroundStyle(by: .value("Model", d.displayName))
                         .cornerRadius(1.5)

@@ -147,16 +147,26 @@ struct DailyCostChartCard: View {
         .onChange(of: scope.accountId) { _, _ in refreshDerived() }
     }
 
+    /// Widest a single bar may draw. A 30-day chart never reaches it; a
+    /// two-day one would be a slab without it.
+    private static let maxBarWidth: CGFloat = 44
+
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
         let dateAxis = pacerDateAxis(totals.map(\.date))
         return Chart {
             ForEach(totals) { d in
+                // The width cap keeps a sparse series from rendering as one
+                // slab filling the card: a two-day account's "last 30 days"
+                // drew a single bar the width of the chart, which reads as a
+                // rendering fault rather than as "you have two days".
                 BarMark(
                     x: .value("Date", d.date),
-                    y: .value("Cost", d.cost)
+                    y: .value("Cost", d.cost),
+                    width: .fixed(Self.maxBarWidth)
                 )
                 .foregroundStyle(barColor(for: d.cost))
                 .cornerRadius(2)
+
                 .annotation(position: .top, alignment: .center, spacing: 2) {
                     if annotateDates.contains(d.date) {
                         Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))

@@ -355,9 +355,13 @@ private struct MonthlyChartCard: View {
     private var chart: some View {
         Chart {
             ForEach(monthly) { m in
+                // Capped for the same reason `DailyCostChartCard` caps its
+                // bars: an account one month old drew a single slab across the
+                // whole card.
                 BarMark(
                     x: .value("Month", m.month),
-                    y: .value("Cost", m.cost)
+                    y: .value("Cost", m.cost),
+                    width: .fixed(56)
                 )
                 .foregroundStyle(.tint)
                 .cornerRadius(2)
