@@ -73,6 +73,46 @@ public enum LimitScope {
         return d
     }
 
+    /// Scoped rows that are actually per-model or per-surface.
+    ///
+    /// The account-wide `session` / `weekly_all` identities duplicate the fixed
+    /// 5h/7d windows and every surface filters them out after fetching — so
+    /// they are excluded here instead, where they cost nothing. On the machine
+    /// this was written for they were two thirds of the scoped rows.
+    public static func modelScopedPredicate(account: String?,
+                                            since: Date? = nil) -> Predicate<UsageLimitSample> {
+        switch (account, since) {
+        case let (a?, s?):
+            return #Predicate {
+                $0.accountId == a && $0.sampledAt >= s
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case let (a?, nil):
+            return #Predicate {
+                $0.accountId == a
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case let (nil, s?):
+            return #Predicate {
+                $0.sampledAt >= s
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case (nil, nil):
+            return #Predicate {
+                $0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil
+            }
+        }
+    }
+
+    public static func modelScopedLimits(account: String?, since: Date? = nil,
+                                         limit: Int? = nil) -> FetchDescriptor<UsageLimitSample> {
+        var d = FetchDescriptor<UsageLimitSample>(
+            predicate: modelScopedPredicate(account: account, since: since),
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        d.fetchLimit = limit
+        return d
+    }
+
     public static func extraUsage(account: String?, since: Date? = nil,
                                   limit: Int? = nil) -> FetchDescriptor<ExtraUsageSample> {
         var d = FetchDescriptor<ExtraUsageSample>(

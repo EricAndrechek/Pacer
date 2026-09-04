@@ -18,12 +18,24 @@ struct NotificationsHost: View {
     /// invalidation materialized every `RateLimitSample` row in the
     /// store just to read one float — the same kind of cost
     /// MenuBarLabel already addressed.
-    @Query private var samples: [RateLimitSample]
+    /// Loaded on a signal, not through `@Query`.
+    ///
+    /// These were `@Query`s with an `accountId` predicate, and that combination
+    /// is the expensive one: an unpredicated capped fetch is served from
+    /// CoreData's row cache, a predicated one is a real fetch — and a `@Query`
+    /// re-executes on *every* context change, which for Pacer is every scan
+    /// cycle. A profile put `NotificationsHost.body` at the top of main-thread
+    /// time with 133 of its 177 samples inside the scoped fetch alone.
+    @State private var samples: [LimitSamplePoint] = []
 
     /// Recent scoped `limits[]` rows for the **active** account, newest first,
     /// bounded. Drives the scoped per-model threshold alerts through the same
     /// crossing logic as the fixed 5h/7d windows.
-    @Query private var scopedSamples: [UsageLimitSample]
+    @State private var scopedSamples: [ScopedWindowRow] = []
+    /// One row, unpredicated — cheap enough to re-run on every save, which is
+    /// the point: it is what tells the two loads above that anything changed.
+    @Query private var newestSignal: [RateLimitSample]
+    @Query private var newestScopedSignal: [UsageLimitSample]
 
     @Query private var todayAggregates: [DailyAggregate]
     /// Per-project rollups for the last 7 days — covers both the
@@ -60,8 +72,8 @@ struct NotificationsHost: View {
     /// new sample (e.g., because some unrelated row in the table
     /// changed). Avoids the `handleFiveHour`/`handleSevenDay` round
     /// trip when there's literally nothing new to react to.
-    @State private var lastConsideredFiveHourId: PersistentIdentifier?
-    @State private var lastConsideredSevenDayId: PersistentIdentifier?
+    @State private var lastConsideredFiveHourId: Date?
+    @State private var lastConsideredSevenDayId: Date?
 
     /// Per-scoped-identity change tracking, mirroring the fixed-window
     /// `lastSeen*` state but keyed by `UsageLimitSample.identity`. Seeded from
@@ -71,7 +83,7 @@ struct NotificationsHost: View {
     @State private var lastSeenScopedResetsAt: [String: Date] = [:]
     /// Newest scoped-sample id already evaluated — short-circuits `onChange`
     /// re-fires that resolve to the same poll.
-    @State private var lastConsideredScopedId: PersistentIdentifier?
+    @State private var lastConsideredScopedId: Date?
 
     /// Both limit queries are scoped to the **active login**, never to the
     /// window's scope — the same rule the spend alerts below already follow,
@@ -116,9 +128,33 @@ struct NotificationsHost: View {
                 $0.date >= weekAgo && $0.date <= today
             }
         )
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
+    }
+
+    /// Newest timestamps across both tables — the trigger for a reload.
+    private var reloadKey: String {
+        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(a)):\(Int(b))"
+    }
+
+    @MainActor
+    private func reloadSamples() {
         let account = UsageScope.storedActiveAccountId
-        _samples = Query(LimitScope.rateLimits(account: account, limit: 8))
-        _scopedSamples = Query(LimitScope.usageLimits(account: account, limit: 200))
+        samples = ((try? context.fetch(LimitScope.rateLimits(account: account, limit: 8))) ?? [])
+            .map(\.limitPoint)
+        scopedSamples = ((try? context.fetch(
+            LimitScope.modelScopedLimits(account: account, limit: 64))) ?? [])
+            .map(\.scopedWindowRow)
     }
 
     // Compute the change-detection fingerprints in computed properties
@@ -127,16 +163,20 @@ struct NotificationsHost: View {
     // inflated the per-modifier inference cost enough that the same
     // chain now times out. Hoisting the .reduce(0, +) expressions
     // breaks the chain into separate type-checking islands.
-    private var fiveHourFingerprint: PersistentIdentifier? {
-        samples.first { $0.window == "five_hour" }?.persistentModelID
+    // The fingerprints are `sampledAt` rather than `persistentModelID` now
+    // that the rows are values. A poll stamps every row it writes with one
+    // timestamp, so it identifies a reading exactly as well as the object id
+    // did — and unlike the id it stays meaningful across a reload.
+    private var fiveHourFingerprint: Date? {
+        samples.first { $0.window == "five_hour" }?.sampledAt
     }
-    private var sevenDayFingerprint: PersistentIdentifier? {
-        samples.first { $0.window == "seven_day" }?.persistentModelID
+    private var sevenDayFingerprint: Date? {
+        samples.first { $0.window == "seven_day" }?.sampledAt
     }
-    /// Newest scoped row's id — changes exactly when a new poll lands, at which
-    /// point `handleScoped` re-evaluates every scoped identity in that batch.
-    private var scopedFingerprint: PersistentIdentifier? {
-        scopedSamples.first?.persistentModelID
+    /// Newest scoped row's timestamp — changes exactly when a new poll lands,
+    /// at which point `handleScoped` re-evaluates every identity in that batch.
+    private var scopedFingerprint: Date? {
+        scopedSamples.first?.sampledAt
     }
     private var todayCostFingerprint: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
@@ -148,17 +188,30 @@ struct NotificationsHost: View {
         weekAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
 
-    var body: some View {
-        // Genuinely empty — this view has no UI. Its job is just to
-        // hold @Query subscriptions so the onChange handlers fire.
-        Color.clear
-            .frame(width: 0, height: 0)
+    @ViewBuilder
+    private func rateLimitWatchers(_ base: some View) -> some View {
+        base
             .onChange(of: fiveHourFingerprint) { handleFiveHour() }
             .onChange(of: sevenDayFingerprint) { handleSevenDay() }
             .onChange(of: scopedFingerprint) { handleScoped() }
             .onChange(of: todayCostFingerprint) { handleDailyCost() }
             .onChange(of: projectWindowFingerprint) { handleProjectBudgets() }
             .onChange(of: weekCostFingerprint) { handleCustomRules() }
+    }
+
+    var body: some View {
+        // Genuinely empty — this view has no UI. Its job is just to
+        // hold @Query subscriptions so the onChange handlers fire.
+        // The chain is split across two `@ViewBuilder` islands on purpose. The
+        // type inferencer already struggled with six `.onChange` modifiers plus
+        // the `@Query` macros (see the fingerprint comment above); swapping the
+        // rate-limit rows for value types tipped it into "unable to type-check
+        // in reasonable time". Splitting gives it two small problems.
+        rateLimitWatchers(
+            Color.clear
+                .frame(width: 0, height: 0)
+                .task(id: reloadKey) { reloadSamples() }
+        )
             .task {
                 // Seed lastSeen from existing data so we don't fire a
                 // notification just because the app launched while
@@ -173,12 +226,11 @@ struct NotificationsHost: View {
                 }
                 // Seed scoped windows from the latest batch so an
                 // already-over-threshold window at launch doesn't fire.
-                for row in scopedSamples.latestBatch()
-                    where ScopedRateLimitAlerts.isModelOrSurfaceScoped(row) {
+                for row in scopedSamples.latestBatch() {
                     lastSeenScoped[row.identity] = row.percent
                     lastSeenScopedResetsAt[row.identity] = row.resetsAt
                 }
-                lastConsideredScopedId = scopedSamples.first?.persistentModelID
+                lastConsideredScopedId = scopedSamples.first?.sampledAt
                 lastSeenDailyCost = todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
                 await NotificationCoordinator.shared.requestAuthorizationIfNeeded()
                 // Daily-summary watchdog: tick every five minutes and
@@ -201,8 +253,8 @@ struct NotificationsHost: View {
         // and our `.first(where:)` happens to resolve to the same
         // entity — without this guard we'd round-trip to the
         // NotificationCoordinator on every such re-fire.
-        if latest.persistentModelID == lastConsideredFiveHourId { return }
-        lastConsideredFiveHourId = latest.persistentModelID
+        if latest.sampledAt == lastConsideredFiveHourId { return }
+        lastConsideredFiveHourId = latest.sampledAt
         let prevPct = lastSeenFiveHour
         let prevResetsAt = lastSeenFiveHourResetsAt
         lastSeenFiveHour = latest.usedPercentage
@@ -228,8 +280,8 @@ struct NotificationsHost: View {
 
     private func handleSevenDay() {
         guard let latest = samples.first(where: { $0.window == "seven_day" }) else { return }
-        if latest.persistentModelID == lastConsideredSevenDayId { return }
-        lastConsideredSevenDayId = latest.persistentModelID
+        if latest.sampledAt == lastConsideredSevenDayId { return }
+        lastConsideredSevenDayId = latest.sampledAt
         let prevPct = lastSeenSevenDay
         let prevResetsAt = lastSeenSevenDayResetsAt
         lastSeenSevenDay = latest.usedPercentage
@@ -262,12 +314,14 @@ struct NotificationsHost: View {
     /// the store, untouched) and resumes the moment it reappears.
     private func handleScoped() {
         let batch = scopedSamples.latestBatch()
-        guard let newestId = batch.first?.persistentModelID else { return }
+        guard let newestId = batch.first?.sampledAt else { return }
         // Short-circuit an onChange re-fire that resolves to the same poll.
         if newestId == lastConsideredScopedId { return }
         lastConsideredScopedId = newestId
 
-        for row in batch where ScopedRateLimitAlerts.isModelOrSurfaceScoped(row) {
+        // Already model/surface-scoped — the fetch excludes the account-wide
+        // `session`/`weekly_all` identities, which have no per-model rules.
+        for row in batch {
             let identity = row.identity
             let thresholds = ScopedRateLimitAlerts.thresholds(forIdentity: identity, in: rules)
             let prevPct = lastSeenScoped[identity]

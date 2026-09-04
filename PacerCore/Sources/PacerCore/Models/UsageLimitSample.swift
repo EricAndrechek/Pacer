@@ -148,9 +148,20 @@ public final class UsageLimitSample {
     /// `UsageLimit.displayBand` so a persisted row colors identically to a
     /// live one.
     public var displayBand: UsageBand {
+        UsageBand.blending(percent: percent, severity: severityValue)
+    }
+}
+
+public extension UsageBand {
+    /// A percentage blended with a severity floor: whichever is worse wins.
+    ///
+    /// Shared rather than reimplemented per row type — the last time a colour
+    /// rule was copied instead of extracted, 60% rendered orange on one screen
+    /// and yellow on another.
+    static func blending(percent: Double, severity: UsageLimitSeverity) -> UsageBand {
         let byPercent = UsageBand(percentage: percent)
-        let floor = severityValue.floor
-        return Self.rank(byPercent) >= Self.rank(floor) ? byPercent : floor
+        let floor = severity.floor
+        return rank(byPercent) >= rank(floor) ? byPercent : floor
     }
 
     private static func rank(_ band: UsageBand) -> Int {

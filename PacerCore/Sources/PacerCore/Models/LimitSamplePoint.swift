@@ -81,3 +81,63 @@ public extension Sequence where Element == ScopedSamplePoint {
         }
     }
 }
+
+
+/// One scoped window as a column renders it — the latest reading for an
+/// identity, plus the fields that decide its title, duration, severity and
+/// ordering.
+///
+/// Exists for the same reason `ScopedSamplePoint` does, but for a different
+/// problem: this replaces a `@Query` whose predicate carried the account.
+/// A `@Query` predicate is fixed at init, so an account-dependent one leaves
+/// the card showing the previous account's columns until something forces a
+/// rebuild — and forcing that rebuild costs the view's measured layout. Load
+/// these alongside the history instead and the card has no account-dependent
+/// query at all.
+public struct ScopedWindowRow: Sendable, Equatable, Identifiable {
+    public let identity: String
+    public let label: String
+    public let group: String
+    public let percent: Double
+    public let resetsAt: Date?
+    public let severity: String
+    public let isActive: Bool
+    public let sampledAt: Date
+
+    public var id: String { identity }
+    public var severityValue: UsageLimitSeverity { UsageLimitSeverity(severity) }
+    public var displayBand: UsageBand {
+        UsageBand.blending(percent: percent, severity: severityValue)
+    }
+
+    public init(identity: String, label: String, group: String, percent: Double,
+                resetsAt: Date?, severity: String, isActive: Bool, sampledAt: Date) {
+        self.identity = identity
+        self.label = label
+        self.group = group
+        self.percent = percent
+        self.resetsAt = resetsAt
+        self.severity = severity
+        self.isActive = isActive
+        self.sampledAt = sampledAt
+    }
+}
+
+public extension UsageLimitSample {
+    var scopedWindowRow: ScopedWindowRow {
+        ScopedWindowRow(identity: identity, label: label, group: group, percent: percent,
+                        resetsAt: resetsAt, severity: severity, isActive: isActive,
+                        sampledAt: sampledAt)
+    }
+}
+
+public extension Sequence where Element == ScopedWindowRow {
+    /// The newest poll's rows. All rows of one poll share a `sampledAt`, with
+    /// sub-second jitter tolerated — the same rule the `UsageLimitSample`
+    /// version uses.
+    func latestBatch(tolerance: TimeInterval = 2) -> [ScopedWindowRow] {
+        guard let newest = map(\.sampledAt).max() else { return [] }
+        let cutoff = newest.addingTimeInterval(-tolerance)
+        return filter { $0.sampledAt >= cutoff }
+    }
+}

@@ -119,15 +119,22 @@ import Testing
             scoped: latest, history: history, duration: Self.sevenDays, now: now)
         let points = try! #require(data).points
 
-        // Every reading, none dropped, plus the tail pinned to "now" (the last
-        // poll landed a cadence-step short of it).
-        #expect(points.count == history.count + 1)
+        // Bounded, because the chart is a few hundred pixels wide and a 7-day
+        // cycle is thousands of readings — see `decimate`. What matters is
+        // coverage and shape, asserted below, not that every row survives.
+        #expect(points.count <= PaceChartView.Data.plotPointCap + 2)
+        #expect(points.count > 100)
         // Spans the elapsed cycle rather than clustering at the tail.
         let span = points.last!.time.timeIntervalSince(points.first!.time)
         #expect(span > elapsed - 120)
         #expect(points.first!.time >= data!.cycleStart)
         #expect(points.last!.time == now)        // pinned to now
         #expect(data!.usedPct == latest.percent)
+        // The curve still rises across the cycle rather than flattening — the
+        // property the point count used to stand in for.
+        let firstHalf = points.prefix(points.count / 2).map(\.value).max() ?? 0
+        let secondHalf = points.suffix(points.count / 2).map(\.value).max() ?? 0
+        #expect(secondHalf > firstHalf)
     }
 
     /// A window with no reading yet has no line (and no synthesized dot).

@@ -488,15 +488,25 @@ private struct ToolbarFreshness: View {
     @MainActor
     private func refresh() {
         tokens = (try? modelContext.fetch(Self.tokenProbe)) ?? []
-        // Scoped: the pill answers "is *this* data flowing", and with every
-        // account in the live table an unscoped newest-row would report the
-        // other login's poll as this one's freshness.
-        rateLimits = (try? modelContext.fetch(
-            LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
+        // Deliberately NOT re-fetched here. `refresh()` runs at 1 Hz to keep
+        // the relative-time label ticking, and the other three probes are
+        // unpredicated, which CoreData serves from its row cache for nothing.
+        // This one is account-predicated, which makes it a real fetch — at 1 Hz
+        // that measured as the second-heaviest thing on the main thread. The
+        // underlying row only changes when the poller writes, so it is loaded
+        // on that signal instead (`refreshRateLimitProbe`).
         sessions = (try? modelContext.fetch(Self.sessionProbe)) ?? []
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
         scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))) ?? []
+        display = Display(state: freshness, label: label, tooltip: tooltip)
+    }
+
+    /// The one predicated probe, re-read only when the poller has written.
+    @MainActor
+    private func refreshRateLimitProbe() {
+        rateLimits = (try? modelContext.fetch(
+            LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
         display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
@@ -619,7 +629,11 @@ private struct ToolbarFreshness: View {
         // The difference now is that this outer body runs on a 1 s timer
         // rather than on every store save.
         PillBody(display: display).equatable()
+            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+                refreshRateLimitProbe()
+            }
             .task {
+                refreshRateLimitProbe()
                 refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window

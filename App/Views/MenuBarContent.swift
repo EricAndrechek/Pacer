@@ -13,9 +13,9 @@ import PacerUI
 /// that vanishes drops out of the next `latestBatch`.
 enum MenuBarWindowSource {
     static func items(
-        fiveHour: RateLimitSample?,
-        sevenDay: RateLimitSample?,
-        scoped: [UsageLimitSample]
+        fiveHour: LimitSamplePoint?,
+        sevenDay: LimitSamplePoint?,
+        scoped: [ScopedWindowRow]
     ) -> [MenuBarWindowItem] {
         var items: [MenuBarWindowItem] = [
             MenuBarWindowItem(
@@ -29,9 +29,10 @@ enum MenuBarWindowSource {
                 duration: MenuBarWindows.sevenDayDuration, group: "",
                 isScoped: false, isActive: false),
         ]
-        // Model/surface-scoped rows from the latest poll only — account-wide
-        // `session`/`weekly_all` rows are excluded (they duplicate 5h/7d).
-        for row in scoped.latestBatch().modelScoped() {
+        // Latest poll only. Account-wide `session`/`weekly_all` rows are
+        // excluded in the fetch (`LimitScope.modelScopedLimits`) rather than
+        // here — they duplicate 5h/7d and were two thirds of the rows.
+        for row in scoped.latestBatch() {
             items.append(MenuBarWindowItem(
                 key: row.identity, displayName: row.label,
                 usedPercentage: row.percent, resetsAt: row.resetsAt,
@@ -50,7 +51,33 @@ enum MenuBarWindowSource {
     /// unscoped "newest 64" can be entirely the other login's rows, and the
     /// caller would render its windows as this account's.
     static func recentScoped(account: String?) -> FetchDescriptor<UsageLimitSample> {
-        LimitScope.usageLimits(account: account, limit: 64)
+        LimitScope.modelScopedLimits(account: account, limit: 64)
+    }
+
+    /// The menu bar's window inputs, fetched once per change rather than once
+    /// per body evaluation.
+    ///
+    /// These were `@Query`s. A `@Query` re-executes whenever the model context
+    /// changes, and Pacer's context changes every scan cycle — so the menu bar
+    /// re-ran two predicated fetches every couple of seconds, on the main
+    /// thread, forever. A profile put **91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches**, and `windows` is
+    /// computed more than once per body, so each evaluation paid twice.
+    ///
+    /// They were cheap before this session because they had no predicate and
+    /// CoreData could serve them from its row cache. Adding `accountId == x`
+    /// made every one a real fetch. The fix is not to un-scope them — that
+    /// would show the wrong account's windows — but to stop re-running them
+    /// when nothing has changed, which is the same signal-gated shape
+    /// `PaceChartCard` uses and documents.
+    @MainActor
+    static func load(_ context: ModelContext, account: String?)
+        -> (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow]) {
+        let fixed = ((try? context.fetch(LimitScope.rateLimits(account: account, limit: 8))) ?? [])
+            .map(\.limitPoint)
+        let scoped = ((try? context.fetch(recentScoped(account: account))) ?? [])
+            .map(\.scopedWindowRow)
+        return (fixed, scoped)
     }
 }
 
@@ -76,7 +103,7 @@ struct MenuBarLabel: View {
     /// Cap the fetch — we only ever look at the most-recent sample per
     /// window. Without the cap, every SwiftData save materialized the
     /// full ~4k-row history just to fire the menu-bar label re-render.
-    @Query private var rateSamples: [RateLimitSample]
+    @State private var rateSamples: [LimitSamplePoint] = []
 
     /// Today's aggregates for cost / tokens chips. Filtered by date so
     /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
@@ -100,9 +127,44 @@ struct MenuBarLabel: View {
     /// Recent scoped `limits[]` rows — the source of the per-model windows the
     /// icon driver can point at. Bounded so this always-visible label never
     /// scans the append-only scoped history.
-    @Query private var scopedSamples: [UsageLimitSample]
+    @State private var scopedSamples: [ScopedWindowRow] = []
+
+    /// One row each, **unpredicated**. A `@Query` re-executes on every context
+    /// change, so what it costs matters: with no predicate CoreData serves it
+    /// from its row cache, which is why the pre-account versions of these were
+    /// free. These only say "something was written"; the scoped fetch they gate
+    /// is the expensive part, and now runs once per change instead of once per
+    /// body evaluation — a profile put 91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches.
+    @Query private var newestSignal: [RateLimitSample]
+    @Query private var newestScopedSignal: [UsageLimitSample]
+    @Environment(\.modelContext) private var menuModelContext
+
+    var reloadKey: String {
+        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(a)):\(Int(b)):\(UsageScope.storedLimitAccountId ?? "all")"
+    }
+
+    @MainActor
+    func reloadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            menuModelContext, account: UsageScope.storedLimitAccountId)
+        rateSamples = loaded.fixed
+        scopedSamples = loaded.scoped
+    }
 
     init() {
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could
@@ -117,12 +179,6 @@ struct MenuBarLabel: View {
                 $0.date == today && $0.accountId == acct
             }
         )
-        // Rate limits resolve differently from spend: "all accounts" is not a
-        // number two 5-hour windows can be added into, so it falls back to the
-        // active login rather than to every account.
-        let limitAcct = UsageScope.storedLimitAccountId
-        _rateSamples = Query(LimitScope.rateLimits(account: limitAcct, limit: 8))
-        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: limitAcct))
     }
 
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
@@ -162,13 +218,17 @@ struct MenuBarLabel: View {
         PacerSettings.MenuBarChipItem.parseList(chipsRaw)
     }
 
-    private var fiveHour: RateLimitSample? {
+    private var fiveHour: LimitSamplePoint? {
         rateSamples.first { $0.window == "five_hour" }
     }
 
-    private var sevenDay: RateLimitSample? {
+    private var sevenDay: LimitSamplePoint? {
         rateSamples.first { $0.window == "seven_day" }
     }
+
+    /// `windows` is read several times per body (the icon driver, the chips,
+    /// the rings), so fold it once.
+    private var windowsCache: [MenuBarWindowItem] { windows }
 
     private var iconStyle: PacerSettings.MenuBarIconStyle {
         PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
@@ -363,6 +423,7 @@ struct MenuBarLabel: View {
         // still re-evaluates on every save (cheap), but the hosted status
         // item only redraws when `rendered` actually differs.
         MenuBarLabelContent(rendered: rendered).equatable()
+            .task(id: reloadKey) { reloadWindows() }
     }
 
     /// Equatable render payload — captures exactly what the status item
@@ -478,7 +539,7 @@ private struct MenuBarLabelContent: View, Equatable {
 /// chip level via @AppStorage; this view is reactive at the data
 /// level via @Query.
 struct MenuStatusContent: View {
-    @Query private var rateLimits: [RateLimitSample]
+    @State private var rateLimits: [LimitSamplePoint] = []
     @Query private var globalToday: [DailyAggregate]
     @Query private var scopedToday: [AccountDailyAggregate]
     @State private var menuScope = UsageScope.shared
@@ -493,7 +554,32 @@ struct MenuStatusContent: View {
 
     /// Recent scoped `limits[]` rows — the source of the dynamic per-model
     /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
-    @Query private var scopedSamples: [UsageLimitSample]
+    @State private var scopedSamples: [ScopedWindowRow] = []
+
+    /// One row each, **unpredicated**. A `@Query` re-executes on every context
+    /// change, so what it costs matters: with no predicate CoreData serves it
+    /// from its row cache, which is why the pre-account versions of these were
+    /// free. These only say "something was written"; the scoped fetch they gate
+    /// is the expensive part, and now runs once per change instead of once per
+    /// body evaluation — a profile put 91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches.
+    @Query private var newestSignal: [RateLimitSample]
+    @Query private var newestScopedSignal: [UsageLimitSample]
+    @Environment(\.modelContext) private var menuModelContext
+
+    var reloadKey: String {
+        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(a)):\(Int(b)):\(UsageScope.storedLimitAccountId ?? "all")"
+    }
+
+    @MainActor
+    func reloadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            menuModelContext, account: UsageScope.storedLimitAccountId)
+        rateLimits = loaded.fixed
+        scopedSamples = loaded.scoped
+    }
 
     /// Engine answers for the outlook touches: per-window crossing (the
     /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
@@ -523,6 +609,16 @@ struct MenuStatusContent: View {
     }
 
     init() {
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could
@@ -537,16 +633,10 @@ struct MenuStatusContent: View {
                 $0.date == today && $0.accountId == acct
             }
         )
-        // Rate limits resolve differently from spend: "all accounts" is not a
-        // number two 5-hour windows can be added into, so it falls back to the
-        // active login rather than to every account.
-        let limitAcct = UsageScope.storedLimitAccountId
-        _rateLimits = Query(LimitScope.rateLimits(account: limitAcct, limit: 8))
-        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: limitAcct))
     }
 
-    private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
-    private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
+    private var fiveHour: LimitSamplePoint? { rateLimits.first { $0.window == "five_hour" } }
+    private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
 
     /// Every window the dropdown lists: 5h, 7d, then each scoped per-model
     /// window in the latest poll, in the dashboard's glued-heroes order.
@@ -597,6 +687,7 @@ struct MenuStatusContent: View {
         // Re-ask when the window set changes (scoped windows discovered) so a
         // freshly-appeared row gets its outlook caption without waiting for the
         // next engine recompute.
+        .task(id: reloadKey) { reloadWindows() }
         .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshEngine(scopedIdentities: scopedIds) }

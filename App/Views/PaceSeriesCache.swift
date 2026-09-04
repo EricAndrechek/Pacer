@@ -25,6 +25,10 @@ final class PaceSeriesCache {
     struct Series {
         var fixed: [LimitSamplePoint] = []
         var scoped: [ScopedSamplePoint] = []
+        /// The column set, cached with the series it belongs to — otherwise a
+        /// flip back would show the right history under the wrong columns for
+        /// a frame.
+        var windows: [ScopedWindowRow] = []
         /// Newest row already loaded; `nil` means "never loaded", which is the
         /// only case that reads all 8 days.
         var loadedThrough: Date?

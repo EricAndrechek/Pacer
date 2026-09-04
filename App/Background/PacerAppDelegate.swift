@@ -371,6 +371,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // its now-stale binary and chronod won't relaunch it on its own.
         // Bounce it here so widgets pick up the new build's code + data.
         WidgetExtensionRelauncher.bounceIfBundleReplaced()
+        MainThreadStallWatchdog.shared.start()
         backgroundService.start()
         installWindowObservers()
         installMenuBar()

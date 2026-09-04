@@ -46,7 +46,17 @@ struct PaceChartCard: View {
     /// the latest poll's batch, which is what decides the scoped column set.
     /// Whole rows: the label, group→duration, binding flag and severity all
     /// read fields a columnar projection wouldn't fetch.
-    @Query private var scopedLatest: [UsageLimitSample]
+    /// The newest poll's scoped rows for this account, loaded alongside the
+    /// history rather than through `@Query`.
+    ///
+    /// It *was* a `@Query`, scoped by account. A `@Query` predicate is fixed at
+    /// init, so on a scope change it kept returning the previous account's
+    /// windows until something forced a rebuild — and forcing that rebuild
+    /// (`.id` on the scope) threw away the card's measured grid width, so the
+    /// three columns re-laid out as a lopsided 2+1 and stayed that way. Loading
+    /// it here means the card has no account-dependent query at all, needs no
+    /// identity change, and keeps its layout.
+    @State private var scopedLatest: [ScopedWindowRow] = []
 
     /// Scoped rows over the same 8-day window the fixed query uses — the
     /// actual-usage line under each scoped column. Separate from the batch
@@ -117,19 +127,23 @@ struct PaceChartCard: View {
         // Only the signal is a `@Query`. One row, so re-running it on every
         // save costs nothing; the series it guards are loaded in `reload()`.
         //
-        // Scoped like everything else here: with every account writing the
-        // live tables, the newest row is whichever login polled last, so an
-        // unscoped signal would fire a reload for the other account's poll and
-        // — worse — sit still when this one's poll was the older of the two.
-        var signal = LimitScope.rateLimits(account: limitAccountId, limit: 1)
+        // Deliberately **unscoped**. These decide *when* to reload, not what
+        // to show, and a predicate fixed at init is exactly the wrong thing for
+        // a value that changes: an account-scoped signal goes stale the moment
+        // the scope changes and then never fires again. Any account's poll is a
+        // fine reason to top up, and the top-up itself is scoped.
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
         signal.propertiesToFetch = [\.sampledAt]
         _newestSignal = Query(signal)
 
-        var scopedSignal = LimitScope.usageLimits(account: limitAccountId, limit: 1)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
         scopedSignal.propertiesToFetch = [\.sampledAt]
         _newestScopedSignal = Query(scopedSignal)
 
-        _scopedLatest = Query(LimitScope.usageLimits(account: limitAccountId, limit: 120))
     }
 
     /// Newest timestamp across both sources — the trigger for a reload.
@@ -193,6 +207,7 @@ struct PaceChartCard: View {
             if cached.loadedThrough != nil {
                 samples = cached.fixed
                 scopedHistory = cached.scoped
+                scopedLatest = cached.windows
                 loadedThrough = cached.loadedThrough
             }
         }
@@ -215,6 +230,7 @@ struct PaceChartCard: View {
             // the fetch is ordered the same way.
             if !loaded.fixed.isEmpty { samples = loaded.fixed + samples }
             if !loaded.scoped.isEmpty { scopedHistory = loaded.scoped + scopedHistory }
+            if !loaded.windows.isEmpty { scopedLatest = loaded.windows }
             // Drop what has aged out, so the window stays 8 days rather than
             // growing for as long as Pacer is open.
             samples.removeAll { $0.sampledAt < loaded.cutoff }
@@ -222,6 +238,7 @@ struct PaceChartCard: View {
         } else if through == nil {
             samples = loaded.fixed
             scopedHistory = loaded.scoped
+            scopedLatest = loaded.windows
         } else {
             // The scope changed while this load was in flight; its rows belong
             // to the previous account. Drop them rather than mixing.
@@ -232,7 +249,8 @@ struct PaceChartCard: View {
             .compactMap { $0 }.max()
         if let newestLoaded { loadedThrough = newestLoaded }
         PaceSeriesCache.shared.store(
-            .init(fixed: samples, scoped: scopedHistory, loadedThrough: loadedThrough),
+            .init(fixed: samples, scoped: scopedHistory, windows: scopedLatest,
+                  loadedThrough: loadedThrough),
             for: account)
 
         if through == nil {
@@ -246,6 +264,10 @@ struct PaceChartCard: View {
     private struct Loaded: Sendable {
         let fixed: [LimitSamplePoint]
         let scoped: [ScopedSamplePoint]
+        /// The newest poll's scoped windows — the column set. Only populated
+        /// on a cold load; an incremental top-up leaves the existing set alone
+        /// unless it brought newer rows, which `latestBatch` sorts out.
+        let windows: [ScopedWindowRow]
         let cutoff: Date
     }
 
@@ -302,10 +324,20 @@ struct PaceChartCard: View {
                                             incremental: through != nil))
         scopedDescriptor.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
         scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-        let scoped = ((try? context.fetch(scopedDescriptor)) ?? []).map(\.scopedPoint)
+        let scopedModels = (try? context.fetch(scopedDescriptor)) ?? []
+        let scoped = scopedModels.map(\.scopedPoint)
+
+        // The column set comes off the same rows — whole-row fields (label,
+        // group, severity, the binding flag) that the columnar projection above
+        // does not carry, so this is a second, tiny fetch of the newest batch.
+        var latest = FetchDescriptor<UsageLimitSample>(
+            predicate: Self.scopedPredicate(account: account, since: cutoff, incremental: false))
+        latest.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
+        latest.fetchLimit = 120
+        let windows = ((try? context.fetch(latest)) ?? []).map(\.scopedWindowRow)
 
         return Loaded(fixed: fixed.sorted { $0.sampledAt > $1.sampledAt },
-                      scoped: scoped, cutoff: cutoff)
+                      scoped: scoped, windows: windows, cutoff: cutoff)
     }
 
     /// `sampledAt >= since` for a cold load, `> since` for an incremental one
@@ -407,12 +439,11 @@ struct PaceChartCard: View {
     /// latest poll, ordered active-first then hottest (the `latestBatch` order).
     /// Account-wide `session`/`weekly_all` rows are excluded — the fixed 5h/7d
     /// hero columns already own those (Decision C).
-    private var scopedRows: [UsageLimitSample] {
-        scopedLatest.latestBatch().filter {
-            ($0.modelId?.isEmpty == false)
-                || ($0.modelDisplayName?.isEmpty == false)
-                || ($0.surface?.isEmpty == false)
-        }
+    private var scopedRows: [ScopedWindowRow] {
+        // Already filtered to model/surface-scoped identities by the loader —
+        // the account-wide `session`/`weekly_all` rows the fixed 5h/7d heroes
+        // own are excluded in the fetch predicate (Decision C).
+        scopedLatest.latestBatch()
     }
 
     /// Fixed 5-hour / 7-day durations — the anchors both the sort (which side a
@@ -487,6 +518,7 @@ struct PaceChartCard: View {
             return
         }
         guard let engine else { return }
+        let started = Date()
         let computed = await Task.detached(priority: .userInitiated) { [engine] in
             var nextSelected: [String: WindowProjection] = [:]
             var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
@@ -516,14 +548,24 @@ struct PaceChartCard: View {
         projections = computed.0
         outlooks = computed.1
         endEstimates = computed.2
+        Log.write("PaceChartCard",
+                  "projections for \(2 + scopedIdentities.count) window(s) in "
+                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
     }
 
     // MARK: - Body
 
     var body: some View {
+        let t0 = Date()
         let b = bucketed
         let now = Date()
         let cols = columns(b, now: now)
+        let buildMs = Int(Date().timeIntervalSince(t0) * 1000)
+        if buildMs >= 100 {
+            Log.write("PaceChartCard",
+                      "body build \(buildMs)ms for \(samples.count)+\(scopedHistory.count) point(s)"
+                        + " → \(cols.map { $0.baseChart?.points.count ?? 0 }) plotted")
+        }
         let scopedIds = scopedRows.map(\.identity)
         // Stable key so `.task(id:)` re-runs the engine ask when the window set
         // changes (a scoped window appears / disappears).
@@ -534,8 +576,10 @@ struct PaceChartCard: View {
         // (`RateLimitSourceChip` in DashboardView) — it describes the whole
         // dashboard's data feed, not this card alone.
         return PacerCard("Rate-limit pace") {
-            if b.latest == nil && scopedRows.isEmpty {
-                if isLoading { loadingState } else { emptyState }
+            if isLoading && b.latest == nil {
+                loadingState
+            } else if b.latest == nil && scopedRows.isEmpty {
+                emptyState
             } else if cols.count <= 2 {
                 // Exactly the fixed pair — reproduce the original two-column
                 // layout byte-for-byte so 5h/7d are unchanged when they're the
@@ -583,6 +627,17 @@ struct PaceChartCard: View {
         // poller writes roughly every five minutes), not on every context
         // change. `.task(id:)` also fires once on appear, which seeds them.
         .task(id: reloadSignal) { await reload() }
+        // A scope change invalidates everything loaded. The card is *not*
+        // rebuilt by identity for this — doing that threw away its measured
+        // grid width and re-laid the columns out lopsided — so it clears its
+        // own state instead.
+        .onChange(of: limitAccountId) {
+            samples = []
+            scopedHistory = []
+            scopedLatest = []
+            loadedThrough = nil
+            Task { await reload() }
+        }
         .task(id: windowKey) { await refreshProjections(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshProjections(scopedIdentities: scopedIds) }

@@ -58,16 +58,6 @@ struct DashboardView: View {
             PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window in
                 modalRoot = .projection(window: window)
             })
-            // `.id` on the scope, so a change is an *identity* change.
-            //
-            // Re-initialising a view with a new `@Query` descriptor is
-            // supposed to be enough, and mostly is — but it left the card
-            // showing the previous account's windows until the user navigated
-            // away and back, because the `@Query`s that decide the column set
-            // kept their original predicate. An identity change rebuilds them
-            // deterministically, and hands the card fresh `@State` so it does
-            // not have to invalidate its own loaded series.
-            .id("pace-\(scope.limitAccountId ?? "all")")
             // Directly under the pace chart, because it answers the question
             // that chart raises the moment a second account exists: whose
             // numbers am I looking at? Renders nothing at all for a
@@ -101,24 +91,42 @@ struct DashboardView: View {
 /// than one card. Goes yellow with a warning triangle when an OAuth feed
 /// stalls past 15 minutes — commonly an expired Claude Code token.
 struct RateLimitSourceChip: View {
-    @Query private var newest: [RateLimitSample]
+    let limitAccountId: String?
 
-    /// Taken as a parameter rather than read from `UsageScope` in here: a
-    /// `@Query` predicate is captured once at init, so a chip that read the
-    /// scope itself would keep reporting the freshness of whichever account
-    /// was selected when it first appeared.
+    /// `@State` + a keyed fetch rather than `@Query`.
     ///
-    /// It has to be scoped at all because `fetchLimit: 1` and "every account
-    /// writes the live table" do not compose: the newest row is whoever polled
-    /// last, which on an idle login is the *other* account, and the chip would
-    /// call stale data fresh.
-    init(limitAccountId: String?) {
-        _newest = Query(LimitScope.rateLimits(account: limitAccountId, limit: 1),
-                        animation: .default)
+    /// It has to be scoped: `fetchLimit: 1` and "every account writes the live
+    /// table" do not compose — the newest row is whoever polled last, which on
+    /// an idle login is the *other* account, so an unscoped chip would call
+    /// stale data fresh. But a `@Query` predicate is fixed at init, so a scoped
+    /// one goes stale the moment the scope changes and reports the previous
+    /// account's freshness for as long as the view lives. One row is cheap
+    /// enough to just re-read on the two events that can change it.
+    @State private var latest: Sample?
+    @Environment(\.modelContext) private var modelContext
+
+    struct Sample: Equatable {
+        let sampledAt: Date
+        let source: String
     }
 
     var body: some View {
-        if let latest = newest.first {
+        content
+            .task(id: limitAccountId) { refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+                refresh()
+            }
+    }
+
+    @MainActor
+    private func refresh() {
+        latest = (try? modelContext.fetch(
+            LimitScope.rateLimits(account: limitAccountId, limit: 1)))?
+            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let latest {
             // OAuth samples ought to arrive every 5 min; statusline samples
             // are irregular by nature, so the staleness warning is
             // oauth-only. See #3.

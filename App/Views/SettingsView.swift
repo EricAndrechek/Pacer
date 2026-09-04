@@ -196,18 +196,17 @@ struct MenuBarCard: View {
 
     /// Recent samples so the driver picker can offer the live window set —
     /// 5h / 7d plus every scoped per-model window currently reported.
-    @Query private var rateSamples: [RateLimitSample]
-    @Query private var scopedSamples: [UsageLimitSample]
-
     /// The **active** login's windows, not the dashboard's scope. This picker
     /// configures what the menu bar draws; which windows exist is a property
     /// of the login you are signed in as, and a settings screen that reshuffled
     /// itself because a chart elsewhere was filtered would be a surprise.
-    init() {
-        let account = UsageScope.storedActiveAccountId
-        _rateSamples = Query(LimitScope.rateLimits(account: account, limit: 8))
-        _scopedSamples = Query(MenuBarWindowSource.recentScoped(account: account))
-    }
+    ///
+    /// Loaded once on appear rather than through `@Query`, for the reason
+    /// `MenuBarWindowSource.load` documents: an account-predicated `@Query`
+    /// re-fetches on every store change, and Pacer's store changes constantly.
+    @State private var rateSamples: [LimitSamplePoint] = []
+    @State private var scopedSamples: [ScopedWindowRow] = []
+    @Environment(\.modelContext) private var modelContext
 
     /// The live window set the picker chooses from (ordered like the dashboard).
     private var windows: [MenuBarWindowItem] {
@@ -215,6 +214,13 @@ struct MenuBarCard: View {
             fiveHour: rateSamples.first { $0.window == RateLimitWindowName.fiveHour },
             sevenDay: rateSamples.first { $0.window == RateLimitWindowName.sevenDay },
             scoped: scopedSamples)
+    }
+
+    private func loadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            modelContext, account: UsageScope.storedActiveAccountId)
+        rateSamples = loaded.fixed
+        scopedSamples = loaded.scoped
     }
 
     /// Local mutable mirror of the persisted chip order (fixed + scoped). We
@@ -378,7 +384,10 @@ struct MenuBarCard: View {
                 }
             }
         })
-        .onAppear { reload() }
+        .onAppear { reload(); loadWindows() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+            loadWindows()
+        }
         // Keep `enabledOrder` in sync if another surface (CLI, another
         // Settings window) writes to the store while we're open.
         .onReceive(NotificationCenter.default.publisher(
