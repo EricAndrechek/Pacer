@@ -660,7 +660,7 @@ public actor UsageIntelligenceEngine {
         let statFor = { (id: String) -> EngineSelfEval.Accuracy.MethodStat? in
             accuracy?.methods.first { $0.method == id }
         }
-        return rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
+        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
             guard let projection = model.fit(current) else { return nil }
             // Anchor to the live value (same rule as `burnOutlook`): smoothed
             // fits sit under a spiking last sample, and an un-anchored curve
@@ -697,6 +697,25 @@ public actor UsageIntelligenceEngine {
                 medianAbsError: stat?.medianAbsError ?? .infinity,
                 coverage: stat == nil ? 0 : 1,
                 isSelected: model.id == rf.selectedId)
+        }
+
+        // The scoreboard can name a model that is not in the roster: selection
+        // reads the accumulated record, while the roster is what will actually
+        // *fit this cycle*, and a model may decline (the diurnal model early in
+        // a cycle, every model at 0%). When that happened nothing was marked
+        // selected, and the chart drew `first` — roster order, which is
+        // arbitrary. On a 7-day window three hours past its reset that meant an
+        // unvetted curve presented as the forecast.
+        //
+        // Fall back explicitly: best realized accuracy among the models that
+        // did fit, ties to the simpler one — the same rule the scoreboard uses.
+        guard !scored.contains(where: \.isSelected), let best = scored.min(by: {
+            $0.medianAbsError != $1.medianAbsError
+                ? $0.medianAbsError < $1.medianAbsError
+                : $0.complexity < $1.complexity
+        }) else { return scored }
+        return scored.map {
+            $0.modelId == best.modelId ? $0.selecting() : $0
         }
     }
 

@@ -29,6 +29,16 @@ struct EngineScopeProbe {
             await engine.recompute()
             let days = await engine.trainingDayCount()
             print("\n=== scope \(scope.key.suffix(4)) — \(days) training day(s)")
+            let eod = await engine.ask(.projectedCost(.today))
+            let pace = await engine.ask(.pace)
+            let vsNow = await engine.ask(.paceVsNow)
+            let record = await engine.eveningTrackRecord()
+            var costLine = "  cost: eod="
+            costLine += eod.isInsufficient ? "insufficient(\(eod.note ?? "-"))" : String(format: "%.2f", eod.value)
+            costLine += " pace=" + (pace.isInsufficient ? "insufficient" : String(format: "%.2f", pace.value))
+            costLine += " vsNow=" + (vsNow.isInsufficient ? "insufficient" : String(format: "%.2f", vsNow.value))
+            costLine += " record=" + (record.map { String(format: "%.0f%%/%dd", $0.medianAbsPctError, $0.days) } ?? "nil")
+            print(costLine)
             for spec in await engine.windowSpecsForProbe() {
                 let outlook = await engine.burnOutlook(windowKey: spec.key)
                 let traj = await engine.rateLimitTrajectories(windowKey: spec.key)

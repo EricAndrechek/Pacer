@@ -218,3 +218,115 @@ struct DiurnalRosterGateTests {
         #expect(rosterIds(cycles: 3).contains("diurnal-rate"))
     }
 }
+
+
+/// Two failures found the day Anthropic reset the windows, both of which made
+/// a freshly-reset window project nonsense.
+@Suite("Early-cycle rate-limit projections")
+struct EarlyCycleProjectionTests {
+
+    private let duration: TimeInterval = 7 * 86_400
+
+    /// A rate table with uniform activity — the shape is irrelevant here, only
+    /// how much of it has been observed.
+    private func flatModel() -> DiurnalBurnModel {
+        DiurnalBurnModel(rate: Array(repeating: Array(repeating: 1.0, count: 24), count: 7))
+    }
+
+    private func cycle(elapsed: TimeInterval, used: Double) -> BurnTrajectory.PartialCycle {
+        let now = Date()
+        let start = now.addingTimeInterval(-elapsed)
+        return BurnTrajectory.PartialCycle(
+            samples: [.init(at: now, usedPercentage: used)],
+            now: now, cycleStart: start, resetsAt: start.addingTimeInterval(duration))
+    }
+
+    /// `level` is `used / expected-so-far`, and just after a reset that
+    /// denominator is nearly zero — so 3% burned in the first hours scaled the
+    /// whole forward shape enormously. Observed live: a 7-day window three
+    /// hours in, 3% used, projecting **3% → 100%**.
+    @Test func theDiurnalModelDeclinesTooEarlyInACycle() {
+        let model = flatModel()
+        // Three hours into a seven-day window — well under the 5% floor.
+        #expect(model.fit(cycle(elapsed: 3 * 3600, used: 3)) == nil)
+    }
+
+    @Test func itFitsOnceEnoughOfTheCycleHasHappened() {
+        let model = flatModel()
+        // A day and a half in — comfortably past the floor.
+        let projection = model.fit(cycle(elapsed: 1.5 * 86_400, used: 20))
+        #expect(projection != nil)
+    }
+
+    /// The floor is a share of the cycle, not a fixed time, so it scales to the
+    /// 5-hour window too.
+    @Test func theFloorIsRelativeToTheWindow() {
+        let model = DiurnalBurnModel(
+            rate: Array(repeating: Array(repeating: 1.0, count: 24), count: 7))
+        let now = Date()
+        let short: TimeInterval = 5 * 3600
+        func fiveHourCycle(elapsed: TimeInterval) -> BurnTrajectory.PartialCycle {
+            let start = now.addingTimeInterval(-elapsed)
+            return BurnTrajectory.PartialCycle(
+                samples: [.init(at: now, usedPercentage: 10)],
+                now: now, cycleStart: start, resetsAt: start.addingTimeInterval(short))
+        }
+        #expect(model.fit(fiveHourCycle(elapsed: 60)) == nil)          // one minute in
+        #expect(model.fit(fiveHourCycle(elapsed: 2 * 3600)) != nil)    // two hours in
+    }
+}
+
+
+/// The scoreboard names a model from the accumulated record; the roster is what
+/// can actually fit *this* cycle. They disagree whenever a model declines — the
+/// diurnal one early in a cycle, all of them at 0% — and when they did, nothing
+/// was marked selected and the chart drew whatever came first in roster order.
+@Suite("Selecting a trajectory that is actually present")
+struct TrajectorySelectionFallbackTests {
+
+    private func features(now: Date) -> EngineFeatures {
+        let duration: TimeInterval = 7 * 86_400
+        let resets = now.addingTimeInterval(duration * 0.9)
+        let start = resets.addingTimeInterval(-duration)
+        var rows: [EngineFeatures.RateRow] = []
+        for step in 0...8 {
+            rows.append(.init(window: RateLimitWindowName.sevenDay,
+                              at: start.addingTimeInterval(Double(step) * 1200),
+                              usedPercentage: Double(step) * 0.5, resetsAt: resets))
+        }
+        return EngineFeatures.build(now: now, calendar: .current, daily: [], hourly: [],
+                                    rate: rows, lastArrivalAt: now, scoped: [])
+    }
+
+    @Test func somethingIsAlwaysSelected() {
+        let now = Date()
+        let f = features(now: now)
+        var fit = UsageIntelligenceEngine.makeFit(f)
+        // The scoreboard picked a model that cannot fit this cycle.
+        fit.rl[RateLimitWindowName.sevenDay]?.selectedId = "a-model-that-declined"
+
+        let scored = UsageIntelligenceEngine.rateLimitTrajectories(
+            f, fit, windowKey: RateLimitWindowName.sevenDay, accuracy: nil)
+        #expect(!scored.isEmpty)
+        #expect(scored.filter(\.isSelected).count == 1)
+    }
+
+    /// And it is the best one available, not the first in roster order.
+    @Test func theStandInIsTheMostAccurateThatFitted() {
+        let now = Date()
+        let f = features(now: now)
+        var fit = UsageIntelligenceEngine.makeFit(f)
+        fit.rl[RateLimitWindowName.sevenDay]?.selectedId = nil
+
+        let ids = UsageIntelligenceEngine.rateLimitTrajectories(
+            f, fit, windowKey: RateLimitWindowName.sevenDay, accuracy: nil).map(\.modelId)
+        let scored = UsageIntelligenceEngine.rateLimitTrajectories(
+            f, fit, windowKey: RateLimitWindowName.sevenDay, accuracy: nil)
+        // With no accuracy record every error is `.infinity`, so the tie-break
+        // is complexity — the simplest model, not `ids.first`.
+        let chosen = scored.first(where: \.isSelected)
+        #expect(chosen != nil)
+        #expect(chosen?.complexity == scored.map(\.complexity).min())
+        #expect(ids.count > 1)
+    }
+}
