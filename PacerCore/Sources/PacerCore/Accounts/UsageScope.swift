@@ -183,14 +183,18 @@ public extension AccountSessionInfo {
     }
 }
 
-/// Which account's usage the cost and token views are showing.
-///
-/// Rate limits are always the active account's — they are a property of the
-/// login, not a view preference — so this governs spend and tokens only.
+/// Which account's usage the app is showing.
 ///
 /// Persisted, because it is a reading posture rather than a transient filter:
 /// someone who works in one account all afternoon should not have to re-pick
 /// it every time the dashboard reopens.
+///
+/// Spend and tokens read `accountId` directly: nil means every account, and
+/// "every account" is a real answer because costs add up. Rate limits read
+/// `limitAccountId` instead, because they do not: two accounts' 5-hour
+/// windows cannot be summed into a third number, so "all accounts" resolves
+/// to the active login — the same thing every gauge showed before accounts
+/// existed.
 @MainActor
 @Observable
 public final class UsageScope {
@@ -201,11 +205,37 @@ public final class UsageScope {
     /// scope stored there would be invisible to every widget by construction.
     public nonisolated static let key = "PacerUsageScopeAccountId"
 
+    /// The active login, mirrored here so a rate-limit view can react to it.
+    ///
+    /// Also in App Group defaults, for the same reason the scope is: the
+    /// widget extension is a separate process, and its gauges have to resolve
+    /// "all accounts" the same way the window does or the two disagree on one
+    /// screen. Persisted rather than derived so a cold start resolves it
+    /// before the first poll lands.
+    public nonisolated static let activeKey = "PacerActiveAccountId"
+
     /// nil means every account combined.
     public private(set) var accountId: String?
+    public private(set) var activeAccountId: String?
 
     private init() {
         accountId = PacerPreferences.store.string(forKey: Self.key)
+        activeAccountId = PacerPreferences.store.string(forKey: Self.activeKey)
+    }
+
+    /// Which account's rate-limit history to read: the picked scope, else the
+    /// active login. Never nil-means-all — see the type's doc comment.
+    public var limitAccountId: String? { accountId ?? activeAccountId }
+
+    /// Called by the poller when the active login changes.
+    public func setActiveAccount(_ id: String?) {
+        guard id != activeAccountId else { return }
+        activeAccountId = id
+        if let id {
+            PacerPreferences.store.set(id, forKey: Self.activeKey)
+        } else {
+            PacerPreferences.store.removeObject(forKey: Self.activeKey)
+        }
     }
 
     public var isAll: Bool { accountId == nil }
@@ -227,6 +257,11 @@ public final class UsageScope {
     /// exporter — run outside the main actor.
     public nonisolated static var storedAccountId: String? {
         PacerPreferences.store.string(forKey: key)
+    }
+
+    /// The rate-limit scope for those same out-of-process readers.
+    public nonisolated static var storedLimitAccountId: String? {
+        storedAccountId ?? PacerPreferences.store.string(forKey: activeKey)
     }
 
     /// Stands in for "no account selected" in a scoped `@Query`, so the

@@ -59,12 +59,13 @@ import Testing
     /// Sendable summary so we don't ferry `@Model` instances across actors.
     private static func fetchSampleSummaries(
         in container: ModelContainer
-    ) async throws -> [(window: String, usedPercentage: Double, hasResetsAt: Bool, source: String)] {
+    ) async throws -> [(window: String, usedPercentage: Double, hasResetsAt: Bool, source: String, accountId: String?)] {
         try await MainActor.run {
             let context = ModelContext(container)
             let rows = try context.fetch(FetchDescriptor<RateLimitSample>())
             return rows.map {
-                (window: $0.window, usedPercentage: $0.usedPercentage, hasResetsAt: $0.resetsAt != nil, source: $0.source)
+                (window: $0.window, usedPercentage: $0.usedPercentage,
+                 hasResetsAt: $0.resetsAt != nil, source: $0.source, accountId: $0.accountId)
             }
         }
     }
@@ -170,12 +171,16 @@ import Testing
         #expect(await poller.runOnce() == .credentialsNotFound)
     }
 
-    /// Two distinct orgs are BOTH tracked — neither dropped. The active
-    /// account (org A) writes the shared timeline; a different-account token
-    /// (org B) is a tracked *secondary* whose readings are cached on its
-    /// `Account` row but kept out of the active timeline, so interleaving
-    /// can never mix two accounts into one history.
-    @Test func secondaryAccountTrackedNotDroppedAndTimelineStaysActiveOnly() async throws {
+    /// Two distinct orgs are BOTH tracked — neither dropped — and both write
+    /// history, each row stamped with its account.
+    ///
+    /// This used to assert the opposite: only the active account wrote rows,
+    /// and isolation came from the live table holding exactly one account.
+    /// That bought isolation with the other account's chart, so isolation is
+    /// now a stamp and a predicate. The property under test is the same one —
+    /// interleaving two logins must never mix them into one history — but it
+    /// is checked where it now lives.
+    @Test func bothAccountsWriteHistoryAndEachRowCarriesItsAccount() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
         let held = EphemeralCredentialStore(OAuthCredential(
@@ -197,17 +202,20 @@ import Testing
         // Lane 0 (keychain, tokA) establishes the active account A and persists.
         let first = await poller.runOnce()
         if case .success = first {} else { Issue.record("expected success, got \(first)") }
-        // Lane 1 (held, tokB) resolves to org B → secondary, tracked, no history.
+        // Lane 1 (held, tokB) resolves to org B → secondary, tracked, and kept.
         if case .secondaryAccount = await poller.runOnce() {} else {
             Issue.record("expected secondaryAccount")
         }
 
-        // The shared timeline holds ONLY the active account (org A).
         let rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.count == 1)
-        #expect(rows.first?.usedPercentage == 10.0)   // not org B's 99
+        #expect(rows.count == 2)
+        #expect(rows.filter { $0.accountId == "orgA" }.map(\.usedPercentage) == [10.0])
+        #expect(rows.filter { $0.accountId == "orgB" }.map(\.usedPercentage) == [99.0])
+        // Nothing unstamped: an unstamped row would read as whichever account
+        // a predicate happened to ask for.
+        #expect(rows.allSatisfy { $0.accountId != nil })
 
-        // But BOTH accounts exist and org B's reading is cached on its row.
+        // Both accounts exist and org B's reading is cached on its row.
         let accounts = try await Self.fetchAccounts(in: container)
         #expect(accounts.count == 2)
         #expect(accounts.first { $0.id == "orgA" }?.isActive == true)
@@ -220,18 +228,18 @@ import Testing
         #expect(snap.primaryOrg == "orgA")
     }
 
-    /// Switching the active account swaps which timeline the shared tables
-    /// hold — org B's usage drives display afterward — and switching back
-    /// restores org A's timeline intact (neither is lost).
+    /// Switching the active account moves no rows.
     ///
-    /// It also lands on the readings gathered *while B was secondary*. That
-    /// used to be an empty table: a secondary account's polls updated its
-    /// cached "latest" and were then discarded, so switching to an account
-    /// Pacer had been watching for hours still showed a blank chart until
-    /// the next poll of the now-active token. The isolation property is
-    /// unchanged — B's rows still never appear in A's timeline — but
-    /// isolation was being bought with data loss it never needed.
-    @Test func switchingActiveAccountSwapsTimelineWithoutLoss() async throws {
+    /// It used to move all of them: the outgoing account's live samples went
+    /// to `AccountUsageArchive` and the incoming account's came back, measured
+    /// at 107,705 rows and 14.3 seconds on a real store, several times a day
+    /// for anyone auto-switching. Now both timelines are simply present, and
+    /// switching flips a flag.
+    ///
+    /// The assertion that matters is that a switch is *lossless in both
+    /// directions at once* — after switching to B, A's history is still
+    /// readable, which under the swap it was not.
+    @Test func switchingActiveAccountMovesNoRows() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
         let held = EphemeralCredentialStore(OAuthCredential(
@@ -250,47 +258,46 @@ import Testing
         let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
         let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
 
-        _ = await poller.runOnce()   // orgA active, timeline = [A:10]
-        _ = await poller.runOnce()   // orgB secondary tracked
+        _ = await poller.runOnce()   // orgA active, writes A:10
+        _ = await poller.runOnce()   // orgB secondary, writes B:99
         let laneBId = OAuthPoller.laneId("tokB")
 
-        // Switch to org B: A's timeline is archived, B's restored — and B
-        // has something to restore, because its secondary poll was kept.
         await poller.setActiveAccount(id: "orgB")
         var rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.contains { $0.usedPercentage == 99.0 })  // gathered while secondary
-        #expect(!rows.contains { $0.usedPercentage == 10.0 }) // A archived out, not mixed in
+        #expect(rows.count == 2)                                        // nothing moved
+        #expect(rows.contains { $0.usedPercentage == 10.0 && $0.accountId == "orgA" })
+        #expect(rows.contains { $0.usedPercentage == 99.0 && $0.accountId == "orgB" })
         #expect(await poller.snapshot().activeAccountKey == "orgB")
 
-        // Poll B now that it's active → it writes the shared timeline.
+        // Poll B now that it's active → appends, stamped B.
         if case .success = await poller.testLane(id: laneBId) {} else {
             Issue.record("expected success polling active org B")
         }
         rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.contains { $0.usedPercentage == 77.0 })
+        #expect(rows.contains { $0.usedPercentage == 77.0 && $0.accountId == "orgB" })
 
-        // Switch back to org A: B archived, A restored (its 10% is back).
+        // Switch back to A. Every row from every phase is still there, and a
+        // read scoped to A sees exactly A's.
         await poller.setActiveAccount(id: "orgA")
         rows = try await Self.fetchSampleSummaries(in: container)
-        #expect(rows.contains { $0.usedPercentage == 10.0 })
-        #expect(!rows.contains { $0.usedPercentage == 77.0 })   // B's rows aren't in A's timeline
-        #expect(!rows.contains { $0.usedPercentage == 99.0 })   // nor its secondary-era ones
+        #expect(rows.count == 3)
+        #expect(rows.filter { $0.accountId == "orgA" }.map(\.usedPercentage) == [10.0])
+        #expect(Set(rows.filter { $0.accountId == "orgB" }.map(\.usedPercentage)) == [99.0, 77.0])
         #expect(await poller.snapshot().activeAccountKey == "orgA")
     }
 
-    /// Scoped `limits[]` history is per-account too (Decision D): a secondary
-    /// account's scoped rows never land in the live timeline, and switching
-    /// active accounts archives/restores the scoped rows alongside the fixed
-    /// windows — two accounts that share a model identity never mix.
-    @Test func scopedLimitsAreIsolatedPerAccountAcrossSwitch() async throws {
+    /// Scoped `limits[]` history is per-account too, and this is the sharpest
+    /// version of the mixing hazard: both accounts have a "Fable" weekly with
+    /// the *same* identity string. Nothing but `accountId` tells the two rows
+    /// apart, so a read that forgets the stamp silently reports one account's
+    /// weekly cap as the other's.
+    @Test func scopedLimitsStayIsolatedByAccountStamp() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
         let held = EphemeralCredentialStore(OAuthCredential(
             accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
         ))
         let counter = AtomicCounter()
-        // Both accounts have a "Fable" weekly scoped window (SAME identity) at
-        // different utilisations — the exact mixing hazard Decision D closes.
         func body(five: Int, fable: Int, org: String) -> HTTPOutcome {
             .success(
                 jsonBody: """
@@ -307,37 +314,29 @@ import Testing
         let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false }, heldStore: held)
         let poller = OAuthPoller(client: client, container: container, configuration: .init(), clock: TestClock())
 
-        _ = await poller.runOnce()   // orgA active → writes Fable@40 stamped orgA
-        _ = await poller.runOnce()   // orgB secondary → must NOT write scoped rows
+        _ = await poller.runOnce()   // orgA active → Fable@40 stamped orgA
+        _ = await poller.runOnce()   // orgB secondary → Fable@88 stamped orgB
 
         var scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.count == 1)                                  // only A's row is LIVE
-        #expect(scoped.first?.percent == 40)
-        #expect(scoped.allSatisfy { $0.accountId == "orgA" })       // stamped + gated
+        #expect(scoped.count == 2)
+        // One identity, two accounts, two different numbers.
+        #expect(Set(scoped.map(\.identity)).count == 1)
+        #expect(scoped.filter { $0.accountId == "orgA" }.map(\.percent) == [40])
+        #expect(scoped.filter { $0.accountId == "orgB" }.map(\.percent) == [88])
 
-        // Switch to B: A's scoped rows archive out, and B's Fable@88 —
-        // gathered while it was secondary — comes in. Both accounts have a
-        // "Fable" weekly at the same identity, so this is the exact mixing
-        // hazard: the live table must hold B's 88 and none of A's 40.
         await poller.setActiveAccount(id: "orgB")
-        scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.contains { $0.percent == 88 && $0.accountId == "orgB" })
-        #expect(!scoped.contains { $0.percent == 40 })
-
-        // Poll B active → its Fable@66 lands, stamped orgB.
         if case .success = await poller.testLane(id: OAuthPoller.laneId("tokB")) {} else {
             Issue.record("expected success polling active org B")
         }
         scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.contains { $0.percent == 66 && $0.accountId == "orgB" })
-        #expect(!scoped.contains { $0.percent == 40 })              // A's row isn't mixed in
+        #expect(scoped.filter { $0.accountId == "orgA" }.map(\.percent) == [40])
+        #expect(Set(scoped.filter { $0.accountId == "orgB" }.map(\.percent)) == [88, 66])
 
-        // Switch back to A: A's Fable@40 restored, B's gone.
+        // Switching back changes nothing about either account's rows.
         await poller.setActiveAccount(id: "orgA")
         scoped = try await Self.fetchScopedSummaries(in: container)
-        #expect(scoped.contains { $0.percent == 40 && $0.accountId == "orgA" })
-        #expect(!scoped.contains { $0.percent == 66 })
-        #expect(!scoped.contains { $0.percent == 88 })   // nor B's secondary-era row
+        #expect(scoped.count == 3)
+        #expect(scoped.allSatisfy { $0.accountId != nil })
     }
 
     /// A single-account user with pre-existing (accountId == nil) history

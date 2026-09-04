@@ -32,6 +32,11 @@ public enum ClaudeCodeMetaKey {
     /// scan knows to do a full re-scan on first launch after upgrade.
     public static let scanVersion = "scan_version"
 
+    /// ISO-8601 timestamp of the one-time pass that moved every account's
+    /// recent rows out of `AccountUsageArchive` and back into the live sample
+    /// tables, when those tables became account-aware. Present ⇒ done.
+    public static let archiveFoldedIntoLive = "archive_folded_into_live"
+
     /// ISO-8601 timestamp of the last full historical scan (any root).
     /// Used for diagnostics; the actual decision to do a fresh full
     /// scan keys off `scanVersion`.

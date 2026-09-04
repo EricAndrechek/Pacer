@@ -260,6 +260,11 @@ public actor OAuthPoller: TokenPoolTesting {
         stopping = false
         // Let the Settings "Tokens" section route Test clicks back here.
         Task { await MainActor.run { TokenPoolStatus.shared.tester = self } }
+        // Off the loop task on purpose: the fold is a one-time pass over tens
+        // of thousands of rows and polling must not wait on it. It guards
+        // itself with a meta key, so a second `start()` costs one fetch.
+        let container = self.container
+        Task.detached { await Self.foldArchiveIntoLiveTables(container: container) }
         loopTask = Task { [weak self] in
             await self?.loop()
         }
@@ -443,8 +448,7 @@ public actor OAuthPoller: TokenPoolTesting {
         await loadPersistedMetaIfNeeded()
         ensureLanes()
         guard id != activeAccountKey else { return }
-        let outgoing = activeAccountKey
-        let newOrg = await swapActiveTimeline(from: outgoing, to: id)
+        let newOrg = await activateAccount(id)
         activeAccountKey = id
         primaryOrg = newOrg
         // Reclassify every confirmed lane against the new active account.
@@ -511,7 +515,9 @@ public actor OAuthPoller: TokenPoolTesting {
             laneCounts[Account.key(forOrg: lane.resolvedOrg), default: 0] += 1
         }
         let accounts = await accountSummaries(laneCounts: laneCounts)
+        let activeId = accounts.first(where: \.isActive)?.id ?? activeAccountKey
         await MainActor.run {
+            UsageScope.shared.setActiveAccount(activeId)
             TokenPoolStatus.shared.publish(
                 lanes: statuses, accounts: accounts,
                 isActive: active, effectiveIntervalSeconds: effective
@@ -971,11 +977,19 @@ public actor OAuthPoller: TokenPoolTesting {
 
     // MARK: - Non-monotonic usage diagnostics
 
-    /// Most recent persisted OAuth sample for a window (or nil).
+    /// Most recent persisted OAuth sample for one account's window (or nil).
+    ///
+    /// Scoped by account because the live table holds every account's rows.
+    /// Unscoped, "the previous reading" would routinely be a *different*
+    /// account's, and the non-monotonic diagnostic would fire on every poll
+    /// that happened to interleave two logins.
     @MainActor
-    private static func latestSample(_ context: ModelContext, window: String) -> RateLimitSample? {
+    private static func latestSample(_ context: ModelContext, window: String,
+                                     accountId: String) -> RateLimitSample? {
         var d = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.window == window && $0.source == "oauth" },
+            predicate: #Predicate {
+                $0.window == window && $0.source == "oauth" && $0.accountId == accountId
+            },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         d.fetchLimit = 1
@@ -1193,151 +1207,86 @@ public actor OAuthPoller: TokenPoolTesting {
             if let cents = captured.extraUsageCents { account.latestExtraUsageCents = cents }
             account.latestPolledAt = captured.sampledAt
 
-            // --- History rows: active account only ---
-            var wroteAnyWindow = false
-            if isActive {
-                if let window = captured.fiveHour {
-                    Self.logIfUsageWentDown(
-                        windowName: RateLimitWindowName.fiveHour,
-                        prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
-                        newUsed: window.usedPercentage,
-                        newReset: window.resetsAt,
-                        laneSource: laneSource
-                    )
-                    context.insert(RateLimitSample(
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.fiveHour,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                if let window = captured.sevenDay {
-                    Self.logIfUsageWentDown(
-                        windowName: RateLimitWindowName.sevenDay,
-                        prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
-                        newUsed: window.usedPercentage,
-                        newReset: window.resetsAt,
-                        laneSource: laneSource
-                    )
-                    context.insert(RateLimitSample(
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.sevenDay,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                // Extra-usage is account-level (not per-window); write at
-                // most one row per snapshot when present. nil means the
-                // field was omitted — leave the prior row rather than
-                // overwrite with a phantom zero.
-                if let cents = captured.extraUsageCents {
-                    context.insert(ExtraUsageSample(
-                        sampledAt: captured.sampledAt,
-                        amountCents: cents,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                // The scoped `limits[]` representation (per-model weekly
-                // windows, severity, binding flag). One generic row per item,
-                // all stamped with the same `sampledAt` so the dashboard reads
-                // them back as one "latest batch" — a limit dropped from the
-                // response simply stops appearing. Keyed by a stable composite
-                // identity, so new models/kinds persist with no schema change.
-                // Gated to the active account, and stamped with `accountId` so
-                // the active-account timeline swap can archive/restore these
-                // rows alongside `RateLimitSample` — a secondary (non-active)
-                // account's limits never pollute the live timeline, and two
-                // accounts that share a model identity (e.g. both have a "Fable"
-                // weekly) keep separate scoped history.
-                for limit in captured.limits {
-                    context.insert(UsageLimitSample(
-                        from: limit,
-                        sampledAt: captured.sampledAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-            } else {
-                // A non-active account's readings go straight to the archive
-                // — the same place the timeline swap puts them — instead of
-                // being thrown away after updating the cached "latest".
-                //
-                // Without this, switching to an account Pacer had been
-                // watching for hours still restored nothing, because nothing
-                // had been kept: the dashboard went blank and stayed blank
-                // until the next poll of the newly-active token, measured at
-                // about five minutes. The readings were already being
-                // fetched; only the decision to keep them was missing.
-                //
-                // These rows are never visible while the account is
-                // secondary. `swapActiveTimeline` restores them (and deletes
-                // them from the archive) if and when it becomes active, so a
-                // switch now lands on real history rather than an empty
-                // chart.
-                if let window = captured.fiveHour {
-                    context.insert(AccountUsageArchive(
-                        accountId: key,
-                        kind: AccountUsageArchive.kindRateLimit,
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.fiveHour,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth
-                    ))
-                }
-                if let window = captured.sevenDay {
-                    context.insert(AccountUsageArchive(
-                        accountId: key,
-                        kind: AccountUsageArchive.kindRateLimit,
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.sevenDay,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth
-                    ))
-                }
-                if let cents = captured.extraUsageCents {
-                    context.insert(AccountUsageArchive(
-                        accountId: key,
-                        kind: AccountUsageArchive.kindExtraUsage,
-                        sampledAt: captured.sampledAt,
-                        amountCents: cents,
-                        source: RateLimitSource.oauth
-                    ))
-                }
-                for limit in captured.limits {
-                    context.insert(AccountUsageArchive(
-                        accountId: key,
-                        kind: AccountUsageArchive.kindUsageLimit,
-                        sampledAt: captured.sampledAt,
-                        usedPercentage: limit.percent,
-                        resetsAt: limit.resetsAt,
-                        source: RateLimitSource.oauth,
-                        identity: limit.identity,
-                        limitKind: limit.kind,
-                        group: limit.group,
-                        label: limit.label,
-                        severity: limit.severity.raw,
-                        isActive: limit.isActive,
-                        modelId: limit.scope?.model?.id,
-                        modelDisplayName: limit.scope?.model?.displayName,
-                        surface: limit.scope?.surface
-                    ))
-                }
-                // Deliberately does NOT set `wroteAnyWindow`: nothing the
-                // dashboard reads has changed, so waking every view for a
-                // background account's poll would be pure cost.
+            // --- History rows: every account, stamped ---
+            //
+            // This used to be `if isActive { live } else { archive }`, and the
+            // swap in `setActiveAccount` moved rows between the two so the
+            // live tables always held exactly one account. That kept every
+            // read site free of accounts at the price of the other account's
+            // pace chart not existing: 45,973 archived rows on this machine,
+            // current to the minute, that nothing could draw.
+            //
+            // Now every account writes here and reads filter by `accountId`.
+            // The archive keeps its second job — cold storage past
+            // `liveWindowDays` — and `evictStaleLiveRows` still fills it.
+            var wroteActiveWindow = false
+            if let window = captured.fiveHour {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.fiveHour,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour, accountId: key),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
+                context.insert(RateLimitSample(
+                    sampledAt: captured.sampledAt,
+                    window: RateLimitWindowName.fiveHour,
+                    usedPercentage: window.usedPercentage,
+                    resetsAt: window.resetsAt,
+                    source: RateLimitSource.oauth,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
             }
-            if isActive, Self.evictionIsDue(now: captured.sampledAt) {
+            if let window = captured.sevenDay {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.sevenDay,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay, accountId: key),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
+                context.insert(RateLimitSample(
+                    sampledAt: captured.sampledAt,
+                    window: RateLimitWindowName.sevenDay,
+                    usedPercentage: window.usedPercentage,
+                    resetsAt: window.resetsAt,
+                    source: RateLimitSource.oauth,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            // Extra-usage is account-level (not per-window); write at
+            // most one row per snapshot when present. nil means the
+            // field was omitted — leave the prior row rather than
+            // overwrite with a phantom zero.
+            if let cents = captured.extraUsageCents {
+                context.insert(ExtraUsageSample(
+                    sampledAt: captured.sampledAt,
+                    amountCents: cents,
+                    source: RateLimitSource.oauth,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            // The scoped `limits[]` representation (per-model weekly
+            // windows, severity, binding flag). One generic row per item,
+            // all stamped with the same `sampledAt` so the dashboard reads
+            // them back as one "latest batch" — a limit dropped from the
+            // response simply stops appearing. Keyed by a stable composite
+            // identity, so new models/kinds persist with no schema change.
+            // Two accounts that share a model identity (e.g. both have a
+            // "Fable" weekly) keep separate scoped history via `accountId`.
+            for limit in captured.limits {
+                context.insert(UsageLimitSample(
+                    from: limit,
+                    sampledAt: captured.sampledAt,
+                    source: RateLimitSource.oauth,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            if Self.evictionIsDue(now: captured.sampledAt) {
                 let moved = Self.evictStaleLiveRows(context: context, accountId: key)
                 if moved > 0 {
                     Log.write("OAuthPoller",
@@ -1346,7 +1295,7 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             do {
                 try context.save()
-                if wroteAnyWindow {
+                if wroteActiveWindow {
                     postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
                 }
             } catch {
@@ -1452,173 +1401,115 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Unbounded, the freeze grows for as long as the app is installed.
     static let liveWindowDays: Double = 35
 
-    /// Swap which account's timeline the live sample tables hold: archive
-    /// the outgoing active account's rows into `AccountUsageArchive`, then
-    /// restore the incoming account's recent window from the archive, and
-    /// flip `Account.isActive`. Returns the incoming account's org so
-    /// the caller can update `primaryOrg`. Runs on the main actor.
-    private func swapActiveTimeline(from outgoing: String?, to incoming: String) async -> String? {
-        await Self.performSwap(container: container, from: outgoing, to: incoming)
-    }
-
-    /// The swap itself, on `@ScanActor` rather than the main thread.
+    /// Make `incoming` the active account. Returns its org so the caller can
+    /// update `primaryOrg`.
     ///
-    /// Measured at the row counts a real machine reaches: restoring one
-    /// account's 35-day window is **107,705 rows and 14.3 seconds** — and
-    /// that is an in-memory store, so on disk it is worse. On `@MainActor`
-    /// that is a fourteen-second frozen dashboard every time the account
-    /// changes, which for anyone running an auto-switcher is several times a
-    /// day. Nothing here needs the main thread: SwiftData propagates a
-    /// background context's saves to `@Query` on its own, which is how the
-    /// whole scan pipeline already works.
+    /// This used to *move rows*: archive the outgoing account's live samples,
+    /// restore the incoming account's from the archive. That kept the live
+    /// tables holding exactly one account, which is why no read site had to
+    /// know about accounts — and why the other account's pace chart did not
+    /// exist. Measured at real row counts the swap was **107,705 rows and
+    /// 14.3 seconds**, several times a day for anyone auto-switching.
     ///
-    /// Batched and yielding so it does not monopolise the actor either — the
-    /// scan loop shares it, and a fourteen-second block there would stall
-    /// ingestion instead of drawing. The user-visible effect is that history
-    /// fills in over a few seconds while the current reading, which the
-    /// poller writes separately, is correct immediately.
-    @ScanActor
-    private static func performSwap(
-        container: ModelContainer,
-        from outgoing: String?,
-        to incoming: String
-    ) async -> String? {
-            let context = ModelContext(container)
-            var pending = 0
-            /// Commit every few thousand rows and let the actor breathe.
-            func flush(force: Bool = false) async {
-                guard force || pending >= 2_000 else { return }
-                pending = 0
-                do { try context.save() } catch {
-                    Log.write("OAuthPoller", "account timeline swap batch failed: \(error)")
-                }
-                await Task.yield()
-            }
-
-            // 1. Archive the outgoing active account's live rows.
-            if let outgoing {
-                let rls = (try? context.fetch(FetchDescriptor<RateLimitSample>())) ?? []
-                for r in rls {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindRateLimit,
-                        sampledAt: r.sampledAt,
-                        window: r.window,
-                        usedPercentage: r.usedPercentage,
-                        resetsAt: r.resetsAt,
-                        source: r.source
-                    ))
-                    context.delete(r)
-                    pending += 1
-                    await flush()
-                }
-                let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>())) ?? []
-                for e in extras {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindExtraUsage,
-                        sampledAt: e.sampledAt,
-                        amountCents: e.amountCents,
-                        source: e.source
-                    ))
-                    context.delete(e)
-                    pending += 1
-                    await flush()
-                }
-                let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>())) ?? []
-                for l in limits {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindUsageLimit,
-                        sampledAt: l.sampledAt,
-                        usedPercentage: l.percent,
-                        resetsAt: l.resetsAt,
-                        source: l.source,
-                        identity: l.identity,
-                        limitKind: l.kind,
-                        group: l.group,
-                        label: l.label,
-                        severity: l.severity,
-                        isActive: l.isActive,
-                        modelId: l.modelId,
-                        modelDisplayName: l.modelDisplayName,
-                        surface: l.surface
-                    ))
-                    context.delete(l)
-                    pending += 1
-                    await flush()
-                }
-            }
-
-            // 2. Restore the incoming account's recent window from the
-            // archive. Older rows stay archived — they are the permanent
-            // record and nothing reads them from the live tables, so moving
-            // them would be a main-thread freeze that buys nothing.
-            let restoreCutoff = Date().addingTimeInterval(-Self.liveWindowDays * 86_400)
-            let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
-                predicate: #Predicate {
-                    $0.accountId == incoming && $0.sampledAt >= restoreCutoff
-                }
-            ))) ?? []
-            for a in archived {
-                switch a.kind {
-                case AccountUsageArchive.kindRateLimit:
-                    context.insert(RateLimitSample(
-                        sampledAt: a.sampledAt,
-                        window: a.window ?? RateLimitWindowName.fiveHour,
-                        usedPercentage: a.usedPercentage ?? 0,
-                        resetsAt: a.resetsAt,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                case AccountUsageArchive.kindUsageLimit:
-                    context.insert(UsageLimitSample(
-                        sampledAt: a.sampledAt,
-                        identity: a.identity ?? "",
-                        kind: a.limitKind ?? "",
-                        group: a.group ?? "",
-                        label: a.label ?? "",
-                        percent: a.usedPercentage ?? 0,
-                        resetsAt: a.resetsAt,
-                        severity: a.severity ?? "",
-                        isActive: a.isActive ?? false,
-                        modelId: a.modelId,
-                        modelDisplayName: a.modelDisplayName,
-                        surface: a.surface,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                default:   // kindExtraUsage
-                    context.insert(ExtraUsageSample(
-                        sampledAt: a.sampledAt,
-                        amountCents: a.amountCents ?? 0,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                }
-                context.delete(a)
-                pending += 1
-                await flush()
-            }
-
-            // 3. Flip active flags.
-            let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+    /// Every sample now carries `accountId` and reads filter on it, so
+    /// switching is a flag flip. The rows never move.
+    private func activateAccount(_ incoming: String) async -> String? {
+        let container = self.container
+        return await MainActor.run {
+            let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
             var incomingOrg: String?
-            for acc in allAccounts {
-                acc.isActive = (acc.id == incoming)
-                if acc.id == incoming { incomingOrg = acc.organizationId }
-            }
-
-            await flush(force: true)
-            // Nudge every @Query consumer to refresh against the swapped
-            // timeline (they auto-refresh on save, but this also drives the
-            // coordination summary the rest of the app listens on). Must be
-            // posted from the main actor — its observers are registered with
-            // `queue: .main`, and posting from a background actor has
-            // previously shown up as multi-second notification phases.
-            Task { @MainActor in
-                postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
+            for account in accounts {
+                account.isActive = (account.id == incoming)
+                if account.id == incoming { incomingOrg = account.organizationId }
             }
             return incomingOrg
+        }
+    }
+
+    /// Bring every account's recent history back out of the archive, once.
+    ///
+    /// Before per-account reads, a non-active account's samples lived only in
+    /// `AccountUsageArchive` — on this machine 45,973 rate-limit rows spanning
+    /// four months, current to the minute, that nothing could draw. Now that
+    /// the live tables are account-aware, that history belongs in them.
+    ///
+    /// Bounded to `liveWindowDays`, matching what a switch used to restore and
+    /// what `evictStaleLiveRows` maintains. Older rows stay archived: they are
+    /// the permanent record, nothing reads them from the live tables, and
+    /// moving them would be a long pass that buys nothing.
+    ///
+    /// Runs on `@ScanActor`, batched and yielding, for the same reason the
+    /// swap did — it is tens of thousands of rows and the scan loop shares the
+    /// actor. Guarded by a meta key so it happens exactly once per store.
+    @ScanActor
+    static func foldArchiveIntoLiveTables(container: ModelContainer, now: Date = Date()) async {
+        let context = ModelContext(container)
+        let metaKey = ClaudeCodeMetaKey.archiveFoldedIntoLive
+        let existing = (try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == metaKey })))?.first
+        guard existing == nil else { return }
+
+        let started = Date()
+        let cutoff = now.addingTimeInterval(-liveWindowDays * 86_400)
+        let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.sampledAt >= cutoff }))) ?? []
+
+        var pending = 0
+        func flush(force: Bool = false) async {
+            guard force || pending >= 2_000 else { return }
+            pending = 0
+            do { try context.save() } catch {
+                Log.write("OAuthPoller", "archive fold batch failed: \(error)")
+            }
+            await Task.yield()
+        }
+
+        for row in archived {
+            switch row.kind {
+            case AccountUsageArchive.kindRateLimit:
+                context.insert(RateLimitSample(
+                    sampledAt: row.sampledAt,
+                    window: row.window ?? RateLimitWindowName.fiveHour,
+                    usedPercentage: row.usedPercentage ?? 0,
+                    resetsAt: row.resetsAt,
+                    source: row.source,
+                    accountId: row.accountId))
+            case AccountUsageArchive.kindUsageLimit:
+                context.insert(UsageLimitSample(
+                    sampledAt: row.sampledAt,
+                    identity: row.identity ?? "",
+                    kind: row.limitKind ?? "",
+                    group: row.group ?? "",
+                    label: row.label ?? "",
+                    percent: row.usedPercentage ?? 0,
+                    resetsAt: row.resetsAt,
+                    severity: row.severity ?? "",
+                    isActive: row.isActive ?? false,
+                    modelId: row.modelId,
+                    modelDisplayName: row.modelDisplayName,
+                    surface: row.surface,
+                    source: row.source,
+                    accountId: row.accountId))
+            default:   // kindExtraUsage
+                context.insert(ExtraUsageSample(
+                    sampledAt: row.sampledAt,
+                    amountCents: row.amountCents ?? 0,
+                    source: row.source,
+                    accountId: row.accountId))
+            }
+            context.delete(row)
+            pending += 1
+            await flush()
+        }
+
+        context.insert(ClaudeCodeMeta(key: metaKey, value: ISO8601DateFormatter().string(from: now)))
+        await flush(force: true)
+        Log.write("OAuthPoller",
+                  "folded \(archived.count) archived row(s) back into the live tables in "
+                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
+
+        Task { @MainActor in
+            postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
+        }
     }
 }
