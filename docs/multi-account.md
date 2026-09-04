@@ -165,19 +165,73 @@ rather than the main thread, batched and yielding.
 Eviction is not deletion: every row is written to the archive before it is
 removed.
 
-## Open: the presentation
+## What follows the scope, and what doesn't
 
-**Needs sign-off before anything is built.** Per-account cost and tokens now
-*exist* and are shown nowhere. The design rule for this repo is to iterate
-visual work as rendered options first, so the open questions are deliberately
-not answered here:
+A menu in the window toolbar selects "all accounts" or one, persisted in **App
+Group** defaults so the widget extension — a separate process — can read it
+too. It renders nothing when only one account exists.
 
-- Where does the account appear — a filter, a column, a segmented control?
-- What does the Projects/Models/History view do when two accounts overlap?
-- How is unattributed history shown so it reads as *incomplete* rather than
-  as an account named "unknown"?
-- Does the pace card show both accounts at once, or the live one plus a
-  secondary chip?
+**Follows the scope** (23 surfaces): every dashboard card, history, projects
+and collections, models, the heatmap, all three drill-down modals, the menu
+bar, all four data widgets, the advisor badges, and CSV export.
+
+**Deliberately doesn't:**
+
+| surface | why |
+|---|---|
+| Rate limits (pace chart, menu-bar gauges) | A property of the *login*, not a view preference. They are always the active account's. |
+| Alerts | A view shows what you asked to see; an alert tells you what you didn't. A spend threshold a display filter can silence is a footgun — scope to work in the morning, stop hearing about personal spend all day. Per-account *rules* are a fine feature; inheriting the window's scope is not the way to get them. |
+| The HTTP API | A scripted consumer wants to say what it means, not get different numbers depending on what a human last clicked in an app it cannot see. Per-account figures belong behind an explicit parameter. |
+| `ToolbarFreshness` | Data freshness, not usage. |
+| Project management (merge sheet, collections manager, alias manager) | They list *paths*; totals are ordering context. Scoping could hide a project you are trying to merge. |
+
+### How a view becomes scope-aware
+
+Two live `@Query`s — global and per-account — and a computed property picking
+between them. The scope arrives as an **initialiser parameter**, because a
+`@Query` predicate is captured once at init: a view that read the scope itself
+would stay pinned to whatever was selected when it first appeared.
+
+`DailyRow`, `HourlyRow`, `SessionRow` and the `ProjectDailyReadable` protocol
+normalise the two tables so a view body renders either without knowing which.
+That is what keeps the switch a change of *source* rather than a second copy
+of every view. `SessionsTable` and `CollectionUsageRollup` moved onto those
+types for the same reason.
+
+Surfaces outside the view tree — the widgets, the CSV exporter, the menu bar —
+read `UsageScope.storedAccountId` directly, since they have no parent to pass
+a parameter down.
+
+One asymmetry worth knowing: `HourlyRow.sampleCount` exists only on the global
+rollup, so a scoped row reports 0. It feeds a "quiet hour" hint, never a number
+anyone reads.
+
+## Four rollups, and what they cost
+
+`AccountDailyAggregate`, `AccountHourlyAggregate`,
+`AccountProjectDailyAggregate` and `AccountSessionInfo` sit **alongside** their
+global counterparts rather than replacing them, so no existing read site
+changed and both scopes are always available without a recompute.
+
+Each is written by the same pass that writes its global counterpart, across
+all three write paths (incremental fast path, per-bucket recompute, bulk
+worker). Where a rollup has non-additive fields — a distinct-session count, a
+`topModel` chosen by comparing per-model totals — the computation moved into a
+shared value type (`ProjectRollupValues`, `SessionRollupValues`) so one
+algorithm produces both rows. "Recompute twice" and "recompute once, write
+twice" are genuinely different once a field is not a sum.
+
+**`make verify-data` cross-checks every pair.** That check has caught four real
+bugs that would otherwise have shipped: the daily fast path skipping account
+rows, the pricing drift, a session fetch that could not see pending inserts,
+and a call site that was never added. It compares tokens and cost but *not*
+session or model counts — a session spanning an account switch belongs to both
+accounts' sets and once to the global one, so those legitimately do not sum.
+
+The session fast path is single-account only. It cannot maintain account rows
+incrementally, because an account's `topModel` may differ from the session's;
+installs with one account keep it, anyone running two pays a full session
+recompute for correctness.
 
 ## Deferred, with the reasoning
 
