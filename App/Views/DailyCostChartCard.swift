@@ -140,6 +140,11 @@ struct DailyCostChartCard: View {
         }
         .onAppear { refreshDerived() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+        // The scope is a refresh trigger like any other. Without it the cache
+        // holds the previous account's numbers until the *next scan cycle*
+        // happens to fire — which on an idle machine is seven to ten seconds,
+        // and looks exactly like a very slow render rather than a stale one.
+        .onChange(of: scope.accountId) { _, _ in refreshDerived() }
     }
 
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {

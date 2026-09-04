@@ -100,12 +100,6 @@ struct PaceChartCard: View {
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
     @State private var endEstimates: [String: Estimate] = [:]
 
-    /// Measured content width of the multi-window grid, fed by a background
-    /// `GeometryReader`, so the balanced column count adapts to the pane. 0
-    /// until the first layout pass resolves it (the grid falls back to a
-    /// single column for that first frame, then corrects).
-    @State private var gridWidth: CGFloat = 0
-
     struct WindowProjection: Equatable, Sendable {
         /// The selected model's raw forward trajectory (origin = the engine's
         /// last-refit snapshot). Re-anchored onto the live actual tail at
@@ -595,23 +589,9 @@ struct PaceChartCard: View {
                 // stay even (4→2+2, 5→3+2, 6→3+3) and drop to fewer columns as
                 // the pane narrows (6→2+2+2) instead of crushing 4+ windows
                 // into a too-narrow row. The last row is left-aligned.
-                let colCount = PaceColumnLayout.columnCount(
-                    itemCount: cols.count, availableWidth: Double(gridWidth),
-                    minItemWidth: 250, spacing: 24)
-                LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.flexible(), spacing: 24, alignment: .top),
-                        count: colCount),
-                    alignment: .leading, spacing: 22
-                ) {
+                PaceColumnGrid() {
                     ForEach(cols) { column($0) }
                 }
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: PaceGridWidthKey.self, value: geo.size.width)
-                    }
-                )
-                .onPreferenceChange(PaceGridWidthKey.self) { gridWidth = $0 }
             }
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
@@ -684,17 +664,6 @@ struct PaceChartCard: View {
             Spacer()
         }
         .frame(minHeight: 96, alignment: .topLeading)
-    }
-}
-
-/// Carries the multi-window grid's measured content width up to the card so the
-/// balanced column count (`PaceColumnLayout.columnCount`) can react to the pane
-/// resizing. The grid always fills the available width regardless of its column
-/// count, so measuring it introduces no layout feedback loop.
-private struct PaceGridWidthKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
 

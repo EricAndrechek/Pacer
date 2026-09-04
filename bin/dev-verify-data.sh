@@ -284,6 +284,31 @@ done
 check "no recent row left in the archive" 0 \
   "$(q "SELECT COUNT(*) FROM ZACCOUNTUSAGEARCHIVE WHERE ZSAMPLEDAT >= ${rl_cut}")"
 
+# --- Indexes SwiftData declared but may not have built -----------------------
+#
+# `#Index` is applied when SwiftData *creates* a table. On an existing store,
+# lightweight migration adds the columns and silently skips the indexes — which
+# is how three tables that gained an `accountId` predicate on every read ended
+# up with no index on it, while the four tables created at the same time (and
+# therefore fresh) had theirs. `StoreIndexRepair` creates the missing ones at
+# launch; this is the check that it did.
+printf '\n%s==>%s Account indexes exist\n' "$B" "$X"
+for spec in \
+  ZRATELIMITSAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZRATELIMITSAMPLE:ZACCOUNTID,ZWINDOW,ZSAMPLEDAT \
+  ZUSAGELIMITSAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZUSAGELIMITSAMPLE:ZACCOUNTID,ZIDENTITY,ZSAMPLEDAT \
+  ZEXTRAUSAGESAMPLE:ZACCOUNTID,ZSAMPLEDAT ; do
+  tbl="${spec%%:*}"; cols="${spec##*:}"
+  # An index covers the query if its leading columns match, whoever made it.
+  found=0
+  for idx in $(q "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='${tbl}'"); do
+    lead=$(q "SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info('${idx}') ORDER BY seqno)")
+    case "${lead}," in "${cols},"*) found=1; break;; esac
+  done
+  check "${tbl} indexed on ${cols}" 1 "$found"
+done
+
 printf '\n%s==>%s Store\n' "$B" "$X"
 printf '    %s rows · %s daily · %s hourly · %s project · %s sessions\n' \
   "$(q 'SELECT COUNT(*) FROM ZTOKENSAMPLE')" \

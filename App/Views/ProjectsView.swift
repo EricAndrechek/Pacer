@@ -645,22 +645,7 @@ private struct ProjectsContent: View {
         // / direction, or the view just appeared. Hover state changes
         // and chart re-renders no longer trigger the O(aggregates)
         // bucket+sort pipeline.
-        .onAppear { refreshAllRows() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
-        .onChange(of: rangeSince) { _, _ in refreshAllRows() }
-        .onChange(of: sort) { _, _ in refreshAllRows() }
-        .onChange(of: descending) { _, _ in refreshAllRows() }
-        .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
-        .onChange(of: collections.count) { _, _ in refreshAllRows() }
-        .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
-        // Probe count drives the badge state. Refreshing on count
-        // change picks up the very first probe write (first scan
-        // after install) plus any churn from the user clearing the
-        // probe table to force a re-walk.
-        .onChange(of: probes.count) { _, _ in refreshAllRows() }
-        // Search debounce: re-filter ~200ms after the last keystroke
-        // rather than on every character. Filtering is cheap relative
-        // to `refreshAllRows`, so a short debounce is enough.
+        .modifier(RefreshTriggers(owner: self))
         .onChange(of: searchText) { _, newValue in
             searchDebounceTask?.cancel()
             searchDebounceTask = Task { @MainActor in
@@ -670,6 +655,39 @@ private struct ProjectsContent: View {
                 refreshFilteredRows()
             }
         }
+    }
+
+    /// The cache-refresh triggers, lifted out of the body's modifier chain.
+    ///
+    /// Ten `.onChange` modifiers plus the `@Query` macros is past what the type
+    /// inferencer will do in reasonable time — adding the scope trigger tipped
+    /// it into a hard "unable to type-check" error. Splitting gives it two
+    /// small problems instead of one large one; the same fix `NotificationsHost`
+    /// needed.
+    struct RefreshTriggers: ViewModifier {
+        let owner: ProjectsContent
+        func body(content: Content) -> some View { owner.refreshTriggerModifiers(content) }
+    }
+
+    @ViewBuilder
+    fileprivate func refreshTriggerModifiers(_ base: some View) -> some View {
+        base
+            .onAppear { refreshAllRows() }
+            .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
+            // The scope is a refresh trigger like any other. Without it the
+            // cache holds the previous account's numbers until the *next scan
+            // cycle* happens to fire — on an idle machine seven to ten seconds,
+            // which looks like a very slow render rather than a stale one.
+            .onChange(of: scope.accountId) { _, _ in refreshAllRows() }
+            .onChange(of: rangeSince) { _, _ in refreshAllRows() }
+            .onChange(of: sort) { _, _ in refreshAllRows() }
+            .onChange(of: descending) { _, _ in refreshAllRows() }
+            .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
+            .onChange(of: collections.count) { _, _ in refreshAllRows() }
+            .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
+            // Probe count drives the badge state — picks up the very first
+            // probe write, plus churn from a forced re-walk.
+            .onChange(of: probes.count) { _, _ in refreshAllRows() }
     }
 
     /// Submenu listing every other project as a possible canonical.

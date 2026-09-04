@@ -345,6 +345,11 @@ private struct MonthlyChartCard: View {
         }
         .onAppear { refreshMonthly() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshMonthly() }
+        // The scope is a refresh trigger like any other. Without it the cache
+        // holds the previous account's numbers until the *next scan cycle*
+        // happens to fire — which on an idle machine is seven to ten seconds,
+        // and looks exactly like a very slow render rather than a stale one.
+        .onChange(of: scope.accountId) { _, _ in refreshMonthly() }
     }
 
     private var chart: some View {

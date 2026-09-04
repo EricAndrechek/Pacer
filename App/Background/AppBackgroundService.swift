@@ -316,6 +316,13 @@ final class AppBackgroundService {
     private func startHistoryPruneTask() {
         guard historyPruneTask == nil else { return }
         let container = self.container
+        // Off the main actor and before the prune: building an index takes the
+        // store's write lock for as long as it takes, and it only ever has
+        // work to do on the first launch after a schema change.
+        Task.detached(priority: .utility) {
+            guard let url = try? PacerStore.storeURL() else { return }
+            StoreIndexRepair.run(storeURL: url)
+        }
         historyPruneTask = Task { @MainActor in
             while !Task.isCancelled {
                 StoreMaintenance.pruneHistory(container: container)
