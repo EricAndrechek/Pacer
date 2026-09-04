@@ -58,6 +58,21 @@ struct PaceChartCard: View {
     /// identity change, and keeps its layout.
     @State private var scopedLatest: [ScopedWindowRow] = []
 
+    /// For naming whose windows these are. Two rows, so the query is free.
+    @Query private var accounts: [Account]
+
+    /// Rate limits belong to a *login*, so "all accounts" cannot combine them —
+    /// two 5-hour windows do not sum into a third. The card falls back to the
+    /// active login, which is what every gauge showed before accounts existed
+    /// and is still the only defensible single answer. Unlabelled, though, it
+    /// reads as "all accounts' limits", which is the one thing it is not.
+    private var limitOwnerNote: String? {
+        guard accounts.count > 1, limitAccountId != nil else { return nil }
+        guard UsageScope.shared.accountId == nil else { return nil }   // a picked scope names itself
+        let owner = accounts.first { $0.id == limitAccountId }?.label ?? "the active account"
+        return "Rate limits are one login's — showing \(owner). Pick an account above for its own."
+    }
+
     /// Scoped rows over the same 8-day window the fixed query uses — the
     /// actual-usage line under each scoped column. Separate from the batch
     /// query because the two want opposite things: the batch needs whole rows
@@ -578,6 +593,9 @@ struct PaceChartCard: View {
             }
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
+                if let limitOwnerNote {
+                    Text(limitOwnerNote)
+                }
                 if hasScoped {
                     Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
                 }
