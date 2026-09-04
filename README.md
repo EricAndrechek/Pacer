@@ -118,7 +118,11 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   account (a `CLAUDE_CONFIG_DIR` profile, so two accounts run at once) are
   tracked separately rather than folded into whichever login is default.
   Usage from before Pacer started watching stays marked unattributed rather
-  than being assigned to a guess.
+  than being assigned to a guess. A menu in the toolbar switches every cost
+  and token view — dashboard, history, projects, models, widgets, menu bar —
+  between all accounts and one, and both are always computed, so switching is
+  instant. Rate limits always show the account you're signed into, since
+  that's what your next message is billed against.
 - **At a glance, always.** A configurable menu-bar readout — an activity-ring
   icon, percent chips, and an explicit choice of which window drives the icon —
   plus home-screen-style widgets, each pickable to whichever window you care
