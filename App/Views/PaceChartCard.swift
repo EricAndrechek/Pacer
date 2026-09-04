@@ -77,6 +77,14 @@ struct PaceChartCard: View {
 
     /// For naming whose windows these are. Two rows, so the query is free.
     @Query private var accounts: [Account]
+    @State private var scope = UsageScope.shared
+
+    /// What actually decides the card's contents: the account the user picked
+    /// (nil for "all"), the one that resolves to, and whether both are live.
+    /// Any of the three changing means a different set of columns.
+    private var scopeKey: String {
+        "\(scope.accountId ?? "all")|\(limitAccountId ?? "-")|\(isParallel)"
+    }
 
     /// Rate limits belong to a *login*, so "all accounts" cannot combine them —
     /// two 5-hour windows do not sum into a third. The card falls back to the
@@ -213,7 +221,6 @@ struct PaceChartCard: View {
     /// renders whatever it has meanwhile.
     private func reload() async {
         guard let container = try? PacerStore.sharedModelContainer() else { return }
-        isParallel = AccountParallelism.isParallel(context: modelContext)
         let targets = loadTargets()
         let started = Date()
         isLoading = series.isEmpty
@@ -707,12 +714,25 @@ struct PaceChartCard: View {
         // Reload the 8-day series when a NEW rate-limit sample lands (the
         // poller writes roughly every five minutes), not on every context
         // change. `.task(id:)` also fires once on appear, which seeds them.
-        .task(id: reloadSignal) { await reload() }
+        // Recomputed with the reload signal rather than inside `reload`, so a
+        // machine that *becomes* parallel — the second account's first usage of
+        // the day — flips `scopeKey` and pulls the other account's columns in.
+        .task(id: reloadSignal) {
+            isParallel = AccountParallelism.isParallel(context: modelContext)
+            await reload()
+        }
         // A scope change invalidates everything loaded. The card is *not*
         // rebuilt by identity for this — doing that threw away its measured
         // grid width and re-laid the columns out lopsided — so it clears its
         // own state instead.
-        .onChange(of: limitAccountId) {
+        //
+        // Keyed on the **picked** scope, not just the resolved one. They are
+        // not the same thing and the difference is exactly the case this card
+        // gets wrong: with work active, "scoped to work" and "all accounts"
+        // both resolve `limitAccountId` to work, so switching between them
+        // changed nothing and the card kept showing three columns where it
+        // should have shown six.
+        .onChange(of: scopeKey) {
             series = []
             Task { await reload() }
         }

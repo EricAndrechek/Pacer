@@ -64,19 +64,25 @@ enum LiveRenderMode {
         let targets = scopes(in: context)
         log("rendering \(targets.count) scope(s) → \(ScreenshotMode.outputDirectory.path)")
 
+        // Warm every engine the store has, not just the requested scopes. In
+        // parallel mode the pace card asks *each account's* engine even when
+        // the scope is "all accounts", and a cold engine answers
+        // `.insufficient` — which draws a chart with no forecast and reads as
+        // a bug that is really an empty cache. Rendering `SCOPES=all` alone
+        // produced exactly that.
+        let allAccounts = (try? context.fetch(FetchDescriptor<Account>()))?.map(\.id) ?? []
+        for accountId in [nil] + allAccounts.map(Optional.init) {
+            let engine = host.engine(forAccount: accountId)
+            await Task.detached(priority: .userInitiated) { await engine.recompute() }.value
+        }
+        log("warmed \(allAccounts.count + 1) engine(s)")
+
         for target in targets {
             UsageScope.shared.selectEphemeral(target.accountId)
             // Warm this scope's engine before drawing, or every engine-powered
             // caption renders its "warming up" state and the render says
             // nothing about the thing being diagnosed.
-            // Warm *every* scope, not just this one: in parallel mode the pace
-            // card asks each account's engine, and a cold engine answers
-            // `.insufficient` — which renders as a chart with no forecast and
-            // reads as a bug that is really just a cold cache.
-            for scope in targets {
-                let engine = host.engine(forAccount: scope.accountId)
-                await Task.detached(priority: .userInitiated) { await engine.recompute() }.value
-            }
+
 
             await OffscreenRenderer.render(
                 name: "live-now-\(target.label)", width: 900, scheme: .dark,
