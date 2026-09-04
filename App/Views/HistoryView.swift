@@ -616,7 +616,16 @@ private struct TopDaysContent: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                let maxCost = visible.map(\.cost).max() ?? 1
+                // The bar encodes whatever the list is ranked BY. It was
+                // hard-wired to cost while the sort switched between cost,
+                // tokens and date — so under "Heaviest token days" the rows
+                // read 13.2M, 10.5M, 9.8M downwards while the bars beside them
+                // went 58%, 68%, 63%: the length was the day's cost. A bar
+                // that disagrees with the number next to it is worse than no
+                // bar. Date-sorted there is no ranking magnitude, so it keeps
+                // cost — the bolder of the two numbers on the row.
+                let barMetric: DayBarMetric = sort == .tokens ? .tokens : .cost
+                let maxValue = visible.map { barMetric.value(of: $0) }.max() ?? 1
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 12) {
                         // Empty rank column header
@@ -655,7 +664,7 @@ private struct TopDaysContent: View {
                     // rows until scrolled into view.
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
-                            topRow(idx: idx, row: row, maxCost: maxCost)
+                            topRow(idx: idx, row: row, maxValue: maxValue, metric: barMetric)
                         }
                     }
                     if all.count > 10 {
@@ -684,8 +693,21 @@ private struct TopDaysContent: View {
         }
     }
 
+    /// Which of the row's two numbers the bar draws.
+    private enum DayBarMetric {
+        case cost, tokens
+        func value(of row: DayRow) -> Double {
+            switch self {
+            case .cost:   return row.cost
+            case .tokens: return Double(row.tokens)
+            }
+        }
+    }
+
     @ViewBuilder
-    private func topRow(idx: Int, row: DayRow, maxCost: Double) -> some View {
+    private func topRow(
+        idx: Int, row: DayRow, maxValue: Double, metric: DayBarMetric
+    ) -> some View {
         HoverRow(action: { onDayTap(row.date) }) {
             HStack(alignment: .center, spacing: 12) {
                 Text("#\(idx + 1)")
@@ -703,7 +725,8 @@ private struct TopDaysContent: View {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(Color.accentColor.opacity(0.85))
                             .frame(
-                                width: geo.size.width * CGFloat(row.cost / max(maxCost, 0.0001)),
+                                width: geo.size.width
+                                    * CGFloat(metric.value(of: row) / max(maxValue, 0.0001)),
                                 height: 6
                             )
                     }

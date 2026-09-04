@@ -802,13 +802,27 @@ private struct ProjectsContent: View {
     /// app feels consistent.
     @State private var hoveredOverviewAngle: Double?
 
+    /// The five rows the donut draws: the largest by the metric the donut is
+    /// *showing*.
+    ///
+    /// This was `rows.prefix(5)` — the first five of the **table's** sort,
+    /// which is a separate control. Sorted by sessions, or by last-active, or
+    /// ascending by name, the card headed "Top projects" drew five arbitrary
+    /// projects and called them the top five.
+    private var overviewTop: [ProjectRow] {
+        let metric = overviewMetric
+        return Array(
+            rows.sorted { value(for: metric, in: $0) > value(for: metric, in: $1) }
+                .prefix(5))
+    }
+
     /// Cumulative-angle index over the top-5 rows for the active
     /// metric. Derived synchronously so a Projects-tab mount renders
     /// the donut at its real size on the first frame — the previous
     /// @State + .onAppear pattern showed an empty donut briefly, then
     /// snapped to the populated layout one tick later.
     private var overviewIndex: (cumulative: [(row: ProjectRow, max: Double)], total: Double) {
-        let top = Array(rows.prefix(5))
+        let top = overviewTop
         var running = 0.0
         var built: [(row: ProjectRow, max: Double)] = []
         built.reserveCapacity(top.count)
@@ -828,7 +842,7 @@ private struct ProjectsContent: View {
     }
 
     private var overviewCard: some View {
-        let top = Array(rows.prefix(5))
+        let top = overviewTop
         let index = overviewIndex
         let totalForMetric = index.total
         let hovered = hoveredOverviewProject(cumulative: index.cumulative)
