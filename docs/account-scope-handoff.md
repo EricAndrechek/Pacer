@@ -4,7 +4,7 @@ Operational companion to [`multi-account.md`](multi-account.md), which holds the
 *design*. This one holds the **state, the invariants, and the traps** — written
 so a session picking this up cold does not re-learn them the expensive way.
 
-Branch `feat/account-attribution`, 39 commits, 750 tests, `make verify-data`
+Branch `feat/account-attribution`, 42 commits, 763 tests, `make verify-data`
 green. Schema at 28 models, cost recompute version **14**.
 
 ---
@@ -152,6 +152,12 @@ Deliberately **not** scoped, with reasons in `multi-account.md`: rate limits
 alarm), the HTTP API (scripted consumers want explicit control),
 `ToolbarFreshness`, and the three project-management views.
 
+The API's half of that decision is now built: `GET /v1/accounts` lists the ids,
+`/v1/usage/daily` and `/v1/usage/models` take `?account=`, and `/metrics` emits
+per-account series. Unscoped output is unchanged. Accounts can also be renamed
+(Settings → Tokens), and a typed name outranks the observed email in
+`Account.label`.
+
 Verified on the real store: a mixed day splits `$70.78` (work) + `$1,187.71`
 (personal) = `$1,258.49` (global). Fresh-install cold start builds all 28 models
 and 108,660 entries in 22.8 s with no migration.
@@ -176,8 +182,22 @@ options and sign-off before building visual work.
 **2. Per-account alert rules.** A feature, not a fix. Inheriting the window's
 scope is explicitly the wrong way to get it.
 
-**3. An `account` parameter on the HTTP API.** A feature. The API deliberately
-reports every account today.
-
-**4. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
+**3. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
 this branch has no CI signal.
+
+---
+
+## One more trap, from the API work
+
+**A leak the tests could not see, because they had never seen real data.**
+`pacer_account_info` published `organizationName` as its label, on the reasoning
+that the org name is coarser than the email. It is not: Anthropic *derives* the
+org name from the email, so it reads `"<someone>@<domain>'s Organization"` for
+every real account. The unit test passed because its fixture said `"Acme"`.
+Caught by curling the live endpoint after installing.
+
+The general shape: **a test fixture is an assumption about the world.** When the
+assertion is "this output never contains X", the fixture that proves it is the
+one taken from the real store, not the one that reads nicely in a diff. There is
+now a test using an email-derived org name, and `metricsName` falls back past
+everything observed to `Account <last 4 of id>`.
