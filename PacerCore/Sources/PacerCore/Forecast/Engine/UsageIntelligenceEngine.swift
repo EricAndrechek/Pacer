@@ -252,9 +252,7 @@ public actor UsageIntelligenceEngine {
     /// counting-statement copy ("your 3rd-highest day in 10 weeks") instead of
     /// indefensible smooth tail probabilities from ~50 points.
     public func yesterdayRank() -> (cost: Double, rankFromTop: Int, of: Int)? {
-        guard let yesterday = fit.dailyBaseline.last, fit.dailyBaseline.count >= 7 else { return nil }
-        let higher = fit.dailyBaseline.filter { $0 > yesterday }.count
-        return (yesterday, higher + 1, fit.dailyBaseline.count)
+        DailyBaseline.yesterdayRank(baseline: fit.dailyBaseline)
     }
 
     /// How each prediction method is doing on this user's own data for a surface
@@ -922,20 +920,10 @@ public actor UsageIntelligenceEngine {
     /// oldest → newest. Missing day = $0 is load-bearing (the anomalies on this
     /// user are lulls, not spikes), so gaps are real zeros, not skipped.
     static func priorDays(_ f: EngineFeatures) -> [DayPoint] {
-        let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
-        guard let minKey = f.dailyCosts.keys.filter({ $0 < todayKey }).min(),
-              let start = EngineFeatures.parseDay(minKey, calendar: f.calendar) else { return [] }
-        var out: [DayPoint] = []
-        var day = start
-        while true {
-            let key = TokenSample.formatDate(day, timeZone: f.calendar.timeZone)
-            guard key < todayKey else { break }
-            out.append(DayPoint(weekday: f.calendar.component(.weekday, from: day),
-                                cost: f.dailyCosts[key] ?? 0))
-            guard let next = f.calendar.date(byAdding: .day, value: 1, to: day) else { break }
-            day = next
-        }
-        return out
+        // The day enumeration lives in `DailyBaseline` so a *scoped* caller can
+        // rank one account's days by the same rule — see its doc comment.
+        DailyBaseline.priorDays(costsByDay: f.dailyCosts, now: f.now, calendar: f.calendar)
+            .map { DayPoint(weekday: f.calendar.component(.weekday, from: $0.day), cost: $0.cost) }
     }
 
     static func normBands(_ prior: [DayPoint]) -> [Int: UsageNorms.Band] {

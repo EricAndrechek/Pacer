@@ -14,6 +14,9 @@ struct AdvisorBadges: View {
     @Query private var scopedToday: [AccountDailyAggregate]
     @Query private var globalWeek: [DailyAggregate]
     @Query private var scopedWeek: [AccountDailyAggregate]
+    /// Every day this account has, for the ranking badge. ~240 rows on a store
+    /// with two years of history, so unbounded is the right shape here.
+    @Query private var scopedAllDays: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
 
     /// Every account, or one. A "spending faster than usual" notice about
@@ -72,6 +75,9 @@ struct AdvisorBadges: View {
                 $0.date >= weekAgo && $0.date <= today && $0.accountId == acct
             }
         )
+        _scopedAllDays = Query(
+            filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct }
+        )
     }
 
     private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
@@ -119,6 +125,12 @@ struct AdvisorBadges: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is a refresh trigger. Without it the hints kept describing
+        // the previous account until an unrelated scan cycle fired.
+        .onChange(of: scope.accountId) { _, _ in
+            refreshCache()
+            Task { await refreshEngineHints() }
+        }
         .task { await refreshEngineHints() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshEngineHints() }
@@ -129,9 +141,20 @@ struct AdvisorBadges: View {
     /// it ranked in the user's top few; today's pace fires only at the
     /// ladder's top rungs (≥85th percentile of their own days).
     private func refreshEngineHints() async {
-        guard let engine else { return }
         var next: [EngineHint] = []
-        if let y = await engine.yesterdayRank(), y.rankFromTop <= max(3, y.of / 10), y.of >= 14 {
+
+        // The ranking is arithmetic over daily costs, so it can be answered for
+        // whichever account is on screen — from the engine when the view shows
+        // every account (which is what the engine fits), and from this
+        // account's own rollup rows otherwise. Same code either way, so the two
+        // cannot drift.
+        let ranked: (cost: Double, rankFromTop: Int, of: Int)?
+        if scope.isAll {
+            ranked = await engine?.yesterdayRank()
+        } else {
+            ranked = DailyBaseline.yesterdayRank(rows: scopedAllDays.map(\.dailyRow))
+        }
+        if let y = ranked, y.rankFromTop <= max(3, y.of / 10), y.of >= 14 {
             let weeks = max(1, Int((Double(y.of) / 7.0).rounded()))
             next.append(EngineHint(
                 id: "yesterday-high",
@@ -139,6 +162,16 @@ struct AdvisorBadges: View {
                 tint: y.rankFromTop == 1 ? .orange : .secondary,
                 title: "Yesterday: \(IntelligenceFormatting.ordinal(y.rankFromTop))-highest in \(weeks)w",
                 detail: "\(pacerCostExact(y.cost)) — higher than \(y.of - y.rankFromTop) of your \(y.of) tracked days."))
+        }
+        // The pace percentile comes from the engine's *fit*, not from
+        // arithmetic — hour-of-day and weekday profiles trained on one series.
+        // There is no honest way to state it for a single account until the
+        // engine itself is per-account, and a number quietly describing every
+        // account under a per-account view is worse than no badge. Same rule
+        // the pace chart's forecast overlay follows.
+        guard scope.isAll, let engine else {
+            engineHints = next
+            return
         }
         let pace = await engine.ask(.pace)
         if !pace.isInsufficient, IntelligenceFormatting.ladderIndex(pace.value) >= 3 {

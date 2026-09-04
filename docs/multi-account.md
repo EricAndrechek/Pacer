@@ -229,6 +229,30 @@ the projection and the model-comparison fan, and says so: *History only.
 Forecasts follow the active account.* A per-account engine is real work and
 remains undone.
 
+### What is per-account, and what is one series
+
+The rollups are per account, so anything that is *arithmetic over them* can be
+scoped: today's spend, the 30-day chart, the model mix, the heatmap, and the
+"yesterday was your Nth-highest day" ranking (`DailyBaseline`, shared with the
+engine so the scoped and unscoped answers are the same code).
+
+The **forecast engine is not**. Its parameters, snapshot trail, self-evaluation
+records and golden fixtures all assume one series, and it reads the *global*
+daily and hourly rollups. So every fitted number — projected spend by tonight,
+the pace percentile, the evening track record, the rate-limit trajectory
+overlay — describes every account, whichever account is on screen.
+
+The rule this settles on: **scope what can be scoped, and withhold the rest
+rather than mislabel it.** Under a per-account view the Now tile drops its
+projection and says *Forecasts follow all accounts*, the pace badge does not
+fire, and the pace chart hides its overlay with *History only. Forecasts follow
+the active account.* A number quietly describing every account under a
+per-account heading is worse than no number.
+
+Making the engine per-account is the remaining piece and a real one: per-account
+`EngineParams`, a second snapshot trail and self-eval record, and the golden
+gate has to stay byte-identical for the unscoped case.
+
 ### Naming an account
 
 Every real account arrives with the identical derived name — `Account.defaultName`

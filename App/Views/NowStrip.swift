@@ -189,6 +189,19 @@ struct NowStrip: View {
     }
 
     private func refreshEngine() async {
+        // Every value below comes from the engine's fit, which is trained on one
+        // series — all accounts' daily and hourly costs. Under a per-account
+        // view they would be someone else's projection wearing this account's
+        // label, so the tile shows the measured numbers alone instead. The
+        // ranking badge in the header is arithmetic and *is* scoped; these are
+        // not, and cannot be until the engine itself is per-account.
+        guard scope.isAll else {
+            todayEOD = nil
+            record = nil
+            paceVsNow = nil
+            pacePercentile = nil
+            return
+        }
         guard let engine else { return }
         todayEOD = await engine.ask(.projectedCost(.today))
         record = await engine.eveningTrackRecord()
@@ -243,6 +256,15 @@ struct NowStrip: View {
         }
         .onAppear { refreshFacts() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
+        // The scope is a refresh trigger. `refresh()` re-reads the scoped rows
+        // on its own second-by-second tick, but the tile renders `cached`, and
+        // that was only rebuilt on a scan cycle — so the numbers stayed the
+        // previous account's until an unrelated write happened to land.
+        .onChange(of: scope.accountId) { _, _ in
+            refresh()
+            refreshFacts()
+            Task { await refreshEngine() }
+        }
         .onChange(of: costModeRaw) { _, _ in
             Task { await SampleCostCache.reload() }
         }
@@ -442,6 +464,11 @@ struct NowStrip: View {
                 }
                 if dailyBudgetEnabled, dailyBudgetUSD > 0 {
                     budgetBar
+                }
+                if !scope.isAll {
+                    Text("Forecasts follow all accounts.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
             }
         }
