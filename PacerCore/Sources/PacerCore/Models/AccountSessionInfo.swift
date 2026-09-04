@@ -31,7 +31,10 @@ public final class AccountSessionInfo {
     #Index<AccountSessionInfo>(
         [\.accountSessionKey],
         [\.accountId],
-        [\.lastSeenAt]
+        [\.lastSeenAt],
+        // "This account's most recently touched session", which is what the
+        // Now tile and the toolbar pill ask for under a scope.
+        [\.accountId, \.lastSeenAt]
     )
 
     public static func makeKey(accountId: String, sessionId: String) -> String {

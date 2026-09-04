@@ -75,6 +75,28 @@ struct StoreIndexRepairTests {
         #expect(!created.contains("pacer_ix_zratelimitsample_zaccountid_zsampledat"))
     }
 
+    /// The list grew past the rate-limit table when the Now tile and the
+    /// toolbar pill started asking for "this account's newest turn". Both
+    /// probes sort by time inside one account, which is a compound index or a
+    /// scan of the largest table in the store.
+    @Test("the newest-turn and newest-session probes get their indexes")
+    func coversTheScopedActivityProbes() throws {
+        let url = try makeStore([
+            """
+            CREATE TABLE ZTOKENSAMPLE (Z_PK INTEGER PRIMARY KEY, ZACCOUNTID TEXT,
+            ZSAMPLEDAT REAL)
+            """,
+            """
+            CREATE TABLE ZACCOUNTSESSIONINFO (Z_PK INTEGER PRIMARY KEY,
+            ZACCOUNTID TEXT, ZLASTSEENAT REAL)
+            """,
+        ])
+        let created = StoreIndexRepair.run(storeURL: url)
+        #expect(created.contains("pacer_ix_ztokensample_zaccountid_zsampledat"))
+        #expect(created.contains("pacer_ix_zaccountsessioninfo_zaccountid_zlastseenat"))
+        #expect(StoreIndexRepair.run(storeURL: url).isEmpty)
+    }
+
     @Test("running twice creates nothing the second time")
     func isIdempotent() throws {
         let url = try makeStore([Self.table])

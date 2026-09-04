@@ -476,7 +476,7 @@ private struct ToolbarFreshness: View {
     /// were `@Query` arrays, and everything downstream is unchanged.
     @State private var tokens: [TokenSample] = []
     @State private var rateLimits: [RateLimitSample] = []
-    @State private var sessions: [SessionInfo] = []
+    @State private var sessionRows: [SessionRow] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
     @State private var scope = UsageScope.shared
     @Environment(\.modelContext) private var modelContext
@@ -486,36 +486,67 @@ private struct ToolbarFreshness: View {
     /// Each is capped (`fetchLimit = 1`, or a single keyed meta row) and
     /// `sampledAt` is indexed, so this is four index seeks — the problem was
     /// never the cost of one refresh, it was doing it on every save forever.
+    /// The 1 Hz tick. Only the *label* needs re-deriving each second — the
+    /// timestamps it formats change when the scanner writes, not when the
+    /// clock moves — so this reads the one cheap unpredicated row and rebuilds
+    /// the display; everything account-predicated is loaded on the write
+    /// signal instead. See `refreshScopedProbes`.
     @MainActor
     private func refresh() {
-        tokens = (try? modelContext.fetch(Self.tokenProbe)) ?? []
-        // Deliberately NOT re-fetched here. `refresh()` runs at 1 Hz to keep
-        // the relative-time label ticking, and the other three probes are
-        // unpredicated, which CoreData serves from its row cache for nothing.
-        // This one is account-predicated, which makes it a real fetch — at 1 Hz
-        // that measured as the second-heaviest thing on the main thread. The
-        // underlying row only changes when the poller writes, so it is loaded
-        // on that signal instead (`refreshRateLimitProbe`).
-        sessions = (try? modelContext.fetch(Self.sessionProbe)) ?? []
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
         scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))) ?? []
         display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
-    /// The one predicated probe, re-read only when the poller has written.
+    /// The account-predicated probes, re-read on the write signal rather than
+    /// at 1 Hz.
+    ///
+    /// They used to be unpredicated and refreshed every second, which is what
+    /// the perf note above describes: CoreData served them from its row cache
+    /// for nothing *because* they were unpredicated. Predicating one at 1 Hz
+    /// measured as the second-heaviest thing on the main thread, which is why
+    /// the rate-limit probe already moved to this path.
+    ///
+    /// They now have to be predicated. The pill sits in the same window as a
+    /// scoped dashboard, and unscoped it reported the other account's
+    /// liveness: with work active and the window scoped to personal, the
+    /// toolbar said "● live" over a Now card that said "Nothing running."
+    /// Both were reading correctly; they were reading different accounts.
     @MainActor
-    private func refreshRateLimitProbe() {
+    private func refreshScopedProbes() {
+        let account = UsageScope.shared.accountId
         rateLimits = (try? modelContext.fetch(
             LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
+        tokens = (try? modelContext.fetch(Self.tokenProbe(account: account))) ?? []
+        if let account {
+            sessionRows = ((try? modelContext.fetch(
+                Self.accountSessionProbe(account: account))) ?? []).map(\.sessionRow)
+        } else {
+            sessionRows = ((try? modelContext.fetch(Self.sessionProbe)) ?? []).map(\.sessionRow)
+        }
         display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
-    private static let tokenProbe: FetchDescriptor<TokenSample> = {
+    private static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
         var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        if let account {
+            d.predicate = #Predicate<TokenSample> { $0.accountId == account }
+        }
         d.fetchLimit = 1
         return d
-    }()
+    }
+
+    private static func accountSessionProbe(
+        account: String
+    ) -> FetchDescriptor<AccountSessionInfo> {
+        var d = FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate<AccountSessionInfo> { $0.accountId == account },
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }
 
     /// Most-recent session row for the live-activity overlay. Cap to
     /// 1 — same probe pattern as the other two; we only ever read
@@ -531,7 +562,7 @@ private struct ToolbarFreshness: View {
     /// the active state in the toolbar — recent/idle is covered by
     /// the regular freshness label.
     private var sessionActivity: LiveSessionActivity? {
-        sessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
+        sessionRows.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
     }
 
     private var lastActivity: Date? {
@@ -600,7 +631,7 @@ private struct ToolbarFreshness: View {
     /// Long-form tooltip on hover so the user can see the exact
     /// timestamp without parsing the relative label.
     private var tooltip: String {
-        if sessionActivity == .active, let s = sessions.first {
+        if sessionActivity == .active, let s = sessionRows.first {
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .medium
@@ -631,14 +662,15 @@ private struct ToolbarFreshness: View {
         // rather than on every store save.
         PillBody(display: display).equatable()
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
-                refreshRateLimitProbe()
+                refreshScopedProbes()
             }
-            // The probe is scoped, so a scope change invalidates it — otherwise
-            // the pill reports the other account's freshness until the next
-            // scan cycle happens to fire.
-            .onChange(of: scope.limitAccountId) { _, _ in refreshRateLimitProbe() }
+            // The probes are scoped, so a scope change invalidates them —
+            // otherwise the pill reports the other account's freshness until
+            // the next scan cycle happens to fire.
+            .onChange(of: scope.limitAccountId) { _, _ in refreshScopedProbes() }
+            .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
             .task {
-                refreshRateLimitProbe()
+                refreshScopedProbes()
                 refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window

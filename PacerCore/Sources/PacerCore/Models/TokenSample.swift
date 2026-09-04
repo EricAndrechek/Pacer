@@ -43,7 +43,13 @@ public final class TokenSample {
         [\.date, \.model],
         [\.projectPath],
         [\.sampledAt],
-        [\.accountId]
+        [\.accountId],
+        // The scoped "newest turn" probe — the Now tile's last-activity line
+        // and the toolbar's liveness pill. `[\.accountId]` alone narrows to one
+        // account and then sorts every one of its rows to find the newest;
+        // `[\.sampledAt]` alone walks the other account's rows to skip them.
+        // This is the biggest table in the store, so it gets the compound.
+        [\.accountId, \.sampledAt]
     )
 
     public var sampledAt: Date

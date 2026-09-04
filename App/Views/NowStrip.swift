@@ -62,10 +62,12 @@ struct NowStrip: View {
     /// time, so no per-render pricing lookups.
     @State private var recentHourlyRows: [HourlyRow] = []
     /// Most-recent sample (any age) so the quiet state can say "last
-    /// activity 3h ago" instead of a flat "no samples".
-    @State private var latestSamples: [TokenSample] = []
+    /// activity 3h ago" instead of a flat "no samples". **This account's**
+    /// most recent — see `refresh`.
+    @State private var latestSampleAt: Date?
+    @State private var latestSampleModel: String?
     /// Most-recently-touched session, for the Now tile's session line.
-    @State private var latestSessions: [SessionInfo] = []
+    @State private var latestSessions: [SessionRow] = []
     @State private var extraUsages: [ExtraUsageSample] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
 
@@ -131,19 +133,48 @@ struct NowStrip: View {
                 .map(\.hourlyRow)
         }
 
-        latestSamples = (try? modelContext.fetch(Self.latestSampleProbe)) ?? []
-        latestSessions = (try? modelContext.fetch(Self.latestSessionProbe)) ?? []
+        // Scoped, like everything above them. These two were plain
+        // newest-row-in-the-table probes, so under a per-account scope the tile
+        // read the *other* account's newest turn: it said "Nothing running."
+        // (correctly, from this account's hourly rows) directly above "Last
+        // activity 15s ago" and a "live" chip (both the other account's).
+        // Same class as the rate-limit reads — no crash, no empty state, just
+        // someone else's number.
+        let latest = (try? modelContext.fetch(Self.latestSampleProbe(account: acct)))?.first
+        latestSampleAt = latest?.sampledAt
+        latestSampleModel = latest?.model
+        if let acct {
+            latestSessions = ((try? modelContext.fetch(
+                Self.latestAccountSessionProbe(account: acct))) ?? []).map(\.sessionRow)
+        } else {
+            latestSessions = ((try? modelContext.fetch(Self.latestSessionProbe)) ?? [])
+                .map(\.sessionRow)
+        }
         extraUsages = (try? modelContext.fetch(LimitScope.extraUsage(account: scope.limitAccountId, limit: 1))) ?? []
         scanMeta = (try? modelContext.fetch(Self.scanMetaProbe)) ?? []
     }
 
-    private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
+    private static func latestSampleProbe(account: String?) -> FetchDescriptor<TokenSample> {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
+        if let account {
+            d.predicate = #Predicate<TokenSample> { $0.accountId == account }
+        }
         d.fetchLimit = 1
         return d
-    }()
+    }
+
+    private static func latestAccountSessionProbe(
+        account: String
+    ) -> FetchDescriptor<AccountSessionInfo> {
+        var d = FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate<AccountSessionInfo> { $0.accountId == account },
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }
 
     private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
         var d = FetchDescriptor<SessionInfo>(
@@ -228,7 +259,7 @@ struct NowStrip: View {
             s.costLastHour += row.totalCostUSD
             s.sampleCount += row.sampleCount
         }
-        s.lastSampleAt = latestSamples.first?.sampledAt
+        s.lastSampleAt = latestSampleAt
         return s
     }
 
@@ -273,7 +304,7 @@ struct NowStrip: View {
 
     /// The session counts as "running" when its last write is recent —
     /// same 10-minute freshness window the live indicator uses.
-    private var runningSession: SessionInfo? {
+    private var runningSession: SessionRow? {
         guard let s = latestSessions.first,
               Date().timeIntervalSince(s.lastSeenAt) < 600 else { return nil }
         return s
@@ -334,7 +365,7 @@ struct NowStrip: View {
         }
     }
 
-    private func sessionDuration(_ s: SessionInfo) -> String {
+    private func sessionDuration(_ s: SessionRow) -> String {
         let hours = s.lastSeenAt.timeIntervalSince(s.firstSeenAt) / 3600
         if hours < 1 {
             return "\(max(1, Int((hours * 60).rounded()))) min"
@@ -355,12 +386,12 @@ struct NowStrip: View {
 
     @ViewBuilder
     private var nowQuietState: some View {
-        if let latest = latestSamples.first {
+        if let at = latestSampleAt, let model = latestSampleModel {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Nothing running.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text("Last activity \(pacerRelative(latest.sampledAt)) — \(pacerModelDisplayName(latest.model)).")
+                Text("Last activity \(pacerRelative(at)) — \(pacerModelDisplayName(model)).")
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }

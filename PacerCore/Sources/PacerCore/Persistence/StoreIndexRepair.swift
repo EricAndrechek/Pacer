@@ -35,15 +35,22 @@ public enum StoreIndexRepair {
     }
 
     /// Mirrors the `#Index` declarations on `RateLimitSample`,
-    /// `UsageLimitSample` and `ExtraUsageSample`. Keep the two in step: this
-    /// list is what an *upgraded* store gets, the declarations are what a
-    /// *fresh* one gets, and they should describe the same database.
+    /// `UsageLimitSample`, `ExtraUsageSample`, `TokenSample` and
+    /// `AccountSessionInfo`. Keep the two in step: this list is what an
+    /// *upgraded* store gets, the declarations are what a *fresh* one gets,
+    /// and they should describe the same database.
     static let desired: [Desired] = [
         Desired(table: "ZRATELIMITSAMPLE", columns: ["ZACCOUNTID", "ZSAMPLEDAT"]),
         Desired(table: "ZRATELIMITSAMPLE", columns: ["ZACCOUNTID", "ZWINDOW", "ZSAMPLEDAT"]),
         Desired(table: "ZUSAGELIMITSAMPLE", columns: ["ZACCOUNTID", "ZSAMPLEDAT"]),
         Desired(table: "ZUSAGELIMITSAMPLE", columns: ["ZACCOUNTID", "ZIDENTITY", "ZSAMPLEDAT"]),
         Desired(table: "ZEXTRAUSAGESAMPLE", columns: ["ZACCOUNTID", "ZSAMPLEDAT"]),
+        // Scoped "newest turn" / "newest session". `ZTOKENSAMPLE` is the
+        // largest table in the store, and `ZACCOUNTSESSIONINFO` was created
+        // new — but only on machines that have run the account build, so it
+        // is listed here too rather than assumed.
+        Desired(table: "ZTOKENSAMPLE", columns: ["ZACCOUNTID", "ZSAMPLEDAT"]),
+        Desired(table: "ZACCOUNTSESSIONINFO", columns: ["ZACCOUNTID", "ZLASTSEENAT"]),
     ]
 
     /// Create whatever is missing. Returns the names created, for the log and

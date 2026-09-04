@@ -121,8 +121,13 @@ struct MenuBarLabel: View {
 
     /// Single most recent TokenSample, for the active-model chip. Cap
     /// to 1 — we never need any other field besides `model`.
+    ///
+    /// Two of them, chosen at read time, the same shape as the today
+    /// aggregates above: unscoped this named whichever account wrote last, so
+    /// a menu bar scoped to one account showed the other's model.
     @Query(MenuBarLabel.recentTokenSampleDescriptor)
     private var recentSamples: [TokenSample]
+    @Query private var scopedRecentSamples: [TokenSample]
 
     /// Recent scoped `limits[]` rows — the source of the per-model windows the
     /// icon driver can point at. Bounded so this always-visible label never
@@ -179,6 +184,11 @@ struct MenuBarLabel: View {
                 $0.date == today && $0.accountId == acct
             }
         )
+        var scopedRecent = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.accountId == acct },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedRecent.fetchLimit = 1
+        _scopedRecentSamples = Query(scopedRecent)
     }
 
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
@@ -310,7 +320,8 @@ struct MenuBarLabel: View {
     }
 
     private var activeModel: String? {
-        recentSamples.first.map { pacerModelDisplayName($0.model) }
+        let latest = menuScope.isAll ? recentSamples.first : scopedRecentSamples.first
+        return latest.map { pacerModelDisplayName($0.model) }
     }
 
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
