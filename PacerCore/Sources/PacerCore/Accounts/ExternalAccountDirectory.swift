@@ -22,6 +22,14 @@ public struct ExternalAccountDirectory: Sendable {
         public let organizationId: String
         public let emailAddress: String?
         public let organizationName: String?
+        /// The switcher's slot number — `cswap switch 2`, "Account 1".
+        ///
+        /// Borrowed for the same reason the alias is: it is a *choice* the user
+        /// made (and can reorder with `cswap swap`/`cswap move`), so listing
+        /// accounts in a different order than the tool they switch with is a
+        /// small, constant friction.
+        public let slot: Int?
+
         /// The nickname the user set with `cswap alias <n> <name>`.
         ///
         /// The only piece of the roster that is *chosen* rather than observed —
@@ -37,11 +45,12 @@ public struct ExternalAccountDirectory: Sendable {
 
         public init(organizationId: String, emailAddress: String?,
                     organizationName: String?, alias: String? = nil,
-                    source: String) {
+                    slot: Int? = nil, source: String) {
             self.organizationId = organizationId
             self.emailAddress = emailAddress
             self.organizationName = organizationName
             self.alias = alias
+            self.slot = slot
             self.source = source
         }
     }
@@ -144,6 +153,7 @@ public struct ExternalAccountDirectory: Sendable {
                     organizationName: (fields["organizationName"] as? String)
                         .flatMap { $0.isEmpty ? nil : $0 },
                     alias: (fields["alias"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                    slot: Int(slot),
                     source: "claude-swap slot \(slot)"
                 ))
             }

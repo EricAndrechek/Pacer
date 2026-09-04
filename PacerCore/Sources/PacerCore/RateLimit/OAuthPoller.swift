@@ -557,11 +557,20 @@ public actor OAuthPoller: TokenPoolTesting {
                         sevenDayPct: a.latestSevenDayPct,
                         extraUsageCents: a.latestExtraUsageCents,
                         lastPolledAt: a.latestPolledAt,
-                        laneCount: laneCounts[a.id] ?? 0
+                        laneCount: laneCounts[a.id] ?? 0,
+                        switcherSlot: a.switcherSlot
                     )
                 }
-                // Active first, then most-recently-polled.
+                // The switcher's slot order when there is one — someone who
+                // types `cswap switch 2` should find account 2 second here.
+                // Otherwise active first, then most-recently-polled.
                 .sorted { l, r in
+                    switch (l.switcherSlot, r.switcherSlot) {
+                    case let (a?, b?) where a != b: return a < b
+                    case (nil, _?): return false
+                    case (_?, nil): return true
+                    default: break
+                    }
                     if l.isActive != r.isActive { return l.isActive }
                     return (l.lastPolledAt ?? .distantPast) > (r.lastPolledAt ?? .distantPast)
                 }

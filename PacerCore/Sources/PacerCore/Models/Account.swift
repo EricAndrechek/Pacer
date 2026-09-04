@@ -60,6 +60,15 @@ public final class Account {
     // can observe, from Claude Code's own `oauthAccount` for the live login
     // and from an external switcher's roster for the others.
 
+    /// The slot an external switcher numbers this account as — `cswap`'s
+    /// "Account 1". Nil when there is no switcher, or it does not know this
+    /// account.
+    ///
+    /// Ordering, not identity: `id` is still the org. It exists so Pacer lists
+    /// accounts in the order the user already switches between them, rather
+    /// than in one of its own.
+    public var switcherSlot: Int?
+
     /// The account's email, when known. Nil until observed.
     public var emailAddress: String?
     /// The org's display name, when known (e.g. "Acme's Organization").
@@ -130,6 +139,22 @@ public final class Account {
             || name.hasPrefix("Account ")
             || name == "Primary account"
             || name.isEmpty
+    }
+
+    /// The order accounts should be listed in, everywhere.
+    ///
+    /// The switcher's slot first when there is one — someone who types
+    /// `cswap switch 2` should find account 2 second in Pacer's menu too.
+    /// Otherwise the active login leads, then by id for stability.
+    public static func listOrder(_ lhs: Account, _ rhs: Account) -> Bool {
+        switch (lhs.switcherSlot, rhs.switcherSlot) {
+        case let (l?, r?) where l != r: return l < r
+        case (nil, _?): return false
+        case (_?, nil): return true
+        default: break
+        }
+        if lhs.isActive != rhs.isActive { return lhs.isActive }
+        return lhs.id < rhs.id
     }
 
     /// Sentinel id for the account whose org the server never returned.

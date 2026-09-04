@@ -77,6 +77,8 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
     public let lastPolledAt: Date?
     /// How many pollable lanes (tokens) currently resolve to this account.
     public let laneCount: Int
+    /// The external switcher's slot, for ordering. See `Account.switcherSlot`.
+    public let switcherSlot: Int?
 
     public init(
         id: String,
@@ -88,7 +90,8 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         sevenDayPct: Double?,
         extraUsageCents: Int?,
         lastPolledAt: Date?,
-        laneCount: Int
+        laneCount: Int,
+        switcherSlot: Int? = nil
     ) {
         self.id = id
         self.organizationId = organizationId
@@ -100,6 +103,7 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         self.extraUsageCents = extraUsageCents
         self.lastPolledAt = lastPolledAt
         self.laneCount = laneCount
+        self.switcherSlot = switcherSlot
     }
 }
 

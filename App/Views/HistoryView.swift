@@ -361,7 +361,7 @@ private struct MonthlyChartCard: View {
                 BarMark(
                     x: .value("Month", m.month),
                     y: .value("Cost", m.cost),
-                    width: .fixed(56)
+                    width: PacerSparseBars.width(count: monthly.count, cap: 56)
                 )
                 .foregroundStyle(.tint)
                 .cornerRadius(2)

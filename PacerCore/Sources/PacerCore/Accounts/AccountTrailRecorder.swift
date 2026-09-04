@@ -160,6 +160,14 @@ public final class AccountTrailRecorder {
             account.displayName = alias
             changed = true
         }
+        // And the slot, for every account — ordering is not a name and does not
+        // wait on one being absent.
+        for account in accounts {
+            guard let slot = directory.entries[account.id]?.slot,
+                  account.switcherSlot != slot else { continue }
+            account.switcherSlot = slot
+            changed = true
+        }
         if changed { try? context.save() }
     }
 

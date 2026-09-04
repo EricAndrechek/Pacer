@@ -302,7 +302,7 @@ struct PaceChartCard: View {
             return [(limitAccountId, nil)]
         }
         return accounts
-            .sorted { $0.isActive != $1.isActive ? $0.isActive : $0.id < $1.id }
+            .sorted(by: Account.listOrder)
             .map { (accountId: Optional($0.id), label: Optional($0.shortLabel)) }
     }
 

@@ -642,7 +642,7 @@ private struct ModelsContent: View {
                         BarMark(
                             x: .value("Date", d.date),
                             y: .value("Tokens", d.tokens),
-                            width: .fixed(44)
+                            width: PacerSparseBars.width(count: Set(dailyMix.map(\.date)).count)
                         )
                         .foregroundStyle(by: .value("Model", d.displayName))
                         .cornerRadius(1.5)

@@ -41,6 +41,12 @@ restore() { open -g -a Pacer 2>/dev/null || true; }
 trap restore EXIT INT TERM
 
 mkdir -p "$OUT"
+
+# The render opens the store read-only, and SwiftData needs a *write* to apply
+# a schema migration — so the first render after a model change fails until the
+# app has launched once and migrated. Make sure it has.
+open -g -a Pacer 2>/dev/null || true
+
 echo "==> Rendering scopes [$SCOPES] to $OUT"
 PACER_SCREENSHOT_MODE=1 \
 PACER_RENDER_LIVE="$SCOPES" \

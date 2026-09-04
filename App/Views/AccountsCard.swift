@@ -54,11 +54,10 @@ struct AccountsCard: View {
         }
     }
 
+    /// The switcher's order when there is one, so the list matches the tool the
+    /// user actually switches with. See `Account.listOrder`.
     private var sortedAccounts: [Account] {
-        accounts.sorted {
-            if $0.isActive != $1.isActive { return $0.isActive }
-            return $0.lastSeenAt > $1.lastSeenAt
-        }
+        accounts.sorted(by: Account.listOrder)
     }
 
     private func subtitle(for account: Account) -> String? {

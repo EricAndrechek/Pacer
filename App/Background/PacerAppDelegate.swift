@@ -111,7 +111,21 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     ? try LiveRenderMode.container()
                     : try PacerStore.makeInMemoryContainer()
             } catch {
-                Self.showFatalContainerError(error)
+                // Never a modal here. This runs headless, beside the app the
+                // user is working in, and a diagnostic that puts up a dialog
+                // saying "Pacer can't open its data store" is indistinguishable
+                // from the real app failing — which is exactly how it read when
+                // it happened.
+                //
+                // It happens for a specific, expected reason: the render opens
+                // the store READ-ONLY, and a schema change needs a write to
+                // migrate. So the first render after a model change fails until
+                // the app itself has launched once. Say that, and exit.
+                FileHandle.standardError.write(Data("""
+                    [Pacer live-render] could not open the store: \(error)
+                    [Pacer live-render] if a model changed, launch Pacer once to migrate, then re-run.
+                    """.utf8))
+                exit(2)
             }
             backgroundService = AppBackgroundService(container: container)
             super.init()

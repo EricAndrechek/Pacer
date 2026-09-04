@@ -26,7 +26,9 @@ struct AccountScopeControl: View {
             Menu {
                 Picker("Account", selection: binding) {
                     Text("All accounts").tag(nil as String?)
-                    ForEach(accounts, id: \.id) { account in
+                    // The switcher's slot order when there is one, so this
+                    // menu reads in the same order as `cswap list`.
+                    ForEach(accounts.sorted(by: Account.listOrder), id: \.id) { account in
                         Text(account.label).tag(account.id as String?)
                     }
                 }

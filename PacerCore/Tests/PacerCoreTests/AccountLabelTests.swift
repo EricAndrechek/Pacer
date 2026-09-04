@@ -151,3 +151,39 @@ struct ExternalAccountDirectoryTests {
         #expect(ExternalAccountDirectory.discover(homeDirectory: home).isEmpty)
     }
 }
+
+/// Pacer lists accounts in the order the user already switches between them.
+@Suite("Account list order")
+struct AccountListOrderTests {
+
+    private func make(_ id: String, slot: Int?, active: Bool = false) -> Account {
+        let a = Account(id: id, organizationId: id, displayName: "n", isActive: active,
+                        firstSeenAt: .distantPast, lastSeenAt: .distantPast)
+        a.switcherSlot = slot
+        return a
+    }
+
+    @Test("the switcher's slot wins")
+    func slotOrders() {
+        let two = make("b", slot: 2, active: true)      // active, but slot 2
+        let one = make("a", slot: 1)
+        #expect([two, one].sorted(by: Account.listOrder).map(\.id) == ["a", "b"])
+    }
+
+    /// An account the switcher does not know sorts after the ones it does,
+    /// rather than jumbling into the middle of a numbered list.
+    @Test("un-slotted accounts follow the numbered ones")
+    func unslottedLast() {
+        let numbered = make("a", slot: 2)
+        let unknown = make("z", slot: nil, active: true)
+        #expect([unknown, numbered].sorted(by: Account.listOrder).map(\.id) == ["a", "z"])
+    }
+
+    /// With no switcher at all, the active login leads — the old behaviour.
+    @Test("no slots means active first")
+    func activeFirstWithoutSlots() {
+        let idle = make("a", slot: nil)
+        let active = make("b", slot: nil, active: true)
+        #expect([idle, active].sorted(by: Account.listOrder).map(\.id) == ["b", "a"])
+    }
+}
