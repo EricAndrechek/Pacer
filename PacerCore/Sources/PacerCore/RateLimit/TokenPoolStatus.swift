@@ -127,6 +127,9 @@ public protocol TokenPoolTesting: AnyObject, Sendable {
     /// account's timeline the shared sample tables hold; no-op if it's
     /// already active or unknown.
     func setActiveAccount(id: String) async
+    /// Give the account a name of the user's choosing. An empty or
+    /// whitespace-only name clears the rename and restores the derived one.
+    func renameAccount(id: String, to name: String) async
 }
 
 /// Process-wide, MainActor-isolated snapshot of the OAuth token pool —
@@ -198,5 +201,9 @@ public final class TokenPoolStatus {
 
     public func setActiveAccount(id: String) async {
         await tester?.setActiveAccount(id: id)
+    }
+
+    public func renameAccount(id: String, to name: String) async {
+        await tester?.renameAccount(id: id, to: name)
     }
 }

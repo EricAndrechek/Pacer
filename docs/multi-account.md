@@ -189,6 +189,29 @@ bar, all four data widgets, the advisor badges, and CSV export.
 | `ToolbarFreshness` | Data freshness, not usage. |
 | Project management (merge sheet, collections manager, alias manager) | They list *paths*; totals are ordering context. Scoping could hide a project you are trying to merge. |
 
+### Naming an account
+
+Every real account arrives with the identical derived name — `Account.defaultName`
+keys off the subscription tier, and a switcher is by definition two accounts on
+the same plan — so `label` reached past it for the observed email. That reads
+fine on a dashboard and badly everywhere else: it is the string in the scope
+dropdown, and it was the string a Prometheus scrape would have carried off the
+machine.
+
+So Settings → Tokens → Accounts lets you rename one: double-click the name, or
+use the row's context menu, which also offers **Reset Name**. Two consequences
+worth knowing:
+
+- **A name you typed outranks everything observed.** `label` used to prefer the
+  email unconditionally; a rename under that rule would have been a control
+  that visibly does nothing.
+- Clearing the name restores the *derived* placeholder, not an empty string —
+  `label` treats a blank as absent and would fall through to the raw uuid.
+
+Identity is still the org id, so a rename touches nothing but the label. It is
+also the only way to get a readable `pacer_account_info` label out of the
+metrics endpoint.
+
 ### The HTTP API asks explicitly
 
 `GET /v1/accounts` lists what Pacer tracks — id, label, lifetime usage, each

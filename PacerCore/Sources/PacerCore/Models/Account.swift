@@ -80,6 +80,10 @@ public final class Account {
     /// the same string for two different accounts that we have any way to
     /// tell apart.
     public var label: String {
+        // A name someone typed wins outright. Anything below this line is
+        // observed rather than chosen, and a rename that the email kept
+        // overriding would be a control that visibly does nothing.
+        if !hasDerivedName { return displayName }
         if let emailAddress, !emailAddress.isEmpty { return emailAddress }
         if let organizationName, !organizationName.isEmpty { return organizationName }
         if !displayName.isEmpty { return displayName }

@@ -1,6 +1,20 @@
 import SwiftUI
 import PacerCore
 
+/// What to do with a new name, as a value rather than a bare closure.
+///
+/// Not `((String) -> Void)?` on purpose. Swift matches an unlabelled trailing
+/// closure to the *first* parameter that can structurally accept one, so an
+/// optional closure parameter declared before `trailing` silently swallows
+/// every existing `PacerAccountRow(model:) { badge }` call site — which is how
+/// this was first written, and it failed to build in a way that pointed at the
+/// caller rather than the cause. A struct cannot be mistaken for the trailing
+/// closure, so callers that do not rename need to know nothing about this.
+public struct PacerRenameAction {
+    public let perform: (String) -> Void
+    public init(_ perform: @escaping (String) -> Void) { self.perform = perform }
+}
+
 /// One account, rendered the same way everywhere.
 ///
 /// There were two of these: the Tokens settings switcher and the dashboard's
@@ -44,12 +58,28 @@ public struct PacerAccountRow<Trailing: View>: View {
     }
 
     public let model: Model
+    /// Non-nil makes the name editable in place — double-click it, or use the
+    /// row's context menu. Called with the trimmed new name; an empty string
+    /// means "clear the rename", which the caller turns back into whatever
+    /// name it would have derived.
+    ///
+    /// It lives on the shared row rather than in one screen because both
+    /// screens show the same name, and the last time these two rows were
+    /// implemented separately they drifted apart. A screen that has nothing
+    /// to write passes nil and gets plain text.
+    public let onRename: PacerRenameAction?
     /// Whatever the calling screen needs on the right: an Active badge, a
     /// Switch button, a turn count.
     public let trailing: () -> Trailing
 
-    public init(model: Model, @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+    @State private var draft = ""
+    @State private var isRenaming = false
+    @FocusState private var nameFocused: Bool
+
+    public init(model: Model, onRename: PacerRenameAction? = nil,
+                @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
         self.model = model
+        self.onRename = onRename
         self.trailing = trailing
     }
 
@@ -57,10 +87,28 @@ public struct PacerAccountRow<Trailing: View>: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(model.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if isRenaming {
+                        TextField("Name", text: $draft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(maxWidth: 180)
+                            .focused($nameFocused)
+                            .onSubmit(commitRename)
+                            .onExitCommand { isRenaming = false }
+                            // Clicking elsewhere is a commit, not a discard:
+                            // the field looks like the name it replaced, so
+                            // losing the edit would read as the rename having
+                            // silently failed.
+                            .onChange(of: nameFocused) { _, focused in
+                                if !focused && isRenaming { commitRename() }
+                            }
+                    } else {
+                        Text(model.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .onTapGesture(count: 2) { beginRename() }
+                    }
                     if let plan = model.plan, !plan.isEmpty {
                         Text(plan)
                             .font(.system(size: 10))
@@ -99,6 +147,12 @@ public struct PacerAccountRow<Trailing: View>: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 10)
+        .contextMenu {
+            if onRename != nil {
+                Button("Rename…") { beginRename() }
+                Button("Reset Name") { onRename?.perform("") }
+            }
+        }
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(model.isActive ? Color.accentColor.opacity(0.12) : Color.clear)
@@ -109,6 +163,21 @@ public struct PacerAccountRow<Trailing: View>: View {
                             lineWidth: 1)
                 )
         )
+    }
+
+    private func beginRename() {
+        guard onRename != nil else { return }
+        draft = model.name
+        isRenaming = true
+        nameFocused = true
+    }
+
+    private func commitRename() {
+        guard isRenaming else { return }
+        isRenaming = false
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != model.name else { return }
+        onRename?.perform(trimmed)
     }
 }
 

@@ -183,6 +183,25 @@ struct PacerAccountsAPITests {
         #expect(text.contains("name=\"Account b\""))
     }
 
+    /// The rename is what makes `pacer_account_info` worth joining on: without
+    /// one every account reports `Account <last 4>`, because nothing Pacer
+    /// observes is safe to publish.
+    @Test func aRenameReachesTheMetricLabel() {
+        let text = metrics(accounts: [
+            PacerMetrics.AccountToday(
+                account: row(id: "0000-4ea8", label: "Personal", displayName: "Personal",
+                             organizationName: "someone@example.com's Organization"),
+                models: []),
+            PacerMetrics.AccountToday(
+                account: row(id: "1111-8c95", label: "someone@example.com",
+                             displayName: "Claude account (max)"),
+                models: []),
+        ])
+        #expect(text.contains("name=\"Personal\""))
+        #expect(text.contains("name=\"Account 8c95\""))
+        #expect(!text.contains("@"))
+    }
+
     private func metrics(accounts: [PacerMetrics.AccountToday]) -> String {
         let snapshot = PacerSnapshotPayload(
             schemaVersion: 1, generatedAt: Date(timeIntervalSince1970: 1_700_000_000),

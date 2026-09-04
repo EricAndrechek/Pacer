@@ -1866,15 +1866,23 @@ private struct TokensCard: View {
     /// token list exactly as before.
     private var accountsSwitcher: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("ACCOUNTS")
-                .font(.system(size: 9, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.tertiary)
+            HStack(spacing: 6) {
+                Text("ACCOUNTS")
+                    .font(.system(size: 9, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                Text("double-click a name to rename")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.quaternary)
+            }
             ForEach(pool.accounts) { account in
                 AccountSwitchRow(
                     account: account,
                     switching: switchingId == account.id,
-                    onSwitch: { switchTo(account.id) }
+                    onSwitch: { switchTo(account.id) },
+                    onRename: { name in
+                        Task { await TokenPoolStatus.shared.renameAccount(id: account.id, to: name) }
+                    }
                 )
             }
         }
@@ -2026,6 +2034,9 @@ private struct AccountSwitchRow: View {
     let account: AccountStatusSummary
     let switching: Bool
     let onSwitch: () -> Void
+    /// Renaming lives here rather than on the dashboard card: this is the
+    /// screen you open to configure an account, and the card is a readout.
+    let onRename: (String) -> Void
 
     var body: some View {
         PacerAccountRow(model: .init(
@@ -2035,7 +2046,7 @@ private struct AccountSwitchRow: View {
             fiveHourPercent: account.fiveHourPct,
             sevenDayPercent: account.sevenDayPct,
             isActive: account.isActive
-        )) {
+        ), onRename: PacerRenameAction(onRename)) {
             if account.isActive {
                 Text("Active")
                     .font(.system(size: 10, weight: .medium))

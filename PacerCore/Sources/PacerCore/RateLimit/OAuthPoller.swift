@@ -456,6 +456,31 @@ public actor OAuthPoller: TokenPoolTesting {
         await publishStatus()
     }
 
+    /// Rename an account. Identity is the org id, so this touches nothing but
+    /// the label — `setActiveAccount`'s timeline swap has no counterpart here.
+    ///
+    /// Clearing the name restores the derived placeholder rather than leaving
+    /// an empty string, because `Account.label` treats a blank name as absent
+    /// and would fall through to the raw uuid.
+    public func renameAccount(id: String, to name: String) async {
+        let container = self.container
+        // On the main actor because that is where `recordPoll` upserts these
+        // rows. Two contexts writing one `Account` from different actors is a
+        // race worth not having for a field nobody writes twice.
+        await MainActor.run {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.id == id })
+            guard let account = (try? context.fetch(descriptor))?.first else { return }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            account.displayName = trimmed.isEmpty
+                ? Account.defaultName(forOrg: account.organizationId,
+                                      subscriptionType: account.subscriptionType)
+                : trimmed
+            try? context.save()
+        }
+        await publishStatus()
+    }
+
     /// Publish a display-safe snapshot of the lane pool + accounts +
     /// effective cadence to `TokenPoolStatus.shared` for the Settings
     /// section.

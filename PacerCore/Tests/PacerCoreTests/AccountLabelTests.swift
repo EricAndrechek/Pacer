@@ -41,6 +41,19 @@ struct AccountLabelTests {
         #expect(account(email: "", orgName: "").label == "Claude account (max)")
     }
 
+    /// The rename would otherwise be a control that visibly does nothing:
+    /// every real account has an observed email, and the email used to win.
+    @Test("a name the user typed beats the observed email")
+    func renameBeatsEverythingObserved() {
+        #expect(account(displayName: "Work", email: "a@example.com", orgName: "Globex").label == "Work")
+    }
+
+    @Test("clearing the rename hands the label back to what was observed")
+    func clearedRenameFallsBackToObserved() {
+        let restored = Account.defaultName(forOrg: "org-1", subscriptionType: "max")
+        #expect(account(displayName: restored, email: "a@example.com").label == "a@example.com")
+    }
+
     @Test("auto-derived names are recognised so a rename is never clobbered")
     func derivedNamesAreRecognised() {
         #expect(account(displayName: "Claude account (max20x)").hasDerivedName)
