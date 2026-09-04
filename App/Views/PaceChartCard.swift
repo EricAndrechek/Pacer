@@ -40,7 +40,7 @@ struct PaceChartCard: View {
     ///
     /// Rate-limit rows only change when the OAuth poller writes, roughly every
     /// five minutes, so `newestSignal` (one row) decides when to reload.
-    @State private var samples: [RateLimitSample] = []
+    @State private var samples: [LimitSamplePoint] = []
 
     /// The newest scoped `limits[]` rows, newest first — just enough to resolve
     /// the latest poll's batch, which is what decides the scoped column set.
@@ -60,7 +60,7 @@ struct PaceChartCard: View {
     /// window — so the scoped line rendered as a stub near "now" no matter how
     /// long the cycle had been running. The 8-day cutoff bounds it by time
     /// instead, which is the bound that matches what the chart draws.
-    @State private var scopedHistory: [UsageLimitSample] = []
+    @State private var scopedHistory: [ScopedSamplePoint] = []
 
     /// One row: the newest rate-limit sample. Cheap to re-run on every save —
     /// which is exactly what `@Query` will do — and its timestamp is the
@@ -150,6 +150,10 @@ struct PaceChartCard: View {
     /// Newest sample already loaded. `nil` means nothing has been loaded yet,
     /// which is the only case that reads all 8 days.
     @State private var loadedThrough: Date?
+    /// True only while the first, full-window fetch for this account is in
+    /// flight — so the card says "loading" rather than showing the cold-start
+    /// empty state, which reads as "this account has no data".
+    @State private var isLoading = false
 
     /// Whether the forecast overlay applies to what is on screen.
     ///
@@ -163,59 +167,193 @@ struct PaceChartCard: View {
         limitAccountId == nil || limitAccountId == UsageScope.shared.activeAccountId
     }
 
-    @MainActor
-    private func reload() {
-        let cutoff = Date().addingTimeInterval(-8 * 86400)
+    /// Load the two 8-day series **off the main actor**.
+    ///
+    /// This used to be `@MainActor` and fetch `@Model` rows straight into
+    /// `@State`. On a busy account that is ~12,500 fixed and ~19,000 scoped
+    /// rows, and SwiftData faults whole objects at roughly 66 µs each however
+    /// few properties you ask for — so about two seconds of frozen window.
+    /// That was survivable while it happened on appear and then incrementally;
+    /// it stopped being survivable when switching accounts started causing it,
+    /// because a freeze you cause by clicking something reads as a broken app.
+    ///
+    /// So the fetch happens on `@ScanActor` with its own `ModelContext` and
+    /// only `LimitSamplePoint`/`ScopedSamplePoint` values cross back — the
+    /// shape `AccountTotals` and `TokenPoolStatus` already use. The card
+    /// renders whatever it has meanwhile.
+    private func reload() async {
+        guard let container = try? PacerStore.sharedModelContainer() else { return }
+        let account = limitAccountId
 
-        // Incremental. A poll adds a handful of rows to an 8-day window of
-        // ~25,700, so re-reading the whole window each time re-materialized
-        // ~25,700 rows to learn about ~3. Once the per-save churn was fixed
-        // this became the largest remaining consumer in the process.
-        //
-        // Newest-first order is preserved by prepending, which is also why the
-        // fetch below is ordered the same way.
-        if let through = loadedThrough {
-            let account = limitAccountId
-            var fresh = FetchDescriptor<RateLimitSample>(
-                predicate: account == nil
-                    ? #Predicate<RateLimitSample> { $0.sampledAt > through }
-                    : #Predicate<RateLimitSample> { $0.sampledAt > through && $0.accountId == account },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-            fresh.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
-            let added = (try? modelContext.fetch(fresh)) ?? []
-            if !added.isEmpty { samples = added + samples }
+        // Seed from the cross-rebuild cache before deciding what to fetch: a
+        // scope flip back to an account already loaded this session becomes an
+        // incremental top-up instead of another full window.
+        if loadedThrough == nil {
+            let cached = PaceSeriesCache.shared.series(for: account)
+            if cached.loadedThrough != nil {
+                samples = cached.fixed
+                scopedHistory = cached.scoped
+                loadedThrough = cached.loadedThrough
+            }
+        }
 
-            var freshScoped = FetchDescriptor<UsageLimitSample>(
-                predicate: account == nil
-                    ? #Predicate<UsageLimitSample> { $0.sampledAt > through }
-                    : #Predicate<UsageLimitSample> { $0.sampledAt > through && $0.accountId == account },
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-            freshScoped.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-            let addedScoped = (try? modelContext.fetch(freshScoped)) ?? []
-            if !addedScoped.isEmpty { scopedHistory = addedScoped + scopedHistory }
+        let through = loadedThrough
+        let started = Date()
+        isLoading = through == nil
 
+        let loaded = await Task.detached(priority: .userInitiated) {
+            await Self.load(container: container, account: account, through: through)
+        }.value
+        isLoading = false
+
+        if let through, loadedThrough == through {
+            // Incremental. A poll adds a handful of rows to an 8-day window of
+            // ~31,000, so re-reading the whole window each time would
+            // re-materialize all of them to learn about three.
+            //
+            // Newest-first order is preserved by prepending, which is also why
+            // the fetch is ordered the same way.
+            if !loaded.fixed.isEmpty { samples = loaded.fixed + samples }
+            if !loaded.scoped.isEmpty { scopedHistory = loaded.scoped + scopedHistory }
             // Drop what has aged out, so the window stays 8 days rather than
             // growing for as long as Pacer is open.
-            samples.removeAll { $0.sampledAt < cutoff }
-            scopedHistory.removeAll { $0.sampledAt < cutoff }
+            samples.removeAll { $0.sampledAt < loaded.cutoff }
+            scopedHistory.removeAll { $0.sampledAt < loaded.cutoff }
+        } else if through == nil {
+            samples = loaded.fixed
+            scopedHistory = loaded.scoped
         } else {
-            var descriptor = LimitScope.rateLimits(account: limitAccountId, since: cutoff)
-            // Columnar projection: the card reads only these four scalars.
-            descriptor.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
-            samples = (try? modelContext.fetch(descriptor)) ?? []
-
-            var scopedDescriptor = LimitScope.usageLimits(account: limitAccountId, since: cutoff)
-            scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-            scopedHistory = (try? modelContext.fetch(scopedDescriptor)) ?? []
+            // The scope changed while this load was in flight; its rows belong
+            // to the previous account. Drop them rather than mixing.
+            return
         }
 
         let newestLoaded = [samples.first?.sampledAt, scopedHistory.first?.sampledAt]
             .compactMap { $0 }.max()
         if let newestLoaded { loadedThrough = newestLoaded }
+        PaceSeriesCache.shared.store(
+            .init(fixed: samples, scoped: scopedHistory, loadedThrough: loadedThrough),
+            for: account)
+
+        if through == nil {
+            Log.write("PaceChartCard",
+                      "loaded \(samples.count) fixed + \(scopedHistory.count) scoped row(s) "
+                        + "in \(Int(Date().timeIntervalSince(started) * 1000))ms"
+                        + " [account \(account.map { String($0.suffix(4)) } ?? "all")]")
+        }
     }
 
+    private struct Loaded: Sendable {
+        let fixed: [LimitSamplePoint]
+        let scoped: [ScopedSamplePoint]
+        let cutoff: Date
+    }
+
+    /// Deliberately **not** on `@ScanActor`. The first version was, and the
+    /// same fetch that takes 59 ms against the store directly measured 1,120 ms
+    /// in-app — it was not slow, it was queued behind the scan pipeline, which
+    /// owns that actor and is at its busiest exactly when the dashboard first
+    /// appears. A short-lived context of its own has no such queue, which is
+    /// the same reason `PacerSnapshotBuilder` and `PacerUsageBuilder` are
+    /// `nonisolated` and build their own.
+    /// Deliberately **not** on `@ScanActor`. The first version was, and it
+    /// queued behind the scan pipeline, which owns that actor and is at its
+    /// busiest exactly when the dashboard first appears. A short-lived context
+    /// of its own has no such queue — the same reason `PacerSnapshotBuilder`
+    /// and `PacerUsageBuilder` are `nonisolated` and build their own.
+    ///
+    /// Two bounds here are about fetching what the card *draws*, which on a
+    /// busy account is a third of what it used to read:
+    ///
+    /// - **The 5-hour window does not need eight days.** Both fixed windows
+    ///   came from one 8-day fetch, but the 5h column only ever plots its
+    ///   current five-hour cycle. Half the fixed rows were being materialised
+    ///   to be filtered straight back out. The `(accountId, window, sampledAt)`
+    ///   index serves both halves.
+    /// - **Account-wide scoped rows are never charted.** The columns keep only
+    ///   model/surface-scoped identities, but the history fetch took every
+    ///   identity: on this machine `session||` and `weekly_all||` were 12,536
+    ///   of 18,822 rows over eight days — two thirds of the scoped cost, drawn
+    ///   nowhere.
+    private nonisolated static func load(container: ModelContainer, account: String?,
+                                         through: Date?) async -> Loaded {
+        let context = ModelContext(container)
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-8 * 86400)
+        // Twice the 5-hour cycle, so a window whose reset has just rolled (or
+        // whose `resets_at` is briefly stale) still has its whole cycle here.
+        let fiveHourCutoff = through ?? now.addingTimeInterval(-12 * 3600)
+        let longCutoff = through ?? cutoff
+
+        var fixed: [LimitSamplePoint] = []
+        for (window, since) in [(RateLimitWindowName.fiveHour, fiveHourCutoff),
+                                (RateLimitWindowName.sevenDay, longCutoff)] {
+            var d = FetchDescriptor<RateLimitSample>(
+                predicate: Self.fixedPredicate(account: account, window: window,
+                                               since: since, incremental: through != nil))
+            d.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
+            // Columnar projection: the card reads only these four scalars.
+            d.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
+            fixed += ((try? context.fetch(d)) ?? []).map(\.limitPoint)
+        }
+
+        var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
+            predicate: Self.scopedPredicate(account: account, since: longCutoff,
+                                            incremental: through != nil))
+        scopedDescriptor.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
+        scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
+        let scoped = ((try? context.fetch(scopedDescriptor)) ?? []).map(\.scopedPoint)
+
+        return Loaded(fixed: fixed.sorted { $0.sampledAt > $1.sampledAt },
+                      scoped: scoped, cutoff: cutoff)
+    }
+
+    /// `sampledAt >= since` for a cold load, `> since` for an incremental one
+    /// — the incremental path is topping up past a row it already holds.
+    private nonisolated static func fixedPredicate(
+        account: String?, window: String, since: Date, incremental: Bool
+    ) -> Predicate<RateLimitSample> {
+        switch (account, incremental) {
+        case let (a?, true):
+            return #Predicate { $0.accountId == a && $0.window == window && $0.sampledAt > since }
+        case let (a?, false):
+            return #Predicate { $0.accountId == a && $0.window == window && $0.sampledAt >= since }
+        case (nil, true):
+            return #Predicate { $0.window == window && $0.sampledAt > since }
+        case (nil, false):
+            return #Predicate { $0.window == window && $0.sampledAt >= since }
+        }
+    }
+
+    /// Model/surface-scoped rows only — the account-wide `session` and
+    /// `weekly_all` identities duplicate the 5h/7d columns and are filtered out
+    /// of the column set anyway, so reading their history is pure cost.
+    private nonisolated static func scopedPredicate(
+        account: String?, since: Date, incremental: Bool
+    ) -> Predicate<UsageLimitSample> {
+        switch (account, incremental) {
+        case let (a?, true):
+            return #Predicate {
+                $0.accountId == a && $0.sampledAt > since
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case let (a?, false):
+            return #Predicate {
+                $0.accountId == a && $0.sampledAt >= since
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case (nil, true):
+            return #Predicate {
+                $0.sampledAt > since
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        case (nil, false):
+            return #Predicate {
+                $0.sampledAt >= since
+                    && ($0.modelId != nil || $0.modelDisplayName != nil || $0.surface != nil)
+            }
+        }
+    }
 
     // MARK: - Column model
 
@@ -247,9 +385,9 @@ struct PaceChartCard: View {
     // MARK: - Column set
 
     private struct Bucketed {
-        var fiveHour: [RateLimitSample] = []
-        var sevenDay: [RateLimitSample] = []
-        var latest: RateLimitSample?
+        var fiveHour: [LimitSamplePoint] = []
+        var sevenDay: [LimitSamplePoint] = []
+        var latest: LimitSamplePoint?
     }
 
     /// Derived synchronously from `samples` so the first render already has the
@@ -326,7 +464,7 @@ struct PaceChartCard: View {
     }
 
     private func fixedColumn(title: String, key: String, duration: TimeInterval,
-                             samples: [RateLimitSample], now: Date) -> Column {
+                             samples: [LimitSamplePoint], now: Date) -> Column {
         let latest = samples.first
         return Column(
             id: key, title: title, duration: duration,
@@ -397,7 +535,7 @@ struct PaceChartCard: View {
         // dashboard's data feed, not this card alone.
         return PacerCard("Rate-limit pace") {
             if b.latest == nil && scopedRows.isEmpty {
-                emptyState
+                if isLoading { loadingState } else { emptyState }
             } else if cols.count <= 2 {
                 // Exactly the fixed pair — reproduce the original two-column
                 // layout byte-for-byte so 5h/7d are unchanged when they're the
@@ -444,17 +582,7 @@ struct PaceChartCard: View {
         // Reload the 8-day series when a NEW rate-limit sample lands (the
         // poller writes roughly every five minutes), not on every context
         // change. `.task(id:)` also fires once on appear, which seeds them.
-        .task(id: reloadSignal) { reload() }
-        // A scope change invalidates the loaded series wholesale. `reload()`
-        // is incremental off `loadedThrough`, so without this it would keep
-        // the previous account's rows and top them up with the new one's.
-        .onChange(of: limitAccountId) {
-            samples = []
-            scopedHistory = []
-            loadedThrough = nil
-            reload()
-            Task { await refreshProjections(scopedIdentities: scopedIds) }
-        }
+        .task(id: reloadSignal) { await reload() }
         .task(id: windowKey) { await refreshProjections(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshProjections(scopedIdentities: scopedIds) }
@@ -468,6 +596,20 @@ struct PaceChartCard: View {
             outlook: outlooks[col.id],
             endEstimate: endEstimates[col.id],
             onCompare: onCompare)
+    }
+
+    /// Shown only while the first full-window fetch for an account is in
+    /// flight. Terse on purpose: the alternative is the cold-start empty
+    /// state, which says "waiting for the first reading" and would be a
+    /// straight-up lie about an account with four months of history.
+    private var loadingState: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text("Loading history…")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 110, alignment: .center)
     }
 
     private var emptyState: some View {

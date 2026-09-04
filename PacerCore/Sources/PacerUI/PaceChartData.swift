@@ -50,6 +50,36 @@ public extension PaceChartView.Data {
             resetsAt: resets, duration: duration, now: now)
     }
 
+    /// The value-typed builders. Identical maths, taking the four scalars the
+    /// line actually plots rather than `@Model` rows — so the caller can load
+    /// its series on a background context instead of the main actor. See
+    /// `LimitSamplePoint`.
+    static func cycle(
+        fixed points: [LimitSamplePoint], duration: TimeInterval, now: Date
+    ) -> PaceChartView.Data? {
+        guard let latest = points.max(by: { $0.sampledAt < $1.sampledAt }),
+              let resets = latest.resetsAt else { return nil }
+        return build(
+            points: points
+                .inCycle(resetting: resets, duration: duration)
+                .map { (time: $0.sampledAt, value: $0.usedPercentage) },
+            latestUsed: latest.usedPercentage,
+            resetsAt: resets, duration: duration, now: now)
+    }
+
+    static func cycle(
+        scoped row: UsageLimitSample, history: [ScopedSamplePoint],
+        duration: TimeInterval, now: Date
+    ) -> PaceChartView.Data? {
+        guard let resets = row.resetsAt else { return nil }
+        return build(
+            points: history
+                .inCycle(identity: row.identity, resetting: resets, duration: duration)
+                .map { (time: $0.sampledAt, value: $0.percent) },
+            latestUsed: row.percent,
+            resetsAt: resets, duration: duration, now: now)
+    }
+
     /// The same line with a forecast overlay attached. Consumers build the
     /// projection themselves (from the live engine on the dashboard, from the
     /// exported snapshot in the widget) and layer it on the shared base.

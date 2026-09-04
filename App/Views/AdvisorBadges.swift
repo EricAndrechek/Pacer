@@ -116,6 +116,7 @@ struct AdvisorBadges: View {
                 hintBadge(cachedHints[idx])
             }
             RateLimitSourceChip(limitAccountId: scope.limitAccountId)
+                .id("freshness-\(scope.limitAccountId ?? "all")")
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }

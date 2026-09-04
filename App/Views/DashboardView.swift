@@ -58,6 +58,16 @@ struct DashboardView: View {
             PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window in
                 modalRoot = .projection(window: window)
             })
+            // `.id` on the scope, so a change is an *identity* change.
+            //
+            // Re-initialising a view with a new `@Query` descriptor is
+            // supposed to be enough, and mostly is — but it left the card
+            // showing the previous account's windows until the user navigated
+            // away and back, because the `@Query`s that decide the column set
+            // kept their original predicate. An identity change rebuilds them
+            // deterministically, and hands the card fresh `@State` so it does
+            // not have to invalidate its own loaded series.
+            .id("pace-\(scope.limitAccountId ?? "all")")
             // Directly under the pace chart, because it answers the question
             // that chart raises the moment a second account exists: whose
             // numbers am I looking at? Renders nothing at all for a
