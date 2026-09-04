@@ -319,6 +319,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
             || AccountAssignMode.isActive {
             NSApp.setActivationPolicy(.accessory)
+            // `.accessory` keeps the diagnostic out of the Dock but does NOT
+            // stop macOS restoring a window for the bundle — these modes run
+            // as a *second* instance of an app the user already has open, and
+            // a restored window from the probe landed on the wrong display in
+            // front of them. Close anything that appears for as long as the
+            // mode runs; every one of these exits in seconds.
+            Self.suppressWindowsWhileDiagnosticRuns()
             Task { @MainActor in
                 if AccountAssignMode.isActive {
                     await AccountAssignMode.run(container: container)
@@ -414,6 +421,23 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         _ sender: NSApplication
     ) -> Bool {
         false
+    }
+
+    /// Close any window that appears while a headless diagnostic mode runs.
+    ///
+    /// Observing rather than closing once, because window restoration is
+    /// asynchronous — a single sweep at launch runs before the window exists.
+    /// The observer dies with the process, which these modes end explicitly.
+    private static func suppressWindowsWhileDiagnosticRuns() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil, queue: .main
+        ) { note in
+            (note.object as? NSWindow)?.close()
+        }
+        DispatchQueue.main.async {
+            for window in NSApp.windows { window.close() }
+        }
     }
 
     // MARK: - Activation policy management
