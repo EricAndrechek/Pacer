@@ -1,5 +1,9 @@
 # Multi-account: attribution, switching, and parallel sessions
 
+> Working state, invariants and traps live in
+> [`account-scope-handoff.md`](account-scope-handoff.md). This file is the
+> design.
+
 How Pacer knows which account a turn belongs to, why that needed a new
 mechanism, and what is still open.
 
