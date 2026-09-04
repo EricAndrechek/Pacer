@@ -610,6 +610,54 @@ struct PaceChartCard: View {
     /// outlook caption. Runs OFF the main actor (awaiting the `@ModelActor`
     /// engine from `@MainActor` would otherwise resume the heavy forecast fit
     /// inline on the main thread).
+    /// Coalesces the burst.
+    ///
+    /// Launch ran a full projection pass five times in five seconds — 9180 ms,
+    /// 2419, 1824, 4407, 187 — for one unchanged answer. There is a
+    /// `pacerEngineDidRecompute` per engine and there are three of them
+    /// (all-accounts plus each account), the window key changes again as the
+    /// series finish loading, and every one of those re-asked *every* window of
+    /// *every* account. Only the last pass could have been the one that
+    /// mattered.
+    ///
+    /// A debounce alone did not fix it, which is the interesting part: the
+    /// passes were not simultaneous, they were *serialized behind the engine's
+    /// 15-second launch refit* and all completed in the same second. Cancelling
+    /// the waiting wrapper does not help either — `askEngine` is a detached
+    /// task, so the work it started keeps going. So the gate is on starting a
+    /// pass at all: one in flight, at most one queued behind it.
+    @State private var projectionTask: Task<Void, Never>?
+    @State private var isRefreshingProjections = false
+    @State private var projectionRefreshPending = false
+
+    private func scheduleProjectionRefresh() {
+        projectionTask?.cancel()
+        projectionTask = Task { @MainActor in
+            // Long enough to swallow a burst that arrives while the engine is
+            // idle, short enough that a single recompute still lands before
+            // anyone reads the card.
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await runProjectionRefresh()
+        }
+    }
+
+    /// At most one pass in flight; anything asked for while one is running
+    /// becomes a single trailing re-run, so the card still ends on fresh
+    /// answers without recomputing them once per notification.
+    private func runProjectionRefresh() async {
+        if isRefreshingProjections {
+            projectionRefreshPending = true
+            return
+        }
+        isRefreshingProjections = true
+        repeat {
+            projectionRefreshPending = false
+            await refreshProjections()
+        } while projectionRefreshPending
+        isRefreshingProjections = false
+    }
+
     private func refreshProjections() async {
         guard let engines else { return }
         let started = Date()
@@ -751,9 +799,9 @@ struct PaceChartCard: View {
             series = []
             Task { await reload() }
         }
-        .task(id: windowKey) { await refreshProjections() }
+        .task(id: windowKey) { scheduleProjectionRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshProjections() }
+            scheduleProjectionRefresh()
         }
     }
 

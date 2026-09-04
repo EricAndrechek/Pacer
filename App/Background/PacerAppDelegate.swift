@@ -101,6 +101,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // `applicationDidFinishLaunching` drive the capture run instead of
         // the normal scan/menu-bar bring-up.
         if ScreenshotMode.isActive {
+            // Tag every line this process writes. It shares the user's log
+            // file with the app it is running beside, and an untagged
+            // multi-second `[MainThread] stalled` from a renderer that loads
+            // every page of every scope back to back reads exactly like a
+            // beachball in the app.
+            Log.processTag = LiveRenderMode.isActive ? "render" : "shot"
             PacerSettings.registerDefaults()
             do {
                 // The live renderer is the same off-screen path pointed at the
