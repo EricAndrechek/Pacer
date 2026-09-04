@@ -228,6 +228,33 @@ written the correct one. Read the plist under the group container
 (`plutil -p ~/Library/Group\ Containers/<group>/Library/Preferences/<group>.plist`)
 before concluding a write did not happen.
 
+**Adding a predicate to a hot `@Query` is a performance change.** This is the
+single most expensive lesson of the account work. A `@Query` re-executes on
+every model-context change, and Pacer's context changes every scan cycle. An
+*unpredicated* capped fetch survives that fine — CoreData serves it from its
+row cache — which is why the menu bar, the notification host and the toolbar
+pill all ran free before accounts existed. Adding `accountId == x` to each made
+every one a real fetch, several times a second, on the main thread. Scoping
+them was correct; leaving them as `@Query` was not. The pattern that works is
+a one-row **unpredicated** `@Query` as a signal plus the real load into
+`@State` behind it — `PaceChartCard` documents it and now so do the other four.
+
+And measure before fixing. I optimised the pace chart's fetch twice (off the
+main actor, then 2.5× fewer rows) and neither made a felt difference, because
+the cost was somewhere else entirely. `MainThreadStallWatchdog` plus a
+`sample` of the process found it in one pass: 91 of 92 main-thread samples in
+one view's body were two fetches. Three plausible culprits reasoned from the
+code, all three wrong.
+
+**SwiftData does not add indexes to an existing store.** The `#Index` entries
+for `accountId` are declared on all three sample models and do not exist in
+the store on disk — lightweight migration ignored them. Check with
+`sqlite3 <store> "SELECT name FROM sqlite_master WHERE type='index'"` before
+assuming a new index is doing anything. It happens not to matter yet (SQLite
+serves these from the `sampledAt` index in under a millisecond) but it will as
+the tables grow, and a fresh install gets different query plans from an
+upgraded one.
+
 **Tests write to the machine's real App Group suite.** `PacerPreferences.store`
 resolves to the live group container in the test process too, so a test that
 sets a scope leaves a fixture id where the running app reads it. Capture and
