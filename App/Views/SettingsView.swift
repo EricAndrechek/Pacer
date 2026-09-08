@@ -809,6 +809,11 @@ struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
+    /// Two rows on a switcher machine — cheap, and it decides whether the
+    /// per-account note below is worth saying at all.
+    @Query private var alertAccounts: [Account]
+    private var accountCount: Int { alertAccounts.count }
+
     /// Latest-poll scoped `limits[]` rows (active account) so the card can
     /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
     /// so the query never scans the full append-only history.
@@ -896,6 +901,18 @@ struct RateLimitAlertsCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                 Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
+                // Only with more than one account: on a single-account machine
+                // this is a distinction without a difference, and the card is
+                // already long.
+                //
+                // It earns the line because the behaviour is otherwise
+                // invisible. These thresholds are watched on *every* account,
+                // including the one you are not signed into — which is the
+                // whole point, since that account can still be filling up — and
+                // there is nothing on screen that would tell you.
+                if accountCount > 1 {
+                    Text("These thresholds apply to every account, including the one you're not signed into. Banners say which account they're about.")
+                }
                 HStack(spacing: 8) {
                     Text("Not seeing banners?")
                     Button("Open System Settings → Notifications") {

@@ -53,16 +53,14 @@ struct AccountScopeControl: View {
         Binding(get: { scope.accountId }, set: { scope.select($0) })
     }
 
-    /// The toolbar's own text. Under "all accounts" it names the signed-in
-    /// login rather than saying nothing, because that is the one whose limits
-    /// the terminal is reporting and the question people actually have.
+    /// Plain. An earlier version squeezed the signed-in login in here as
+    /// "All · on eric" and it read as noise in window chrome — the toolbar
+    /// says what you are *looking at*, which is the only thing this control
+    /// changes. Which account is signed in belongs where you go to pick one
+    /// (the menu below) and on the pace card, where it changes what the
+    /// numbers mean.
     private var label: String {
-        guard let id = scope.accountId else {
-            guard let active = accounts.first(where: { $0.isActive }) else {
-                return "All accounts"
-            }
-            return "All · on \(active.shortLabel)"
-        }
+        guard let id = scope.accountId else { return "All accounts" }
         return accounts.first { $0.id == id }?.label ?? "All accounts"
     }
 }
