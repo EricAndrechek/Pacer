@@ -218,7 +218,17 @@ public struct OAuthPollScheduler: Sendable {
         // — a throttled token is not helped by asking again.
         if overdueForOwnPoll(l, now: now) {
             let byOwnInterval = l.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
-            return max(byCooldown, byOwnInterval)
+            // Owed a reading is not the same as owed it this second. Still step
+            // around a request the other client has just made, since landing on
+            // top of one is how both end up with nothing — observed at 68
+            // seconds behind cswap's attempt, and both took a 429.
+            //
+            // Capped at one interval so this cannot become the pin again: a
+            // client asking every minute forever delays the probe once, not
+            // indefinitely.
+            let afterExternal = l.externalLastPollAt?.addingTimeInterval(interval) ?? .distantPast
+            let politeness = min(afterExternal, now.addingTimeInterval(interval))
+            return max(byCooldown, byOwnInterval, politeness)
         }
 
         // The per-token invariant counts every request on the token, not just

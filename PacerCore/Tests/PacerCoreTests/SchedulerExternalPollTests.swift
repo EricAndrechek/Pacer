@@ -156,7 +156,7 @@ struct SchedulerProbeFloorTests {
     func probeFloorBreaksThePin() {
         #expect(decide(.init(lastPolledAt: now.addingTimeInterval(-yieldMax - 1),
                              externalNextPollAt: now.addingTimeInterval(-60),
-                             externalLastPollAt: now.addingTimeInterval(-30),
+                             externalLastPollAt: now.addingTimeInterval(-floor - 1),
                              account: .primary)) == .poll(laneIndex: 0))
     }
 
@@ -170,6 +170,37 @@ struct SchedulerProbeFloorTests {
                                         account: .primary)) else {
             Issue.record("stopped yielding well before the floor"); return
         }
+    }
+
+    /// The probe is owed, but not owed this second: it steps around a request
+    /// the other client has just made rather than landing on top of it. This
+    /// is the collision that was observed — Pacer probed 68 seconds behind
+    /// cswap's attempt and both took a 429.
+    @Test("the probe still steps around a request just made")
+    func probeStepsAroundARecentExternalRequest() {
+        guard case .wait = decide(.init(lastPolledAt: now.addingTimeInterval(-yieldMax - 1),
+                                        externalNextPollAt: now.addingTimeInterval(-60),
+                                        externalLastPollAt: now.addingTimeInterval(-68),
+                                        account: .primary)) else {
+            Issue.record("probed straight on top of another client's request"); return
+        }
+    }
+
+    /// …but only once. A client asking every minute forever would otherwise
+    /// push the probe back every time, which is the pin the floor exists to
+    /// break, reintroduced one interval at a time.
+    @Test("stepping around is capped at a single interval")
+    func politenessIsBounded() {
+        let scheduler = OAuthPollScheduler(tuning: .init(
+            perTokenMinInterval: floor, activeInterval: 0, idleInterval: 600,
+            activeWindow: 900, minWait: 1, externalYieldMax: yieldMax))
+        let lane = OAuthPollScheduler.LaneState(
+            lastPolledAt: now.addingTimeInterval(-yieldMax - 1),
+            externalNextPollAt: now.addingTimeInterval(-60),
+            externalLastPollAt: now.addingTimeInterval(-1),
+            account: .primary)
+        #expect(scheduler.readyAt(lane, interval: floor, now: now)
+                <= now.addingTimeInterval(floor))
     }
 
     /// A throttled token is not helped by asking again, so the floor overrides
@@ -250,7 +281,7 @@ struct SchedulerReadyAtTests {
         let lane = OAuthPollScheduler.LaneState(
             lastPolledAt: now.addingTimeInterval(-1000),
             externalNextPollAt: now.addingTimeInterval(-120),
-            externalLastPollAt: now.addingTimeInterval(-60), account: .secondary)
+            externalLastPollAt: now.addingTimeInterval(-700), account: .secondary)
         #expect(ready(lane, interval: 600) <= now)
     }
 
