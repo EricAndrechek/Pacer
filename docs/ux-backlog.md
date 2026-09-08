@@ -3,7 +3,70 @@
 Things worth doing eventually but not blocking. Captured here so a
 future session can pick them up cold without rediscovery.
 
-## The pace card's series load is occasionally slow, and nobody knows why
+## The engine refit is the most expensive thing Pacer does — where the time goes
+
+**This is the cause of the multi-second dashboard hitches.** 30 of 36 loads
+over a second happened *during* a refit, 6 outside. Measured across a day on a
+two-account store: 97 refits, median 15.9 s, worst 41 s, half an hour of work.
+
+`recompute` now logs its phases when it exceeds a second. A representative
+steady-state line for the active account's ~45,000 scoped rows and ~30,000
+rate rows over the engine's 32-day window:
+
+    recompute all 7040ms {scopedLimits:3364, rate:1332, evalRows:775,
+                          makeFit:700, snapshots:112, features:78,
+                          hourly:66, daily:9}
+
+Two thirds of it is two fetches. `makeFit` — the actual modelling — is 700 ms.
+
+**Already done:** only scopes something still reads are refitted
+(`EngineHost.live`). On a machine where the dashboard has been scoped to an
+account at some point, that was up to two thirds of the work.
+
+**Tried and rejected, with numbers, so nobody repeats them:**
+
+- *Serialising the refits.* One engine fits in ~13.2 s, three concurrently in
+  ~15.9 s — they overlap almost perfectly, so serial would stretch the window
+  the rest of the app waits on from ~16 s to ~40 s for identical work.
+- *`propertiesToFetch` on the two big fetches.* The obvious columnar
+  projection, and it is **slower** on these queries: rate 1.10-1.33 s →
+  1.56-1.79 s, scoped 2.86-3.36 s → 3.62-4.57 s, consistently. The pace card's
+  loader does benefit from the same API, so it is a property of these queries,
+  not of SwiftData.
+
+**The next lead, attempted and backed out — read this before retrying.**
+`.allAccounts` reads the *active* account's limits by design (two 5-hour
+windows do not sum), so when that account's own scope is also live the two
+engines run identical `fetchRate` and `fetchScopedLimits` calls in the same
+cycle. Confirmed rather than assumed: the refit line now logs `limitAcct:`, and
+`recompute all` and `recompute 8c95` both report `limitAcct:8c95` while each
+spends ~3.7 s on `scopedLimits`. That is one whole duplicate copy of the
+expensive half of a refit, every cycle.
+
+A shared read was built and removed again. Two things it taught:
+
+- **An ordinary cache cannot help.** The engines refit *concurrently*, so
+  check-then-build has both miss before either stores anything — measured,
+  `share:0h` on every cycle. It needs single-flight: the second caller waits on
+  the first's result instead of issuing its own query. Wall time is unchanged;
+  the store does half the work, and the store is the contended resource.
+- **Test isolation is the hard part.** `.serialized` orders tests inside a
+  suite, not across suites, and Swift Testing runs suites in parallel — so any
+  process-wide cache is being mutated by the engine tests while its own tests
+  run. The single-flight test stayed intermittently red (`builds → 3` instead
+  of 1) and the reason was never pinned down. It was reverted rather than
+  shipped: a concurrency primitive whose test cannot be trusted is worse than
+  the duplicate fetch.
+
+If you pick this up, key the cache per engine-host instance rather than
+process-wide, or inject it, so the tests are not fighting over global state.
+
+After that, the real question is why 32 days of 60-second samples are read at
+full resolution when the fit works in cycles. That one is gated on the golden
+fixture — changing what the fit sees has to stay byte-identical for the active
+account — so it needs the Python replay harness, not a hunch.
+
+## The pace card's series load is occasionally slow — it is the refit above
 
 Measured over a full day on a two-account store, with the dashboard open:
 
@@ -19,15 +82,15 @@ same as the busy ones.
 and it is wrong — slow loads sit within 3s of an `[OAuthPoller]` write 35% of
 the time, fast loads 39%. No relationship.
 
-Still open: whether the slow ones are cold reads rather than top-ups, and
-which account. The log line now carries that (`fetch=[8c95 top-up 3row 61ms |
-…]`), so the next look is one pass over a day of logs instead of another round
-of hypotheses. Do that before touching any code.
+**Answered.** The per-fetch logging (`fetch=[8c95 top-up 3row 61ms | …]`)
+showed the slow ones are not cold reads: a *top-up fetching three rows* took
+2,224 ms. What they have in common is the engine refit above — the card's read
+queues behind it. Fix the refit and this goes with it; there is nothing wrong
+with the loader itself.
 
-Worth knowing before optimising: the fetch is already off the main actor on a
-detached task, `propertiesToFetch` is a columnar projection, and the top-up
-path only reads rows newer than what it holds. The obvious things are done, so
-the answer is probably not obvious.
+Ruled out along the way: contention with the poller's writes. Slow loads sit
+within 3 s of an `[OAuthPoller]` write 35% of the time, fast loads 39%. No
+relationship.
 
 ## Hover-for-exact: the pace tiles, and only the pace tiles
 
