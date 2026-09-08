@@ -34,12 +34,32 @@ account at some point, that was up to two thirds of the work.
   loader does benefit from the same API, so it is a property of these queries,
   not of SwiftData.
 
-**The next lead, unexplored:** `.allAccounts` reads the *active* account's
-limits by design (two 5-hour windows do not sum), so when that account's own
-scope is also live, the two engines run identical `fetchRate` and
-`fetchScopedLimits` calls in the same cycle — visible above as `recompute all`
-and `recompute 8c95` both spending ~4.5 s on `scopedLimits`. Sharing one fetch
-between them would remove a whole duplicate copy of the expensive half.
+**The next lead, attempted and backed out — read this before retrying.**
+`.allAccounts` reads the *active* account's limits by design (two 5-hour
+windows do not sum), so when that account's own scope is also live the two
+engines run identical `fetchRate` and `fetchScopedLimits` calls in the same
+cycle. Confirmed rather than assumed: the refit line now logs `limitAcct:`, and
+`recompute all` and `recompute 8c95` both report `limitAcct:8c95` while each
+spends ~3.7 s on `scopedLimits`. That is one whole duplicate copy of the
+expensive half of a refit, every cycle.
+
+A shared read was built and removed again. Two things it taught:
+
+- **An ordinary cache cannot help.** The engines refit *concurrently*, so
+  check-then-build has both miss before either stores anything — measured,
+  `share:0h` on every cycle. It needs single-flight: the second caller waits on
+  the first's result instead of issuing its own query. Wall time is unchanged;
+  the store does half the work, and the store is the contended resource.
+- **Test isolation is the hard part.** `.serialized` orders tests inside a
+  suite, not across suites, and Swift Testing runs suites in parallel — so any
+  process-wide cache is being mutated by the engine tests while its own tests
+  run. The single-flight test stayed intermittently red (`builds → 3` instead
+  of 1) and the reason was never pinned down. It was reverted rather than
+  shipped: a concurrency primitive whose test cannot be trusted is worse than
+  the duplicate fetch.
+
+If you pick this up, key the cache per engine-host instance rather than
+process-wide, or inject it, so the tests are not fighting over global state.
 
 After that, the real question is why 32 days of 60-second samples are read at
 full resolution when the fit works in cycles. That one is gated on the golden

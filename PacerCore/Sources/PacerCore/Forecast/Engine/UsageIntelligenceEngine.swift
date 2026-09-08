@@ -247,7 +247,11 @@ public actor UsageIntelligenceEngine {
                 .filter { $0.value > 0 }
                 .map { "\($0.key):\($0.value)" }
                 .joined(separator: ",")
-            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)}")
+            // Which account's limits this fit read — the global engine reads
+            // the active login's, so this is how you see two engines doing the
+            // same expensive work in one cycle.
+            let acct = "limitAcct:" + (limitAccountId.map { String($0.suffix(4)) } ?? "nil")
+            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)} \(acct)")
         }
     }
 
