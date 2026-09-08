@@ -151,6 +151,7 @@ struct TodayDetailsCard: View {
                 // with the label rather than the icon.
                 Spacer().frame(width: 21)
                 Text(subline(read: totals.cacheReadTokens, written: written, reuse: reuse))
+                    .help("\(pacerTokensExact(totals.cacheReadTokens)) read · \(pacerTokensExact(written)) written")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
