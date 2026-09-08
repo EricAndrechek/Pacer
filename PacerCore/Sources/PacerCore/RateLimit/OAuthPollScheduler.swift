@@ -84,12 +84,28 @@ public struct OAuthPollScheduler: Sendable {
 
     public struct LaneState: Sendable, Equatable {
         public var lastPolledAt: Date?
+        /// When another client on this machine will next spend this token's
+        /// budget, if it publishes a schedule.
+        ///
+        /// The budget Anthropic enforces is per token, and Pacer is not the
+        /// only thing holding these: `cswap` polls the same credentials. Two
+        /// clients each politely respecting `perTokenMinInterval` still land
+        /// requests seconds apart and both take 429s, because neither counts
+        /// the other's.
+        ///
+        /// Knowing when the other one will go is what turns that from a
+        /// collision into a schedule — see `laneReadyAt`. nil when nothing else
+        /// is known to be polling, which is the ordinary case.
+        public var externalNextPollAt: Date?
+
         /// Set after a 429/transport failure; the lane is ineligible until
         /// this passes. The poller grows it per-lane on repeated failures.
         public var cooldownUntil: Date?
         public var account: AccountStatus
 
-        public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil, account: AccountStatus = .unknown) {
+        public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil,
+                    externalNextPollAt: Date? = nil, account: AccountStatus = .unknown) {
+            self.externalNextPollAt = externalNextPollAt
             self.lastPolledAt = lastPolledAt
             self.cooldownUntil = cooldownUntil
             self.account = account
@@ -140,7 +156,32 @@ public struct OAuthPollScheduler: Sendable {
         func laneReadyAt(_ l: LaneState) -> Date {
             let byInterval = l.lastPolledAt?.addingTimeInterval(tuning.perTokenMinInterval) ?? .distantPast
             let byCooldown = l.cooldownUntil ?? .distantPast
-            return max(byInterval, byCooldown)
+            return max(byInterval, byCooldown, byExternalSchedule(l, earliest: max(byInterval, byCooldown)))
+        }
+
+        /// Keep clear of another client's known request on the same token.
+        ///
+        /// The rule is the per-token invariant applied in both directions:
+        /// requests on one token must be `perTokenMinInterval` apart no matter
+        /// who makes them. Backwards is already handled — the poller folds an
+        /// external poll into `lastPolledAt`. This is forwards: do not poll so
+        /// close in front of a known upcoming request that the pair breaches
+        /// the same spacing.
+        ///
+        /// It stays adaptive rather than fixed. A wide external interval leaves
+        /// room and Pacer slots in at its own floor; a narrow one leaves none
+        /// and Pacer waits until after the other request, then resumes. No
+        /// hard-coded "poll at the midpoint" — that was an earlier attempt, and
+        /// it threw away the lane-count and backoff logic this scheduler
+        /// already does well.
+        func byExternalSchedule(_ l: LaneState, earliest: Date) -> Date {
+            guard let external = l.externalNextPollAt, external > now else { return .distantPast }
+            // Room in front of it: taking `earliest` still leaves a full
+            // interval before the other client goes.
+            if external.timeIntervalSince(earliest) >= tuning.perTokenMinInterval {
+                return .distantPast
+            }
+            return external.addingTimeInterval(tuning.perTokenMinInterval)
         }
         let earliestLaneReady = usableIdx.map { laneReadyAt(lanes[$0]) }.min() ?? .distantPast
 

@@ -43,17 +43,6 @@ public enum SwitcherUsageCache {
         public let fiveHour: Window?
         public let sevenDay: Window?
         public let scoped: [ScopedWindow]
-
-        /// The moment halfway between cswap's last poll and its next one.
-        ///
-        /// Polling there doubles how often the account is read — cswap's
-        /// request and Pacer's alternate — while leaving the most possible room
-        /// on either side of each, which is what keeps both under the token's
-        /// budget. Nil when cswap has not published a schedule.
-        public var interleavedPollAt: Date? {
-            guard let nextPollAt, let pollInterval, pollInterval > 0 else { return nil }
-            return nextPollAt.addingTimeInterval(-pollInterval / 2)
-        }
     }
 
     public struct Window: Sendable, Equatable {
