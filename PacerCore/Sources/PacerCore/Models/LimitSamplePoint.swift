@@ -137,11 +137,19 @@ public extension Sequence where Element == ScopedWindowRow {
     /// `UsageLimitSample` version uses.
     ///
     /// The per-identity part is not defensive. Several poller lanes can resolve
-    /// to the same account — one per token that belongs to it — and each writes
-    /// its own row for the same server-reported window within the same second.
-    /// A plain time filter returns all of them, and each becomes a column: the
-    /// dashboard drew *four* identical "Fable · Eric" cards next to one real
-    /// one, nine cards for two accounts.
+    /// to the same account — one per token that belongs to it — and when the
+    /// poller reclassifies them ("token is another account — tracked as
+    /// secondary") it polls those lanes back to back. Measured: four polls
+    /// 1.1 seconds apart, four rows for one window. A plain time filter returns
+    /// all of them and each becomes a column — the dashboard drew *four*
+    /// identical "Fable · Eric" cards beside one real one, nine cards for two
+    /// accounts.
+    ///
+    /// These are successive readings, not one reading stored repeatedly, which
+    /// is why the newest wins rather than any of them. Steady state writes
+    /// exactly one row per identity per poll — measured at a duplication factor
+    /// of 1.00 over eight days — so there is nothing to suppress on the write
+    /// side, and an earlier claim that there was is wrong.
     ///
     /// Input order is preserved (the fetches are newest-first), so the winner
     /// on an exact `sampledAt` tie is stable rather than dictionary order.
