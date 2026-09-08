@@ -84,18 +84,33 @@ covers the most common discovery path. The popover content stays
 visible while open; users wanting exact numbers can open the main
 app from the same panel.
 
-**Built, not yet confirmed.** `menuTooltip(_:)` (PacerUI) now applies both
-`.help` and a real `NSView.toolTip`, on the option-1 reasoning above but
-carried by a SwiftUI-sized overlay rather than manual `addToolTip` rects, so
-there is no frame tracking to go stale. The three popover rows use it.
+**Option 1 was built, measured, and does not work. Do not rebuild it.**
 
-What cannot be settled off-screen is whether macOS *draws* it — NSMenu's
-tracking loop has no headless equivalent. `make verify-tooltip` is the
-prepared one-shot check: read `AGENTS.md` § "Never take over the machine"
-first, and get the owner's go-ahead **for that run**. If the PNG shows a
-tooltip beside the highlighted row, close this item. If it does not, option 1
-is dead and only option 3 (drop NSMenu) remains — which needs sign-off,
-because it changes how the menu bar looks and behaves.
+`NSView.toolTip` was applied alongside `.help` via a SwiftUI-sized overlay —
+the appealing version of option 1, with no manual `addToolTip` rects and so no
+frame tracking to go stale as the popover resizes. It was verified on a real
+session with `make verify-tooltip`, which lands the pointer on a row and asks
+the window server whether a window appeared:
+
+    HOVER: landed on the row
+    TOOLTIP: no — no window appeared while hovering
+
+The hover is proven, so the negative is real: **NSMenu swallows AppKit's own
+tooltips exactly as it swallows SwiftUI's.** The mechanism was reverted rather
+than shipped, because dead code that reads as working is worse than the gap.
+`.help(...)` stays on those rows — harmless, and correct everywhere else the
+same view could be hosted.
+
+That leaves **only option 3**: stop using `NSMenu` for the data panel. It
+changes how the menu bar looks and how it hands off to other menu-bar items,
+so it is a product decision, not a spare afternoon. Nobody should spend
+another authorised run on options 1 or 2.
+
+`bin/verify-menubar-tooltip.sh` and `MenuBarTooltipSelfTest` are kept: they
+are the pattern for anything else that can only be answered on a real session
+— a scripted one-shot, a machine-readable verdict, and the owner's go-ahead
+for that run. Read `AGENTS.md` § "Never take over the machine" before using
+them.
 
 ## Other things noticed during the formatter sweep
 

@@ -94,6 +94,15 @@ outside: it knows where its own views are, so there is nothing to guess and
 nothing to retry. See `PACER_TOOLTIP_SELFTEST` in `MenuBarTooltipSelfTest` for
 the shape — env-gated, self-contained, restores the cursor, exits.
 
+**Make it report a verdict, not a photograph.** That harness took three
+authorised runs to produce an answer and all three failures were in the
+instrument: it captured the wrong monitor, then a frame with no cursor in it
+(`screencapture -C` does not composite the pointer under `-R`), so "the thing
+did not happen" and "we never actually did it" looked identical. It only became
+useful when it started asking the window server whether a window appeared and
+logging where the pointer actually was. Every run costs somebody their machine
+for a few seconds — spend the effort up front so one run is enough.
+
 This is written down because it happened: an agent investigating why `.help()`
 does not fire inside an `NSMenuItem` built an event-dispatch harness and took
 over the cursor while the repo owner was working.
