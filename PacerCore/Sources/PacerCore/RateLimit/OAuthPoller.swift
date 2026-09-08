@@ -144,6 +144,11 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    /// Last switcher-cache timestamp ingested per account, so an unchanged
+    /// file costs one comparison rather than a store query each cycle.
+    private var lastSwitcherIngestAt: [String: Date] = [:]
+    private let switcherCache: @Sendable () -> [SwitcherUsageCache.Reading]
+
     /// Categorized outcome of one poll, surfaced for tests and debug UI.
     public enum PollOutcome: Sendable, Equatable {
         case success(fiveHourPct: Double?, sevenDayPct: Double?)
@@ -264,12 +269,17 @@ public actor OAuthPoller: TokenPoolTesting {
         clock: PollerClock = SystemPollerClock(),
         activityProbe: (@Sendable () async -> Date?)? = nil,
         poolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
+        /// Injected so tests do not read the developer's real switcher cache —
+        /// the same seam every other machine-touching source here has.
+        switcherCache: @escaping @Sendable () -> [SwitcherUsageCache.Reading]
+            = { SwitcherUsageCache.readings(at: SwitcherUsageCache.defaultURL()) },
         random: @escaping RandomSource = { Double.random(in: 0..<1) }
     ) {
         self.client = client
         self.container = container
         self.configuration = configuration
         self.clock = clock
+        self.switcherCache = switcherCache
         self.scheduler = OAuthPollScheduler(tuning: configuration.scheduler)
         self.activityProbe = activityProbe ?? Self.defaultActivityProbe(container: container)
         self.poolStore = poolStore
@@ -649,6 +659,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
         while !stopping && !Task.isCancelled {
             ensureLanes()
+            await ingestSwitcherCache()
             let activity = await activityProbe()
             lastActivityAt = activity
 
@@ -689,16 +700,112 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    /// The least-recently-polled secondary lane that's due for its slow
-    /// sweep now (past its per-lane interval and not cooling), or nil.
+    /// Record anything the account switcher has fetched that Pacer has not.
+    ///
+    /// Free — it is a file read, not a request — and it is the only way to see
+    /// an account whose token Pacer cannot use: one it has never been signed
+    /// into on this machine, or one whose credential is being 429'd because
+    /// two clients are polling it. Measured at the time of writing: the
+    /// signed-in account's reading was 26 minutes old in Pacer and 30 seconds
+    /// old in the switcher's cache.
+    ///
+    /// Strictly additive. A reading is dropped unless it is newer than what
+    /// Pacer already holds for that account, so a stale cache can never walk a
+    /// live series backwards, and an absent file is simply nothing.
+    private func ingestSwitcherCache() async {
+        let readings = switcherCache()
+        guard !readings.isEmpty else { return }
+        for reading in readings {
+            let key = Account.key(forOrg: reading.organizationId)
+            if let seen = lastSwitcherIngestAt[key], seen >= reading.fetchedAt { continue }
+            guard await isNewerThanStored(reading.fetchedAt, account: key) else {
+                lastSwitcherIngestAt[key] = reading.fetchedAt
+                continue
+            }
+            lastSwitcherIngestAt[key] = reading.fetchedAt
+
+            let snapshot = RateLimitSnapshot(
+                sampledAt: reading.fetchedAt,
+                fiveHour: reading.fiveHour.map {
+                    RateLimitWindow(usedPercentage: $0.percent, resetsAt: $0.resetsAt)
+                },
+                sevenDay: reading.sevenDay.map {
+                    RateLimitWindow(usedPercentage: $0.percent, resetsAt: $0.resetsAt)
+                },
+                extraUsageCents: nil,
+                organizationId: reading.organizationId,
+                limits: reading.scoped.map { row in
+                    UsageLimit(
+                        kind: "weekly_scoped", group: "weekly", percent: row.percent,
+                        severity: UsageLimitSeverity("normal"), resetsAt: row.resetsAt,
+                        scope: UsageLimitScope(
+                            model: UsageLimitScope.Model(id: nil, displayName: row.name),
+                            surface: nil),
+                        isActive: false)
+                })
+            await recordPoll(snapshot, accountKey: key,
+                             organizationId: reading.organizationId,
+                             subscriptionType: nil,
+                             isActive: activeAccountKey == key,
+                             laneSource: .parked,
+                             source: RateLimitSource.switcher)
+        }
+    }
+
+    /// Newest stored sample for an account, so an older cached reading is not
+    /// replayed over a fresher poll.
+    private func isNewerThanStored(_ at: Date, account: String) async -> Bool {
+        let container = self.container
+        return await MainActor.run {
+            let context = ModelContext(container)
+            var d = FetchDescriptor<RateLimitSample>(
+                predicate: LimitScope.rateLimitPredicate(account: account),
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+            d.fetchLimit = 1
+            guard let newest = (try? context.fetch(d))?.first else { return true }
+            return at > newest.sampledAt
+        }
+    }
+
+    /// The next secondary lane to sweep, or nil.
+    ///
+    /// **The budget is spent per account, not per lane.** An account needs one
+    /// reading per interval; it does not become better known by asking five of
+    /// its tokens. Before this, the interval was enforced per *lane*, so an
+    /// account holding five Claude Desktop tokens was polled five times as
+    /// often as one holding a single credential — and the usage endpoint's
+    /// budget is shared, per token and overall.
+    ///
+    /// What that cost, from the log: the signed-in account's one lane took
+    /// consecutive 429s and went nineteen minutes without a reading, while five
+    /// Desktop lanes for the account *not* signed in were read every fifty
+    /// seconds and all succeeded. The dashboard then said "last read 18m ago"
+    /// about the account the user was actually on. `cswap` competes for the
+    /// same budget and was taking 429s of its own throughout.
+    ///
+    /// So: an account whose freshest lane was polled within the interval is
+    /// skipped entirely, whichever of its lanes that was.
     private func dueSecondaryLaneIndex(now: Date) -> Int? {
         let interval = configuration.secondarySweepInterval
+
+        // Freshest poll per account, across all of that account's lanes.
+        var lastPollByAccount: [String: Date] = [:]
+        for lane in lanes {
+            let key = lane.accountKey ?? "?"
+            let at = lane.state.lastPolledAt ?? .distantPast
+            if at > (lastPollByAccount[key] ?? .distantPast) { lastPollByAccount[key] = at }
+        }
+
         return lanes.indices
             .filter { i in
-                lanes[i].state.account == .secondary
+                let key = lanes[i].accountKey ?? "?"
+                let accountPolledAt = lastPollByAccount[key] ?? .distantPast
+                return lanes[i].state.account == .secondary
                     && (lanes[i].state.cooldownUntil.map { now >= $0 } ?? true)
-                    && ((lanes[i].state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast) <= now)
+                    && accountPolledAt.addingTimeInterval(interval) <= now
             }
+            // Within an account, prefer the lane that has waited longest, so a
+            // token that keeps failing does not monopolise its account's turn.
             .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
     }
 
@@ -706,8 +813,18 @@ public actor OAuthPoller: TokenPoolTesting {
     /// there are no secondary lanes.
     private func nextSecondaryWait(now: Date) -> TimeInterval? {
         let interval = configuration.secondarySweepInterval
+        var lastPollByAccount: [String: Date] = [:]
+        for lane in lanes {
+            let key = lane.accountKey ?? "?"
+            let at = lane.state.lastPolledAt ?? .distantPast
+            if at > (lastPollByAccount[key] ?? .distantPast) { lastPollByAccount[key] = at }
+        }
         let readyTimes = lanes.filter { $0.state.account == .secondary }.map { lane -> Date in
-            let byInterval = lane.state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
+            // Account-level, to match `dueSecondaryLaneIndex` — a wait computed
+            // per lane would wake the loop for a lane its account has already
+            // been read for.
+            let accountPolledAt = lastPollByAccount[lane.accountKey ?? "?"] ?? .distantPast
+            let byInterval = accountPolledAt.addingTimeInterval(interval)
             let byCooldown = lane.state.cooldownUntil ?? .distantPast
             return max(byInterval, byCooldown)
         }
@@ -1218,7 +1335,11 @@ public actor OAuthPoller: TokenPoolTesting {
         organizationId: String?,
         subscriptionType: String?,
         isActive: Bool,
-        laneSource: CredentialCandidate.Source
+        laneSource: CredentialCandidate.Source,
+        /// Which mechanism produced this observation. Defaults to a live poll;
+        /// the switcher-cache path passes its own so the rows say where they
+        /// came from and the dashboard's source chip stays honest.
+        source: String = RateLimitSource.oauth
     ) async {
         let container = self.container
         let captured = snapshot
@@ -1286,7 +1407,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     window: RateLimitWindowName.fiveHour,
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
-                    source: RateLimitSource.oauth,
+                    source: source,
                     accountId: key
                 ))
                 wroteActiveWindow = wroteActiveWindow || isActive
@@ -1304,7 +1425,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     window: RateLimitWindowName.sevenDay,
                     usedPercentage: window.usedPercentage,
                     resetsAt: window.resetsAt,
-                    source: RateLimitSource.oauth,
+                    source: source,
                     accountId: key
                 ))
                 wroteActiveWindow = wroteActiveWindow || isActive
@@ -1317,7 +1438,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 context.insert(ExtraUsageSample(
                     sampledAt: captured.sampledAt,
                     amountCents: cents,
-                    source: RateLimitSource.oauth,
+                    source: source,
                     accountId: key
                 ))
                 wroteActiveWindow = wroteActiveWindow || isActive
@@ -1334,7 +1455,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 context.insert(UsageLimitSample(
                     from: limit,
                     sampledAt: captured.sampledAt,
-                    source: RateLimitSource.oauth,
+                    source: source,
                     accountId: key
                 ))
                 wroteActiveWindow = wroteActiveWindow || isActive
