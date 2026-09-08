@@ -11,13 +11,36 @@ import SwiftData
 /// always live because the menu bar, alerts, widgets and the HTTP API read it
 /// whatever the window is showing. A per-account engine is created the first
 /// time a view asks for one and then kept warm, so switching back and forth
-/// costs nothing. A refit is ~1.1 s of background work per scope per
-/// five-minute cycle; two scopes is well under 1% duty, and the engines are
-/// separate actors so their refits overlap rather than queue.
+/// costs nothing.
+///
+/// **What a refit actually costs.** This used to say "~1.1 s per scope per
+/// five-minute cycle; two scopes is well under 1% duty". Measured on a
+/// two-account store it was 97 refits in a day at a median of 15.9 s, worst
+/// 41 s — half an hour of work, and 83% of the pace card's multi-second loads
+/// landed inside one. The estimate was out by more than ten times, in the
+/// direction that matters.
+///
+/// The lever that works is fitting fewer scopes: `live` rather than `all`.
+/// Serialising the refits was tried and rejected — one engine fits in ~13.2 s
+/// and three concurrent in ~15.9 s, so they overlap almost perfectly and going
+/// serial would stretch the window the rest of the app waits on from ~16 s to
+/// ~40 s for identical work. `AppBackgroundService` carries that measurement
+/// next to the code that keeps the task group.
 @MainActor
 public final class EngineHost {
     private let container: ModelContainer
     private var engines: [EngineScope: UsageIntelligenceEngine] = [:]
+    /// When each scope was last asked for. Drives `live` — see below.
+    private var lastAsked: [EngineScope: Date] = [:]
+
+    /// How long a per-account scope keeps being refitted after the last view
+    /// asked for it.
+    ///
+    /// Generous on purpose: flicking between accounts must not pay a cold fit
+    /// each time, and a fit that is one cycle stale is still a fit. What this
+    /// stops is the *permanent* cost — before it, asking for a scope once kept
+    /// it refitting for the life of the process.
+    public static let idleScopeGrace: TimeInterval = 15 * 60
 
     public init(container: ModelContainer) {
         self.container = container
@@ -53,6 +76,7 @@ public final class EngineHost {
     /// fill in within a second, not within five minutes.
     @discardableResult
     public func engine(for scope: EngineScope) -> UsageIntelligenceEngine {
+        lastAsked[scope] = Date()
         if let existing = engines[scope] { return existing }
         let engine = UsageIntelligenceEngine(modelContainer: container)
         engines[scope] = engine
@@ -79,8 +103,36 @@ public final class EngineHost {
 
     public var scopes: [EngineScope] { Array(engines.keys) }
 
-    /// Every live scope's engine, for the recompute tick.
+    /// Test seam: backdate a scope's last-asked stamp so the grace period can
+    /// be exercised without waiting fifteen minutes.
+    public func markAskedForTesting(_ scope: EngineScope, at date: Date) {
+        lastAsked[scope] = date
+    }
+
+    /// Every scope's engine, whether or not anything is still reading it.
     public var all: [(scope: EngineScope, engine: UsageIntelligenceEngine)] {
         engines.map { ($0.key, $0.value) }
+    }
+
+    /// The scopes worth refitting: `.allAccounts` always, plus any per-account
+    /// scope something has asked for recently.
+    ///
+    /// **This is the expensive list, and it used to be `all`.** Measured on a
+    /// two-account store: 97 refits in a day, median 15.9 s, worst 41 s, half
+    /// an hour of work in total — against a doc comment on this type claiming
+    /// "~1.1 s per scope" and "well under 1% duty". Three engines were being
+    /// fitted every cycle because asking for a scope once kept it alive for the
+    /// life of the process, so scoping the dashboard to an account in the
+    /// morning bought a permanent third of that cost.
+    ///
+    /// `.allAccounts` is never dropped: alerts, the menu bar, the widgets and
+    /// the HTTP API all read it regardless of what the window is showing.
+    public var live: [(scope: EngineScope, engine: UsageIntelligenceEngine)] {
+        let cutoff = Date().addingTimeInterval(-Self.idleScopeGrace)
+        return engines.compactMap { scope, engine in
+            guard scope != .allAccounts else { return (scope, engine) }
+            guard let asked = lastAsked[scope], asked >= cutoff else { return nil }
+            return (scope, engine)
+        }
     }
 }

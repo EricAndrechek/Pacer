@@ -231,7 +231,7 @@ struct PaceChartCard: View {
     /// shape `AccountTotals` and `TokenPoolStatus` already use. The card
     /// renders whatever it has meanwhile.
     private func reload() async {
-        var fetchMillis: [(account: String, kind: String, rows: Int, ms: Int)] = []
+        var fetchMillis: [(account: String, kind: String, rows: Int, ms: Int, detail: String)] = []
         // The container the view is actually hosted in, not the process-wide
         // on-disk one.
         //
@@ -284,10 +284,13 @@ struct PaceChartCard: View {
             // ruled out (slow loads sit near a write 35% of the time, fast
             // ones 39%). Recorded so the next look is one pass rather than
             // another round of hypotheses.
+            let breakdown = loaded.timings.sorted { $0.value > $1.value }
+                .map { "\($0.key):\($0.value)" }.joined(separator: ",")
             fetchMillis.append((account.map { String($0.suffix(4)) } ?? "all",
                                 through == nil ? "cold" : "top-up",
                                 loaded.fixed.count + loaded.scoped.count,
-                                Int(Date().timeIntervalSince(fetchStarted) * 1000)))
+                                Int(Date().timeIntervalSince(fetchStarted) * 1000),
+                                breakdown))
 
             if through != nil {
                 // Incremental. A poll adds a handful of rows to an 8-day window
@@ -327,7 +330,7 @@ struct PaceChartCard: View {
             return name + ":" + String(entry.fixed.count + entry.scoped.count)
         }
         let detail: [String] = fetchMillis.map { row in
-            "\(row.account) \(row.kind) \(row.rows)row \(row.ms)ms"
+            "\(row.account) \(row.kind) \(row.rows)row \(row.ms)ms {\(row.detail)}"
         }
         let summary = "loaded \(next.count) series in \(totalMs)ms"
             + " [" + retained.joined(separator: " ") + "]"
@@ -358,6 +361,10 @@ struct PaceChartCard: View {
         /// unless it brought newer rows, which `latestBatch` sorts out.
         let windows: [ScopedWindowRow]
         let cutoff: Date
+        /// Milliseconds per stage of the fetch, for the log line. Cheap enough
+        /// to leave on: five `Date()` reads against a load that costs
+        /// hundreds of milliseconds.
+        let timings: [String: Int]
     }
 
     /// Deliberately **not** on `@ScanActor`. The first version was, and the
@@ -396,6 +403,14 @@ struct PaceChartCard: View {
         let fiveHourCutoff = through ?? now.addingTimeInterval(-12 * 3600)
         let longCutoff = through ?? cutoff
 
+        var timings: [String: Int] = [:]
+        func timed<T>(_ label: String, _ body: () -> T) -> T {
+            let t = Date()
+            let out = body()
+            timings[label, default: 0] += Int(Date().timeIntervalSince(t) * 1000)
+            return out
+        }
+
         var fixed: [LimitSamplePoint] = []
         for (window, since) in [(RateLimitWindowName.fiveHour, fiveHourCutoff),
                                 (RateLimitWindowName.sevenDay, longCutoff)] {
@@ -405,7 +420,10 @@ struct PaceChartCard: View {
             d.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
             // Columnar projection: the card reads only these four scalars.
             d.propertiesToFetch = [\.window, \.sampledAt, \.resetsAt, \.usedPercentage]
-            fixed += ((try? context.fetch(d)) ?? []).map(\.limitPoint)
+            let rows = timed(window == RateLimitWindowName.fiveHour ? "5h" : "7d") {
+                (try? context.fetch(d)) ?? []
+            }
+            fixed += timed("map") { rows.map(\.limitPoint) }
         }
 
         var scopedDescriptor = FetchDescriptor<UsageLimitSample>(
@@ -413,8 +431,8 @@ struct PaceChartCard: View {
                                             incremental: through != nil))
         scopedDescriptor.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
         scopedDescriptor.propertiesToFetch = [\.identity, \.sampledAt, \.resetsAt, \.percent]
-        let scopedModels = (try? context.fetch(scopedDescriptor)) ?? []
-        let scoped = scopedModels.map(\.scopedPoint)
+        let scopedModels = timed("scoped") { (try? context.fetch(scopedDescriptor)) ?? [] }
+        let scoped = timed("map") { scopedModels.map(\.scopedPoint) }
 
         // The column set comes off the same rows — whole-row fields (label,
         // group, severity, the binding flag) that the columnar projection above
@@ -423,10 +441,13 @@ struct PaceChartCard: View {
             predicate: Self.scopedPredicate(account: account, since: cutoff, incremental: false))
         latest.sortBy = [SortDescriptor(\.sampledAt, order: .reverse)]
         latest.fetchLimit = 120
-        let windows = ((try? context.fetch(latest)) ?? []).map(\.scopedWindowRow)
+        let windows = timed("latest") {
+            ((try? context.fetch(latest)) ?? []).map(\.scopedWindowRow)
+        }
+        let sortedFixed = timed("sort") { fixed.sorted { $0.sampledAt > $1.sampledAt } }
 
-        return Loaded(fixed: fixed.sorted { $0.sampledAt > $1.sampledAt },
-                      scoped: scoped, windows: windows, cutoff: cutoff)
+        return Loaded(fixed: sortedFixed, scoped: scoped, windows: windows,
+                      cutoff: cutoff, timings: timings)
     }
 
     /// `sampledAt >= since` for a cold load, `> since` for an incremental one

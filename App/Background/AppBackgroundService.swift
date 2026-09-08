@@ -546,10 +546,22 @@ final class AppBackgroundService {
         // optimization — confirmed on Main via sample(1) during a scroll).
         // A detached task forces it onto the engine's executor.
         let started = Date()
-        // Every live scope, concurrently. The engines are separate actors, so
-        // two refits overlap rather than queue; detached for the reason above
-        // (an `await` from `@MainActor` would resume the fit inline on main).
-        let live = engines.all
+        // Every scope anything is still reading — not every scope ever asked
+        // for. See `EngineHost.live`.
+        //
+        // Still concurrent, and deliberately so after trying the alternative.
+        // Serialising them looked right — 83% of the pace card's multi-second
+        // loads land inside a refit — until the two numbers were measured
+        // against each other: one engine fits in ~13.2 s and three concurrent
+        // in ~15.9 s, so engines two and three add under three seconds of wall
+        // time. They overlap almost perfectly. Running them one at a time
+        // would stretch the window the rest of the app has to get through from
+        // ~16 s to ~40 s for exactly the same work, which is the wrong
+        // direction. Fewer scopes is the lever; ordering is not.
+        //
+        // Detached for the reason above: an `await` from `@MainActor` resumes
+        // the fit inline on the main thread.
+        let live = engines.live
         await Task.detached(priority: .utility) {
             await withTaskGroup(of: Void.self) { group in
                 for entry in live {
