@@ -34,6 +34,17 @@ public enum SwitcherUsageCache {
     public struct Reading: Sendable, Equatable {
         public let organizationId: String
         public let fetchedAt: Date
+        /// When cswap last *asked*, whether or not it got an answer.
+        ///
+        /// This is the field that matters for budget, and reading only
+        /// `fetchedAt` is what kept the two clients colliding. A 429'd request
+        /// spends the token's allowance exactly like a successful one, but it
+        /// never advances `fetchedAt` — so cswap could be retrying every six
+        /// minutes and, as far as Pacer could see, doing nothing at all.
+        /// Measured in that state: Pacer polled the signed-in account at
+        /// 14:45:40 (fine), 14:50:52 (429) and 14:55:52 (429) — its own cadence,
+        /// exactly, landing between cswap's invisible retries every time.
+        public let lastAttemptAt: Date?
         /// When cswap intends to poll this account next, and how often it
         /// polls. Published in the same file, which is what lets Pacer aim for
         /// the *gap* between cswap's requests instead of standing down and
@@ -82,11 +93,16 @@ public enum SwitcherUsageCache {
             guard let account = raw as? [String: Any],
                   let org = account["organizationUuid"] as? String, !org.isEmpty,
                   // `fetchedAt` is when the *successful* fetch happened, which
-                  // is the timestamp the sample belongs at — not `lastAttemptAt`,
-                  // which moves on a 429 that produced nothing.
+                  // is the timestamp the sample belongs at. `lastAttemptAt`
+                  // moves on a 429 that produced nothing, so it dates no sample
+                  // — but it is read separately above, because a request that
+                  // produced nothing still spent the budget.
                   let fetchedAt = account["fetchedAt"] as? Double, fetchedAt > 0,
                   let good = account["lastGood"] as? [String: Any]
             else { continue }
+            let attemptedAt = (account["lastAttemptAt"] as? Double).flatMap {
+                $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
+            }
             let nextPoll = (account["nextPollAt"] as? Double).flatMap {
                 $0 > 0 ? Date(timeIntervalSince1970: $0) : nil
             }
@@ -94,6 +110,7 @@ public enum SwitcherUsageCache {
             out.append(Reading(
                 organizationId: org,
                 fetchedAt: Date(timeIntervalSince1970: fetchedAt),
+                lastAttemptAt: attemptedAt,
                 nextPollAt: nextPoll,
                 pollInterval: interval,
                 fiveHour: window(good["five_hour"]),

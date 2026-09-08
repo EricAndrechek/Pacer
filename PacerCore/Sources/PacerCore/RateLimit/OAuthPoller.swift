@@ -714,9 +714,28 @@ public actor OAuthPoller: TokenPoolTesting {
     /// live series backwards, and an absent file is simply nothing.
     private func ingestSwitcherCache() async {
         let readings = switcherCache()
+        forgetSwitcherSchedule(
+            exceptAccounts: Set(readings.map { Account.key(forOrg: $0.organizationId) }))
         guard !readings.isEmpty else { return }
         for reading in readings {
             let key = Account.key(forOrg: reading.organizationId)
+
+            // The *schedule* is applied unconditionally, before any freshness
+            // test on the data.
+            //
+            // This was the other way round and it deadlocked: the guard that
+            // keeps Pacer clear of cswap's requests was only installed when a
+            // cswap reading was ingested, and a reading only appears when cswap
+            // *succeeds* — so while cswap was being 429'd, nothing told Pacer
+            // to leave it room, and Pacer's polling is what kept it 429'd.
+            // Measured in that state: Pacer took zero 429s over ten minutes and
+            // cswap took them steadily. Pacer winning is not the goal; cswap
+            // needs this data to switch accounts on a limit.
+            //
+            // When cswap will poll is a fact whether or not its last attempt
+            // worked. Only recording a sample needs the data to be new.
+            noteSwitcherActivity(account: key, with: reading)
+
             if let seen = lastSwitcherIngestAt[key], seen >= reading.fetchedAt { continue }
             guard await isNewerThanStored(reading.fetchedAt, account: key) else {
                 lastSwitcherIngestAt[key] = reading.fetchedAt
@@ -749,8 +768,6 @@ public actor OAuthPoller: TokenPoolTesting {
                              isActive: activeAccountKey == key,
                              laneSource: .parked,
                              source: RateLimitSource.cswap)
-
-            noteSwitcherActivity(account: key, with: reading)
         }
     }
 
@@ -770,11 +787,94 @@ public actor OAuthPoller: TokenPoolTesting {
     /// crowding it. What cadence falls out is then the scheduler's decision,
     /// and it adapts — a wide cswap interval leaves room for Pacer at its own
     /// floor, a narrow one does not.
-    private func noteSwitcherActivity(account key: String, with reading: SwitcherUsageCache.Reading) {
-        for i in lanes.indices where lanes[i].accountKey == key {
+    private func noteSwitcherActivity(
+        account key: String, with reading: SwitcherUsageCache.Reading, now: Date = Date()
+    ) {
+        let hold = Self.switcherHold(for: reading, now: now)
+        for i in lanes.indices
+        where lanes[i].accountKey == key && Self.sharesBudgetWithSwitcher(lanes[i].source) {
+            // Backwards: cswap already spent this token's budget. `max` keeps it
+            // monotonic, so re-reading an unchanged cache on every cycle cannot
+            // walk the lane backwards or hold it still.
             lanes[i].state.lastPolledAt = max(
-                lanes[i].state.lastPolledAt ?? .distantPast, reading.fetchedAt)
-            lanes[i].state.externalNextPollAt = reading.nextPollAt
+                lanes[i].state.lastPolledAt ?? .distantPast, hold.spentAt)
+            // Forwards: where cswap says it is going next.
+            lanes[i].state.externalNextPollAt = hold.nextPollAt
+        }
+    }
+
+    /// What one cswap reading says about a shared token: when its budget was
+    /// last spent, and when the other client intends to spend it next.
+    ///
+    /// Split out from the lane walk because it is the whole policy, and the
+    /// lanes are just where it gets written.
+    struct SwitcherHold: Equatable {
+        let spentAt: Date
+        let nextPollAt: Date?
+    }
+
+    static func switcherHold(
+        for reading: SwitcherUsageCache.Reading, now: Date
+    ) -> SwitcherHold {
+        // Standing down only pays while it buys data. Past this, whatever cswap
+        // is doing is not producing readings, and continuing to defer would
+        // trade Pacer's freshness for nothing — so stop treating it as a
+        // participant and go back to polling normally.
+        guard reading.fetchedAt > now.addingTimeInterval(-switcherStaleAfter) else {
+            // Its retry loop is deliberately *not* counted here: a client that
+            // asks every six minutes and never succeeds would otherwise hold
+            // the lane down forever through `spentAt` alone.
+            return SwitcherHold(spentAt: reading.fetchedAt, nextPollAt: nil)
+        }
+        // A request spends the budget whether or not it returns anything, so
+        // the mark is the later of "asked" and "answered" — see
+        // `SwitcherUsageCache.Reading.lastAttemptAt`.
+        return SwitcherHold(
+            spentAt: max(reading.fetchedAt, reading.lastAttemptAt ?? .distantPast),
+            nextPollAt: reading.nextPollAt)
+    }
+
+    /// How long cswap may go without a successful fetch before Pacer stops
+    /// deferring to it.
+    ///
+    /// Two of Pacer's own intervals. The arrangement is worth it while cswap is
+    /// working — Pacer gets the numbers for free and spends none of the token's
+    /// budget — but a client that cannot get an answer is not covering the
+    /// account, and the user is left watching a reading age. Ten minutes is the
+    /// most staleness that trade is worth.
+    static let switcherStaleAfter: TimeInterval = 600
+
+    /// Forget a schedule for lanes no reading covers.
+    ///
+    /// Without this, a `nextPollAt` from cswap's last write outlives cswap
+    /// itself: uninstall it, or have it drop an account, and the lane keeps
+    /// deferring to a client that is not running.
+    private func forgetSwitcherSchedule(exceptAccounts covered: Set<String>) {
+        for i in lanes.indices
+        where lanes[i].state.externalNextPollAt != nil
+            && !covered.contains(lanes[i].accountKey ?? "") {
+            lanes[i].state.externalNextPollAt = nil
+        }
+    }
+
+    /// Whether a lane holds the same credential cswap polls.
+    ///
+    /// The budget is per token, so only the tokens cswap actually uses are
+    /// affected — and cswap swaps Claude Code's credential, nothing else. A
+    /// Claude Desktop token for the same account is a *different* credential
+    /// with its own budget and is untouched by anything cswap does.
+    ///
+    /// Getting this wrong is not theoretical: the first version marked every
+    /// lane of the account, which stamped all five of the work account's
+    /// Desktop lanes with one timestamp. That collapsed their stagger — they
+    /// had been polled about fifty seconds apart, and afterwards all became due
+    /// together — so an account with five tokens refreshed at the same rate as
+    /// one with a single token. Exactly the multi-token spreading this was
+    /// supposed to preserve.
+    private static func sharesBudgetWithSwitcher(_ source: CredentialCandidate.Source) -> Bool {
+        switch source {
+        case .keychain, .parked: return true
+        case .desktop, .held, .override: return false
         }
     }
 

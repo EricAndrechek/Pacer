@@ -51,14 +51,23 @@ struct SchedulerExternalPollTests {
         #expect(seconds >= 60 + floor - 1)
     }
 
-    /// An announced poll that has already passed says nothing about the future
-    /// and must not pin the lane forever.
-    @Test("a stale external time is ignored")
-    func staleExternalIgnored() {
+    /// This test used to assert the opposite — that a past time is ignored —
+    /// and that was wrong in the direction that matters. A client whose next
+    /// poll is overdue is a client that keeps failing to make it, which is
+    /// exactly when the token's budget should be left alone. Observed for
+    /// real: cswap ran 24 minutes overdue taking 429 after 429 while Pacer,
+    /// reading a stale timestamp as "nothing scheduled", kept polling.
+    ///
+    /// It cannot pin the lane forever: the moment cswap succeeds it publishes a
+    /// fresh `nextPollAt` in the future, and the room reappears.
+    @Test("an overdue external poll still holds Pacer off")
+    func overdueExternalStillYields() {
         let d = decide(.init(lastPolledAt: now.addingTimeInterval(-floor),
                              externalNextPollAt: now.addingTimeInterval(-60),
                              account: .primary))
-        #expect(d == .poll(laneIndex: 0))
+        guard case .wait = d else {
+            Issue.record("polled over a client that is overdue and failing"); return
+        }
     }
 
     /// Nothing else polling: unchanged behaviour, which is the common case for
@@ -83,5 +92,38 @@ struct SchedulerExternalPollTests {
         // Five tokens sustain a one-minute endpoint cadence; all are past
         // their own floor, so one is due now.
         #expect(d == .poll(laneIndex: 4))
+    }
+}
+
+/// The overdue case, separated out because it is the one that inverts the
+/// intent: when the other client is *behind*, it is failing, and that is when
+/// it most needs the token's budget left alone.
+@Suite("Yielding to a client that has fallen behind")
+struct SchedulerOverdueExternalTests {
+
+    private let floor: TimeInterval = 300
+    private let now = Date(timeIntervalSince1970: 200_000)
+
+    private func decide(externalNextPollAt: Date?) -> OAuthPollScheduler.Decision {
+        OAuthPollScheduler(tuning: .init(
+            perTokenMinInterval: floor, activeInterval: 0, idleInterval: 600,
+            activeWindow: 900, minWait: 1)
+        ).decide(
+            lanes: [.init(lastPolledAt: now.addingTimeInterval(-floor),
+                          externalNextPollAt: externalNextPollAt, account: .primary)],
+            lastActivityAt: now, now: now)
+    }
+
+    @Test("an overdue external poll is treated as imminent, not as absent")
+    func overdueYields() {
+        guard case .wait = decide(externalNextPollAt: now.addingTimeInterval(-1400)) else {
+            Issue.record("polled over a client that is overdue and failing"); return
+        }
+    }
+
+    @Test("a future external poll with room still lets Pacer through")
+    func futureWithRoomStillPolls() {
+        #expect(decide(externalNextPollAt: now.addingTimeInterval(floor * 3))
+                == .poll(laneIndex: 0))
     }
 }

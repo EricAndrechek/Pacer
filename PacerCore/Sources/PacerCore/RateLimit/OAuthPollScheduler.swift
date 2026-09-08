@@ -175,7 +175,19 @@ public struct OAuthPollScheduler: Sendable {
         /// it threw away the lane-count and backoff logic this scheduler
         /// already does well.
         func byExternalSchedule(_ l: LaneState, earliest: Date) -> Date {
-            guard let external = l.externalNextPollAt, external > now else { return .distantPast }
+            guard let announced = l.externalNextPollAt else { return .distantPast }
+            // An overdue time means the other client wants to poll *now* and
+            // has not managed to — which is precisely when it needs the room,
+            // not when it stops deserving it. Treating a past time as "no
+            // upcoming poll" had Pacer crowd a client that was already failing:
+            // cswap's next poll ran 24 minutes overdue while it took 429 after
+            // 429, and Pacer, seeing a stale timestamp, kept taking the budget.
+            //
+            // Yielding here is bounded elsewhere, by data rather than by clock:
+            // `OAuthPoller` stops publishing a schedule at all once the other
+            // client has gone long enough without a successful fetch, so a
+            // permanently stuck client cannot park this lane forever.
+            let external = max(announced, now)
             // Room in front of it: taking `earliest` still leaves a full
             // interval before the other client goes.
             if external.timeIntervalSince(earliest) >= tuning.perTokenMinInterval {
