@@ -165,7 +165,7 @@ struct WeeklyComparisonCard: View {
                 value: pacerCost(thisWeek.cost),
                 label: "cost",
                 hint: deltaHint(this: thisWeek.cost, last: lastWeek.cost, formatter: pacerCost),
-                tooltip: pacerCostExact(thisWeek.cost)
+                tooltip: deltaTooltip(this: thisWeek.cost, last: lastWeek.cost, exact: pacerCostExact)
             )
             MetricTile(
                 value: pacerTokens(thisWeek.totalTokens),
@@ -175,7 +175,11 @@ struct WeeklyComparisonCard: View {
                     last: Double(lastWeek.totalTokens),
                     formatter: { pacerTokens(Int64($0)) }
                 ),
-                tooltip: pacerTokensExact(thisWeek.totalTokens)
+                tooltip: deltaTooltip(
+                    this: Double(thisWeek.totalTokens),
+                    last: Double(lastWeek.totalTokens),
+                    exact: { pacerTokensExact(Int64($0)) }
+                )
             )
             MetricTile(
                 value: "\(thisWeek.distinctDates.count)",
@@ -216,6 +220,22 @@ struct WeeklyComparisonCard: View {
         let pct = abs((ratio - 1) * 100)
         let arrow: String = ratio >= 1.05 ? "↑" : ratio <= 0.95 ? "↓" : "≈"
         return String(format: "%@ %.0f%% (vs %@)", arrow, pct, formatter(last))
+    }
+
+    /// Both endpoints of the week-over-week comparison, exact —
+    /// "$4,203.11 → $14,602.55". The tile already shows this week
+    /// compact as its value and last week compact inside `deltaHint`,
+    /// so the one thing hover can still add is the pair at full
+    /// precision, in the order the change happened. Falls back to this
+    /// week alone when there is no prior week, matching `deltaHint`'s
+    /// own "first 7 days" case.
+    private func deltaTooltip(
+        this: Double,
+        last: Double,
+        exact: (Double) -> String
+    ) -> String {
+        guard last > 0 else { return exact(this) }
+        return "\(exact(last)) → \(exact(this))"
     }
 
     /// "82% cache hits" — only when there's enough data and only when
