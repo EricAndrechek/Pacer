@@ -84,17 +84,18 @@ covers the most common discovery path. The popover content stays
 visible while open; users wanting exact numbers can open the main
 app from the same panel.
 
-**Do not try to verify this with a scripted hover.** An attempt to test
-option 1 by dispatching AppKit mouse events at a real window took over the
-repo owner's cursor mid-work; see "Never take over the machine" in
-`AGENTS.md`. There is no off-screen way to test `NSMenu` tracking, which
-means this item cannot be closed by an agent alone: build the change if
-you like, then hand it to a human to hover. "This needs a human to check"
-is the correct place to stop.
+**Built, not yet confirmed.** `menuTooltip(_:)` (PacerUI) now applies both
+`.help` and a real `NSView.toolTip`, on the option-1 reasoning above but
+carried by a SwiftUI-sized overlay rather than manual `addToolTip` rects, so
+there is no frame tracking to go stale. The three popover rows use it.
 
-Two relative-date labels in `MenuBarContent.swift` are deliberately left
-without the `pacerRelativeExact` tooltip the rest of the app now carries,
-for this reason — `.help` would not fire on them anyway.
+What cannot be settled off-screen is whether macOS *draws* it — NSMenu's
+tracking loop has no headless equivalent. `make verify-tooltip` is the
+prepared one-shot check: read `AGENTS.md` § "Never take over the machine"
+first, and get the owner's go-ahead **for that run**. If the PNG shows a
+tooltip beside the highlighted row, close this item. If it does not, option 1
+is dead and only option 3 (drop NSMenu) remains — which needs sign-off,
+because it changes how the menu bar looks and behaves.
 
 ## Other things noticed during the formatter sweep
 
