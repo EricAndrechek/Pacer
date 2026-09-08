@@ -241,6 +241,44 @@ piece of work gated on per-account token retention.
 
 ---
 
+## Attribution was audited against Claude Code's own records — and is fine
+
+Worth writing down because the audit is easy to redo badly. I did, twice.
+
+Claude Code's transcripts carry `ownerOrganizationUuid` on **`bridge-session`**
+records, and those uuids are exactly Pacer's account ids. That looks like
+ground truth for "who owned this session", and it is tempting to attribute
+whole sessions from it.
+
+**It is not ground truth for a session.** Two things kill that:
+
+1. **A session's owner genuinely changes.** 7 of 82 sessions show
+   `427a → 7459` within one session. So "one session, one account" is false,
+   and Pacer splitting a session across accounts is *correct*. An early version
+   of this audit collapsed each session to its last owner and then reported the
+   collapse as a Pacer error — 9 fake disagreements.
+2. **The records only describe bridged activity, and carry no timestamp.** One
+   session had 595 owner records against 5,465 turns. They cannot say what
+   served the rest.
+
+Compared as *sets* of accounts per session: **76 of 82 match**, 4 sessions are
+not in Pacer's table, and 2 differ — in both, the transcript names only work
+while Pacer also credits a slice to personal. Given the records cover a subset
+of the session, that is what a partial record looks like, not evidence of
+misattribution.
+
+Corroborating from the other direction: after the 11:43 switch, personal's
+5-hour went flat at 98% and stayed there while work's climbed from 0%. If
+sessions had kept billing personal after the switch, personal would have kept
+rising.
+
+**Conclusion: leave attribution alone.** The activation trail is the best
+signal available, and nothing here contradicts it. If you change attribution,
+re-run this comparison as a set comparison, and do not treat the owner field as
+covering a whole session.
+
+---
+
 ## What is next, with honest sizing
 
 **1. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
