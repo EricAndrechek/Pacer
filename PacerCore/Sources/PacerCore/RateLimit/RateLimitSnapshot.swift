@@ -75,14 +75,17 @@ public struct RateLimitSnapshot: Sendable, Equatable {
 public enum RateLimitSource {
     public static let oauth = "oauth"
     public static let statusline = "statusline"
-    /// Read from an account switcher's own usage cache rather than fetched.
+    /// Read from `cswap`'s own usage cache rather than fetched.
     ///
-    /// Anthropic budgets the usage endpoint per token, and `cswap` polls the
-    /// same tokens — both clients asking about the signed-in account produced
-    /// 429s for both. Reading what the switcher already fetched costs no
-    /// request and covers accounts Pacer cannot poll at all. See
-    /// `SwitcherUsageCache`.
-    public static let switcher = "switcher"
+    /// Named for the tool rather than the category, because the integration is
+    /// specific to it — the file, its path and its schema are cswap's. A second
+    /// switcher would be a second source, not a rename of this one.
+    ///
+    /// Anthropic budgets the usage endpoint per token and cswap polls the same
+    /// tokens, so both clients asking about the signed-in account produced 429s
+    /// for both. Reading what cswap already fetched costs no request and covers
+    /// accounts Pacer cannot poll at all. See `SwitcherUsageCache`.
+    public static let cswap = "cswap"
 }
 
 /// Window-name constants. Same string-not-enum reasoning as

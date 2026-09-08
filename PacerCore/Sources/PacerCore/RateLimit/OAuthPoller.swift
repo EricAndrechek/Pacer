@@ -748,7 +748,25 @@ public actor OAuthPoller: TokenPoolTesting {
                              subscriptionType: nil,
                              isActive: activeAccountKey == key,
                              laneSource: .parked,
-                             source: RateLimitSource.switcher)
+                             source: RateLimitSource.cswap)
+
+            // Stand down on this account's tokens for a cycle.
+            //
+            // Otherwise both clients keep asking and both keep getting 429s,
+            // which is the state this whole fix exists to leave. Yielding the
+            // token's budget to the one that is going to poll it anyway means
+            // cswap succeeds, its cache stays fresh, and Pacer reads it for
+            // free — better data for fewer requests.
+            //
+            // Expressed by advancing `lastPolledAt`, so the ordinary scheduler
+            // defers them; nothing new decides anything. It is also
+            // self-healing: if cswap stops running its cache stops advancing,
+            // no reading is newer, this never runs, and Pacer goes back to
+            // polling on its own.
+            for i in lanes.indices where lanes[i].accountKey == key {
+                lanes[i].state.lastPolledAt = max(
+                    lanes[i].state.lastPolledAt ?? .distantPast, reading.fetchedAt)
+            }
         }
     }
 
@@ -767,45 +785,31 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    /// The next secondary lane to sweep, or nil.
+    /// The least-recently-polled secondary lane that's due for its sweep now
+    /// (past its per-lane interval and not cooling), or nil.
     ///
-    /// **The budget is spent per account, not per lane.** An account needs one
-    /// reading per interval; it does not become better known by asking five of
-    /// its tokens. Before this, the interval was enforced per *lane*, so an
-    /// account holding five Claude Desktop tokens was polled five times as
-    /// often as one holding a single credential — and the usage endpoint's
-    /// budget is shared, per token and overall.
+    /// **Per lane, deliberately — that is the multi-token design working.**
+    /// The budget Anthropic enforces is per *token*, so an account holding five
+    /// credentials really can be read five times as often without costing any
+    /// other account anything. Spreading load across an account's tokens to
+    /// shorten its refresh interval is the point of the token pool.
     ///
-    /// What that cost, from the log: the signed-in account's one lane took
-    /// consecutive 429s and went nineteen minutes without a reading, while five
-    /// Desktop lanes for the account *not* signed in were read every fifty
-    /// seconds and all succeeded. The dashboard then said "last read 18m ago"
-    /// about the account the user was actually on. `cswap` competes for the
-    /// same budget and was taking 429s of its own throughout.
-    ///
-    /// So: an account whose freshest lane was polled within the interval is
-    /// skipped entirely, whichever of its lanes that was.
+    /// This was briefly changed to budget per account, on the theory that five
+    /// Desktop lanes were starving the signed-in account's single lane. That
+    /// theory was wrong: the 429s only ever landed on the signed-in account's
+    /// own token, never on the five that were being polled twelve times as
+    /// often, which is exactly what a per-token budget looks like. The real
+    /// contention was Pacer and `cswap` polling the *same* token — fixed by
+    /// reading cswap's cache instead. Throttling by account fixed nothing and
+    /// gave up a real feature, so it is reverted.
     private func dueSecondaryLaneIndex(now: Date) -> Int? {
         let interval = configuration.secondarySweepInterval
-
-        // Freshest poll per account, across all of that account's lanes.
-        var lastPollByAccount: [String: Date] = [:]
-        for lane in lanes {
-            let key = lane.accountKey ?? "?"
-            let at = lane.state.lastPolledAt ?? .distantPast
-            if at > (lastPollByAccount[key] ?? .distantPast) { lastPollByAccount[key] = at }
-        }
-
         return lanes.indices
             .filter { i in
-                let key = lanes[i].accountKey ?? "?"
-                let accountPolledAt = lastPollByAccount[key] ?? .distantPast
-                return lanes[i].state.account == .secondary
+                lanes[i].state.account == .secondary
                     && (lanes[i].state.cooldownUntil.map { now >= $0 } ?? true)
-                    && accountPolledAt.addingTimeInterval(interval) <= now
+                    && ((lanes[i].state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast) <= now)
             }
-            // Within an account, prefer the lane that has waited longest, so a
-            // token that keeps failing does not monopolise its account's turn.
             .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
     }
 
@@ -813,18 +817,8 @@ public actor OAuthPoller: TokenPoolTesting {
     /// there are no secondary lanes.
     private func nextSecondaryWait(now: Date) -> TimeInterval? {
         let interval = configuration.secondarySweepInterval
-        var lastPollByAccount: [String: Date] = [:]
-        for lane in lanes {
-            let key = lane.accountKey ?? "?"
-            let at = lane.state.lastPolledAt ?? .distantPast
-            if at > (lastPollByAccount[key] ?? .distantPast) { lastPollByAccount[key] = at }
-        }
         let readyTimes = lanes.filter { $0.state.account == .secondary }.map { lane -> Date in
-            // Account-level, to match `dueSecondaryLaneIndex` — a wait computed
-            // per lane would wake the loop for a lane its account has already
-            // been read for.
-            let accountPolledAt = lastPollByAccount[lane.accountKey ?? "?"] ?? .distantPast
-            let byInterval = accountPolledAt.addingTimeInterval(interval)
+            let byInterval = lane.state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
             let byCooldown = lane.state.cooldownUntil ?? .distantPast
             return max(byInterval, byCooldown)
         }
