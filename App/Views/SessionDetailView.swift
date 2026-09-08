@@ -148,7 +148,10 @@ struct SessionDetailView: View {
                     tooltip: pacerTokensExact(session.totalTokens)
                 )
                 MetricTile(value: pacerModelDisplayName(session.topModel), label: "top model", size: .compact)
-                MetricTile(value: Self.durationLabel(for: session), label: "duration", size: .compact)
+                MetricTile(
+                    value: Self.durationLabel(for: session), label: "duration", size: .compact,
+                    tooltip: "\(pacerRelativeExact(session.firstSeenAt)) → \(pacerRelativeExact(session.lastSeenAt))"
+                )
             }
         }
     }

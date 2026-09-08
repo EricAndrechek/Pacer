@@ -3,47 +3,50 @@
 Things worth doing eventually but not blocking. Captured here so a
 future session can pick them up cold without rediscovery.
 
-## Hover-for-exact: extend the pattern beyond cost / tokens
+## Hover-for-exact: the pace tiles, and only the pace tiles
 
 The compact/exact pair landed for `pacerCost` / `pacerTokens` in
-`fccba00`. Every visible cost/token now has `.help(pacerCostExact(v))`
-or `.help(pacerTokensExact(v))` inline so hover reveals the full
-locale-grouped value. A handful of other compact renderings in the
-app would benefit from the same pattern, ranked by likely value:
+`fccba00` and for relative dates (`pacerRelative` /
+`pacerRelativeExact`) in the follow-up sweep. Session duration
+(hover → `first seen → last seen`), the cache sub-line (hover →
+exact read / written counts) and the week-over-week tiles (hover →
+`$4,203.11 → $14,602.55`) went with it. What is left is one item,
+and it is smaller than it first looked:
 
-1. **`pacerRelative` dates** — "3m ago", "yesterday", "2w ago".
-   Loses precision; an absolute timestamp on hover
-   ("2026-05-20 14:47:32") would let users disambiguate without
-   checking another source. Used in the toolbar freshness pill,
-   projects last-active column, sessions table, hover-row context
-   menus, and probably others. Add a `pacerRelativeExact(date) ->
-   String` companion and inline-sweep mirror of the cost pass.
-2. **Pace-tile percent chips** ("5h 23%", "7d 91%"). Hover could
-   reveal absolute counts ("32,847 of 137,500 messages") plus
-   reset time. Implemented per-card since the underlying data
-   differs (5-hour vs 7-day rate limit samples).
-3. **Trend chips** ("+18% vs last week"). Hover could expand to
-   "$12.4k → $14.6k vs prior 7d" so the user sees both endpoints
-   without leaving the dashboard.
-4. **Duration labels** ("9h 12m", "2d 4h"). Less critical — the
-   compact form is already specific enough — but a tooltip with
-   the exact `[start, end]` window could help on session detail
-   modals.
-5. **Cache reuse / hit-rate %**. Already inline-shown; hovering
-   could reveal "read / written" raw totals (those are already in
-   the subline, so lowest priority).
+**Pace-tile percent chips** ("5h 23%", "7d 91%"). The original note
+here asked for hover to reveal absolute counts — "32,847 of 137,500
+messages" — plus the reset time. Neither is available as written:
 
-**Mechanical pattern:** every site looks the same as the
-`Text(pacerCost(v)).help(pacerCostExact(v))` sweep — add a
-companion exact function in `PacerCore/Sources/PacerUI/Formatters.swift`,
-then run a targeted regex pass with `perl -i` to attach `.help(…)`
-to every existing site. Keep the swept change *inline* — do not
-introduce a `CostText`-style wrapper view. The wrapper pattern
-triggered a SwiftUI runtime crash
+- Pacer has no numerator or denominator to show.
+  `PaceChartCard.Column` carries `usedPct` and nothing else, because
+  Anthropic's rate-limit headers report a percentage, not a count.
+  Recovering counts would mean inferring a denominator, which is a
+  guess dressed up as a fact — exactly what the hover-for-exact
+  pattern exists to avoid.
+- The reset time is already rendered, in the `caption` directly
+  under the chip (`pacerResetCaption` → "resets in 2 hr. · 9:14 PM").
+
+So the honest remaining version is small: hover the rounded hero
+percent to see the un-rounded one (23% → 23.4%). Worth doing on a
+pass that is already touching `PaceChartCard.swift`; not worth a
+dedicated change to a file that is churned heavily by scope work.
+
+**Mechanical pattern** (still the rule for any future sweep): add a
+companion exact function next to the compact one in
+`PacerCore/Sources/PacerUI/Formatters.swift` or `TimeFormatters.swift`,
+then attach `.help(…)` to the existing call sites. Keep the swept
+change *inline* — do not introduce a `CostText`-style wrapper view.
+The wrapper pattern triggered a SwiftUI runtime crash
 (`_swift_getGenericMetadata` exhausting the stack guard) at scale
 because every wrapper added new struct types to the view-tree's
-generic stack. Inline `.help()` keeps the type tree the same
-shape it had before, just one extra modifier per call.
+generic stack. Inline `.help()` keeps the type tree the same shape
+it had before, just one extra modifier per call. Where a surface
+already takes a `tooltip:` parameter (`MetricTile`), use that
+instead of wrapping it.
+
+Two sites are deliberately left without tooltips: `MenuBarContent`'s
+popover rows, where `.help` never fires (see the next section), and
+the status-item button, which is itself already the hover surface.
 
 ## Menu-bar popover (NSMenu) doesn't fire SwiftUI tooltips
 

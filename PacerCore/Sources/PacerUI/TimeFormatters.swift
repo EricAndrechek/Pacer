@@ -95,6 +95,28 @@ public func pacerRelative(
         .localizedString(for: date, relativeTo: Date())
 }
 
+/// Absolute timestamp companion to `pacerRelative`, for the `.help(…)`
+/// tooltip that sits on the same label.
+///
+/// `pacerRelative` trades precision for scannability — "3m ago",
+/// "yesterday", "2w ago". That is the right call for the label, but it
+/// leaves the reader unable to answer "which Tuesday?" without going to
+/// another source. Pairing every relative label with
+/// `.help(pacerRelativeExact(date))` puts the exact instant one hover
+/// away — the same compact/exact split `pacerCost` / `pacerCostExact`
+/// already use for money.
+///
+/// Medium date + medium time ("May 20, 2026 at 2:47:32 PM" in en_US,
+/// locale-aware elsewhere). Both halves earn their place: the date
+/// disambiguates a week-old "2w ago", and the seconds disambiguate a
+/// freshness pill that has been reading "3m ago" across two refresh
+/// cycles. Formatter is cached with the rest — see the note on
+/// `Cached.relativeFormatter(for:)` for why building one per call is
+/// not free on a per-row surface.
+public func pacerRelativeExact(_ date: Date) -> String {
+    Cached.absoluteTimestamp.string(from: date)
+}
+
 // MARK: - Reset caption
 
 /// "resets in 2 hr. · 9:14 PM" (5h cycle) / "resets in 4 days · Mon 3 PM"
@@ -128,6 +150,16 @@ private enum Cached {
         let f = DateFormatter()
         f.locale = .current
         f.dateFormat = "EEE"
+        return f
+    }()
+    /// Absolute "when exactly" formatter behind `pacerRelativeExact`.
+    /// Medium/medium so the string carries year, day and seconds
+    /// without spelling the weekday out.
+    static let absoluteTimestamp: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.dateStyle = .medium
+        f.timeStyle = .medium
         return f
     }()
     static let clockTime: DateFormatter = {
