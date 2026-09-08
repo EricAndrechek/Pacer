@@ -94,6 +94,20 @@ full resolution when the fit works in cycles. That one is gated on the golden
 fixture — changing what the fit sees has to stay byte-identical for the active
 account — so it needs the Python replay harness, not a hunch.
 
+## What is left after the refit fix: the scan path
+
+With the refit down from ~16 s to ~2.8 s, the remaining main-thread stalls
+change character. Over the first quarter hour after the fix: 4 refits (p50
+2,820 ms), 13 series loads (p50 98 ms), and 6 stalls of a second or more — and
+all six sit inside a two-minute window dense with `[ScanCoordinator] scan:
+incremental` lines, with a pace-card top-up of *three rows* taking 2,215 ms in
+the middle of it.
+
+So the next contended writer is the JSONL scan path, not the engine. Two
+caveats before anyone acts on that: the sample is fifteen minutes, and it was
+taken while the machine was generating Claude Code turns continuously, which is
+the heaviest the scanner ever gets. Measure over a normal day first.
+
 ## The pace card's series load is occasionally slow — it is the refit above
 
 Measured over a full day on a two-account store, with the dashboard open:
