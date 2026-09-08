@@ -231,7 +231,16 @@ struct PaceChartCard: View {
     /// shape `AccountTotals` and `TokenPoolStatus` already use. The card
     /// renders whatever it has meanwhile.
     private func reload() async {
-        guard let container = try? PacerStore.sharedModelContainer() else { return }
+        // The container the view is actually hosted in, not the process-wide
+        // on-disk one.
+        //
+        // They are the same object in the running app, and different in the
+        // two modes that matter: screenshot mode renders a synthetic fixture,
+        // and asking for the shared container there reached past it into the
+        // user's real store — so the README's pace chart was drawn from real
+        // rate-limit history while every number beside it came from the
+        // fixture. Non-deterministic, and real data in a public repo.
+        let container = modelContext.container
         // Before the first `await`, so a `scopeKey` change caused by this call
         // itself cannot race ahead of it. See `loadedScopeKey`.
         loadedScopeKey = scopeKey
@@ -799,7 +808,12 @@ struct PaceChartCard: View {
             series = []
             Task { await reload() }
         }
-        .task(id: windowKey) { scheduleProjectionRefresh() }
+        // Awaited directly, not scheduled: this is the path that first fills
+        // the card, it fires once per window-set change, and handing it to the
+        // debounced scheduler left the chips and the dashed forecast line
+        // missing from anything that captures at a fixed settle. The burst
+        // worth collapsing is the notification path below.
+        .task(id: windowKey) { await runProjectionRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
         }

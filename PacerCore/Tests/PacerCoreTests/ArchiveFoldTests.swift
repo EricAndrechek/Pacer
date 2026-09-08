@@ -184,4 +184,41 @@ struct ScopeMirrorTests {
         #expect(await MainActor.run { UsageScope.shared.activeAccountId } == "orgB")
         #expect(UsageScope.storedActiveAccountId == "orgB")
     }
+
+    /// The mirror is what *other* processes read. A reconcile that diffs
+    /// against this process's own in-memory value cannot repair one that has
+    /// gone missing — and an absent mirror makes every out-of-process
+    /// rate-limit read unscoped, which is silently wrong rather than empty.
+    @Test("a missing mirror is republished even when this process already agrees")
+    func reconcileRewritesAnAbsentMirror() async throws {
+        let container = try ModelContainer(
+            for: Account.self, RateLimitSample.self, UsageLimitSample.self,
+            ExtraUsageSample.self, AccountUsageArchive.self, ClaudeCodeMeta.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        await MainActor.run {
+            let c = ModelContext(container)
+            c.insert(Account(id: "orgB", organizationId: "orgB", displayName: "B",
+                             isActive: true, firstSeenAt: .distantPast, lastSeenAt: .distantPast))
+            try? c.save()
+        }
+
+        let previous = UsageScope.storedActiveAccountId
+        defer {
+            if let previous {
+                PacerPreferences.store.set(previous, forKey: UsageScope.activeKey)
+            } else {
+                PacerPreferences.store.removeObject(forKey: UsageScope.activeKey)
+            }
+        }
+
+        // In memory it is already right; on disk it is gone. This is the shape
+        // a `defaults delete` under a running app leaves behind.
+        await MainActor.run { UsageScope.shared.setActiveAccount("orgB") }
+        PacerPreferences.store.removeObject(forKey: UsageScope.activeKey)
+        #expect(UsageScope.storedActiveAccountId == nil)
+
+        await OAuthPoller.reconcileScopeMirror(container: container)
+
+        #expect(UsageScope.storedActiveAccountId == "orgB")
+    }
 }

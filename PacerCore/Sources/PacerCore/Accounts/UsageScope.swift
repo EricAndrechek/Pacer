@@ -240,6 +240,28 @@ public final class UsageScope {
         PacerPreferences.store.set(id, forKey: Self.activeKey)
     }
 
+    /// Write the mirror whether or not it looks like it needs writing.
+    ///
+    /// `setActiveAccount` returns early when the id matches what this process
+    /// already holds, which is right for the poller's hot path and wrong for a
+    /// reconcile: the stored value is what *other* processes read — the widget
+    /// extension, the renderer, a relaunched menu bar — and it can be missing
+    /// or stale while this process's in-memory copy is perfectly correct.
+    ///
+    /// The failure it removes: anything that changes the stored value without
+    /// going through this process — a crash mid-write, a defaults edit, a
+    /// second process — leaves a mirror the reconcile then declines to repair,
+    /// because in memory everything already looks right. An absent or stale
+    /// mirror makes every out-of-process rate-limit read unscoped, which is
+    /// two accounts' windows interleaved rather than an empty state anyone
+    /// would notice.
+    ///
+    /// A mirror is asserted, not diffed.
+    public func republishActiveAccount(_ id: String) {
+        activeAccountId = id
+        PacerPreferences.store.set(id, forKey: Self.activeKey)
+    }
+
     public var isAll: Bool { accountId == nil }
 
     public func select(_ accountId: String?) {

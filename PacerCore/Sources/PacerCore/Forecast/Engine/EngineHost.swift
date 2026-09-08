@@ -24,6 +24,23 @@ public final class EngineHost {
         _ = engine(for: .allAccounts)
     }
 
+    /// Build a host around engines that already exist and are already fitted.
+    ///
+    /// For headless rendering. The normal init warms `.allAccounts` on a
+    /// detached task, which is right in the app and a race against a capture
+    /// that happens at a fixed settle: the screenshot scenes fit their engine
+    /// synchronously against a synthetic fixture and then have nothing to wait
+    /// for. Without this they got no host at all — the environment carried only
+    /// the older single-engine key, so every view that moved to a per-scope
+    /// engine silently rendered no forecast at all, and the README's headline
+    /// screenshot lost its projections, its at-reset chips and its
+    /// pace-vs-normal chip.
+    public init(container: ModelContainer, preseeded: [EngineScope: UsageIntelligenceEngine]) {
+        self.container = container
+        self.engines = preseeded
+        if engines[.allAccounts] == nil { _ = engine(for: .allAccounts) }
+    }
+
     /// The all-accounts engine — what anything that must not follow the
     /// window's scope reads: alerts, the menu bar's gauges, the HTTP API.
     public var global: UsageIntelligenceEngine { engine(for: .allAccounts) }

@@ -1479,7 +1479,10 @@ public actor OAuthPoller: TokenPoolTesting {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         guard let active = accounts.first(where: \.isActive)?.id ?? accounts.first?.id
         else { return }
-        await MainActor.run { UsageScope.shared.setActiveAccount(active) }
+        // Unconditional: see `republishActiveAccount`. A reconcile that skips
+        // the write when this process already agrees cannot repair a mirror
+        // that is missing or wrong for everyone else.
+        await MainActor.run { UsageScope.shared.republishActiveAccount(active) }
     }
 
     /// Bring every account's recent history back out of the archive.

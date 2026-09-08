@@ -82,7 +82,12 @@ verify-data:  ## Check every rollup against the raw samples in the REAL store. R
 	@$(REPO_ROOT)/bin/dev-verify-data.sh
 
 test:  ## Run the PacerCore unit + ground-truth tests.
-	@cd PacerCore && swift test 2>&1 | tail -3
+	@# PACER_ISOLATED_DEFAULTS keeps the suite off the machine's App Group
+	@# defaults. Tests publish fixture account ids through the same keys the
+	@# running app reads, and one leaked `orgA` scoped the live app (and the
+	@# screenshot renderer) to an account with no rows. PacerPreferences also
+	@# detects a test process on its own; this is the half that cannot drift.
+	@cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3
 
 pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
 	@bin/update-pricing-snapshot.sh

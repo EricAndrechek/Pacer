@@ -232,10 +232,27 @@ nothing. The failure mode is the dangerous kind: no error, no empty state, the
 gauges just stopped having a value. Both ends now publish only ids the store
 knows, and `reconcileScopeMirror` repairs whatever is there at launch.
 
-**`defaults read` lies.** It served a stale value for minutes after the app had
-written the correct one. Read the plist under the group container
-(`plutil -p ~/Library/Group\ Containers/<group>/Library/Preferences/<group>.plist`)
-before concluding a write did not happen.
+**`defaults read <group> <key>` reads a different file than the app writes.**
+Not staleness — a different domain. The installed app is sandboxed, so
+`UserDefaults(suiteName: <group>)` resolves inside the App Group *container*:
+
+    ~/Library/Group Containers/<group>/Library/Preferences/<group>.plist
+
+Any process that is **not** sandboxed — `swift test`, and any Pacer binary run
+straight from a shell, which includes the screenshot renderer and
+`bin/dev-render-live.sh` — gets the same suite name from the **user domain**:
+
+    ~/Library/Preferences/<group>.plist
+
+Both exist, with different contents, and `defaults` only ever shows you the
+second one. Read the group-container plist with `plutil -p` before concluding
+anything about what the app sees.
+
+The practical consequence is worse than the confusion: the two halves of the
+project that render UI headlessly read the *user*-domain copy, so a test that
+leaves a fixture account id behind scopes them to an account with no rows.
+`PacerPreferences.store` now gives a test process its own private suite for
+exactly this reason.
 
 **Adding a predicate to a hot `@Query` is a performance change.** This is the
 single most expensive lesson of the account work. A `@Query` re-executes on
@@ -293,6 +310,17 @@ the table beside it, and took `rows.prefix(n)` from the table's order — so
 "Top projects" listed five arbitrary projects and hovering a wedge named the
 wrong model. Same class: a bar whose length is one metric under a heading that
 names another (History's "Heaviest token days" drew cost).
+
+**A view that reaches for `PacerStore.sharedModelContainer()` bypasses
+screenshot mode.** Screenshot mode renders a synthetic fixture into an
+in-memory container and promises never to touch the user's data; nothing
+installs that container as the shared one, so a view asking the process for the
+shared container reaches straight past the fixture into the real store.
+`PaceChartCard` did, which meant the README's pace chart was drawn from real
+rate-limit history while every number beside it came from the fixture — real
+data in a public repo, and a screenshot that could not render the same twice.
+Use `modelContext.container`: identical in the running app, correct everywhere
+else.
 
 **Tests write to the machine's real App Group suite.** `PacerPreferences.store`
 resolves to the live group container in the test process too, so a test that

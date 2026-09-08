@@ -428,7 +428,8 @@ enum ScreenshotMode {
             // before/after evidence.
             ctx.insert(RateLimitSample(
                 sampledAt: now.addingTimeInterval(1), window: window,
-                usedPercentage: pct, resetsAt: reset, source: "oauth"))
+                usedPercentage: pct, resetsAt: reset, source: "oauth",
+                accountId: fixtureLimitAccount))
         }
         do { try ctx.save() } catch { log("⚠️ at-limit: seed save failed: \(error)") }
 
@@ -723,7 +724,7 @@ enum ScreenshotMode {
                 sampledAt: t, identity: "weekly_scoped|Fable|", kind: "weekly_scoped",
                 group: "weekly", label: "Fable", percent: pct, resetsAt: scopedReset,
                 severity: "normal", isActive: true,
-                modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             // The account-wide rows every poll also carries — they share the
             // row budget with the scoped window, which is what made a flat
             // fetch cap clip the scoped tail so aggressively.
@@ -731,12 +732,12 @@ enum ScreenshotMode {
                 sampledAt: t, identity: "session||", kind: "session", group: "session",
                 label: "All models", percent: 39, resetsAt: sessionReset.addingTimeInterval(jitter),
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             ctx.insert(UsageLimitSample(
                 sampledAt: t, identity: "weekly_all||", kind: "weekly_all", group: "weekly",
                 label: "All models", percent: 71, resetsAt: resetsAt.addingTimeInterval(jitter),
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             t = t.addingTimeInterval(interval)
             i += 1
         }
@@ -818,7 +819,7 @@ enum ScreenshotMode {
                     sampledAt: t, identity: identity, kind: kind, group: s.group,
                     label: s.model, percent: pct, resetsAt: reset,
                     severity: s.severity, isActive: s.active,
-                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             }
             var t = cycleStart
             var i = 0
@@ -863,9 +864,18 @@ enum ScreenshotMode {
         @ViewBuilder _ content: () -> some View
     ) async {
         let margin: CGFloat = card ? 56 : 28
+        // Both engine keys. Views migrated to the per-scope `EngineHost`
+        // during the account work and the scenes only ever set the older
+        // single-engine key, so their forecasts quietly disappeared. Preseeded
+        // so the host uses this scene's already-fitted engine rather than
+        // warming a fresh one against a capture deadline.
+        let host = screenshotEngine.map {
+            EngineHost(container: container, preseeded: [.allAccounts: $0])
+        }
         let inner = content()
             .modelContainer(container)
             .environment(\.usageEngine, screenshotEngine)
+            .environment(\.usageEngines, host)
             .frame(width: width, height: height)
 
         // Optional macOS window chrome — a titlebar with traffic-light
@@ -1210,6 +1220,27 @@ extension ScreenshotMode {
     /// `now` lands partway through each cycle (≈60% of the 5-hour, ≈57%
     /// of the 7-day), and the final keyframe is the value the hero
     /// tiles / gauges / menu-bar readout display (42% and 61%).
+    /// The account id every synthetic rate-limit and scoped-limit row is
+    /// stamped with.
+    ///
+    /// The fixture used to leave these nil, which was fine while the reads
+    /// were unscoped and silently wrong once they were not: `LimitScope`
+    /// resolves an account for every limit read, so unstamped rows match
+    /// nothing and the pace card renders its cold-start empty state. That is
+    /// how the README's flagship dashboard screenshot came back saying
+    /// "Waiting for the first rate-limit reading".
+    ///
+    /// It follows whatever this process resolves rather than inventing an id,
+    /// because the surrounding views read the same scope — an id of our own
+    /// would only move the mismatch. `nil` (a machine that has never polled)
+    /// reads everything, which is the pre-account behaviour and still correct.
+    ///
+    /// The real store obeys this invariant too; `make verify-data` asserts it
+    /// ("every rate-limit row carries an account").
+    private static var fixtureLimitAccount: String? {
+        UsageScope.storedLimitAccountId
+    }
+
     private static func seedRateLimits(_ ctx: ModelContext, now: Date) {
         // 5-hour: a steady, near-linear climb with a recent uptick, ending
         // ~32%. In real data the 5-hour window is rarely stressed (it
@@ -1259,7 +1290,8 @@ extension ScreenshotMode {
                 last[spec.window] = pct
                 ctx.insert(RateLimitSample(
                     sampledAt: t, window: spec.window, usedPercentage: pct,
-                    resetsAt: spec.resetsAt, source: "oauth"
+                    resetsAt: spec.resetsAt, source: "oauth",
+                    accountId: fixtureLimitAccount
                 ))
             }
             t = t.addingTimeInterval(interval)
@@ -1310,7 +1342,7 @@ extension ScreenshotMode {
                 sampledAt: now, identity: "\(a.kind)||", kind: a.kind, group: a.group,
                 label: "All models", percent: a.pct, resetsAt: a.reset,
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
         }
 
         // Scoped per-model weekly windows — the first-class pace columns.
@@ -1325,7 +1357,7 @@ extension ScreenshotMode {
                     sampledAt: t, identity: identity, kind: "weekly_scoped", group: "weekly",
                     label: s.model, percent: pct, resetsAt: weeklyReset,
                     severity: s.severity, isActive: s.active,
-                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             }
             var t = cycleStart
             var i = 0
