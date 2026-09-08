@@ -241,6 +241,9 @@ public actor OAuthPoller: TokenPoolTesting {
     /// publishes can report active/idle without another probe.
     private var lastActivityAt: Date?
     private var lastOutcome: PollOutcome?
+    /// Which lane the last logged poll used, so a change of token is worth a
+    /// line even when the outcome category has not moved.
+    private var lastPolledLaneId: String?
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
@@ -1052,10 +1055,20 @@ public actor OAuthPoller: TokenPoolTesting {
         lanes[idx].state.lastPolledAt = now
 
         let previous = lastOutcome
+        let previousLane = lastPolledLaneId
         let outcome = await apply(result: result, laneIndex: idx, now: now)
         lastOutcome = outcome
-        if !Self.sameCategory(previous, outcome) {
-            Log.write("OAuthPoller", Self.summarize(outcome: outcome, laneCount: lanes.count))
+        lastPolledLaneId = idx < lanes.count
+            ? Self.laneId(lanes[idx].credential.accessToken) : nil
+        // Log a change of lane as well as a change of outcome. Deduping on the
+        // outcome alone hid which token was being spent, which is the one thing
+        // that matters when two clients share one: a run of identical `ok`
+        // lines could be one lane every minute or six lanes in rotation, and
+        // there was no way to tell them apart from outside.
+        if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
+            Log.write("OAuthPoller", Self.summarize(
+                outcome: outcome, laneCount: lanes.count,
+                lane: idx < lanes.count ? lanes[idx] : nil))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
@@ -1180,8 +1193,17 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    private static func summarize(outcome: PollOutcome, laneCount: Int) -> String {
-        let lanes = "lanes=\(laneCount)"
+    private static func summarize(
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil
+    ) -> String {
+        // Which credential, and whose. Enough to tell a Desktop token from the
+        // Claude Code one an account switcher is also holding, without ever
+        // putting the token itself in a log file.
+        let which = lane.map { l in
+            let org = l.accountKey.map { String($0.prefix(4)) } ?? "?"
+            return "\(l.source.rawValue)/\(org) "
+        } ?? ""
+        let lanes = "\(which)lanes=\(laneCount)"
         switch outcome {
         case .success(let fh, let sd):
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"
