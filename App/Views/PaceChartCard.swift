@@ -231,6 +231,7 @@ struct PaceChartCard: View {
     /// shape `AccountTotals` and `TokenPoolStatus` already use. The card
     /// renders whatever it has meanwhile.
     private func reload() async {
+        var fetchMillis: [(account: String, kind: String, rows: Int, ms: Int)] = []
         // The container the view is actually hosted in, not the process-wide
         // on-disk one.
         //
@@ -271,9 +272,22 @@ struct PaceChartCard: View {
 
             let through = entry.loadedThrough
             let account = target.accountId
+            let fetchStarted = Date()
             let loaded = await Task.detached(priority: .userInitiated) {
                 await Self.load(container: container, account: account, through: through)
             }.value
+            // Per-target detail, because the aggregate line below cannot say
+            // which of two accounts was slow, whether it was a cold read or a
+            // top-up, or how many rows came back. About 6% of these exceed a
+            // second and the cause is not yet known — it is *not* contention
+            // with the poller's writes, which was the obvious guess and is
+            // ruled out (slow loads sit near a write 35% of the time, fast
+            // ones 39%). Recorded so the next look is one pass rather than
+            // another round of hypotheses.
+            fetchMillis.append((account.map { String($0.suffix(4)) } ?? "all",
+                                through == nil ? "cold" : "top-up",
+                                loaded.fixed.count + loaded.scoped.count,
+                                Int(Date().timeIntervalSince(fetchStarted) * 1000)))
 
             if through != nil {
                 // Incremental. A poll adds a handful of rows to an 8-day window
@@ -306,12 +320,19 @@ struct PaceChartCard: View {
         isLoading = false
         series = next
 
-        Log.write("PaceChartCard",
-                  "loaded \(next.count) series in "
-                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms ["
-                    + next.map { ($0.accountId.map { String($0.suffix(4)) } ?? "all")
-                                 + ":" + String($0.fixed.count + $0.scoped.count) }
-                        .joined(separator: " ") + "]")
+        // Built in steps: as one expression the type checker gives up.
+        let totalMs = Int(Date().timeIntervalSince(started) * 1000)
+        let retained: [String] = next.map { entry in
+            let name = entry.accountId.map { String($0.suffix(4)) } ?? "all"
+            return name + ":" + String(entry.fixed.count + entry.scoped.count)
+        }
+        let detail: [String] = fetchMillis.map { row in
+            "\(row.account) \(row.kind) \(row.rows)row \(row.ms)ms"
+        }
+        let summary = "loaded \(next.count) series in \(totalMs)ms"
+            + " [" + retained.joined(separator: " ") + "]"
+            + " fetch=[" + detail.joined(separator: " | ") + "]"
+        Log.write("PaceChartCard", summary)
     }
 
     /// Which accounts this card should draw.

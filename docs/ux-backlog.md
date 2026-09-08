@@ -3,6 +3,32 @@
 Things worth doing eventually but not blocking. Captured here so a
 future session can pick them up cold without rediscovery.
 
+## The pace card's series load is occasionally slow, and nobody knows why
+
+Measured over a full day on a two-account store, with the dashboard open:
+
+    PaceChartCard series loads: n=544  p50=183ms  p90=751ms  max=3329ms
+    over 1s: 34 (6%)
+
+The slow ones line up with the multi-second main-thread hitches — about 29
+stalls of 2s or worse across the day, roughly one an hour, worst 5.7s. Not
+install churn: the overnight hours, with nobody touching the machine, look the
+same as the busy ones.
+
+**Ruled out: contention with the poller's writes.** That is the obvious guess
+and it is wrong — slow loads sit within 3s of an `[OAuthPoller]` write 35% of
+the time, fast loads 39%. No relationship.
+
+Still open: whether the slow ones are cold reads rather than top-ups, and
+which account. The log line now carries that (`fetch=[8c95 top-up 3row 61ms |
+…]`), so the next look is one pass over a day of logs instead of another round
+of hypotheses. Do that before touching any code.
+
+Worth knowing before optimising: the fetch is already off the main actor on a
+detached task, `propertiesToFetch` is a columnar projection, and the top-up
+path only reads rows newer than what it holds. The obvious things are done, so
+the answer is probably not obvious.
+
 ## Hover-for-exact: the pace tiles, and only the pace tiles
 
 The compact/exact pair landed for `pacerCost` / `pacerTokens` in
