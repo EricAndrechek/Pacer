@@ -135,6 +135,7 @@ enum MenuBarTooltipSelfTest {
         var captured = false
         var hoverPoint: CGPoint = .zero
         var rowRect: CGRect = .zero
+        var approachFrom: CGPoint = .zero
         var step = 0
         init(item: NSStatusItem, output: URL) {
             self.item = item
@@ -146,12 +147,21 @@ enum MenuBarTooltipSelfTest {
     /// conditionals that depend on what the screen looks like.
     private static func schedule(_ plan: Plan) {
         let t0 = Date()
-        // Hover early, then hold still for the tooltip delay. The nudge is a
-        // second move a beat after the first: a warp repositions the cursor
-        // without generating the mouse-moved event tracking waits for.
-        let hoverAt = t0.addingTimeInterval(0.45)
-        let nudgeAt = hoverAt.addingTimeInterval(0.15)
-        let captureAt = nudgeAt.addingTimeInterval(tooltipDelay)
+        // **Glide, do not teleport.** The first run warped the cursor straight
+        // onto the row, waited, and photographed no tooltip — which does not
+        // distinguish "NSMenu swallows this" from "a warp never generated the
+        // mouse-entered event a tracking rect waits for". A warp moves the
+        // pointer without telling anything it moved, and one synthetic nudge
+        // afterwards may land already inside the rect, so the boundary is
+        // never crossed.
+        //
+        // So it approaches: land a row above, then cross into the target over
+        // several posted moves. That is what a hand does, and it makes a
+        // negative result mean something.
+        let landAt = t0.addingTimeInterval(0.35)
+        let glideFrom = landAt.addingTimeInterval(0.20)
+        let glideTo = glideFrom.addingTimeInterval(0.30)
+        let captureAt = glideTo.addingTimeInterval(tooltipDelay)
         let doneAt = captureAt.addingTimeInterval(0.35)
 
         // The timer is held here rather than taken as the closure's argument:
@@ -162,7 +172,7 @@ enum MenuBarTooltipSelfTest {
         let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
             MainActor.assumeIsolated {
                 let now = Date()
-                if plan.step == 0, now >= hoverAt {
+                if plan.step == 0, now >= landAt {
                     plan.step = 1
                     guard let rect = hostedRowRect() else {
                         // Nothing to hover — stop rather than flail. The caller
@@ -175,10 +185,23 @@ enum MenuBarTooltipSelfTest {
                     plan.foundRow = true
                     plan.rowRect = rect
                     plan.hoverPoint = CGPoint(x: rect.midX, y: rect.midY)
-                    moveCursor(to: plan.hoverPoint)
-                } else if plan.step == 1, now >= nudgeAt {
-                    plan.step = 2
-                    moveCursor(to: CGPoint(x: plan.hoverPoint.x + 1, y: plan.hoverPoint.y))
+                    // A row's height above the target, still inside the menu —
+                    // approaching from outside the menu window risks
+                    // dismissing it.
+                    plan.approachFrom = CGPoint(x: rect.midX,
+                                                y: rect.midY + rect.height * 1.6)
+                    moveCursor(to: plan.approachFrom)
+                } else if plan.step == 1, now >= glideFrom {
+                    // Cross into the row over the glide window, one posted move
+                    // per tick, so the tracking rect sees an entry.
+                    let span = max(0.001, glideTo.timeIntervalSince(glideFrom))
+                    let progress = min(1, max(0, now.timeIntervalSince(glideFrom) / span))
+                    moveCursor(to: CGPoint(
+                        x: plan.approachFrom.x
+                            + (plan.hoverPoint.x - plan.approachFrom.x) * progress,
+                        y: plan.approachFrom.y
+                            + (plan.hoverPoint.y - plan.approachFrom.y) * progress))
+                    if progress >= 1 { plan.step = 2 }
                 } else if plan.step == 2, now >= captureAt {
                     plan.step = 3
                     plan.captured = capture(to: plan.output, around: plan.rowRect)
@@ -314,9 +337,15 @@ enum MenuBarTooltipSelfTest {
         // machine's layout and was the whole bug.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        // -x silent, -o no window shadow, -R region.
+        // -x silent, -o no window shadow, -C include the cursor, -R region.
+        //
+        // The cursor is in the frame on purpose. Without it a photograph with
+        // no tooltip is ambiguous — it could mean the tooltip did not appear,
+        // or that the pointer never got where it was aimed. Seeing the arrow
+        // sitting on the row separates those two, and separating them is the
+        // difference between an answer and another run.
         task.arguments = [
-            "-x", "-o",
+            "-x", "-o", "-C",
             "-R\(Int(quartz.origin.x)),\(Int(quartz.origin.y)),"
                 + "\(Int(quartz.width)),\(Int(quartz.height))",
             url.path,
