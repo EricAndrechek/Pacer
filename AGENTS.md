@@ -41,6 +41,45 @@ See `docs/design.md` for the full v1 design.
   per-cycle SwiftData fetches, or adding any new always-running
   background work.
 
+## Never take over the machine — no cursor, no windows, no focus
+
+**This is a hard rule and it has no exceptions.** Someone is sitting at this
+Mac using it while you work. You do not get the input devices, the windows, the
+focus, or the active Space. Not briefly, not "just to check something", not
+behind a flag.
+
+Concretely, never write, run, or leave behind anything that:
+
+- posts synthetic input — `CGEvent`, `NSEvent` posting, `CGWarpMouseCursorPosition`,
+  `CGDisplayMoveCursorToPoint`, `IOHIDPostEvent`;
+- drives the UI through Accessibility or AppleScript — `osascript` with System
+  Events, `AXUIElement` actions, `click`/`keystroke`/`key code`, `tell application
+  … to activate`;
+- runs an AppKit event loop against a *visible* window to simulate interaction —
+  an `NSApp.run()` harness that dispatches mouse-moved events is exactly the
+  thing this rule exists to stop;
+- activates, raises, resizes, moves, closes or Spaces-switches any window,
+  including Pacer's own;
+- records the screen or captures another app's windows.
+
+Reading is fine: `NSEvent.mouseLocation` to place a window the *user* asked
+for, `NSScreen.frame`, and so on. The line is between observing the machine and
+operating it.
+
+**What to do instead.** Everything Pacer needs to see it can render off-screen,
+headlessly, as a PNG — that is the entire reason `make render-live`,
+`make screenshots` and `OffscreenRenderer` exist (next section). Behaviour that
+is not visual belongs in a unit test. If something genuinely can only be
+confirmed by a human hovering or clicking — an `NSMenu` tooltip is the standing
+example — then **say so and ask**. A scripted hover is not a user gesture and
+never was evidence; simulating one buys nothing and costs the user their
+machine. Reporting "this needs a human to check" is a complete, acceptable
+answer.
+
+This is written down because it happened: an agent investigating why `.help()`
+does not fire inside an `NSMenuItem` built an event-dispatch harness and took
+over the cursor while the repo owner was working.
+
 ## Non-negotiable correctness rules
 
 These are subtle, easy to miss, and break user-visible numbers:
@@ -88,6 +127,8 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 ## What NOT to do
 
+- **Do not take over the cursor, the windows, or the focus.** Own section
+  above; it is the one rule here with no exceptions.
 - **Do not auto-write to `~/.claude/settings.json`** without explicit
   user confirmation per write. Coordination with `ccstatusline`,
   `claude-hud`, etc. depends on a "watch + notify + offer" UX, not silent
@@ -117,6 +158,12 @@ biggest day.
 
 It is **not** `make screenshots`. That one seeds synthetic data because its
 output ships in the README; this one shows what the user is actually seeing.
+
+This is also the *only* sanctioned way to look at the UI. Rendering off-screen
+is not a convenience over driving the real window — driving the real window is
+forbidden (see "Never take over the machine"). If a page you need is not in
+`LiveRenderMode.Page`, add a case; that is a one-line change and it is how
+Settings got there.
 
 Three things it does so you do not have to remember them, all in
 `LiveRenderMode` and `bin/dev-render-live.sh`:

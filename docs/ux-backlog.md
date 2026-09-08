@@ -84,6 +84,18 @@ covers the most common discovery path. The popover content stays
 visible while open; users wanting exact numbers can open the main
 app from the same panel.
 
+**Do not try to verify this with a scripted hover.** An attempt to test
+option 1 by dispatching AppKit mouse events at a real window took over the
+repo owner's cursor mid-work; see "Never take over the machine" in
+`AGENTS.md`. There is no off-screen way to test `NSMenu` tracking, which
+means this item cannot be closed by an agent alone: build the change if
+you like, then hand it to a human to hover. "This needs a human to check"
+is the correct place to stop.
+
+Two relative-date labels in `MenuBarContent.swift` are deliberately left
+without the `pacerRelativeExact` tooltip the rest of the app now carries,
+for this reason — `.help` would not fire on them anyway.
+
 ## Other things noticed during the formatter sweep
 
 - **`pacerCost` / `pacerCostExact` currency localization scaffolding**
