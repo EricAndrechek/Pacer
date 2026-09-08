@@ -137,6 +137,11 @@ confidently on no data.
   window. If it does, something re-entered the frame-setting path.
 - Eric keeps the dashboard open on a portrait display at x≈2500. Leave Pacer
   running and its window where it was.
+- **A fresh git worktree cannot build until you give it two things.**
+  `Pacer.xcodeproj` is generated, so run `xcodegen generate` first (`make
+  verify` does it for you; a bare `xcodebuild` does not). And
+  `Vendor/DuckDB.xcframework` is gitignored, so copy it across from the main
+  worktree. Neither failure says what is wrong.
 
 ---
 
