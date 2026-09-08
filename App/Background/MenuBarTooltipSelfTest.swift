@@ -115,6 +115,14 @@ enum MenuBarTooltipSelfTest {
         log("wrote \(out.path)")
         log("hovered \(Int(plan.hoverPoint.x)),\(Int(plan.hoverPoint.y)) — "
             + "the tooltip, if any, is beside that point")
+        // Printed unconditionally: this is a run someone had to authorise, so
+        // anything that would otherwise cost a second one gets said the first
+        // time. The display layout is exactly that — the first attempt
+        // captured the wrong monitor and there was no way to tell from the
+        // output.
+        log("screens: " + NSScreen.screens.map {
+            "\(Int($0.frame.width))x\(Int($0.frame.height))@\(Int($0.frame.minX)),\(Int($0.frame.minY))"
+        }.joined(separator: " "))
         exit(0)
     }
 
@@ -126,6 +134,7 @@ enum MenuBarTooltipSelfTest {
         var foundRow = false
         var captured = false
         var hoverPoint: CGPoint = .zero
+        var rowRect: CGRect = .zero
         var step = 0
         init(item: NSStatusItem, output: URL) {
             self.item = item
@@ -164,6 +173,7 @@ enum MenuBarTooltipSelfTest {
                         return
                     }
                     plan.foundRow = true
+                    plan.rowRect = rect
                     plan.hoverPoint = CGPoint(x: rect.midX, y: rect.midY)
                     moveCursor(to: plan.hoverPoint)
                 } else if plan.step == 1, now >= nudgeAt {
@@ -171,7 +181,7 @@ enum MenuBarTooltipSelfTest {
                     moveCursor(to: CGPoint(x: plan.hoverPoint.x + 1, y: plan.hoverPoint.y))
                 } else if plan.step == 2, now >= captureAt {
                     plan.step = 3
-                    plan.captured = capture(to: plan.output)
+                    plan.captured = capture(to: plan.output, around: plan.rowRect)
                 } else if plan.step == 3, now >= doneAt {
                     plan.step = 4
                     ticker?.invalidate()
@@ -279,18 +289,63 @@ enum MenuBarTooltipSelfTest {
         return CGPoint(x: point.x, y: primary.frame.maxY - point.y)
     }
 
-    /// Full-screen grab. The tooltip is its own window and may sit outside the
-    /// menu's bounds, so cropping to the menu risks cutting off the very thing
-    /// being looked for.
-    private static func capture(to url: URL) -> Bool {
+    /// Grab a region around the menu, in global display coordinates.
+    ///
+    /// **Not a full-screen grab.** `screencapture <file>` photographs the main
+    /// display only, and the status item is not necessarily on it — the first
+    /// run of this test put the menu on a second monitor and captured the
+    /// laptop screen, which showed a perfectly ordinary menu bar and proved
+    /// nothing. `-R` takes a rect in the global space, so it finds whichever
+    /// display the menu actually opened on without being told.
+    ///
+    /// It is also the decent thing to do: the whole point is one tooltip, not a
+    /// photograph of somebody's desktop.
+    ///
+    /// The margin is generous because a tooltip is its own window and renders
+    /// offset from the cursor, so a tight crop around the row would cut off the
+    /// thing being looked for.
+    private static func capture(to url: URL, around cocoaRect: CGRect) -> Bool {
+        let padded = cocoaRect.insetBy(dx: -260, dy: -220)
+        let quartz = flipRectToQuartz(padded)
+        // A negative origin is fine — verified against a rect placed off every
+        // display, which parsed and then refused only for "does not intersect
+        // any displays". That matters here because a monitor above or left of
+        // the primary sits at negative Quartz coordinates, which is this
+        // machine's layout and was the whole bug.
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        // -x silent, -o no window shadow.
-        task.arguments = ["-x", "-o", url.path]
-        do { try task.run() } catch { return false }
+        // -x silent, -o no window shadow, -R region.
+        task.arguments = [
+            "-x", "-o",
+            "-R\(Int(quartz.origin.x)),\(Int(quartz.origin.y)),"
+                + "\(Int(quartz.width)),\(Int(quartz.height))",
+            url.path,
+        ]
+        // screencapture explains its own refusals ("does not intersect any
+        // displays"); relay that rather than making someone authorise another
+        // run to find out why nothing appeared.
+        let errPipe = Pipe()
+        task.standardError = errPipe
+        do { try task.run() } catch {
+            log("could not launch screencapture: \(error)")
+            return false
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
+        if let text = String(data: errData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            log("screencapture: \(text)")
+        }
         return task.terminationStatus == 0
             && FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Cocoa rect (origin bottom-left of the primary screen) to Quartz global
+    /// rect (origin top-left of the primary screen, y downward).
+    private static func flipRectToQuartz(_ rect: CGRect) -> CGRect {
+        guard let primary = NSScreen.screens.first else { return rect }
+        return CGRect(x: rect.minX, y: primary.frame.maxY - rect.maxY,
+                      width: rect.width, height: rect.height)
     }
 
 }
