@@ -127,3 +127,83 @@ struct SchedulerOverdueExternalTests {
                 == .poll(laneIndex: 0))
     }
 }
+
+/// The bound on standing aside.
+///
+/// Deferring to cswap is right while it works — its answer is on disk and costs
+/// none of the token's budget. But it cannot be unconditional: both clients
+/// spent fifty minutes locked out of the same token, cswap retrying and
+/// failing, and an unbounded yield would have left Pacer's own reading aging
+/// with no way back. The floor guarantees a poll of Pacer's own eventually.
+@Suite("Never yielding forever")
+struct SchedulerProbeFloorTests {
+
+    private let floor: TimeInterval = 300
+    private let yieldMax: TimeInterval = 900
+    private let now = Date(timeIntervalSince1970: 500_000)
+
+    private func decide(_ lane: OAuthPollScheduler.LaneState) -> OAuthPollScheduler.Decision {
+        OAuthPollScheduler(tuning: .init(
+            perTokenMinInterval: floor, activeInterval: 0, idleInterval: 600,
+            activeWindow: 900, minWait: 1, externalYieldMax: yieldMax)
+        ).decide(lanes: [lane], lastActivityAt: now, now: now)
+    }
+
+    /// The state actually observed: cswap asking every couple of minutes,
+    /// never succeeding, its next poll permanently overdue. Every external
+    /// signal says "wait", and waiting forever is not an answer.
+    @Test("a client that asks constantly and never succeeds cannot pin a lane")
+    func probeFloorBreaksThePin() {
+        #expect(decide(.init(lastPolledAt: now.addingTimeInterval(-yieldMax - 1),
+                             externalNextPollAt: now.addingTimeInterval(-60),
+                             externalLastPollAt: now.addingTimeInterval(-30),
+                             account: .primary)) == .poll(laneIndex: 0))
+    }
+
+    /// Inside the floor the yield stands — this is the ordinary cooperative
+    /// case and it must not be weakened by the escape hatch.
+    @Test("inside the floor Pacer still stands aside")
+    func insideTheFloorStillYields() {
+        guard case .wait = decide(.init(lastPolledAt: now.addingTimeInterval(-floor),
+                                        externalNextPollAt: now.addingTimeInterval(-60),
+                                        externalLastPollAt: now.addingTimeInterval(-30),
+                                        account: .primary)) else {
+            Issue.record("stopped yielding well before the floor"); return
+        }
+    }
+
+    /// A throttled token is not helped by asking again, so the floor overrides
+    /// another client's schedule but never Pacer's own cooldown.
+    @Test("the floor does not override a cooldown")
+    func floorRespectsCooldown() {
+        guard case .wait = decide(.init(lastPolledAt: now.addingTimeInterval(-yieldMax - 1),
+                                        cooldownUntil: now.addingTimeInterval(600),
+                                        externalNextPollAt: now.addingTimeInterval(-60),
+                                        externalLastPollAt: now.addingTimeInterval(-30),
+                                        account: .primary)) else {
+            Issue.record("polled a lane that is still cooling from a 429"); return
+        }
+    }
+
+    /// With nothing else on the token the floor is inert — it must not make a
+    /// solo lane poll faster than the per-token invariant allows.
+    @Test("with no other client the floor changes nothing")
+    func inertWithoutAnExternalClient() {
+        guard case .wait = decide(.init(lastPolledAt: now.addingTimeInterval(-floor + 30),
+                                        account: .primary)) else {
+            Issue.record("broke the per-token invariant on a lane nobody shares"); return
+        }
+    }
+
+    /// Another client's requests count against the shared budget, which is the
+    /// whole point: Pacer's own interval has elapsed, but the token was used
+    /// thirty seconds ago by someone else.
+    @Test("an external request holds the lane off even when Pacer's interval is up")
+    func externalRequestCountsAgainstTheInterval() {
+        guard case .wait = decide(.init(lastPolledAt: now.addingTimeInterval(-floor - 1),
+                                        externalLastPollAt: now.addingTimeInterval(-30),
+                                        account: .primary)) else {
+            Issue.record("polled a token another client used thirty seconds ago"); return
+        }
+    }
+}

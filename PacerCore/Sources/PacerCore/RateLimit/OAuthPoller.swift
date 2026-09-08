@@ -788,16 +788,16 @@ public actor OAuthPoller: TokenPoolTesting {
     /// and it adapts — a wide cswap interval leaves room for Pacer at its own
     /// floor, a narrow one does not.
     private func noteSwitcherActivity(
-        account key: String, with reading: SwitcherUsageCache.Reading, now: Date = Date()
+        account key: String, with reading: SwitcherUsageCache.Reading
     ) {
-        let hold = Self.switcherHold(for: reading, now: now)
+        let hold = Self.switcherHold(for: reading)
         for i in lanes.indices
         where lanes[i].accountKey == key && Self.sharesBudgetWithSwitcher(lanes[i].source) {
-            // Backwards: cswap already spent this token's budget. `max` keeps it
-            // monotonic, so re-reading an unchanged cache on every cycle cannot
-            // walk the lane backwards or hold it still.
-            lanes[i].state.lastPolledAt = max(
-                lanes[i].state.lastPolledAt ?? .distantPast, hold.spentAt)
+            // Backwards: when cswap last spent this token's budget. Kept apart
+            // from `lastPolledAt`, which stays Pacer's own poll — the scheduler
+            // needs both, and folding them together is what let a stuck cswap
+            // hide how long Pacer had gone without a reading.
+            lanes[i].state.externalLastPollAt = hold.spentAt
             // Forwards: where cswap says it is going next.
             lanes[i].state.externalNextPollAt = hold.nextPollAt
         }
@@ -813,36 +813,21 @@ public actor OAuthPoller: TokenPoolTesting {
         let nextPollAt: Date?
     }
 
-    static func switcherHold(
-        for reading: SwitcherUsageCache.Reading, now: Date
-    ) -> SwitcherHold {
-        // Standing down only pays while it buys data. Past this, whatever cswap
-        // is doing is not producing readings, and continuing to defer would
-        // trade Pacer's freshness for nothing — so stop treating it as a
-        // participant and go back to polling normally.
-        guard reading.fetchedAt > now.addingTimeInterval(-switcherStaleAfter) else {
-            // Its retry loop is deliberately *not* counted here: a client that
-            // asks every six minutes and never succeeds would otherwise hold
-            // the lane down forever through `spentAt` alone.
-            return SwitcherHold(spentAt: reading.fetchedAt, nextPollAt: nil)
-        }
-        // A request spends the budget whether or not it returns anything, so
-        // the mark is the later of "asked" and "answered" — see
-        // `SwitcherUsageCache.Reading.lastAttemptAt`.
-        return SwitcherHold(
+    /// A request spends the budget whether or not it returns anything, so the
+    /// mark is the later of "asked" and "answered" — see
+    /// `SwitcherUsageCache.Reading.lastAttemptAt`.
+    ///
+    /// Counting failures deliberately has no escape hatch here. It looked like
+    /// it needed one — a client stuck retrying would hold the lane down
+    /// forever — but the answer to that is not to pretend its requests are not
+    /// happening. They are, and polling into them is what keeps a throttled
+    /// token throttled. The bound belongs on Pacer's own staleness instead, and
+    /// lives in the scheduler as `externalYieldMax`.
+    static func switcherHold(for reading: SwitcherUsageCache.Reading) -> SwitcherHold {
+        SwitcherHold(
             spentAt: max(reading.fetchedAt, reading.lastAttemptAt ?? .distantPast),
             nextPollAt: reading.nextPollAt)
     }
-
-    /// How long cswap may go without a successful fetch before Pacer stops
-    /// deferring to it.
-    ///
-    /// Two of Pacer's own intervals. The arrangement is worth it while cswap is
-    /// working — Pacer gets the numbers for free and spends none of the token's
-    /// budget — but a client that cannot get an answer is not covering the
-    /// account, and the user is left watching a reading age. Ten minutes is the
-    /// most staleness that trade is worth.
-    static let switcherStaleAfter: TimeInterval = 600
 
     /// Forget a schedule for lanes no reading covers.
     ///
@@ -851,9 +836,11 @@ public actor OAuthPoller: TokenPoolTesting {
     /// deferring to a client that is not running.
     private func forgetSwitcherSchedule(exceptAccounts covered: Set<String>) {
         for i in lanes.indices
-        where lanes[i].state.externalNextPollAt != nil
+        where (lanes[i].state.externalNextPollAt != nil
+               || lanes[i].state.externalLastPollAt != nil)
             && !covered.contains(lanes[i].accountKey ?? "") {
             lanes[i].state.externalNextPollAt = nil
+            lanes[i].state.externalLastPollAt = nil
         }
     }
 

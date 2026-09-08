@@ -122,14 +122,14 @@ struct SwitcherHoldTests {
     @Test("a failed retry counts as budget spent")
     func failedRetryCountsAsSpent() {
         let hold = OAuthPoller.switcherHold(
-            for: reading(fetched: -240, attempted: -30, next: 300), now: now)
+            for: reading(fetched: -240, attempted: -30, next: 300))
         #expect(hold.spentAt == now.addingTimeInterval(-30))
         #expect(hold.nextPollAt == now.addingTimeInterval(300))
     }
 
     @Test("with no failures the successful fetch is the mark")
     func successIsTheMark() {
-        #expect(OAuthPoller.switcherHold(for: reading(fetched: -120), now: now).spentAt
+        #expect(OAuthPoller.switcherHold(for: reading(fetched: -120)).spentAt
                 == now.addingTimeInterval(-120))
     }
 
@@ -138,27 +138,19 @@ struct SwitcherHoldTests {
     @Test("an older attempt never moves the mark back")
     func olderAttemptIgnored() {
         #expect(OAuthPoller.switcherHold(
-            for: reading(fetched: -60, attempted: -600), now: now).spentAt
+            for: reading(fetched: -60, attempted: -600)).spentAt
                 == now.addingTimeInterval(-60))
     }
 
-    /// The other half: deferring is only worth it while it produces readings.
-    /// A client stuck in a retry loop it never wins would otherwise pin the
-    /// lane indefinitely — both through its schedule and through its attempts —
-    /// and Pacer would sit and watch its own numbers age.
-    @Test("a switcher that has stopped delivering is no longer deferred to")
-    func stuckSwitcherIsDropped() {
-        let stale = -(OAuthPoller.switcherStaleAfter + 60)
+    /// A switcher that has not succeeded in an hour is still asking, and its
+    /// requests still cost the token. Pacer is protected from being pinned by
+    /// it in the scheduler (`externalYieldMax`), not by disbelieving the
+    /// attempts — see `SchedulerProbeFloorTests`.
+    @Test("a long-failing switcher's attempts still count")
+    func stuckSwitcherStillCounts() {
         let hold = OAuthPoller.switcherHold(
-            for: reading(fetched: stale, attempted: -10, next: 60), now: now)
-        #expect(hold.nextPollAt == nil)
-        #expect(hold.spentAt == now.addingTimeInterval(stale))
-    }
-
-    @Test("a delivering switcher just inside the window is still deferred to")
-    func freshEnoughStillHolds() {
-        let hold = OAuthPoller.switcherHold(
-            for: reading(fetched: -(OAuthPoller.switcherStaleAfter - 60), next: 60), now: now)
+            for: reading(fetched: -3600, attempted: -20, next: 60))
+        #expect(hold.spentAt == now.addingTimeInterval(-20))
         #expect(hold.nextPollAt == now.addingTimeInterval(60))
     }
 }
