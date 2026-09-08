@@ -54,14 +54,32 @@ public enum ScopedRateLimitAlerts {
     /// `PacerSettings.thresholds(forWindow:)` returns for the fixed windows, so
     /// the evaluation path is uniform. Empty ⇒ the window has no alert (the
     /// default for every scoped window until the user adds one).
-    public static func thresholds(forIdentity identity: String, in rules: [AlertRule]) -> [Int] {
+    /// `account` is the account whose window is being evaluated. A rule with
+    /// no `accountId` watches every account (the default, and what every rule
+    /// written before accounts existed means); a rule that names one is only
+    /// consulted for that one. Pass `nil` to ignore the account dimension
+    /// entirely — what Settings does when it is listing a window's thresholds
+    /// rather than evaluating them.
+    public static func thresholds(
+        forIdentity identity: String, account: String? = nil, in rules: [AlertRule]
+    ) -> [Int] {
         let values = rules
             .filter { $0.enabled
                 && $0.metric == AlertRuleMetric.rateLimitPct
-                && $0.scopedWindow == identity }
+                && $0.scopedWindow == identity
+                && matches(rule: $0, account: account) }
             .map { Int($0.thresholdValue.rounded()) }
             .filter { (1...99).contains($0) }
         return Array(Set(values)).sorted()
+    }
+
+    /// Whether a rule applies to the account being evaluated. An untargeted
+    /// rule applies to all of them; asking without an account matches
+    /// everything, which is the listing case rather than the firing case.
+    public static func matches(rule: AlertRule, account: String?) -> Bool {
+        guard let account else { return true }
+        guard let target = rule.accountId, !target.isEmpty else { return true }
+        return target == account
     }
 
     /// Every scoped-window identity that has at least one rate-limit alert rule

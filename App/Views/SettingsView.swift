@@ -1220,6 +1220,20 @@ private struct CustomRulesCard: View {
     @State private var draftMetric: String = AlertRuleMetric.weeklyCost
     @State private var draftName: String = ""
     @State private var draftThreshold: Double = 100
+    /// Which account a new rule watches. `nil` = every account, which stays the
+    /// default: a spend cap should not narrow itself the day a second login
+    /// appears.
+    @State private var draftAccount: String?
+    /// Shown only when there is more than one — a picker with a single option
+    /// is a question with one answer.
+    @Query private var accounts: [Account]
+
+    private var isMultiAccount: Bool { accounts.count > 1 }
+
+    private func accountName(_ id: String?) -> String? {
+        guard let id, isMultiAccount else { return nil }
+        return accounts.first { $0.id == id }?.shortLabel
+    }
 
     var body: some View {
         PacerCard("Custom alerts", content: {
@@ -1228,7 +1242,7 @@ private struct CustomRulesCard: View {
                 // the auto-listed Rate-limit alerts card above — exclude them
                 // here so they don't read as broken custom rules.
                 ForEach(rules.filter { $0.metric != AlertRuleMetric.rateLimitPct }, id: \.id) { rule in
-                    RuleRow(rule: rule) {
+                    RuleRow(rule: rule, accountName: accountName(rule.accountId)) {
                         context.delete(rule)
                         try? context.save()
                     }
@@ -1254,6 +1268,16 @@ private struct CustomRulesCard: View {
             }
             .labelsHidden()
             .frame(width: 180)
+            if isMultiAccount {
+                Picker("", selection: $draftAccount) {
+                    Text("All accounts").tag(String?.none)
+                    ForEach(accounts.sorted(by: Account.listOrder), id: \.id) { account in
+                        Text(account.shortLabel).tag(String?.some(account.id))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 150)
+            }
             thresholdField
             Spacer()
             Button("Add") {
@@ -1262,7 +1286,8 @@ private struct CustomRulesCard: View {
                 context.insert(AlertRule(
                     name: trimmed,
                     metric: draftMetric,
-                    thresholdValue: draftThreshold
+                    thresholdValue: draftThreshold,
+                    accountId: draftAccount
                 ))
                 try? context.save()
                 draftName = ""
@@ -1293,6 +1318,9 @@ private struct CustomRulesCard: View {
 
     private struct RuleRow: View {
         @Bindable var rule: AlertRule
+        /// Nil on a single-account machine, or for a rule that watches every
+        /// account — in both cases there is nothing worth saying.
+        let accountName: String?
         let onRemove: () -> Void
 
         var body: some View {
@@ -1302,7 +1330,7 @@ private struct CustomRulesCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rule.name)
                         .font(.system(size: 13, weight: .medium))
-                    Text("\(AlertRuleMetric.label(for: rule.metric)) ≥ \(formatThreshold)")
+                    Text(subtitle)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -1317,6 +1345,12 @@ private struct CustomRulesCard: View {
                 .buttonStyle(.borderless)
                 .help("Remove rule")
             }
+        }
+
+        private var subtitle: String {
+            let base = "\(AlertRuleMetric.label(for: rule.metric)) ≥ \(formatThreshold)"
+            guard let accountName else { return base }
+            return "\(base) · \(accountName)"
         }
 
         private var formatThreshold: String {

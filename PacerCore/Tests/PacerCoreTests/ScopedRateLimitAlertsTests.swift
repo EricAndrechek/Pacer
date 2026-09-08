@@ -151,4 +151,55 @@ struct ScopedRateLimitAlertsTests {
         #expect(!ScopedRateLimitAlerts.shouldWarnBurnRate(
             identity: id, willHitLimitBeforeReset: true, usedPct: 95, cyclesObserved: warm - 1, in: rules))
     }
+
+    /// A rule with no account watches every account — that is what every rule
+    /// written before accounts existed means, and narrowing them silently
+    /// would turn a spend cap into half a spend cap.
+    @Test("an untargeted rule fires for every account")
+    func untargetedRuleAppliesEverywhere() {
+        let id = "weekly_scoped|Fable|"
+        let rules = [AlertRule(name: "Fable", metric: AlertRuleMetric.rateLimitPct,
+                               thresholdValue: 80, scopedWindow: id)]
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgA", in: rules) == [80])
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgB", in: rules) == [80])
+    }
+
+    @Test("a targeted rule fires only for its account")
+    func targetedRuleIsScoped() {
+        let id = "weekly_scoped|Fable|"
+        let rules = [
+            AlertRule(name: "Fable work", metric: AlertRuleMetric.rateLimitPct,
+                      thresholdValue: 80, scopedWindow: id, accountId: "orgA"),
+            AlertRule(name: "Fable personal", metric: AlertRuleMetric.rateLimitPct,
+                      thresholdValue: 50, scopedWindow: id, accountId: "orgB"),
+        ]
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgA", in: rules) == [80])
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgB", in: rules) == [50])
+        // Asking without an account is the Settings listing case: everything.
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, in: rules) == [50, 80])
+    }
+
+    /// The two kinds compose: a rule for everyone plus one for a single
+    /// account means that account has both thresholds and the other has one.
+    @Test("targeted and untargeted rules compose")
+    func mixedTargetingComposes() {
+        let id = "weekly_scoped|Fable|"
+        let rules = [
+            AlertRule(name: "everyone", metric: AlertRuleMetric.rateLimitPct,
+                      thresholdValue: 90, scopedWindow: id),
+            AlertRule(name: "work only", metric: AlertRuleMetric.rateLimitPct,
+                      thresholdValue: 60, scopedWindow: id, accountId: "orgA"),
+        ]
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgA", in: rules) == [60, 90])
+        #expect(ScopedRateLimitAlerts.thresholds(forIdentity: id, account: "orgB", in: rules) == [90])
+    }
+
+    /// An empty string is not a target. The Settings picker stores `nil` for
+    /// "all accounts", but a decoded row from a future/older writer might not.
+    @Test("an empty account target reads as untargeted")
+    func emptyTargetIsUntargeted() {
+        let rule = AlertRule(name: "x", metric: AlertRuleMetric.rateLimitPct,
+                             thresholdValue: 80, accountId: "")
+        #expect(ScopedRateLimitAlerts.matches(rule: rule, account: "orgA"))
+    }
 }

@@ -42,13 +42,15 @@ enum LiveRenderMode {
     /// What to render. Whole tabs by default; `PACER_RENDER_PAGES` takes a
     /// comma-separated subset when iterating on one of them.
     enum Page: String, CaseIterable {
-        case dashboard, history, projects, models, now, pace, badges
+        case dashboard, history, projects, models, now, pace, badges, settings
 
         /// Wide enough that the balanced grids take their many-column layout —
         /// a narrow render exercises a fallback the user is not looking at.
         var width: CGFloat {
             switch self {
             case .dashboard, .history, .projects, .models: return 1200
+            // Settings is a single column of cards; wider only stretches them.
+            case .settings: return 820
             case .pace: return 1100
             case .now, .badges: return 900
             }
@@ -63,6 +65,10 @@ enum LiveRenderMode {
             case .now:       NowStrip()
             case .pace:      PaceChartCard(limitAccountId: UsageScope.shared.limitAccountId)
             case .badges:    AdvisorBadges(scopeAccountId: UsageScope.shared.accountId)
+            // Read-only like every other page here — the cards bind to
+            // SwiftData, and this process opens the store read-only, so a
+            // stray click is not possible and a write would fail loudly.
+            case .settings:  SettingsView()
             }
         }
     }
