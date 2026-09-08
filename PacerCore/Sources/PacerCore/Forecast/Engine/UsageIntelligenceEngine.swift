@@ -1284,6 +1284,28 @@ public actor UsageIntelligenceEngine {
 
     /// Whose rate-limit history this instance fits: its own account, or the
     /// active login when it is the all-accounts instance.
+    /// The file **this engine's own container** is backed by, or nil when there
+    /// is not one.
+    ///
+    /// Emphatically not `PacerStore.storeURL()`. That is the process-wide
+    /// on-disk store, and an engine does not always run against it: the tests
+    /// build in-memory containers per case, screenshot mode renders a synthetic
+    /// fixture, and the live renderer opens the real store read-only. Asking
+    /// the process for "the" store rather than asking this context reads a
+    /// different database than the one being fitted — the same mistake
+    /// `PaceChartCard.reload` made, where it reached past the screenshot
+    /// fixture into real data. Here it made three tests fit against the
+    /// developer's live store instead of their own fixtures.
+    ///
+    /// Nil for in-memory containers, which falls back to the SwiftData query —
+    /// correct, and no slower than before this existed.
+    private var rawStoreURL: URL? {
+        guard let config = modelContext.container.configurations.first,
+              !config.isStoredInMemoryOnly
+        else { return nil }
+        return config.url
+    }
+
     private var limitAccountId: String? {
         scope.accountId ?? Account.activeId(in: modelContext)
     }
@@ -1315,6 +1337,16 @@ public actor UsageIntelligenceEngine {
     /// cycles for the backtest while staying a small read.
     private func fetchRate(now: Date) -> [EngineFeatures.RateRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
+        // Raw SQLite first — see `RawLimitReader`. Thirty-two days is ~30,000
+        // rows and SwiftData spends ~1.3 s materialising them; the same read
+        // through sqlite3 is a small fraction of that. `nil` means the reader
+        // could not do it (no file, schema surprise), and the SwiftData query
+        // below runs instead, so this can only ever be slower, never wrong.
+        if let url = rawStoreURL,
+           let rows = RawLimitReader.rateRows(
+               storeURL: url, account: limitAccountId, since: cutoff) {
+            return rows
+        }
         // This instance's account. `.allAccounts` has no rate-limit meaning —
         // two 5-hour windows do not sum — so it keeps reading the *active*
         // login, exactly as it did before scopes existed, which is what makes
@@ -1346,6 +1378,23 @@ public actor UsageIntelligenceEngine {
     /// a limit that vanished from the latest response goes quiet).
     private func fetchScopedLimits(now: Date) -> [EngineFeatures.ScopedRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
+        // Same as `fetchRate`, and the bigger half: ~45,000 rows and ~3.4 s
+        // through SwiftData. `inLatestBatch` is stamped here rather than in the
+        // reader because it depends on the newest row in the returned set.
+        if let url = rawStoreURL,
+           let rows = RawLimitReader.scopedRows(
+               storeURL: url, account: limitAccountId, since: cutoff) {
+            guard let newest = rows.map(\.at).max() else { return [] }
+            let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance
+            return rows.map { r in
+                EngineFeatures.ScopedRow(
+                    identity: r.identity, group: r.group, label: r.label,
+                    modelId: r.modelId, modelDisplayName: r.modelDisplayName,
+                    surface: r.surface, at: r.at, usedPercentage: r.usedPercentage,
+                    resetsAt: r.resetsAt, inLatestBatch: r.at >= batchCutoff,
+                    isActive: r.isActive)
+            }
+        }
         var descriptor = FetchDescriptor<UsageLimitSample>(
             predicate: LimitScope.usageLimitPredicate(
                 account: limitAccountId, since: cutoff))
