@@ -119,12 +119,28 @@ public actor OAuthPoller: TokenPoolTesting {
             self.laneRediscoverInterval = laneRediscoverInterval
         }
 
-        /// Per-lane floor for the non-active accounts' slow sweep. Each
-        /// secondary lane is polled no more often than this (and never
-        /// below the per-token invariant). Wide enough to keep the switcher
-        /// fresh without background chatter.
+        /// Per-lane floor for a non-active account's lanes.
+        ///
+        /// **The per-token invariant and nothing more.** This used to add
+        /// `idleInterval` on top, putting the other account on a ten-minute
+        /// sweep while the signed-in one was read every minute — and the
+        /// account you have just switched *away* from is usually the one that
+        /// matters, because you switched away from it for a reason.
+        ///
+        /// What that cost, measured on a real switch: `~/.claude.json` flipped
+        /// to the other account for six minutes and flipped back. That is not a
+        /// bug — Pacer read it correctly, five seconds behind `cswap`'s own log
+        /// — but it demoted the account actually doing the work to the slow
+        /// tier while it climbed from 87% to 98%, so the dashboard sat on a
+        /// stale 87% through exactly the stretch where the number mattered.
+        ///
+        /// Five minutes is the floor, not a choice: `perTokenMinInterval` is
+        /// the usage endpoint's own budget per token, and it is shared with
+        /// whatever else is asking — `cswap` is already taking 429s on it. An
+        /// account with one token cannot be fresher than that; one with several
+        /// is read more often by rotating through them.
         var secondarySweepInterval: TimeInterval {
-            max(scheduler.idleInterval, scheduler.perTokenMinInterval)
+            scheduler.perTokenMinInterval
         }
     }
 
@@ -170,6 +186,14 @@ public actor OAuthPoller: TokenPoolTesting {
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
+
+        /// The highest window utilisation this lane last saw, and the soonest
+        /// reset it reported. Recorded for diagnostics — an earlier version
+        /// used them to sweep a near-the-cap account faster than an idle one,
+        /// which was the wrong shape: every account now gets the per-token
+        /// floor, so there is no slow tier left to escape from.
+        var lastTopPercent: Double?
+        var lastSoonestReset: Date?
 
         /// The account key this lane belongs to once classified, or nil.
         var accountKey: String? {
@@ -853,6 +877,12 @@ public actor OAuthPoller: TokenPoolTesting {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
             lanes[idx].state.cooldownUntil = nil
+            lanes[idx].lastTopPercent = [snapshot.fiveHour?.usedPercentage,
+                                         snapshot.sevenDay?.usedPercentage]
+                .compactMap { $0 }.max()
+            lanes[idx].lastSoonestReset = [snapshot.fiveHour?.resetsAt,
+                                           snapshot.sevenDay?.resetsAt]
+                .compactMap { $0 }.min()
             let org = snapshot.organizationId
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
