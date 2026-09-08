@@ -141,13 +141,30 @@ public actor UsageIntelligenceEngine {
     /// samples (save for a single most-recent token timestamp), and the fits
     /// are closed-form. Failures degrade to an empty fit rather than throwing.
     public func recompute(now: Date = Date(), calendar: Calendar = .current) {
-        let f = EngineFeatures.build(
-            now: now, calendar: calendar,
-            daily: fetchDaily(),
-            hourly: fetchHourly(),
-            rate: fetchRate(now: now),
-            lastArrivalAt: fetchLastArrival(),
-            scoped: fetchScopedLimits(now: now))
+        // Phase timings. A refit is the most expensive recurring thing Pacer
+        // does — measured at ~13 s for a single scope — and until now the only
+        // number anyone had was the total, which says nothing about where it
+        // goes. Five `Date()` reads against thirteen seconds is free.
+        var phase: [String: Int] = [:]
+        func timed<T>(_ label: String, _ body: () -> T) -> T {
+            let t = Date()
+            let out = body()
+            phase[label, default: 0] += Int(Date().timeIntervalSince(t) * 1000)
+            return out
+        }
+        let recomputeStarted = Date()
+
+        let daily = timed("daily") { fetchDaily() }
+        let hourly = timed("hourly") { fetchHourly() }
+        let rate = timed("rate") { fetchRate(now: now) }
+        let arrival = timed("arrival") { fetchLastArrival() }
+        let scopedLimits = timed("scopedLimits") { fetchScopedLimits(now: now) }
+        let f = timed("features") {
+            EngineFeatures.build(
+                now: now, calendar: calendar,
+                daily: daily, hourly: hourly, rate: rate,
+                lastArrivalAt: arrival, scoped: scopedLimits)
+        }
         self.features = f
 
         // Self-eval feedback loop: score newly-completed periods into the
@@ -159,7 +176,7 @@ public actor UsageIntelligenceEngine {
         // it holds thousands of rows, and the previous five separate fetches
         // (existing-keys ×2 + per-surface records ×3) were a measured ~0.4s
         // of every refit.
-        var allRows = fetchAllEvalRows()
+        var allRows = timed("evalRows") { fetchAllEvalRows() }
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
@@ -215,12 +232,31 @@ public actor UsageIntelligenceEngine {
             }
         }
 
-        self.fit = Self.makeFit(f, eodPools: pools, rlSelection: rlSelection)
+        self.fit = timed("makeFit") { Self.makeFit(f, eodPools: pools, rlSelection: rlSelection) }
 
         // Prediction trail: record what this refit would tell the user —
         // the live answers with their bands, residual evidence, and version
         // tags — behind the change/heartbeat policy.
-        recordPredictionSnapshots(f, now: now)
+        timed("snapshots") { recordPredictionSnapshots(f, now: now) }
+
+        let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
+        // Only when it is worth reading about. A warm refit on a small store
+        // is milliseconds and does not need a line each time.
+        if total >= 1000 {
+            let detail = phase.sorted { $0.value > $1.value }
+                .filter { $0.value > 0 }
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)}")
+        }
+    }
+
+    /// Short scope tag for the phase log — which engine this was.
+    private var scopeLabel: String {
+        switch scope {
+        case .allAccounts: return "all"
+        case .account(let id): return String(id.suffix(4))
+        }
     }
 
     /// Number of historical days the fit was trained on — for a future
@@ -1283,6 +1319,14 @@ public actor UsageIntelligenceEngine {
             predicate: LimitScope.rateLimitPredicate(
                 account: limitAccountId, since: cutoff))
         descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
+        // No `propertiesToFetch` here, and that is a measured decision rather
+        // than an oversight. The projection is the obvious move — the mapping
+        // reads four scalars out of ~30,000 rows — and on this table it is
+        // *slower*: 1.10-1.33 s became 1.56-1.79 s across steady-state refits,
+        // consistently, about 35% worse. Same for the scoped fetch below. The
+        // pace card's loader does benefit from it, so this is a property of
+        // these queries rather than of the API. Do not re-add it without
+        // numbers.
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
     }
@@ -1302,6 +1346,8 @@ public actor UsageIntelligenceEngine {
             predicate: LimitScope.usageLimitPredicate(
                 account: limitAccountId, since: cutoff))
         descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
+        // Deliberately no `propertiesToFetch` — see `fetchRate`. Tried and
+        // measured: 2.86-3.36 s became 3.62-4.57 s. Worse, every sample.
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         guard let newest = rows.map(\.sampledAt).max() else { return [] }
         let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance
