@@ -3,7 +3,34 @@
 Things worth doing eventually but not blocking. Captured here so a
 future session can pick them up cold without rediscovery.
 
-## The engine refit is the most expensive thing Pacer does — where the time goes
+## Should the limit tables live in DuckDB? Measured answer: no longer worth it
+
+The instinct is right — `RateLimitSample` and `UsageLimitSample` are append-only
+time series, tens of thousands of rows, read as bulk 32-day ranges by the
+forecast. That is an analytical workload in a row store, and this project
+already has the pattern for it: token samples live in a DuckDB archive with a
+hot window in SwiftData.
+
+They are in SwiftData for two reasons that still hold — the widget extension
+reads them through the App Group, and `@Query` reactivity is what makes the
+gauges update when a poll lands — and one that stopped holding: they used to be
+small. At the old five-minute poll cadence this was ~300 rows a day. Adaptive
+multi-token polling took it to ~60 seconds and the second account doubled it
+again, which is how a design note reading "~1.1 s per refit" ended up
+describing something that took sixteen.
+
+**But the cost was never the storage engine.** It was SwiftData materialising
+75,000 rows as objects at ~65 µs each. Reading the same file directly through
+sqlite3 (`RawLimitReader`) took the two fetches from 3,618 ms + 1,485 ms to
+128 ms + 22 ms. What remains of a refit is `evalRows` and `makeFit` — the
+modelling — and a move to DuckDB would now be competing for about 150 ms out of
+2,700 ms.
+
+So: worth doing if the tables are ever moved for storage reasons, and not worth
+doing for speed. If they do move, `RawLimitReader` is deleted rather than
+ported.
+
+## The engine refit was the most expensive thing Pacer does — where the time went
 
 **This is the cause of the multi-second dashboard hitches.** 30 of 36 loads
 over a second happened *during* a refit, 6 outside. Measured across a day on a
@@ -19,8 +46,9 @@ rate rows over the engine's 32-day window:
 
 Two thirds of it is two fetches. `makeFit` — the actual modelling — is 700 ms.
 
-**Already done:** only scopes something still reads are refitted
-(`EngineHost.live`). On a machine where the dashboard has been scoped to an
+**Fixed.** The two big fetches now go through `RawLimitReader` — 7,717 ms →
+2,669 ms for a whole refit. Also: only scopes something still reads are
+refitted (`EngineHost.live`). On a machine where the dashboard has been scoped to an
 account at some point, that was up to two thirds of the work.
 
 **Tried and rejected, with numbers, so nobody repeats them:**
