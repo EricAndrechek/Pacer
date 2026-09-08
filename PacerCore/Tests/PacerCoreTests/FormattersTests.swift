@@ -155,3 +155,49 @@ import Testing
     // empty currency symbol.
     #expect(pacerCurrencySymbol(for: "XYZ") == "$")
 }
+
+// MARK: - pacerRelativeExact
+
+/// `pacerRelativeExact` is the hover companion to `pacerRelative`: the
+/// label reads "2w ago", the tooltip has to say *which* moment that
+/// was. Its exact rendering is locale-dependent, so these lock the
+/// properties the tooltip's usefulness actually rests on rather than a
+/// literal en_US string.
+
+@Test func relativeExactCarriesTheCalendarDate() {
+    // The failure this guards: rendering time-only ("2:47:32 PM"),
+    // which cannot disambiguate a "2w ago" label at all. Two instants
+    // at the same wall-clock time a week apart must differ.
+    let a = Date(timeIntervalSince1970: 1_700_000_000)
+    let b = a.addingTimeInterval(7 * 24 * 3600)
+    #expect(pacerRelativeExact(a) != pacerRelativeExact(b))
+}
+
+@Test func relativeExactCarriesSeconds() {
+    // A freshness pill can sit on "3m ago" across several refreshes;
+    // the tooltip is only useful if it resolves to the second.
+    let a = Date(timeIntervalSince1970: 1_700_000_000)
+    let b = a.addingTimeInterval(1)
+    #expect(pacerRelativeExact(a) != pacerRelativeExact(b))
+}
+
+@Test func relativeExactIsAbsoluteNotRelativeToNow() {
+    // Unlike `pacerRelative`, the same instant renders identically no
+    // matter when it is asked for — so a cached tooltip never goes
+    // stale and two rows for the same instant never disagree.
+    let d = Date(timeIntervalSince1970: 1_700_000_000)
+    #expect(pacerRelativeExact(d) == pacerRelativeExact(d))
+    #expect(pacerRelativeExact(d) != pacerRelative(d))
+}
+
+@Test func relativeExactMatchesMediumDateAndTime() {
+    // Locks the chosen style. Anything narrower drops the year or the
+    // seconds; anything wider ( .long / .full ) spells out the time
+    // zone and blows the tooltip's width for no added precision.
+    let reference = DateFormatter()
+    reference.locale = .current
+    reference.dateStyle = .medium
+    reference.timeStyle = .medium
+    let d = Date(timeIntervalSince1970: 1_700_000_000)
+    #expect(pacerRelativeExact(d) == reference.string(from: d))
+}
