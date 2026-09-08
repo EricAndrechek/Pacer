@@ -132,12 +132,33 @@ public extension UsageLimitSample {
 }
 
 public extension Sequence where Element == ScopedWindowRow {
-    /// The newest poll's rows. All rows of one poll share a `sampledAt`, with
-    /// sub-second jitter tolerated — the same rule the `UsageLimitSample`
-    /// version uses.
+    /// The newest poll's rows, **one per identity**. All rows of one poll share
+    /// a `sampledAt`, with sub-second jitter tolerated — the same rule the
+    /// `UsageLimitSample` version uses.
+    ///
+    /// The per-identity part is not defensive. Several poller lanes can resolve
+    /// to the same account — one per token that belongs to it — and each writes
+    /// its own row for the same server-reported window within the same second.
+    /// A plain time filter returns all of them, and each becomes a column: the
+    /// dashboard drew *four* identical "Fable · Eric" cards next to one real
+    /// one, nine cards for two accounts.
+    ///
+    /// Input order is preserved (the fetches are newest-first), so the winner
+    /// on an exact `sampledAt` tie is stable rather than dictionary order.
     func latestBatch(tolerance: TimeInterval = 2) -> [ScopedWindowRow] {
-        guard let newest = map(\.sampledAt).max() else { return [] }
+        let all = Array(self)
+        guard let newest = all.map(\.sampledAt).max() else { return [] }
         let cutoff = newest.addingTimeInterval(-tolerance)
-        return filter { $0.sampledAt >= cutoff }
+        var order: [String] = []
+        var best: [String: ScopedWindowRow] = [:]
+        for row in all where row.sampledAt >= cutoff {
+            guard let existing = best[row.identity] else {
+                best[row.identity] = row
+                order.append(row.identity)
+                continue
+            }
+            if row.sampledAt > existing.sampledAt { best[row.identity] = row }
+        }
+        return order.compactMap { best[$0] }
     }
 }

@@ -189,11 +189,20 @@ public extension Sequence where Element == UsageLimitSample {
         let all = Array(self)
         guard let newest = all.map(\.sampledAt).max() else { return [] }
         let cutoff = newest.addingTimeInterval(-tolerance)
-        return all
-            .filter { $0.sampledAt >= cutoff }
+        // One row per identity. Several poller lanes can belong to the same
+        // account and each writes the same window within the same second, so
+        // the time filter alone yields duplicates — see the `ScopedWindowRow`
+        // version for what that looked like on screen.
+        var best: [String: UsageLimitSample] = [:]
+        for row in all where row.sampledAt >= cutoff {
+            guard let existing = best[row.identity] else { best[row.identity] = row; continue }
+            if row.sampledAt > existing.sampledAt { best[row.identity] = row }
+        }
+        return best.values
             .sorted { a, b in
                 if a.isActive != b.isActive { return a.isActive && !b.isActive }
-                return a.percent > b.percent
+                if a.percent != b.percent { return a.percent > b.percent }
+                return a.identity < b.identity
             }
     }
 
