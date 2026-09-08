@@ -30,6 +30,13 @@ So: worth doing if the tables are ever moved for storage reasons, and not worth
 doing for speed. If they do move, `RawLimitReader` is deleted rather than
 ported.
 
+The wider version of that question — *why is SwiftData in the middle of an
+analytical workload at all* — is written up as a decision record in
+`docs/storage-layering.md`, with the row counts, the two things that stop it
+being a free win (the widget extension is a separate process and DuckDB takes an
+exclusive lock; `verify-data` loses its independent second copy), and the order
+that would de-risk it.
+
 ## The engine refit was the most expensive thing Pacer does — where the time went
 
 **This is the cause of the multi-second dashboard hitches.** 30 of 36 loads
