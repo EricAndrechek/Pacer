@@ -188,11 +188,19 @@ and 108,660 entries in 22.8 s with no migration.
 
 ## What is next, with honest sizing
 
-**1. Per-account alert rules.** A feature, not a fix. Inheriting the window's
-scope is explicitly the wrong way to get it.
-
-**2. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
+**1. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
 this branch has no CI signal.
+
+Per-account alert rules are **done** — and the larger half of that turned out to
+be a bug rather than a feature. `NotificationsHost` scoped its rate-limit reads
+to the active login, so the account you were not signed into could fill its
+7-day window in silence. It now evaluates every account, with crossing state
+keyed by `(account, window)` and a `#<account>` suffix on the per-cycle dedup
+key so two logins cannot silence each other. `AlertRule.accountId` is the
+explicit per-rule target on top of that; `nil` still means every account,
+because a cap set before you had two logins must not quietly start covering
+half your usage. It is a target on the rule, never the window's display
+scope — the reason is in the model's doc comment.
 
 ---
 
