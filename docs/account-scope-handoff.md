@@ -428,3 +428,76 @@ resolves to the live group container in the test process too, so a test that
 sets a scope leaves a fixture id where the running app reads it. Capture and
 restore, and mark the suite `.serialized` — parallel tests otherwise clobber
 each other's restore.
+
+## Sharing the usage endpoint with cswap
+
+The last thing fixed on this branch, and the one with the most misdiagnoses per
+line of code. Worth reading before touching `OAuthPoller` or the scheduler.
+
+**The endpoint's budget is per token.** Not per IP, not per account. Confirmed
+from both sides: Pacer's 429s only ever landed on the one credential it shared
+with cswap, while five Claude Desktop tokens for the *other* account, polled
+twelve times as often, never failed once. Any fix that throttles by account is
+solving the wrong problem — one was written and reverted.
+
+**cswap holds the same tokens.** It swaps Claude Code's keychain credential and
+parks the others as `Claude Code-credentials-<suffix>`. Both are lanes in
+Pacer's pool. Claude Desktop's tokens are separate credentials with separate
+budgets and cswap never touches them — `sharesBudgetWithSwitcher` is that
+distinction, and getting it wrong stamps every lane of an account with one
+timestamp and collapses the multi-token stagger that makes the fast cadence
+possible. That happened; the work account's refresh went from ~50 s to ~5 min.
+
+**Two polite clients are still over budget.** Each keeping to one request per
+five minutes on one token is two requests per five minutes. Observed: Pacer at
+14:45:40 (fine), 14:50:52 (429), 14:55:52 (429) — its own cadence, exactly —
+while cswap sat at `lastError: http-429` for fifty minutes and the signed-in
+account's reading aged from 0.4 to 12.4 minutes. Neither client was
+misbehaving alone.
+
+**The thing that made it invisible: `fetchedAt` only moves on success.** Pacer
+read that field alone, so a cswap stuck retrying every six minutes looked
+completely idle, and Pacer scheduled straight into it. `lastAttemptAt` is in the
+same file and says exactly when it last asked. Read both; take the later.
+
+**Three fixes that looked right and were not**, in the order I tried them:
+
+1. *Poll at the midpoint between cswap's polls.* Rejected — it discards the
+   lane-count and backoff logic the scheduler already does well. Feed the
+   external schedule into the existing rules instead.
+2. *Only install the guard when a cswap reading is ingested.* Deadlock: a
+   reading appears only when cswap succeeds, and it could not succeed while
+   Pacer was crowding it. Apply schedule facts unconditionally; only *recording
+   a sample* needs the data to be new.
+3. *Stop believing cswap's attempts once it has gone ten minutes without a
+   success.* Backwards. The requests are real whether or not they succeed, and
+   polling into them is what keeps a throttled token throttled. The bound
+   belongs on Pacer's own staleness — `externalYieldMax`, 15 min, after which
+   Pacer polls the lane itself regardless. One probe per fifteen minutes is far
+   under budget, so it cannot perpetuate a throttle.
+
+**`lastPolledAt` means Pacer's own poll.** An earlier version folded cswap's
+activity into it. That loses the distinction the probe floor needs, leaks one
+credential's external activity onto the endpoint-cadence gate every lane of the
+account shares, and gets persisted, so a restart inherits it.
+`externalLastPollAt` is the separate fact.
+
+**The secondary sweep is a second caller and had a partial copy of the rule.**
+`dueSecondaryLaneIndex` checked cooldown, Pacer's own interval, and an
+announced *future* external request — but nothing about requests already made.
+That path is where the collisions actually were: it polls the account you are
+not signed into, whose credential is exactly the one cswap has parked. Both
+callers now go through `OAuthPollScheduler.readyAt(_:interval:now:)`.
+
+**How to watch it.** `~/.claude-swap-backup/cache/usage.json` has per-account
+`fetchedAt` / `lastAttemptAt` / `nextPollAt` / `lastError`; Pacer's newest row
+per account is `ZRATELIMITSAMPLE` with `ZSOURCE` (`oauth` = Pacer polled,
+`cswap` = read from the cache); 429s are in `~/Library/Logs/Pacer/Pacer.err.log`
+as `[OAuthPoller] rate-limited`. Sampling all three together every 30 s is what
+made the diagnosis obvious after several wrong ones from static snapshots.
+Recovery looks like a `cswap` reading appearing for the account Pacer had been
+starving, then both staying fresh.
+
+**Give it time before drawing conclusions.** A burst keeps a token throttled
+for ~35 minutes, and both clients' retries inside that window extend it. A
+snapshot taken during the penalty looks identical whether or not the fix works.
