@@ -201,7 +201,7 @@ public struct SessionsTable: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .frame(width: 70, alignment: .trailing)
-                Text(pacerRelative(row.lastSeenAt))
+                Text(pacerRelative(row.lastSeenAt)).help(pacerRelativeExact(row.lastSeenAt))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .frame(width: 90, alignment: .trailing)

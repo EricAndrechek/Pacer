@@ -1347,7 +1347,7 @@ private struct ProjectsContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 70, alignment: .trailing)
-            Text(pacerRelative(row.lastActive))
+            Text(pacerRelative(row.lastActive)).help(pacerRelativeExact(row.lastActive))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .trailing)

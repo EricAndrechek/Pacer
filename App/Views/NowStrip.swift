@@ -379,6 +379,7 @@ struct NowStrip: View {
             Chip(text: "live", systemImage: "bolt.fill", tint: .yellow, size: .compact)
         } else if let last = stats.lastSampleAt {
             Text("last sample \(pacerRelative(last))")
+                .help(pacerRelativeExact(last))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -392,6 +393,7 @@ struct NowStrip: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Text("Last activity \(pacerRelative(at)) — \(pacerModelDisplayName(model)).")
+                    .help(pacerRelativeExact(at))
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }

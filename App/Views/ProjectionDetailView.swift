@@ -590,6 +590,7 @@ struct ProjectionDetailView: View {
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
                         Text("limit \(pacerRelative(crossAt, style: .short))")
+                            .help(pacerRelativeExact(crossAt))
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
                     Text(st.medianAbsError.isFinite

@@ -152,7 +152,7 @@ struct RateLimitSourceChip: View {
             .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
             .help(isStaleOAuth
                 ? "Pacer hasn't received fresh data in \(pacerRelative(latest.sampledAt)). The OAuth token may have expired — try launching or quitting/reopening Claude Code to refresh it. See ~/Library/Logs/Pacer/Pacer.err.log for the poller's last outcome."
-                : "")
+                : pacerRelativeExact(latest.sampledAt))
         }
     }
 }
