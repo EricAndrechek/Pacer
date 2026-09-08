@@ -113,8 +113,19 @@ enum MenuBarTooltipSelfTest {
             exit(4)
         }
         log("wrote \(out.path)")
-        log("hovered \(Int(plan.hoverPoint.x)),\(Int(plan.hoverPoint.y)) — "
-            + "the tooltip, if any, is beside that point")
+        log("aimed at \(Int(plan.hoverPoint.x)),\(Int(plan.hoverPoint.y)); "
+            + "pointer was at \(Int(plan.cursorAtCapture.x)),\(Int(plan.cursorAtCapture.y)) "
+            + "when the frame was taken")
+        let landed = plan.rowRect.insetBy(dx: -4, dy: -4).contains(plan.cursorAtCapture)
+        log(landed ? "HOVER: landed on the row" : "HOVER: MISSED the row — the result below means nothing")
+        if plan.newWindows.isEmpty {
+            log("TOOLTIP: no — no window appeared while hovering")
+        } else {
+            let described = plan.newWindows
+                .map { "\(Int($0.width))x\(Int($0.height))@\(Int($0.minX)),\(Int($0.minY))" }
+                .joined(separator: " ")
+            log("TOOLTIP: yes — \(plan.newWindows.count) new window(s): \(described)")
+        }
         // Printed unconditionally: this is a run someone had to authorise, so
         // anything that would otherwise cost a second one gets said the first
         // time. The display layout is exactly that — the first attempt
@@ -136,6 +147,12 @@ enum MenuBarTooltipSelfTest {
         var hoverPoint: CGPoint = .zero
         var rowRect: CGRect = .zero
         var approachFrom: CGPoint = .zero
+        /// Windows this process already had on screen before the hover, so a
+        /// tooltip can be recognised as the one that appeared afterwards.
+        var windowsBefore: Set<CGWindowID> = []
+        var newWindows: [CGRect] = []
+        /// Where the pointer actually was when the frame was taken.
+        var cursorAtCapture: CGPoint = .zero
         var step = 0
         init(item: NSStatusItem, output: URL) {
             self.item = item
@@ -190,6 +207,7 @@ enum MenuBarTooltipSelfTest {
                     // dismissing it.
                     plan.approachFrom = CGPoint(x: rect.midX,
                                                 y: rect.midY + rect.height * 1.6)
+                    plan.windowsBefore = Set(ownedWindows().map(\.id))
                     moveCursor(to: plan.approachFrom)
                 } else if plan.step == 1, now >= glideFrom {
                     // Cross into the row over the glide window, one posted move
@@ -204,6 +222,20 @@ enum MenuBarTooltipSelfTest {
                     if progress >= 1 { plan.step = 2 }
                 } else if plan.step == 2, now >= captureAt {
                     plan.step = 3
+                    // Ask the window server instead of reading pixels.
+                    //
+                    // Two screenshots in a row were inconclusive — one showed
+                    // the wrong monitor, one had no cursor in it because
+                    // `screencapture -C` does not composite the pointer under
+                    // `-R`. Both times the photograph could not distinguish
+                    // "no tooltip" from "never hovered". A tooltip is a window;
+                    // this process owns it; so the honest test is whether a
+                    // window appeared that was not there before, and the answer
+                    // is a boolean rather than something to squint at.
+                    plan.cursorAtCapture = NSEvent.mouseLocation
+                    plan.newWindows = ownedWindows()
+                        .filter { !plan.windowsBefore.contains($0.id) }
+                        .map(\.bounds)
                     plan.captured = capture(to: plan.output, around: plan.rowRect)
                 } else if plan.step == 3, now >= doneAt {
                     plan.step = 4
@@ -367,6 +399,26 @@ enum MenuBarTooltipSelfTest {
         }
         return task.terminationStatus == 0
             && FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// On-screen windows belonging to this process, with their Quartz bounds.
+    ///
+    /// Geometry and owner pid come back without Screen Recording permission —
+    /// only window *titles* are gated — so this works even where the capture
+    /// does not.
+    private static func ownedWindows() -> [(id: CGWindowID, bounds: CGRect)] {
+        let mine = ProcessInfo.processInfo.processIdentifier
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        return raw.compactMap { entry in
+            guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pid == mine,
+                  let number = entry[kCGWindowNumber as String] as? CGWindowID,
+                  let boundsDict = entry[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
+            else { return nil }
+            return (number, rect)
+        }
     }
 
     /// Cocoa rect (origin bottom-left of the primary screen) to Quartz global
