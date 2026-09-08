@@ -79,3 +79,42 @@ the lever the poller pulls.
 
 With one token this degrades cleanly to single-lane activity-gating. Tuning
 constants live in `OAuthPoller.Configuration` / `OAuthPollScheduler.Tuning`.
+
+## Sharing a token with another client
+
+Pacer is not necessarily the only thing on this machine polling these
+credentials. `cswap` polls the same tokens to decide when to switch accounts,
+and because the budget is **per token**, two clients each politely keeping to
+one request per five minutes add up to two — which is over, permanently.
+
+Observed, 2026-09-08, on the account that was signed in: Pacer polled at
+14:45:40 (fine), 14:50:52 (429) and 14:55:52 (429), while cswap sat at
+`lastError: http-429` for fifty minutes and the reading on screen aged from 0.4
+to 12.4 minutes. Neither client was misbehaving on its own. Together they were
+double the budget, and every retry from either kept the throttle alive.
+
+The arrangement, in `SwitcherUsageCache` + `OAuthPoller`:
+
+- **Read, don't re-fetch.** cswap writes what it fetched to
+  `~/.claude-swap-backup/cache/usage.json`, for every account it manages. A
+  reading newer than Pacer's own is recorded as a sample (`source: cswap`), so
+  the data arrives without spending any budget.
+- **Count its requests, not just its answers.** `lastAttemptAt` moves on a 429;
+  `fetchedAt` does not. Reading only the latter made a client retrying every few
+  minutes look idle, and Pacer scheduled straight into it. The per-token
+  interval now runs from whichever client asked last (`externalLastPollAt`).
+- **Keep clear of its next one.** cswap publishes `nextPollAt`; Pacer will not
+  poll so close in front of it that the pair breaches the same spacing. An
+  *overdue* time counts as imminent — a client that is behind is a client that
+  keeps failing, which is when it most needs the room.
+- **But never yield forever** (`externalYieldMax`, 15 min). A client that asks
+  constantly and never succeeds would otherwise pin a lane, and on an account
+  with a single token that means no readings at all. One probe per fifteen
+  minutes is well under budget.
+
+Only the credential cswap actually swaps is affected — Claude Code's keychain
+entry and the parked `Claude Code-credentials-<suffix>` ones. Desktop tokens for
+the same account are separate credentials with separate budgets and are left
+alone (`sharesBudgetWithSwitcher`); an early version marked every lane of the
+account and collapsed the multi-token stagger that makes the fast cadence
+possible.

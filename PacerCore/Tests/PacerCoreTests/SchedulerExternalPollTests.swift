@@ -207,3 +207,61 @@ struct SchedulerProbeFloorTests {
         }
     }
 }
+
+/// `readyAt` is the rule both callers use — the fast pool at the per-token
+/// floor, the secondary sweep at its own interval. These pin the shape it has
+/// to keep for the second caller, which is the one that had a partial copy.
+@Suite("The shared eligibility rule")
+struct SchedulerReadyAtTests {
+
+    private let now = Date(timeIntervalSince1970: 900_000)
+    private let scheduler = OAuthPollScheduler(tuning: .init(
+        perTokenMinInterval: 300, activeInterval: 0, idleInterval: 600,
+        activeWindow: 900, minWait: 1, externalYieldMax: 900))
+
+    private func ready(_ l: OAuthPollScheduler.LaneState, interval: TimeInterval = 600) -> Date {
+        scheduler.readyAt(l, interval: interval, now: now)
+    }
+
+    /// The interval is the caller's, not the tuning's — otherwise the slow
+    /// sweep would silently run at the fast pool's cadence.
+    @Test("the caller's interval is what spaces the lane")
+    func callerIntervalApplies() {
+        let lane = OAuthPollScheduler.LaneState(
+            lastPolledAt: now.addingTimeInterval(-400), account: .secondary)
+        #expect(ready(lane, interval: 600) == now.addingTimeInterval(200))
+        #expect(ready(lane, interval: 300) <= now)
+    }
+
+    /// The half the sweep's own copy was missing: another client's *past*
+    /// request. It checked only for an announced future one.
+    @Test("another client's last request spaces the lane too")
+    func externalLastCounts() {
+        let lane = OAuthPollScheduler.LaneState(
+            lastPolledAt: now.addingTimeInterval(-700),
+            externalLastPollAt: now.addingTimeInterval(-60), account: .secondary)
+        #expect(ready(lane, interval: 600) == now.addingTimeInterval(540))
+    }
+
+    /// And it must still let a lane through once the floor is reached, or the
+    /// secondary account would go unread for as long as cswap keeps asking.
+    @Test("the probe floor applies to the slow sweep as well")
+    func probeFloorAppliesToSweep() {
+        let lane = OAuthPollScheduler.LaneState(
+            lastPolledAt: now.addingTimeInterval(-1000),
+            externalNextPollAt: now.addingTimeInterval(-120),
+            externalLastPollAt: now.addingTimeInterval(-60), account: .secondary)
+        #expect(ready(lane, interval: 600) <= now)
+    }
+
+    /// Nobody else on the token: the rule is exactly the old one.
+    @Test("with no other client it is just interval and cooldown")
+    func unchangedWhenAlone() {
+        #expect(ready(.init(lastPolledAt: now.addingTimeInterval(-100), account: .secondary))
+                == now.addingTimeInterval(500))
+        #expect(ready(.init(lastPolledAt: now.addingTimeInterval(-1000),
+                            cooldownUntil: now.addingTimeInterval(60), account: .secondary))
+                == now.addingTimeInterval(60))
+        #expect(ready(.init(account: .secondary)) == .distantPast)
+    }
+}

@@ -897,20 +897,18 @@ public actor OAuthPoller: TokenPoolTesting {
     /// contention was Pacer and `cswap` polling the *same* token — fixed by
     /// reading cswap's cache instead. Throttling by account fixed nothing and
     /// gave up a real feature, so it is reverted.
+    ///
+    /// Eligibility itself is `OAuthPollScheduler.readyAt`, the same rule the
+    /// fast pool uses, differing only in the interval. This method had its own
+    /// partial copy of it — cooldown and Pacer's own spacing, plus half of the
+    /// external check — so a secondary lane could keep its distance from
+    /// Pacer's polls while landing squarely on another client's.
     private func dueSecondaryLaneIndex(now: Date) -> Int? {
         let interval = configuration.secondarySweepInterval
         return lanes.indices
-            .filter { i in
-                // Same forward-spacing rule the fast pool uses: do not land a
-                // request just in front of one another client has announced on
-                // the same token. See `LaneState.externalNextPollAt`.
-                let crowdsExternal = lanes[i].state.externalNextPollAt.map {
-                    $0 > now && $0.timeIntervalSince(now) < interval
-                } ?? false
-                return lanes[i].state.account == .secondary
-                    && !crowdsExternal
-                    && (lanes[i].state.cooldownUntil.map { now >= $0 } ?? true)
-                    && ((lanes[i].state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast) <= now)
+            .filter {
+                lanes[$0].state.account == .secondary
+                    && scheduler.readyAt(lanes[$0].state, interval: interval, now: now) <= now
             }
             .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
     }
@@ -919,10 +917,8 @@ public actor OAuthPoller: TokenPoolTesting {
     /// there are no secondary lanes.
     private func nextSecondaryWait(now: Date) -> TimeInterval? {
         let interval = configuration.secondarySweepInterval
-        let readyTimes = lanes.filter { $0.state.account == .secondary }.map { lane -> Date in
-            let byInterval = lane.state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
-            let byCooldown = lane.state.cooldownUntil ?? .distantPast
-            return max(byInterval, byCooldown)
+        let readyTimes = lanes.filter { $0.state.account == .secondary }.map {
+            scheduler.readyAt($0.state, interval: interval, now: now)
         }
         guard let earliest = readyTimes.min() else { return nil }
         return max(configuration.scheduler.minWait, earliest.timeIntervalSince(now))
