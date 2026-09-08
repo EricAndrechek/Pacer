@@ -982,11 +982,17 @@ struct PaceChartCard: View {
                     .help("Claude Code is using this account right now — these "
                           + "are the numbers your terminal reports.")
             }
-            if stale, let at = group.readingAt {
-                Text("last read \(pacerRelative(at))")
+            if let at = group.readingAt {
+                // Always, not only when stale. "How current is this?" is a
+                // question about every account on screen, and answering it only
+                // for the bad case leaves the good case ambiguous — silence
+                // reads as "no information" rather than "fine".
+                Text("read \(pacerRelative(at))")
                     .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-                    .help("This account is not being polled right now.")
+                    .foregroundStyle(stale ? .orange : .secondary)
+                    .help(stale
+                          ? "This account is not being polled right now."
+                          : "When Pacer last read this account's limits.")
             }
             Spacer(minLength: 0)
         }

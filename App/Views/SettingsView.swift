@@ -2049,6 +2049,7 @@ private struct TokensCard: View {
         case .desktop:  return "Claude Desktop"
         case .override: return "manually-added"
         case .held:     return "saved"
+        case .parked:   return "switcher (signed out)"
         }
     }
 
@@ -2249,6 +2250,9 @@ private struct TokenLaneRow: View {
         case .desktop:  return "Claude Desktop"
         case .override: return "Manual"
         case .held:     return "Saved by Pacer"
+        // A login the account switcher has stashed — a real Claude Code
+        // credential, just not the one signed in right now.
+        case .parked:   return "Switcher"
         }
     }
 
@@ -2258,6 +2262,7 @@ private struct TokenLaneRow: View {
         case .desktop:  return "desktopcomputer"
         case .override: return "key.fill"
         case .held:     return "lock.fill"
+        case .parked:   return "arrow.left.arrow.right"
         }
     }
 }

@@ -812,7 +812,12 @@ public actor OAuthPoller: TokenPoolTesting {
             case .override: return 0
             case .keychain: return 1
             case .held:     return 2
-            case .desktop:  return 3
+            // Below the live sources, above Desktop: a parked credential
+            // speaks for a real Claude Code login, just not the current one,
+            // so it should establish its account before a Desktop token gets
+            // the chance to claim the same org.
+            case .parked:   return 3
+            case .desktop:  return 4
             }
         }
         lanes.sort { a, b in

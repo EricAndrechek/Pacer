@@ -168,7 +168,11 @@ public enum PacerPreferences {
     /// and `NSClassFromString("XCTestCase")` is nil because Swift Testing does
     /// not link XCTest. What is always present is the `.xctest` bundle among
     /// the arguments. The XCTest signals are kept for `xcodebuild test`.
-    private static let isTestProcess: Bool = {
+    /// Also read outside this type — a test process must not touch the
+    /// machine's keychain either, for the same reason it must not write its
+    /// defaults: it is somebody's real machine and the side effects outlive the
+    /// run. See `OAuthClient.defaultParkedCredentials`.
+    public static let isTestProcess: Bool = {
         let info = ProcessInfo.processInfo
         let env = info.environment
         if env["PACER_ISOLATED_DEFAULTS"] == "1" { return true }
