@@ -191,6 +191,53 @@ and 108,660 entries in 22.8 s with no migration.
 
 ---
 
+## The open gap: the non-active account's rate limits go to 0%
+
+**Reported symptom.** Scope the window to the work account and the pace cards
+read `0%` on both 5-hour and 7-day, with no usage drawn — while Today, Today's
+traffic and Today by hour all show real spend for that same account.
+
+**It is wrong, and the spend is not the wrong half.** Verified on the real
+store:
+
+- Work is attributed $231 today, and the activation trail confirms it genuinely
+  was the active login for about two and a half hours (06:37-07:20, 08:40-08:45,
+  09:19-11:13, 11:27-11:33). Attribution is correct.
+- Work's 7-day has read *exactly* 0.0% since 09-07 06:06 — three days flat.
+- Personal's 7-day over the same day climbs 1% → 3 → 6 → 9 → 12 → 16%. That one
+  is tracking reality.
+
+**Cause.** `ZTOKENLANEMETA` holds six lanes: five for the work org, every one
+of them `source=desktop`, and a single `source=keychain` lane — Claude Code's
+actual credential — which resolves to whichever account currently owns
+`~/.claude/.credentials.json`. So Pacer polls *Claude Desktop* tokens for work,
+and Eric does not use Desktop for work, so they honestly report ~0%.
+
+Lanes are keyed by access-token value and expired ones are dropped when the pool
+is seeded, so the work account's Code token survives only until it expires —
+after which nothing can renew it, because auto-refresh is deliberately disabled
+(rotation invalidates the token the live Claude Code session is using; see
+`project_oauth_credential_strategy`).
+
+**So the structural limit is:** Pacer can report live rate limits for the
+account that currently owns the credentials file, plus any account it holds a
+still-valid token for. For a `cswap` user the other account's limits go stale
+within a day and then read as a confident `0%`.
+
+**cswap cannot rescue this.** `~/.claude-swap-backup/credentials/` holds only
+lock files — the credentials themselves live in the keychain, which is the
+deferred keychain-access-group item.
+
+**The fix that belongs in this branch is the honest one, not the complete one.**
+A reading Pacer cannot obtain must not render as `0%`. That is the exact failure
+mode this whole branch has been chasing — a number that is silently wrong rather
+than visibly absent. The card should say the window has no recent reading for
+that account and when the last one was, the same way the source chip already
+distinguishes fresh from stale. Polling both accounts properly is a separate
+piece of work gated on per-account token retention.
+
+---
+
 ## What is next, with honest sizing
 
 **1. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
