@@ -514,6 +514,22 @@ struct PaceChartCard: View {
         let duration: TimeInterval
         /// Latest reading (nil ⇒ no sample yet — the genuine cold start).
         let usedPct: Double?
+        /// When that reading was taken.
+        ///
+        /// Needed because Pacer can only poll the account that currently owns
+        /// `~/.claude/.credentials.json`. When `cswap` switches away — which it
+        /// does automatically on hitting a limit — the previous account's
+        /// readings simply stop, and without this the card goes on presenting
+        /// the last one as if it were current. Seen for real: personal frozen
+        /// at "87% · resets 12:20" eight minutes after the switch, while Claude
+        /// Code was showing the *other* account's fresh window.
+        let readingAt: Date?
+        /// Newest reading Pacer holds for *any* account, so a column can tell
+        /// "nothing has been polled lately" (everyone is quiet) from "this
+        /// account stopped being polled" (the switched-away one). Self
+        /// calibrating: it needs no assumption about the poll cadence, which
+        /// varies between the active lane and the rest.
+        let newestAnyAccountAt: Date?
         /// Window rollover (nil ⇒ idle / server anchored no cycle).
         let resetsAt: Date?
         /// Projection-free actual line — the shared-image-parity base the
@@ -522,6 +538,18 @@ struct PaceChartCard: View {
         /// This scoped window is the one currently in effect for the account.
         /// Always false for fixed windows.
         let isActive: Bool
+        /// This column's account is the one Claude Code is signed into right now.
+        ///
+        /// Without it the all-accounts card is two sets of numbers with no
+        /// indication which one the terminal is actually reporting. That is not
+        /// hypothetical: `cswap` switched accounts on hitting a limit, Claude
+        /// Code started showing the new account's fresh window, and Pacer's
+        /// other card still read 98% with a different reset — both correct,
+        /// nothing on screen saying they were different accounts.
+        ///
+        /// False everywhere when only one account is drawn; a single-account
+        /// card has nothing to disambiguate.
+        let isActiveAccount: Bool
         /// Scoped windows only: a raised-severity tag ("warning"/"critical")
         /// when the server flags one. nil for fixed windows and normal rows.
         let severity: SeverityTag?
@@ -589,14 +617,19 @@ struct PaceChartCard: View {
     /// puzzle. The active login leads.
     private func columns(now: Date) -> [Column] {
         typealias Side = PaceColumnLayout.Side
+        // The freshest thing Pacer knows, across every account — the yardstick a
+        // column uses to tell "quiet everywhere" from "this one stopped".
+        let newestAny = series.compactMap { $0.fixed.first?.sampledAt }.max()
         var out: [Column] = []
         for entry in series {
             let b = bucketed(entry)
             var tagged: [(side: Side, col: Column)] = [
                 (.fiveHour, fixedColumn(entry, title: "5-hour", key: RateLimitWindowName.fiveHour,
-                                        duration: Self.fiveHourDuration, samples: b.fiveHour, now: now)),
+                                        duration: Self.fiveHourDuration, samples: b.fiveHour, now: now,
+                                        newestAnyAccountAt: newestAny)),
                 (.sevenDay, fixedColumn(entry, title: "7-day", key: RateLimitWindowName.sevenDay,
-                                        duration: Self.sevenDayDuration, samples: b.sevenDay, now: now)),
+                                        duration: Self.sevenDayDuration, samples: b.sevenDay, now: now,
+                                        newestAnyAccountAt: newestAny)),
             ]
             for row in scopedRows(entry) {
                 let duration = WindowSpec.scopedDuration(group: row.group)
@@ -611,10 +644,13 @@ struct PaceChartCard: View {
                     accountId: entry.accountId, windowKey: row.identity,
                     title: Self.decorate(row.label, with: entry.label),
                     duration: duration,
-                    usedPct: row.percent, resetsAt: row.resetsAt,
+                    usedPct: row.percent,
+                    readingAt: row.sampledAt, newestAnyAccountAt: newestAny,
+                    resetsAt: row.resetsAt,
                     baseChart: .cycle(scoped: row, history: entry.scoped,
                                       duration: duration, now: now),
-                    isActive: row.isActive, severity: severity, isScoped: true)))
+                    isActive: row.isActive, isActiveAccount: isActiveAccount(entry),
+                    severity: severity, isScoped: true)))
             }
             out += tagged
                 .sorted { lhs, rhs in
@@ -630,6 +666,13 @@ struct PaceChartCard: View {
         return out
     }
 
+    /// Whether this series' account is the live login — only meaningful, and
+    /// only marked, when more than one account is on screen.
+    private func isActiveAccount(_ entry: AccountSeries) -> Bool {
+        guard series.count > 1, let id = entry.accountId else { return false }
+        return accounts.first { $0.isActive }?.id == id
+    }
+
     static func columnID(_ accountId: String?, _ windowKey: String) -> String {
         "\(accountId ?? "")|\(windowKey)"
     }
@@ -643,15 +686,19 @@ struct PaceChartCard: View {
 
     private func fixedColumn(_ entry: AccountSeries, title: String, key: String,
                              duration: TimeInterval,
-                             samples: [LimitSamplePoint], now: Date) -> Column {
+                             samples: [LimitSamplePoint], now: Date,
+                             newestAnyAccountAt: Date?) -> Column {
         let latest = samples.first
         return Column(
             id: Self.columnID(entry.accountId, key),
             accountId: entry.accountId, windowKey: key,
             title: Self.decorate(title, with: entry.label), duration: duration,
-            usedPct: latest?.usedPercentage, resetsAt: latest?.resetsAt,
+            usedPct: latest?.usedPercentage,
+            readingAt: latest?.sampledAt, newestAnyAccountAt: newestAnyAccountAt,
+            resetsAt: latest?.resetsAt,
             baseChart: .cycle(fixed: samples, duration: duration, now: now),
-            isActive: false, severity: nil, isScoped: false)
+            isActive: false, isActiveAccount: isActiveAccount(entry),
+            severity: nil, isScoped: false)
     }
 
     // MARK: - Engine refresh
@@ -928,6 +975,29 @@ private struct PaceColumn: View {
     @State private var hovering = false
     @State private var sharing = false
 
+    /// How far behind the freshest reading this column may fall before it is
+    /// reported as stale rather than current.
+    ///
+    /// Relative, not absolute, on purpose. The poll cadence differs between the
+    /// active credential and the rest and changes with activity, so any fixed
+    /// "older than N minutes" threshold is wrong half the time. Falling three
+    /// minutes behind *the newest thing Pacer has* means something specific:
+    /// other accounts are being read and this one is not.
+    private static let staleBehind: TimeInterval = 3 * 60
+
+    /// True when this account has stopped being read while others carry on.
+    ///
+    /// The number stays on screen — it is the last thing Pacer actually knew,
+    /// and hiding it would be worse — but everything that asserts something
+    /// about *now* is withdrawn: the pace verdict, the projection, and the
+    /// "on pace / behind" reading of the chart.
+    private var isStale: Bool {
+        guard let readingAt = column.readingAt,
+              let newest = column.newestAnyAccountAt
+        else { return false }
+        return newest.timeIntervalSince(readingAt) > Self.staleBehind
+    }
+
     private var windowKey: String { column.windowKey }
     private var title: String { column.title }
     private var duration: TimeInterval { column.duration }
@@ -954,6 +1024,10 @@ private struct PaceColumn: View {
     /// unchanged.
     private func liveChartData(base: PaceChartView.Data?) -> PaceChartView.Data? {
         guard let base else { return nil }
+        // A forecast extrapolates from *now*, and a stale column's "now" is
+        // whenever the account was last read. Drawing the dashed line anyway
+        // projects from a point that has already moved.
+        guard !isStale else { return base }
         guard let projection else { return base }
         // Re-anchor the forecast onto the live actual tail so the dashed line
         // continues the solid one without a step.
@@ -985,7 +1059,14 @@ private struct PaceColumn: View {
     /// Status + burn chips under the hero numbers — the at-a-glance verdict row.
     @ViewBuilder
     private var chipRow: some View {
-        if let used = column.usedPct, let cycle, !cycle.isAwaiting {
+        // Every chip here is a verdict about the present — "behind", "on pace",
+        // "limit in 40 min". A stale reading cannot support any of them: the
+        // account may have been sitting untouched since, or may have been
+        // hammered by whatever `cswap` switched *to*. The caption says when the
+        // number is from; that is the only honest claim left.
+        if isStale {
+            EmptyView()
+        } else if let used = column.usedPct, let cycle, !cycle.isAwaiting {
             let band = PaceBand(usedPct: used, paceEndPct: cycle.paceFraction * 100)
             HStack(spacing: 6) {
                 paceChip(band: band)
@@ -1153,6 +1234,11 @@ private struct PaceColumn: View {
                     .help("Currently the active limit for this account")
             }
             Eyebrow(text: title)
+            if column.isActiveAccount {
+                Chip(text: "signed in", tint: .green, size: .compact)
+                    .help("Claude Code is using this account right now — these are "
+                          + "the numbers your terminal reports.")
+            }
             if let severity = column.severity {
                 Chip(text: severity.text, tint: severity.band.color, size: .compact)
             }
@@ -1165,7 +1251,17 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var caption: some View {
-        if let cycle, cycle.isAwaiting {
+        if isStale, let readingAt = column.readingAt {
+            // Says what Pacer knows and when, instead of implying it is current.
+            // The reset time is deliberately dropped here: it came from the same
+            // stale reading, and two facts of different ages side by side is
+            // what made this confusing in the first place.
+            Text("last read \(pacerRelative(readingAt))")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+                .help("This account is not being polled right now — Pacer can only "
+                      + "read the account that currently owns Claude Code's credentials.")
+        } else if let cycle, cycle.isAwaiting {
             Text("cycle reset · awaiting")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
