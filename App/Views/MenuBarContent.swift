@@ -758,7 +758,7 @@ struct MenuStatusContent: View {
                     Circle()
                         .fill(Color.accentColor)
                         .frame(width: 5, height: 5)
-                        .help("Currently in effect")
+                        .menuTooltip("Currently in effect")
                 }
                 Text(window.displayName.uppercased())
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -844,6 +844,7 @@ struct MenuStatusContent: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .menuTooltip(pacerRelativeExact(resets))
                     }
                 }
             } else {
@@ -867,7 +868,7 @@ struct MenuStatusContent: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.primary)
-                .help(tooltip ?? value)
+                .menuTooltip(tooltip ?? value)
         }
     }
 }

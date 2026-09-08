@@ -43,10 +43,24 @@ See `docs/design.md` for the full v1 design.
 
 ## Never take over the machine — no cursor, no windows, no focus
 
-**This is a hard rule and it has no exceptions.** Someone is sitting at this
-Mac using it while you work. You do not get the input devices, the windows, the
-focus, or the active Space. Not briefly, not "just to check something", not
-behind a flag.
+**Never without the owner's explicit, in-the-moment go-ahead.** Someone is
+sitting at this Mac using it while you work. You do not get the input devices,
+the windows, the focus, or the active Space — not briefly, not "just to check
+something", not because a flag was set for you once in the past.
+
+There is exactly one way this is allowed, and it is narrow:
+
+1. You have already built and tested everything that *can* be tested off-screen,
+   so the on-machine run is confirming one specific thing.
+2. The whole run is scripted end to end, deterministic, and takes seconds. It
+   asks nothing, guesses no coordinates, and restores what it touched.
+3. You describe exactly what it will do, and the owner says go — **for that
+   run**. Consent does not carry to the next one.
+
+**Never explore, debug, or iterate on his screen.** If the scripted run fails,
+it fails; take the artifacts away and work out why off-screen. A second attempt
+needs a second go-ahead. "I'll just try it and see" is the thing that caused
+this rule.
 
 Concretely, never write, run, or leave behind anything that:
 
@@ -70,11 +84,15 @@ operating it.
 headlessly, as a PNG — that is the entire reason `make render-live`,
 `make screenshots` and `OffscreenRenderer` exist (next section). Behaviour that
 is not visual belongs in a unit test. If something genuinely can only be
-confirmed by a human hovering or clicking — an `NSMenu` tooltip is the standing
-example — then **say so and ask**. A scripted hover is not a user gesture and
-never was evidence; simulating one buys nothing and costs the user their
-machine. Reporting "this needs a human to check" is a complete, acceptable
-answer.
+confirmed on a real session — an `NSMenu` tooltip is the standing example,
+because NSMenu tracking cannot be exercised off-screen at all — then build it,
+test your half headlessly, and **hand over a single prepared run**. Reporting
+"this needs you to check" is a complete, acceptable answer.
+
+Prefer making the *app* drive its own check over scripting coordinates from
+outside: it knows where its own views are, so there is nothing to guess and
+nothing to retry. See `PACER_TOOLTIP_SELFTEST` in `MenuBarTooltipSelfTest` for
+the shape — env-gated, self-contained, restores the cursor, exits.
 
 This is written down because it happened: an agent investigating why `.help()`
 does not fire inside an `NSMenuItem` built an event-dispatch harness and took

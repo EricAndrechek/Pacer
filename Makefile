@@ -89,6 +89,9 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 	@# detects a test process on its own; this is the half that cannot drift.
 	@cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3
 
+verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — only run it with the machine owner's explicit go-ahead, for that run. See AGENTS.md "Never take over the machine".
+	@bin/verify-menubar-tooltip.sh
+
 pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
 	@bin/update-pricing-snapshot.sh
 

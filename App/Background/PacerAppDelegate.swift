@@ -344,6 +344,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Self.suppressWindowsWhileDiagnosticRuns()
             Task { @MainActor in
                 await SampleCostCache.reload()
+                // The one mode that is *allowed* to touch the screen, and only
+                // with the owner's go-ahead for that run — read
+                // `MenuBarTooltipSelfTest` and the AGENTS.md rule it points at
+                // before invoking it. It rides the screenshot-mode bypasses
+                // (in-memory store, no scan, no single-instance gate) but needs
+                // `.accessory` rather than `.prohibited`, because it has to own
+                // a real status item.
+                if MenuBarTooltipSelfTest.isActive {
+                    ScreenshotMode.seed(into: container)
+                    await MenuBarTooltipSelfTest.run(container: container)
+                }
                 if LiveRenderMode.isActive {
                     await LiveRenderMode.run(container: container)
                 } else {
