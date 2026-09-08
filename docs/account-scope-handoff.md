@@ -207,29 +207,32 @@ store:
 - Personal's 7-day over the same day climbs 1% → 3 → 6 → 9 → 12 → 16%. That one
   is tracking reality.
 
-**Cause.** `ZTOKENLANEMETA` holds six lanes: five for the work org, every one
-of them `source=desktop`, and a single `source=keychain` lane — Claude Code's
-actual credential — which resolves to whichever account currently owns
-`~/.claude/.credentials.json`. So Pacer polls *Claude Desktop* tokens for work,
-and Eric does not use Desktop for work, so they honestly report ~0%.
+**Cause — and a correction.** The first read of this was that Pacer cannot keep
+a second account's token. It can, and does: `ZTOKENLANEMETA` now shows a
+`source=keychain` lane *per account*, one primary and one secondary, and both
+accounts read real values (personal 5h 0% after its 12:20 reset, 7d 21%; work
+5h 29%, 7d 6%, both under a minute old). Retention works.
 
-Lanes are keyed by access-token value and expired ones are dropped when the pool
-is seeded, so the work account's Code token survives only until it expires —
-after which nothing can renew it, because auto-refresh is deliberately disabled
-(rotation invalidates the token the live Claude Code session is using; see
-`project_oauth_credential_strategy`).
+What actually produced three days of `0.0%` is narrower: during that stretch the
+only lanes Pacer held for the work org were five `source=desktop` tokens, and
+Eric does not use Claude Desktop for work, so they honestly reported an idle
+account. Pacer captured work's *Code* token the next time work was signed in,
+and the numbers came right immediately.
 
-**So the structural limit is:** Pacer can report live rate limits for the
-account that currently owns the credentials file, plus any account it holds a
-still-valid token for. For a `cswap` user the other account's limits go stale
-within a day and then read as a confident `0%`.
+**The real limit is expiry, not retention.** A Claude Code access token lasts
+hours — the retained personal lane above expires about twenty minutes after the
+switch. Expired lanes are dropped when the pool is seeded, and nothing can renew
+them: auto-refresh is deliberately disabled because rotation invalidates the
+token the live session is using, and it would also invalidate the copy `cswap`
+holds to switch back with. So a parked account reports correctly for a few
+hours and then has no usable lane at all.
 
-**cswap cannot rescue this.** `~/.claude-swap-backup/credentials/` holds only
-lock files — the credentials themselves live in the keychain, which is the
-deferred keychain-access-group item.
+**cswap cannot supply one.** `~/.claude-swap-backup/credentials/` holds only
+lock files; the credentials live in the keychain — the deferred
+keychain-access-group item.
 
-**The fix that belongs in this branch is the honest one, not the complete one.**
-A reading Pacer cannot obtain must not render as `0%`. That is the exact failure
+**Done in this branch:** the honest presentation. A reading Pacer cannot obtain
+must not render as `0%`. That is the exact failure
 mode this whole branch has been chasing — a number that is silently wrong rather
 than visibly absent. The card should say the window has no recent reading for
 that account and when the last one was, the same way the source chip already
