@@ -857,8 +857,29 @@ struct PaceChartCard: View {
                 // stay even (4→2+2, 5→3+2, 6→3+3) and drop to fewer columns as
                 // the pane narrows (6→2+2+2) instead of crushing 4+ windows
                 // into a too-narrow row. The last row is left-aligned.
-                PaceColumnGrid() {
-                    ForEach(cols) { column($0) }
+                if accountGroups(cols).count > 1 {
+                    // One header per account, then that account's windows.
+                    //
+                    // Everything account-level said itself three times before:
+                    // the name in every eyebrow, "signed in" on every column,
+                    // "last read 8m ago" on every column. Those are facts about
+                    // the *login*, not the window, and repeating them per column
+                    // is what made the card read as noise. The window keeps only
+                    // what differs — its name, and when it resets.
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(accountGroups(cols), id: \.id) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                accountHeader(group)
+                                PaceColumnGrid() {
+                                    ForEach(group.columns) { column($0, grouped: true) }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    PaceColumnGrid() {
+                        ForEach(cols) { column($0) }
+                    }
                 }
             }
         } footer: {
@@ -908,13 +929,81 @@ struct PaceChartCard: View {
         }
     }
 
-    private func column(_ col: Column) -> PaceColumn {
+    /// One account's windows, in the order `columns(now:)` emitted them.
+    struct AccountGroup: Identifiable {
+        let id: String
+        let label: String?
+        let isActiveAccount: Bool
+        let readingAt: Date?
+        let newestAnyAccountAt: Date?
+        var columns: [Column]
+    }
+
+    /// Groups the columns by account, preserving order. `columns(now:)` already
+    /// emits each account's windows together — this only finds the boundaries.
+    private func accountGroups(_ cols: [Column]) -> [AccountGroup] {
+        var out: [AccountGroup] = []
+        for col in cols {
+            let key = col.accountId ?? ""
+            if out.last?.id == key {
+                out[out.count - 1].columns.append(col)
+            } else {
+                out.append(AccountGroup(
+                    id: key, label: accountLabel(col.accountId),
+                    isActiveAccount: col.isActiveAccount,
+                    readingAt: col.readingAt,
+                    newestAnyAccountAt: col.newestAnyAccountAt,
+                    columns: [col]))
+            }
+        }
+        return out
+    }
+
+    private func accountLabel(_ id: String?) -> String? {
+        guard let id else { return nil }
+        return accounts.first { $0.id == id }?.shortLabel
+    }
+
+    /// Account identity, whether Claude Code is on it, and how fresh its
+    /// numbers are — said once for the whole group.
+    @ViewBuilder
+    private func accountHeader(_ group: AccountGroup) -> some View {
+        let stale: Bool = {
+            guard let at = group.readingAt, let newest = group.newestAnyAccountAt
+            else { return false }
+            return newest.timeIntervalSince(at) > PaceChartCard.staleBehind
+        }()
+        HStack(spacing: 8) {
+            Text(group.label ?? "Account")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            if group.isActiveAccount {
+                Chip(text: "signed in", tint: .green, size: .compact)
+                    .help("Claude Code is using this account right now — these "
+                          + "are the numbers your terminal reports.")
+            }
+            if stale, let at = group.readingAt {
+                Text("last read \(pacerRelative(at))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .help("This account is not being polled right now.")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// How far behind the freshest reading an account may fall before its
+    /// numbers stop being presented as current. See `PaceColumn.isStale`.
+    static let staleBehind: TimeInterval = 3 * 60
+
+    private func column(_ col: Column, grouped: Bool = false) -> PaceColumn {
         PaceColumn(
             column: col,
             projection: projections[col.id],
             outlook: outlooks[col.id],
             endEstimate: endEstimates[col.id],
-            onCompare: onCompare)
+            onCompare: onCompare,
+            groupedUnderAccountHeader: grouped)
     }
 
     /// Shown only while the first full-window fetch for an account is in
@@ -969,6 +1058,11 @@ private struct PaceColumn: View {
     /// modal-navigation root), keyed by this window's key / identity.
     var onCompare: ((String, String?) -> Void)?
 
+    /// True when an account header above this column already carries the
+    /// account's name, its signed-in state and its freshness. The column then
+    /// shows only what varies between windows.
+    var groupedUnderAccountHeader = false
+
     /// Share affordance state. `hovering` reveals the share button only while
     /// the cursor is over the column (Linear/Things idiom); `sharing` drives the
     /// preview popover.
@@ -999,7 +1093,12 @@ private struct PaceColumn: View {
     }
 
     private var windowKey: String { column.windowKey }
-    private var title: String { column.title }
+    /// "5-HOUR · ERIC" collapses to "5-HOUR" once a header names the account.
+    private var title: String {
+        guard groupedUnderAccountHeader else { return column.title }
+        guard let cut = column.title.range(of: " · ") else { return column.title }
+        return String(column.title[..<cut.lowerBound])
+    }
     private var duration: TimeInterval { column.duration }
 
     /// Display-cycle for this column. nil only when there's no reading or the
@@ -1234,7 +1333,7 @@ private struct PaceColumn: View {
                     .help("Currently the active limit for this account")
             }
             Eyebrow(text: title)
-            if column.isActiveAccount {
+            if column.isActiveAccount, !groupedUnderAccountHeader {
                 Chip(text: "signed in", tint: .green, size: .compact)
                     .help("Claude Code is using this account right now — these are "
                           + "the numbers your terminal reports.")
@@ -1251,7 +1350,7 @@ private struct PaceColumn: View {
 
     @ViewBuilder
     private var caption: some View {
-        if isStale, let readingAt = column.readingAt {
+        if isStale, !groupedUnderAccountHeader, let readingAt = column.readingAt {
             // Says what Pacer knows and when, instead of implying it is current.
             // The reset time is deliberately dropped here: it came from the same
             // stale reading, and two facts of different ages side by side is
