@@ -750,23 +750,46 @@ public actor OAuthPoller: TokenPoolTesting {
                              laneSource: .parked,
                              source: RateLimitSource.cswap)
 
-            // Stand down on this account's tokens for a cycle.
-            //
-            // Otherwise both clients keep asking and both keep getting 429s,
-            // which is the state this whole fix exists to leave. Yielding the
-            // token's budget to the one that is going to poll it anyway means
-            // cswap succeeds, its cache stays fresh, and Pacer reads it for
-            // free — better data for fewer requests.
-            //
-            // Expressed by advancing `lastPolledAt`, so the ordinary scheduler
-            // defers them; nothing new decides anything. It is also
-            // self-healing: if cswap stops running its cache stops advancing,
-            // no reading is newer, this never runs, and Pacer goes back to
-            // polling on its own.
-            for i in lanes.indices where lanes[i].accountKey == key {
-                lanes[i].state.lastPolledAt = max(
-                    lanes[i].state.lastPolledAt ?? .distantPast, reading.fetchedAt)
-            }
+            interleave(account: key, with: reading)
+        }
+    }
+
+    /// Aim this account's next poll at the middle of cswap's gap.
+    ///
+    /// **Interleave, do not stand down.** An earlier version simply deferred
+    /// to cswap, which stopped the 429s and also inherited cswap's cadence —
+    /// ten or eleven minutes for an account that could be read far more often.
+    /// Yielding is only the right move if the two clients cannot be arranged,
+    /// and they can: cswap publishes `nextPollAt` and `pollIntervalS` in the
+    /// same file it publishes the readings.
+    ///
+    /// So Pacer targets the midpoint between cswap's polls. The two requests
+    /// alternate, the account is read about twice as often as either client
+    /// manages alone, and each request sits as far as possible from the other —
+    /// which is what keeps both inside the token's budget rather than trading
+    /// 429s.
+    ///
+    /// Only ever *delays* a poll, never brings one forward: the per-token floor
+    /// stays the binding constraint, and an account with several tokens keeps
+    /// spreading across them as usual. Self-healing too — if cswap stops
+    /// running its cache stops advancing, no reading is newer, this never runs,
+    /// and Pacer goes back to its own schedule.
+    private func interleave(account key: String, with reading: SwitcherUsageCache.Reading) {
+        guard let target = reading.interleavedPollAt,
+              let interval = reading.pollInterval
+        else { return }
+        let now = clock.now()
+        // Already past the midpoint for this cycle — the next one is a whole
+        // interval later.
+        let aim = target > now ? target : target.addingTimeInterval(interval)
+        for i in lanes.indices where lanes[i].accountKey == key {
+            let laneInterval = lanes[i].state.account == .secondary
+                ? configuration.secondarySweepInterval
+                : configuration.scheduler.perTokenMinInterval
+            // Due exactly at `aim`, expressed the only way the scheduler reads.
+            let shifted = aim.addingTimeInterval(-laneInterval)
+            let current = lanes[i].state.lastPolledAt ?? .distantPast
+            if shifted > current { lanes[i].state.lastPolledAt = shifted }
         }
     }
 
