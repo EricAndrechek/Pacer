@@ -673,7 +673,10 @@ struct PaceChartCard: View {
         return accounts.first { $0.isActive }?.id == id
     }
 
-    static func columnID(_ accountId: String?, _ windowKey: String) -> String {
+    /// `nonisolated` because a `View`'s statics inherit its `@MainActor`
+    /// isolation, and this one is called from inside `askEngine` — off the main
+    /// actor by design. It is a pure string join with nothing to protect.
+    nonisolated static func columnID(_ accountId: String?, _ windowKey: String) -> String {
         "\(accountId ?? "")|\(windowKey)"
     }
 

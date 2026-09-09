@@ -491,7 +491,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil, queue: .main
         ) { note in
-            (note.object as? NSWindow)?.close()
+            // Extract the window outside the @MainActor Task, for the same
+            // reason the observers below do — capturing the whole `note` would
+            // carry a non-Sendable userInfo dict across the boundary. The hop
+            // itself is required because the block is nonisolated even though
+            // `queue: .main` delivers it on the main thread.
+            let window = note.object as? NSWindow
+            Task { @MainActor in window?.close() }
         }
         DispatchQueue.main.async {
             for window in NSApp.windows { window.close() }
