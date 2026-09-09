@@ -245,10 +245,7 @@ struct PaceGaugesWidgetView: View {
             ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
                       lineWidth: 8, labelSize: 20)
                 .frame(width: 74, height: 74)
-            Text(resetText(cell.resetsAt, durationSeconds: cell.durationSeconds))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds)
         }
         .frame(maxWidth: .infinity)
     }
@@ -271,10 +268,7 @@ struct PaceGaugesWidgetView: View {
                 Spacer()
             }
             Spacer(minLength: 2)
-            Text(resetText(target.state?.resetsAt, durationSeconds: target.durationSeconds))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            resetCaption(target.state?.resetsAt, durationSeconds: target.durationSeconds)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(WidgetStyle.smallPad)
@@ -328,10 +322,8 @@ struct PaceGaugesWidgetView: View {
             }
             ringGauge(for: state, lineWidth: lineWidth, labelSize: labelSize)
                 .frame(width: ringSize, height: ringSize)
-            Text(resetText(state?.resetsAt, durationSeconds: durationSeconds))
-                .font(large ? .caption : .caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            resetCaption(state?.resetsAt, durationSeconds: durationSeconds,
+                         font: large ? .caption : .caption2)
         }
         .frame(maxWidth: .infinity)
     }
@@ -356,17 +348,36 @@ struct PaceGaugesWidgetView: View {
         return UsageBand(percentage: state.usedPct).color
     }
 
-    /// Reset caption: relative duration plus the wall-clock anchor —
-    /// "resets in 2h · 9 PM" for 5h, "resets in 4d · Mon 3 PM" for 7d.
-    /// Mirrors `App/Views/PaceChartCard.swift:resetLabel(resets:)` so
-    /// the gauge widget reads the same as the dashboard pace card.
-    private func resetText(_ date: Date?, durationSeconds: TimeInterval) -> String {
+    /// Reset caption, via the shared `pacerResetCaption`.
+    ///
+    /// This used to be a private re-implementation of that helper — same
+    /// intent, one missing feature: the shared one takes `compact:` for
+    /// narrow columns and this copy did not, so the large widget's three-across
+    /// grid truncated every caption to "resets in 2d · Sat…". `ViewThatFits`
+    /// below picks the full form when the column can hold it and the compact
+    /// one when it cannot, which is better than either hard-coding.
+    private func resetText(
+        _ date: Date?, durationSeconds: TimeInterval, compact: Bool = false
+    ) -> String {
         guard let date else { return "no data" }
-        let rel = pacerRelative(date)
-        let clock = durationSeconds <= 6 * 3600
-            ? pacerClockTime(date)
-            : pacerWeekdayClock(date)
-        return "resets \(rel) · \(clock)"
+        return pacerResetCaption(
+            resetsAt: date, durationSeconds: durationSeconds, compact: compact)
+    }
+
+    /// The caption at whichever detail level survives the width on offer.
+    @ViewBuilder
+    private func resetCaption(
+        _ date: Date?, durationSeconds: TimeInterval, font: Font = .caption2
+    ) -> some View {
+        ViewThatFits(in: .horizontal) {
+            ForEach([false, true], id: \.self) { compact in
+                Text(resetText(date, durationSeconds: durationSeconds, compact: compact))
+                    .font(font)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+        }
     }
 }
 

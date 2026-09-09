@@ -860,6 +860,8 @@ enum ScreenshotMode {
         cornerRadius: CGFloat = 14,
         chrome: Bool = false,
         title: String = "",
+        /// What `navigationSubtitle` shows: the scoped account's 5h/7d.
+        subtitle: String = "",
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
@@ -872,6 +874,9 @@ enum ScreenshotMode {
         let host = screenshotEngine.map {
             EngineHost(container: container, preseeded: [.allAccounts: $0])
         }
+        // The same string `navigationSubtitle` shows, from the same helper —
+        // the scoped account's 5h/7d, or the active login on a default scope.
+        let subtitle = chrome ? Self.windowSubtitle(container: container) : ""
         let inner = content()
             .modelContainer(container)
             .environment(\.usageEngine, screenshotEngine)
@@ -883,7 +888,7 @@ enum ScreenshotMode {
         // app-window screenshot.
         let framed: AnyView = chrome
             ? AnyView(VStack(spacing: 0) {
-                MacWindowChrome(title: title) {
+                MacWindowChrome(title: title, subtitle: subtitle) {
                     AccountScopeControl()
                     ToolbarFreshness()
                 }
@@ -1261,6 +1266,15 @@ extension ScreenshotMode {
     /// Names are fictional and obviously so. Rate-limit and usage rows stay
     /// attributed as they were: the scope defaults to "all accounts", so the
     /// numbers on screen are unchanged, and only the account surfaces appear.
+    /// The active account's 5h/7d, formatted by `ContentView` itself.
+    @MainActor
+    private static func windowSubtitle(container: ModelContainer) -> String {
+        let ctx = ModelContext(container)
+        let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
+        return ContentView.windowSubtitle(
+            for: accounts.first { $0.isActive } ?? accounts.first)
+    }
+
     private static func seedAccounts(_ ctx: ModelContext, now: Date) {
         let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
             ("acct-acme-0000-0000-000000000001", "you@acme.example",
@@ -1596,7 +1610,26 @@ private struct CollectionEditorShowcase: View {
     }
 }
 
-/// The synthetic title bar the window scenes sit under.
+/// A stand-in for the title bar, because the app does not own one.
+///
+/// `.navigationTitle`, `.navigationSubtitle` and `.toolbar { }` are
+/// instructions to AppKit, which draws the bar in a real window's frame view.
+/// There is no app-side code to reuse here — only a bar to approximate — and
+/// an approximation drifts: this one centred the title, omitted the subtitle
+/// and drew "All accounts" beside a glyph the real toolbar shows alone.
+///
+/// It was measured, not assumed. A titled `NSWindow` hosting `ContentView`
+/// off-screen *does* get the real thing — `title=Dashboard`,
+/// `subtitle=5h 32% • 7d 62%`, a live `NSToolbar` with four items — and its
+/// frame view captures without ever going on screen. Two things stopped it
+/// replacing this outright: the traffic lights render grey because the window
+/// never becomes key, and making it key means activating the app, which
+/// AGENTS.md forbids; and `.primaryAction` items do not take their trailing
+/// placement in a hand-built window. Tracked as a follow-up.
+///
+/// So: everything the app *does* own is the real thing — the toolbar items are
+/// the live views, and the subtitle comes from `ContentView.windowSubtitle`.
+/// Only what AppKit would draw is approximated here.
 ///
 /// It also carries the **toolbar**, which is the only way those controls reach
 /// a screenshot at all: the scenes render a SwiftUI view into an offscreen
@@ -1610,33 +1643,58 @@ private struct CollectionEditorShowcase: View {
 /// image honest: if `AccountScopeControl` changes, so does the screenshot.
 private struct MacWindowChrome<Trailing: View>: View {
     let title: String
+    let subtitle: String
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 8) {
-                dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
-                dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
-                dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
-                Spacer()
-                trailing
-                    .labelStyle(.titleAndIcon)
-                    .controlSize(.small)
-                    // A `Menu` in a plain HStack greedily takes the width it is
-                    // offered; a real toolbar hands it only what its label
-                    // needs. Without this the account switcher rendered as a
-                    // bordered box spanning the whole title bar.
-                    .fixedSize()
-            }
+        HStack(spacing: 10) {
+            dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
+            dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
+            dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
+
+            // The split-view toggle AppKit puts beside the lights.
+            Image(systemName: "sidebar.leading")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 6)
+
+            // Title and subtitle are LEADING and stacked — a
+            // `NavigationSplitView` detail title is not centred, and the
+            // subtitle under it is where `navigationSubtitle` puts the
+            // active account's 5h/7d. Centring it and dropping the subtitle
+            // made these screenshots visibly not the app.
             if !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.leading, 8)
             }
+
+            Spacer(minLength: 12)
+
+            // `.iconOnly` because that is what a real macOS toolbar does to a
+            // `Label`, and outside one SwiftUI defaults to title-and-icon. The
+            // first version of this let that default stand and drew "All
+            // accounts" beside the glyph — text the actual title bar never
+            // shows. A screenshot has to be the app, not a more legible
+            // version of it.
+            //
+            // `fixedSize` because a `Menu` in a plain HStack takes all the
+            // width it is offered; without it the control spanned the bar.
+            trailing
+                .labelStyle(.iconOnly)
+                .controlSize(.small)
+                .fixedSize()
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)
-        .frame(height: 40)
+        .frame(height: 52)
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)

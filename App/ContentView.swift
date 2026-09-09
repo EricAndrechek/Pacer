@@ -84,8 +84,13 @@ struct ContentView: View {
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
-    private var windowSubtitle: String {
-        guard let account = scopedAccount else { return "" }
+    private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
+
+    /// Shared with the screenshot harness, which draws its own title bar and
+    /// would otherwise carry a second copy of this format — a copy that could
+    /// only ever drift away from what the window actually says.
+    static func windowSubtitle(for account: Account?) -> String {
+        guard let account else { return "" }
         let parts: [String?] = [
             account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
             account.latestSevenDayPct.map { "7d \(Int($0.rounded()))%" }
