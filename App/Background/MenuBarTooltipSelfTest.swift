@@ -139,6 +139,11 @@ enum MenuBarTooltipSelfTest {
 
     /// Mutable state the timer steps share. A class because the timer closure
     /// needs to write back what happened for the caller to report.
+    /// `@MainActor` because every field is touched from the timer block, which
+    /// already asserts main-actor isolation. Nesting inside a `@MainActor` type
+    /// does not confer it, so without this `Plan` is non-Sendable and capturing
+    /// it in the timer's `@Sendable` block warns.
+    @MainActor
     private final class Plan {
         let item: NSStatusItem
         let output: URL
@@ -154,6 +159,10 @@ enum MenuBarTooltipSelfTest {
         /// Where the pointer actually was when the frame was taken.
         var cursorAtCapture: CGPoint = .zero
         var step = 0
+        /// Held here rather than taken as the block's argument: a mutable local
+        /// captured by a `@Sendable` closure is unsafe by construction, and
+        /// this is main-thread-only state like everything else here.
+        var ticker: Timer?
         init(item: NSStatusItem, output: URL) {
             self.item = item
             self.output = output
@@ -181,11 +190,6 @@ enum MenuBarTooltipSelfTest {
         let captureAt = glideTo.addingTimeInterval(tooltipDelay)
         let doneAt = captureAt.addingTimeInterval(0.35)
 
-        // The timer is held here rather than taken as the closure's argument:
-        // passing the `Timer` into a `@MainActor` closure is a Sendable
-        // violation under strict concurrency, and it is main-thread-only state
-        // either way.
-        var ticker: Timer?
         let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
             MainActor.assumeIsolated {
                 let now = Date()
@@ -195,7 +199,7 @@ enum MenuBarTooltipSelfTest {
                         // Nothing to hover — stop rather than flail. The caller
                         // reports it and exits non-zero.
                         plan.step = 4
-                        ticker?.invalidate()
+                        plan.ticker?.invalidate()
                         plan.item.menu?.cancelTracking()
                         return
                     }
@@ -239,7 +243,7 @@ enum MenuBarTooltipSelfTest {
                     plan.captured = capture(to: plan.output, around: plan.rowRect)
                 } else if plan.step == 3, now >= doneAt {
                     plan.step = 4
-                    ticker?.invalidate()
+                    plan.ticker?.invalidate()
                     plan.item.menu?.cancelTracking()
                 }
             }
@@ -247,7 +251,7 @@ enum MenuBarTooltipSelfTest {
         // `.common` covers `.eventTracking`, which is the mode NSMenu runs its
         // tracking loop in. Without it none of the above fires until the menu
         // closes, by which time there is nothing left to photograph.
-        ticker = timer
+        plan.ticker = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 

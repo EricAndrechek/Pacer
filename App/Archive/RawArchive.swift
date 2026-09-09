@@ -233,7 +233,7 @@ final class RawArchive {
                 guard length > 0 else { continue }
                 if duckdb_string_is_inlined(value) {
                     withUnsafeBytes(of: &value.value.inlined.inlined) { raw in
-                        keys.insert(String(decoding: raw.prefix(length), as: UTF8.self))
+                        _ = keys.insert(String(decoding: raw.prefix(length), as: UTF8.self))
                     }
                 } else if let pointer = duckdb_string_t_data(&value) {
                     keys.insert(String(

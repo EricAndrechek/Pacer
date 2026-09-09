@@ -523,7 +523,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: NSWindow.didChangeOcclusionStateNotification,
             object: nil,
             queue: .main
-        ) { [weak self] note in
+        ) { note in
             let window = note.object as? NSWindow
             Task { @MainActor in
                 guard let window else { return }

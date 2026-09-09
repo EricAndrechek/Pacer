@@ -425,7 +425,7 @@ final class AppBackgroundService {
             guard samplesChanged else { return }
             Task { @ScanActor [weak self] in
                 guard let self else { return }
-                await self.syncArchive(archiveURL: archiveURL)
+                self.syncArchive(archiveURL: archiveURL)
             }
         }
     }

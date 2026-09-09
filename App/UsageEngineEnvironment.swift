@@ -15,10 +15,10 @@ private struct UsageEngineKey: EnvironmentKey {
 /// own here; `usageEngine` remains the all-accounts instance for everything
 /// that must not follow the window.
 private struct UsageEngineHostKey: EnvironmentKey {
-    // `nonisolated(unsafe)` because the value is a constant `nil`; the host
-    // itself is `@MainActor`, and every read of this key happens in a view
-    // body, which is too.
-    nonisolated(unsafe) static let defaultValue: EngineHost? = nil
+    // A `let` of an optional class type is already Sendable, so this needs no
+    // `nonisolated(unsafe)`. The host itself is `@MainActor`, and every read of
+    // this key happens in a view body, which is too.
+    static let defaultValue: EngineHost? = nil
 }
 
 extension EnvironmentValues {
