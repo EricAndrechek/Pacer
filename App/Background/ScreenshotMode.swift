@@ -882,7 +882,14 @@ enum ScreenshotMode {
         // buttons above the content, so window scenes read like a real
         // app-window screenshot.
         let framed: AnyView = chrome
-            ? AnyView(VStack(spacing: 0) { MacWindowChrome(title: title); inner })
+            ? AnyView(VStack(spacing: 0) {
+                MacWindowChrome(title: title) {
+                    AccountScopeControl()
+                    ToolbarFreshness()
+                }
+                .modelContainer(container)
+                inner
+            })
             : AnyView(inner)
 
         let decorated: AnyView
@@ -1020,6 +1027,7 @@ extension ScreenshotMode {
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
+        seedAccounts(ctx, now: now)
 
         ctx.insert(ClaudeCodeMeta(
             key: ClaudeCodeMetaKey.lastIncrementalScanAt,
@@ -1241,6 +1249,45 @@ extension ScreenshotMode {
         UsageScope.storedLimitAccountId
     }
 
+    /// Two accounts, because one is the case where the account UI is invisible.
+    ///
+    /// `AccountsCard` and the toolbar's `AccountScopeControl` both render only
+    /// when `accounts.count > 1` — correctly, since a single-account user
+    /// should not be shown a switcher. But the fixture created no `Account`
+    /// rows at all, so every committed screenshot showed the app as if
+    /// multi-account support did not exist. The headline feature was missing
+    /// from its own README.
+    ///
+    /// Names are fictional and obviously so. Rate-limit and usage rows stay
+    /// attributed as they were: the scope defaults to "all accounts", so the
+    /// numbers on screen are unchanged, and only the account surfaces appear.
+    private static func seedAccounts(_ ctx: ModelContext, now: Date) {
+        let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
+            ("acct-acme-0000-0000-000000000001", "you@acme.example",
+             "Acme's Organization", true, 32, 62),
+            ("acct-globex-0000-0000-00000000002", "you@globex.example",
+             "Globex's Organization", false, 47, 30),
+        ]
+        for a in accounts {
+            ctx.insert(Account(
+                id: a.id,
+                organizationId: a.id,
+                displayName: Account.defaultName(forOrg: a.id, subscriptionType: "max"),
+                isActive: a.active,
+                firstSeenAt: now.addingTimeInterval(-90 * 86_400),
+                lastSeenAt: a.active ? now : now.addingTimeInterval(-25 * 60),
+                subscriptionType: "max",
+                emailAddress: a.email,
+                organizationName: a.org,
+                latestFiveHourPct: a.five,
+                latestFiveHourResetsAt: now.addingTimeInterval(2 * 3_600),
+                latestSevenDayPct: a.seven,
+                latestSevenDayResetsAt: now.addingTimeInterval(2 * 86_400),
+                latestPolledAt: a.active ? now.addingTimeInterval(-40)
+                                         : now.addingTimeInterval(-25 * 60)))
+        }
+    }
+
     private static func seedRateLimits(_ ctx: ModelContext, now: Date) {
         // 5-hour: a steady, near-linear climb with a recent uptick, ending
         // ~32%. In real data the 5-hour window is rarely stressed (it
@@ -1315,6 +1362,14 @@ extension ScreenshotMode {
     /// windows in play. (model, target%, active/in-effect, severity.) The
     /// default README seed opts into just one of these (a single "Fable" cap)
     /// so the dashboard pace grid reads uncluttered — see `seed(into:)`.
+    ///
+    /// **These are deliberately unreal and must not reach `docs/screenshots`.**
+    /// Anthropic reports exactly one per-model window today; the extra caps
+    /// exist only to put several windows in play for a layout proof, and they
+    /// go to `docs/mockups` (untracked apart from two issue-125 images). A
+    /// committed screenshot is a claim about what a user gets — one of these
+    /// sets did reach `scoped-firstclass-widget.png` and advertised Haiku,
+    /// Opus and Sonnet caps that do not exist.
     private static let mockupScopedWindows:
         [(model: String, target: Double, active: Bool, severity: String)] = [
             ("Haiku",  93, true,  "warning"),
@@ -1541,8 +1596,21 @@ private struct CollectionEditorShowcase: View {
     }
 }
 
-private struct MacWindowChrome: View {
+/// The synthetic title bar the window scenes sit under.
+///
+/// It also carries the **toolbar**, which is the only way those controls reach
+/// a screenshot at all: the scenes render a SwiftUI view into an offscreen
+/// `NSHostingView`, and a `.toolbar { }` modifier needs a real window's toolbar
+/// to attach to. There isn't one, so every trailing toolbar item — the account
+/// switcher and the freshness pill both — silently rendered nowhere. The
+/// screenshots were not showing a different app; they were showing this app
+/// with its title bar amputated.
+///
+/// Hosting the real views here rather than drawing a mock-up of them keeps the
+/// image honest: if `AccountScopeControl` changes, so does the screenshot.
+private struct MacWindowChrome<Trailing: View>: View {
     let title: String
+    @ViewBuilder var trailing: Trailing
 
     var body: some View {
         ZStack {
@@ -1551,6 +1619,14 @@ private struct MacWindowChrome: View {
                 dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
                 dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
                 Spacer()
+                trailing
+                    .labelStyle(.titleAndIcon)
+                    .controlSize(.small)
+                    // A `Menu` in a plain HStack greedily takes the width it is
+                    // offered; a real toolbar hands it only what its label
+                    // needs. Without this the account switcher rendered as a
+                    // bordered box spanning the whole title bar.
+                    .fixedSize()
             }
             if !title.isEmpty {
                 Text(title)
@@ -1591,7 +1667,9 @@ private struct MenuBarExperience: View {
             .environment(\.colorScheme, .dark)   // light chips on the dark bar
 
             MenuStatusContent()
-                .frame(width: 300)
+                // Deliberately not a width of its own: `MenuStatusContent`
+                // sets `popoverWidth`, and a second number here only ever
+                // drifts from it.
                 .background(Color(nsColor: .windowBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
@@ -1782,9 +1860,14 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
             sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            // Fable only. Anthropic reports exactly one per-model window
+            // today, so caps for Haiku/Opus/Sonnet beside it advertised a
+            // product nobody has. The grid is built for N of these; a
+            // committed screenshot is a claim about what you get.
             scoped: [
-                .init(key: "weekly_scoped|Haiku|", label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
-                .init(key: "weekly_scoped|Opus|",  label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
+                .init(key: fableKey, label: "Fable",
+                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71),
+                      isActive: true),
             ],
             primaryKey: "five_hour", secondaryKey: "seven_day"
         )
@@ -1814,11 +1897,11 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            // See `paceChartScopedLarge`: one real per-model window, not four
+            // invented ones.
             scoped: [
-                .init(key: "weekly_scoped|Haiku|",  label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
-                .init(key: "weekly_scoped|Opus|",   label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(key: "weekly_scoped|Fable|",  label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(key: "weekly_scoped|Sonnet|", label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: fableKey, label: "Fable", usedPct: 49,
+                      resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
             ],
             primaryKey: "five_hour", secondaryKey: "seven_day"
         )

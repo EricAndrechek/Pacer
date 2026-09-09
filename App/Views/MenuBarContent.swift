@@ -679,13 +679,26 @@ struct MenuStatusContent: View {
         }
     }
 
+    /// The popover's fixed width. Named because the screenshot harness used to
+    /// carry its own hard-coded copy (300pt) — close enough to pass unnoticed
+    /// while the real value was 280, and a visible clip once it became 336.
+    static let popoverWidth: CGFloat = 336
+
     var body: some View {
         // Width is fixed because the host (`NSMenuItem.view`) doesn't
-        // re-measure when the SwiftUI body changes size — the menu
-        // tracks the view's frame at attach time. 280pt is wide enough
-        // for "pace 50% · resets in 2 hr." without truncating and
-        // matches typical Apple status menu widths (Wi-Fi ~280pt,
-        // Battery ~260pt).
+        // re-measure when the SwiftUI body changes size — the menu tracks the
+        // view's frame at attach time.
+        //
+        // 280pt was sized for a row of "pace 50% · resets in 2 hr." Then the
+        // rows gained a 54pt label column, because scoped windows need naming
+        // and "5-HOUR" has to sit somewhere. Nothing re-measured, so the two
+        // captions absorbed the loss and both truncated: "pace 6…" cut a
+        // percentage mid-number, and "resets in…" said nothing at all. A menu
+        // whose numbers are ellipses is not a readout.
+        //
+        // 336pt is that 280 plus the label column and its gap, so the captions
+        // get back exactly what they lost. Still inside the range Apple's own
+        // status menus occupy (Wi-Fi ~280, Sound ~300).
         let windows = self.windows
         let scopedIds = windows.filter(\.isScoped).map(\.key)
         // Stable key so `.task(id:)` re-asks the engine when the window SET
@@ -708,7 +721,7 @@ struct MenuStatusContent: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .frame(width: 280, alignment: .leading)
+        .frame(width: Self.popoverWidth, alignment: .leading)
         // Re-ask when the window set changes (scoped windows discovered) so a
         // freshly-appeared row gets its outlook caption without waiting for the
         // next engine recompute.
@@ -819,6 +832,11 @@ struct MenuStatusContent: View {
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(band.color)
+                        // Never the column that gives way: "pace 6…" is a
+                        // number cut in half, which reads as a smaller number
+                        // rather than as missing text.
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
 
                     Spacer(minLength: 4)
 

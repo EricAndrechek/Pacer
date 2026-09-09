@@ -454,7 +454,10 @@ private struct SidebarItem: View {
 /// Previously lived in the sidebar header; moved to the toolbar to
 /// match macOS-native chrome conventions (Linear / Reeder / Things
 /// all surface live state in their toolbars, not their sidebars).
-private struct ToolbarFreshness: View {
+/// Not `private` only so the screenshot harness can host it in its synthetic
+/// title bar — a `.toolbar` item cannot render into an offscreen `NSHostingView`
+/// on its own. See `MacWindowChrome`.
+struct ToolbarFreshness: View {
     // MARK: Why these are fetched on a timer instead of via `@Query`
     //
     // `@Query` re-evaluates whenever the model context changes, and Pacer's
