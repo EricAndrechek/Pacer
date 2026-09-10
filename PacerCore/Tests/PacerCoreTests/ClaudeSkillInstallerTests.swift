@@ -135,6 +135,35 @@ struct ClaudeSkillInstallerTests {
         #expect(files == ["SKILL.md", "pace.sh"])
     }
 
+    /// The import line is a *pointer*, and that is the whole point: the prose
+    /// it names ships inside the app and is replaced on every update, so a
+    /// user's CLAUDE.md never needs re-pasting. Pasting the prose itself is how
+    /// the instructions this replaced went stale.
+    @Test func theImportLinePointsAtTheInstalledFileRatherThanCarryingIt() {
+        let line = ClaudeSkillInstaller.claudeMdImportLine
+        #expect(line == "@~/.claude/skills/pacer/pacing.md")
+        // One line, no prose: anything longer is content that would go stale.
+        #expect(!line.contains("\n"))
+        #expect(line.hasPrefix("@"))
+    }
+
+    /// The importable file has to actually ship, or the line a user pastes
+    /// points at nothing.
+    @Test func theImportedFileIsPartOfTheInstalledSkill() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        try "## Pacing\n".write(
+            to: f.installer.source.appendingPathComponent(ClaudeSkillInstaller.importFileName),
+            atomically: true, encoding: .utf8)
+
+        try f.installer.install()
+
+        #expect(FileManager.default.fileExists(
+            atPath: f.installedFile(ClaudeSkillInstaller.importFileName).path))
+        // And it is tracked, so a Pacer update re-syncs it like everything else
+        // — which is what keeps the pointer honest.
+        #expect(f.installer.readManifest()?.files[ClaudeSkillInstaller.importFileName] != nil)
+    }
+
     /// A PacerCore-only build has no app bundle to read the skill out of, and
     /// that is a build shape rather than a user-facing failure.
     @Test func aBundleWithoutTheSkillIsUnavailable() throws {

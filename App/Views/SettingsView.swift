@@ -2651,6 +2651,7 @@ private struct ClaudeSkillCard: View {
     @State private var status: ClaudeSkillInstaller.Status?
     @State private var failure: String?
     @State private var busy = false
+    @State private var copiedImport = false
 
     private var installer: ClaudeSkillInstaller? { ClaudeSkillInstaller.bundled() }
 
@@ -2685,6 +2686,26 @@ private struct ClaudeSkillCard: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                if isInstalled {
+                    Divider().opacity(0.4)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Add this line to `~/.claude/CLAUDE.md` so Claude paces long runs without being asked:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 8) {
+                            Text(ClaudeSkillInstaller.claudeMdImportLine)
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                            Button(copiedImport ? "Copied" : "Copy") { copyImportLine() }
+                                .controlSize(.small)
+                        }
+                        Text("It points at a file Pacer keeps current, so it never needs re-pasting.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -2772,6 +2793,17 @@ private struct ClaudeSkillCard: View {
             failure = "\(error)"
         }
         refresh()
+    }
+
+    private func copyImportLine() {
+        #if canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ClaudeSkillInstaller.claudeMdImportLine, forType: .string)
+        #endif
+        copiedImport = true
+        // Long enough to register as feedback, short enough that the button
+        // does not read as a permanent state.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copiedImport = false }
     }
 
     private func reveal() {

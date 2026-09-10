@@ -31,6 +31,24 @@ public struct ClaudeSkillInstaller: Sendable {
     /// Where the skill sits inside the app bundle's `Resources`.
     public static let bundledSubpath = "Skills/\(skillName)"
 
+    /// The always-on half of the skill: a few lines a user imports into their
+    /// own `CLAUDE.md` so an agent knows pacing exists *before* it decides
+    /// whether to look for a skill.
+    ///
+    /// A skill loads when its description matches the work at hand, which is
+    /// the right default and the wrong one for exactly this case — the moment
+    /// pacing matters is a long autonomous run, which is when nothing is
+    /// thinking about usage.
+    public static let importFileName = "pacing.md"
+
+    /// The line to paste. A *pointer*, never the content: the file it names
+    /// ships inside the app and is replaced on every update, so what it says
+    /// stays current without anyone re-pasting anything. Pasting the prose
+    /// itself is how the instructions this replaced went stale.
+    public static var claudeMdImportLine: String {
+        "@~/.claude/skills/\(skillName)/\(importFileName)"
+    }
+
     /// Records what was installed, so an update knows whether the files on
     /// disk are still ours. Lives inside the installed directory; hidden so it
     /// does not read as part of the skill.

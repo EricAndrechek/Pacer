@@ -131,7 +131,9 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   a hundred subagents — per-model caps and your other account included — pause
   and checkpoint when one is nearly full, and wait out the reset rather than
   losing the run. One shared read serves the whole fan-out, and the skill
-  updates when Pacer does.
+  updates when Pacer does. One optional line in your `CLAUDE.md` makes it the
+  default for long runs, and because that line is a pointer rather than a copy,
+  it never needs re-pasting.
 - **Export.** Send daily totals, daily-by-model, or per-project numbers to a
   CSV for your own spreadsheets.
 

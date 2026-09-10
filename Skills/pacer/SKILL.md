@@ -272,6 +272,26 @@ that increments on a rollover — segment on that, never on `resetsAt`, which
 drifts by milliseconds between polls. Fitting a line across a reset produces a
 number that means nothing.
 
+## 11. Making this the default without being asked
+
+A skill loads when its description matches the work at hand. That is the right
+default and the wrong one for exactly this case: the moment pacing matters is a
+long autonomous run, which is when nothing is thinking about usage.
+
+So `pacing.md` sits beside this file — a few lines meant to be imported into a
+`CLAUDE.md`, which loads every session:
+
+```
+@~/.claude/skills/pacer/pacing.md
+```
+
+Paste that one line, not the prose. The file it points at ships inside Pacer.app
+and is replaced whenever Pacer updates, so it stays current without anyone
+re-pasting anything — which is the failure the line replaced. Settings →
+Integrations has a copy button.
+
+If a user asks how to make pacing automatic, that line is the answer.
+
 ## Caveats
 
 - **How fresh a percentage can be.** Pacer polls Anthropic no faster than once
@@ -284,6 +304,10 @@ number that means nothing.
   poll — it is the server's number — but `/v1/limits/history?bucket=5m` gives
   you every reading Pacer has, to fit whatever you like.
 
+- **An import loads in every session**, so `pacing.md` is deliberately a few
+  lines. It is also skipped in Cowork sessions on the desktop, which do not
+  load user-scope imports resolving outside the working directory; the skill
+  itself still works there.
 - **Pacer's API is opt-in.** If `report` says the API is unreachable, turn it on
   in Pacer → Settings → Integrations → "Local API & metrics server". Everything
   here degrades to "proceed ungated" while it is off.
