@@ -101,7 +101,7 @@ struct PacerAccountsAPITests {
 
     // MARK: - Prometheus
 
-    @Test func perAccountSeriesUseTheIdAndNeverTheEmailLabel() {
+    @Test func perAccountSeriesUseTheIdAndNeverTheEmailLabel() throws {
         let text = metrics(accounts: [
             PacerMetrics.AccountToday(
                 account: row(id: "org-work", label: "eng@example.com",
@@ -115,7 +115,15 @@ struct PacerAccountsAPITests {
         ])
         #expect(text.contains("pacer_account_cost_usd{account=\"org-work\"} 2.5"))
         #expect(text.contains("pacer_account_tokens{account=\"org-home\",kind=\"output\"} 200"))
-        #expect(text.contains("account=\"org-work\",name=\"Globex\",active=\"true\""))
+        // Checked as individual labels rather than one exact sequence: the
+        // order is incidental to what this is protecting, and pinning it made
+        // adding `plan` look like a regression.
+        let info = text.split(separator: "\n").first { $0.hasPrefix("pacer_account_info{account=\"org-work\"") }
+        let line = try #require(info.map(String.init))
+        #expect(line.contains("name=\"Globex\""))
+        #expect(line.contains("active=\"true\""))
+        // The plan is the denominator a percentage per hour is read against.
+        #expect(line.contains("plan=\"max20x\""))
         // The display label may be an email; a scraped endpoint must not carry one.
         #expect(!text.contains("@example.com"))
     }

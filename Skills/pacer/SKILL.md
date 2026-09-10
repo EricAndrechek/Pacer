@@ -43,7 +43,48 @@ resolves it, because only Pacer knows which login is signed into it. Otherwise
 the active login. `--account all` shows every account, prefixed by id;
 `--account <id>` picks one.
 
-## 2. The gating model (why it scales to hundreds of agents)
+## 2. Who else is spending this budget
+
+**A rate-limit window is account-wide.** Every session signed into an account
+draws on the same percentage — so a burn rate already includes all of them, and
+the question a fan-out turns on is not "how fast is it going" but "how many
+ways is it already split, and what happens if I add ten more".
+
+```
+$ pace.sh accounts
+2 accounts
+
+  427af130   max · active login
+    0 sessions drawing on it now
+    5h 0%  7d 39%  Fable 57%
+
+  74598a77   max
+    4 sessions drawing on it now
+    5h 55%  7d 89%  Fable 100%
+```
+
+```
+$ pace.sh sessions
+active  74598a77  grafana (main)          claude-opus-5     /Users/…/grafana
+active  74598a77  Pacer (feat/pacing)     claude-opus-5     /Users/…/Pacer  ← git@github.com:…
+recent  74598a77  core (main)             claude-fable-5-1  /Users/…/chtypes/core
+```
+
+Three things that changes:
+
+- **The plan is the denominator.** A percentage per hour means something
+  different on `max` than on `pro` or `free`. Before there is any burn history
+  to read — right after a reset, or on a first run — the plan is the only prior
+  you have for how much a wave will cost.
+- **Concurrency is already in the rate, not additive to it.** Four sessions
+  producing 20%/h between them is 20%/h, not 80%. But they are also four claims
+  on the same window, so your own headroom is a share of it.
+- **Branches are read when you ask, never stored.** A branch changes without
+  producing a turn for Pacer to observe, so a recorded one would be wrong more
+  often than right. `sessions` runs `git rev-parse` against each live path at
+  the moment you run it.
+
+## 3. The gating model (why it scales to hundreds of agents)
 
 Pacer only recomputes every **~5 min**, and you must not have 200 subagents
 each curling it. So it is **one poller, many cheap readers**:
@@ -83,7 +124,7 @@ would otherwise report GO forever.
 verdict the other is about to obey. Set `PACE_RUN=<name>` (or `--state`) per
 orchestration.
 
-## 3. Say which model you are
+## 4. Say which model you are
 
 **A per-model cap only gates work that uses that model.** A Fable weekly window
 at 95% has nothing to say to an Opus agent, and pausing one for it is a pause
@@ -126,7 +167,7 @@ PACE_RUN=opus-wave  pace.sh gate --cap 85 --model opus
 PACE_RUN=fable-wave pace.sh gate --cap 85 --model fable
 ```
 
-## 4. Gate on the forecast, not just the level
+## 5. Gate on the forecast, not just the level
 
 `--cap` asks "am I nearly out". `--eta` asks the better question — **"will this
 wave finish before I run out"**:
@@ -141,14 +182,14 @@ about to launch takes an hour. Pacer already forecasts every window with a
 calibrated band; this is the one line that uses it. Set the horizon to roughly
 how long your wave runs.
 
-## 5. Orchestrator protocol
+## 6. Orchestrator protocol
 
 Invoke with a cap (default **85**). For a big fan-out:
 
 1. **Pre-flight:** `pace.sh report` so you and the user see the starting
    headroom.
 2. **Before each wave:** `pace.sh gate --cap 85 --model <yours> --eta <wave length>`.
-   - exit 0 → spawn the wave; give every subagent the clause in §6.
+   - exit 0 → spawn the wave; give every subagent the clause in §7.
    - exit 10 → do **not** spawn; go to step 4.
 3. Keep waves small enough to finish in a few minutes, so a mid-wave trip is
    caught at the next gate.
@@ -156,7 +197,7 @@ Invoke with a cap (default **85**). For a big fan-out:
    - If the work is in worktrees, the default branch stays clean. In each
      active worktree: `git add -A && git commit -m "pace-checkpoint"` (or
      `git stash push -u`).
-   - Write or refresh the **resume manifest** (§7): done / in-flight / pending.
+   - Write or refresh the **resume manifest** (§8): done / in-flight / pending.
    - Tell the user which window tripped, at what %, and its reset time.
 5. **Sleep until reset without burning turns** — launch the waiter in the
    background (`run_in_background: true`):
@@ -185,7 +226,7 @@ Invoke with a cap (default **85**). For a big fan-out:
      (a weekly cap, usually). Do not sleep: leave the manifest, tell the user
      the reset time, and stop. They resume by re-running you after reset.
 
-## 6. The clause to paste into EVERY subagent prompt
+## 7. The clause to paste into EVERY subagent prompt
 
 > **Usage gating:** before you start, and before any expensive step, run
 > `~/.claude/skills/pacer/pace.sh status --model auto`
@@ -205,7 +246,7 @@ return the partial results plus the manifest, and **end the workflow cleanly**
 so it can be resumed with `resumeFromRunId` after the reset. Do not hold a
 workflow open for hours.
 
-## 7. Resume manifest
+## 8. Resume manifest
 
 A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 `~/.claude/pace/resume-<run>.json`. Minimum shape:
@@ -227,7 +268,7 @@ A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
 
-## 8. Parameters and policy
+## 9. Parameters and policy
 
 - `--cap N` (default 85): pause when **any** watched window is at or over N%.
 - `--model NAME|auto` (default: every window binds): only gate on windows that
@@ -257,13 +298,13 @@ it and continue. Keep it current as items complete.
   `CLAUDE_CONFIG_DIR` is read if the session has one, to pick the right
   account.
 
-## 9. External supervisor (no agent involved)
+## 10. External supervisor (no agent involved)
 
 `pace-guard.sh [claude args…]` blocks until there is headroom, then execs
 `claude`. `PACE_THRESHOLD` (default 85) sets the cap. Good for wrapping an
 unattended run from your own terminal.
 
-## 10. The shape of a window over time
+## 11. The shape of a window over time
 
 `GET /v1/limits/history?hours=24&bucket=15m` gives every window's utilization
 as a series, so a consumer can see whether the last hour was a steady climb or
@@ -272,7 +313,7 @@ that increments on a rollover — segment on that, never on `resetsAt`, which
 drifts by milliseconds between polls. Fitting a line across a reset produces a
 number that means nothing.
 
-## 11. Making this the default without being asked
+## 12. Making this the default without being asked
 
 A skill loads when its description matches the work at hand. That is the right
 default and the wrong one for exactly this case: the moment pacing matters is a

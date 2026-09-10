@@ -329,6 +329,22 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/sessions":
+            guard authorized(headers) else { return unauthorized(client) }
+            let within = query["within"].flatMap { Double($0) } ?? LiveSessionActivity.recentThreshold
+            let sessionAccount: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: sessionAccount = nil
+            case .scoped(let key): sessionAccount = key
+            }
+            guard let sessions = try? PacerSessionLookupBuilder.list(
+                    withinSeconds: within, account: sessionAccount),
+                  let json = try? sessions.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/session":
             guard authorized(headers) else { return unauthorized(client) }
             guard let id = query["id"], !id.isEmpty else {
@@ -627,7 +643,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/session", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/session", "/v1/sessions", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)

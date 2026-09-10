@@ -82,12 +82,22 @@ public struct PacerAccountList: Codable, Sendable {
         /// login is in it. Empty for the default login and for any account not
         /// currently pinned anywhere.
         public let configRoots: [String]
+        /// Sessions that produced a turn on this account in the last 5 minutes
+        /// and the last hour.
+        ///
+        /// A rate-limit window is account-wide, so these are the other claims
+        /// on the same percentage. A burn rate already includes all of them —
+        /// this says how many ways it is being split, which is what a decision
+        /// to fan out further actually turns on.
+        public let activeSessions: Int
+        public let recentSessions: Int
 
         public init(id: String, label: String, displayName: String,
                     organizationName: String?, subscriptionType: String?,
                     isActive: Bool, unattributed: Bool,
                     firstSeenAt: Date?, lastSeenAt: Date?,
-                    usage: Usage?, limits: Limits?, configRoots: [String] = []) {
+                    usage: Usage?, limits: Limits?, configRoots: [String] = [],
+                    activeSessions: Int = 0, recentSessions: Int = 0) {
             self.id = id
             self.label = label
             self.displayName = displayName
@@ -100,6 +110,8 @@ public struct PacerAccountList: Codable, Sendable {
             self.usage = usage
             self.limits = limits
             self.configRoots = configRoots
+            self.activeSessions = activeSessions
+            self.recentSessions = recentSessions
         }
     }
 
@@ -224,11 +236,30 @@ public enum PacerAccountsBuilder {
     }
 
     public nonisolated static func list(now: Date = Date()) throws -> PacerAccountList {
-        let context = ModelContext(try PacerStore.sharedModelContainer())
+        try list(container: PacerStore.sharedModelContainer(), now: now)
+    }
+
+    nonisolated static func list(container: ModelContainer,
+                                 now: Date) throws -> PacerAccountList {
+        let context = ModelContext(container)
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let rollups = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>())) ?? []
         let pinnedRoots = AccountParallelism.trail(context: context).openPinnedRoots
         let rootsByAccount = Dictionary(grouping: pinnedRoots.keys) { pinnedRoots[$0] ?? "" }
+
+        // How many sessions are drawing on each account right now. One bounded
+        // fetch for every account rather than one per account.
+        let sessionCutoff = now.addingTimeInterval(-LiveSessionActivity.recentThreshold)
+        let liveSessions = (try? context.fetch(FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate { $0.lastSeenAt >= sessionCutoff }))) ?? []
+        var active: [String: Int] = [:]
+        var recent: [String: Int] = [:]
+        for session in liveSessions {
+            recent[session.accountId, default: 0] += 1
+            if LiveSessionActivity.from(lastSeen: session.lastSeenAt, now: now) == .active {
+                active[session.accountId, default: 0] += 1
+            }
+        }
 
         var usage: [String: PacerAccountList.Usage] = [:]
         var acc: [String: Accumulator] = [:]
@@ -260,7 +291,9 @@ public enum PacerAccountsBuilder {
                         sevenDayResetsAt: account.latestSevenDayResetsAt,
                         overageUSD: account.latestExtraUsageCents.map { Double($0) / 100 },
                         polledAt: account.latestPolledAt),
-                    configRoots: (rootsByAccount[account.id] ?? []).sorted())
+                    configRoots: (rootsByAccount[account.id] ?? []).sorted(),
+                    activeSessions: active[account.id] ?? 0,
+                    recentSessions: recent[account.id] ?? 0)
             }
 
         // Only when there is something in it: an install that has never seen

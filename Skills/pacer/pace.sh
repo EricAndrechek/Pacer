@@ -13,6 +13,8 @@
 #     then exits so the launcher is re-invoked to resume.
 #
 # Subcommands:
+#   accounts               every account: plan, live sessions, windows (HTTP)
+#   sessions               where the live sessions are, with branches (HTTP)
 #   report                 human table of every window (HTTP)
 #   json                   machine JSON of the same (HTTP)
 #   gate  --cap N          HTTP read + write state file; 0=go 10=paused
@@ -459,6 +461,109 @@ cmd_report() {
   done
 }
 
+# What am I working with: how many accounts, on what plan, with how many
+# sessions already drawing on each, and where each window stands.
+#
+# Everything here comes out of `/metrics`, which already carries the account
+# directory (`pacer_account_info`) and the session counts — so this is the same
+# single request the gate makes, not a second source of truth.
+cmd_accounts() {
+  local body
+  body=$(curl -s -m 5 ${AUTH[@]+"${AUTH[@]}"} "$API") || { api_off_note; exit "$(off_exit_code)"; }
+  [ -n "$body" ] || { api_off_note; exit "$(off_exit_code)"; }
+  printf '%s\n' "$body" | awk -v SEP="$SEP" '
+    function tagval(line, key,   s, p, q) {
+      p = index(line, key "=\"")
+      if (p == 0) return ""
+      s = substr(line, p + length(key) + 2)
+      q = index(s, "\"")
+      return q ? substr(s, 1, q - 1) : ""
+    }
+    function labelfor(id,   n, parts) {
+      if (id == "five_hour") return "5h"
+      if (id == "seven_day") return "7d"
+      n = split(id, parts, "|")
+      if (n >= 2 && parts[2] != "") return parts[2]
+      return parts[1]
+    }
+    /^pacer_account_info\{/ {
+      a = tagval($0, "account")
+      if (!(a in seen)) { seen[a] = 1; order[++n] = a }
+      name[a] = tagval($0, "name"); plan[a] = tagval($0, "plan")
+      act[a] = tagval($0, "active"); next
+    }
+    /^pacer_account_active_sessions\{/ { live[tagval($0, "account")] = $NF; next }
+    /^pacer_rate_limit_used_ratio\{/ {
+      a = tagval($0, "account"); w = tagval($0, "window")
+      if (!(a in seen)) { seen[a] = 1; order[++n] = a }
+      wins[a] = wins[a] (wins[a] == "" ? "" : "  ") sprintf("%s %d%%", labelfor(w), $NF * 100 + 0.5)
+      next
+    }
+    END {
+      if (n == 0) { print "pace: Pacer reports no accounts yet."; exit }
+      printf "%d account%s\n", n, (n == 1 ? "" : "s")
+      for (i = 1; i <= n; i++) {
+        a = order[i]
+        printf "\n  %-10s %s%s\n", substr(a, 1, 8),
+               (plan[a] == "" ? "plan unknown" : plan[a]),
+               (act[a] == "true" ? " · active login" : "")
+        printf "    %s session%s drawing on it now\n",
+               (a in live ? live[a] : "0"), ((a in live && live[a] + 0 == 1) ? "" : "s")
+        if (wins[a] != "") printf "    %s\n", wins[a]
+      }
+      print "\nA window is account-wide: every session above draws on the same percentage."
+    }'
+}
+
+# Where the other sessions are. Paths come from Pacer; the branch is read here,
+# at the moment you ask, because a branch changes without producing a turn for
+# Pacer to notice and a stored one would be wrong more often than right.
+cmd_sessions() {
+  local body
+  body=$(curl -s -m 5 ${AUTH[@]+"${AUTH[@]}"} \
+         --get ${SCOPE[@]+"${SCOPE[@]}"} "${API_BASE%/}/v1/sessions") \
+    || { api_off_note; exit "$(off_exit_code)"; }
+  case "$body" in *'"sessions"'*) ;; *) api_off_note; exit "$(off_exit_code)";; esac
+
+  local rows
+  rows=$(printf '%s\n' "$body" | awk -v SEP="$SEP" '
+    function val(line,   p, rest, q) {
+      p = index(line, "\" : \"")
+      if (p == 0) return ""
+      rest = substr(line, p + 5)
+      q = index(rest, "\"")
+      return q ? substr(rest, 1, q - 1) : ""
+    }
+    /^ *\{/ { acct = ""; model = ""; path = ""; proj = ""; repo = ""; when = ""; state = ""; next }
+    /"accountId" *:/  { acct  = val($0); next }
+    /"model" *:/      { model = val($0); next }
+    /"projectPath" *:/{ path  = val($0); next }
+    /"project" *:/    { proj  = val($0); next }
+    /"repository" *:/ { repo  = val($0); next }
+    /"lastActiveAt" *:/ { when = val($0); next }
+    /"activity" *:/   { state = val($0); next }
+    /^ *\}/ {
+      if (proj != "" || path != "")
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", state, SEP, substr(acct, 1, 8), SEP,
+               proj, SEP, (model == "" ? "?" : model), SEP, path, SEP, repo
+    }')
+  [ -n "$rows" ] || { echo "No sessions in the last hour."; return 0; }
+
+  printf '%s\n' "$rows" | while IFS="$SEP" read -r state acct proj model path repo; do
+    local branch=""
+    if [ -n "$path" ] && [ -d "$path" ]; then
+      branch=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+      [ -n "$branch" ] && branch=" ($branch)"
+    fi
+    local where="$proj$branch"
+    # Truncate rather than let a long branch name shove every later column
+    # out of line — the full path is on the same row anyway.
+    [ "${#where}" -gt 34 ] && where="${where:0:33}…"
+    printf '%-7s %-9s %-34s %-18s %s%s\n' "$state" "$acct" "$where" "$model" "$path" \
+      "$([ -n "$repo" ] && printf '  ← %s' "$repo")"
+  done
+}
+
 cmd_json() {
   fetch_rows || {
     printf '{"ok": false, "reason": "%s"}\n' "${FETCH_REASON:-off}"
@@ -629,10 +734,12 @@ elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
 fi
 
 case "$SUB" in
+  accounts) cmd_accounts;;
+  sessions) cmd_sessions;;
   report) cmd_report;;
   json)   cmd_json;;
   gate)   cmd_gate;;
   status) cmd_status;;
   wait)   cmd_wait;;
-  *) die "unknown subcommand '$SUB' (report|json|gate|status|wait)";;
+  *) die "unknown subcommand '$SUB' (report|json|accounts|sessions|gate|status|wait)";;
 esac

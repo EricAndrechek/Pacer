@@ -325,6 +325,15 @@ Two consequences of that being *everything*:
   projections in it. Rate limited to once a minute per account, and the same
   idle grace reclaims it once the consumer stops polling.
 
+**How many accounts, on what plan, with how many sessions.** `/v1/accounts`
+carries `subscriptionType` and, per account, `activeSessions` / `recentSessions`
+— because a rate-limit window is account-wide and a burn rate therefore already
+includes every session drawing on it. `/v1/sessions` lists those sessions with
+their project, path, model and git remote. It deliberately does not carry a
+branch: a branch changes without producing a turn for Pacer to observe, so a
+stored one would be wrong more often than right, and a local caller can read it
+from the path at the moment it asks.
+
 **A session can ask Pacer about itself.** `GET /v1/session?id=<uuid>` reports
 the model a session is running and the account its work was attributed to,
 keyed by the id Claude Code exports as `CLAUDE_CODE_SESSION_ID` — which is the

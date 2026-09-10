@@ -225,10 +225,20 @@ public struct PacerMetrics: Sendable {
             }
             for entry in todayAccounts {
                 m.append(PacerMetric("pacer_account_info", 1,
-                                     help: "Account identity; value is always 1. `active` marks the login whose rate limits pacer_rate_limit_* describe.",
+                                     help: "Account identity; value is always 1. `active` marks the login whose rate limits pacer_rate_limit_* describe; `plan` is the subscription Anthropic reports for it.",
                                      labels: [("account", entry.account.id),
                                               ("name", entry.account.metricsName),
+                                              ("plan", entry.account.subscriptionType ?? "unknown"),
                                               ("active", entry.account.isActive ? "true" : "false")]))
+            }
+            // How many ways each account's window is being split. The rate
+            // limit is account-wide, so a burn rate already includes every one
+            // of these — this is what says whether adding more will multiply it.
+            let sessionHelp = "Sessions that produced a turn on this account in the last 5 minutes."
+            for entry in todayAccounts {
+                m.append(PacerMetric("pacer_account_active_sessions",
+                                     Double(entry.account.activeSessions),
+                                     help: sessionHelp, labels: [("account", entry.account.id)]))
             }
         }
 

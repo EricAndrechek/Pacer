@@ -18,6 +18,11 @@ proceed ungated.**
   file-reads in every subagent, checkpoint to a resume manifest on a trip, and
   a backgrounded waiter whose exit wakes you. A rate limit should cost a
   resumable pause, not the run.
+- **A window is account-wide.** `pace.sh accounts` shows how many accounts
+  there are, each one's plan, and how many sessions are already drawing on it;
+  `pace.sh sessions` shows where they are. Concurrency is already inside a burn
+  rate rather than added to it, but every live session is another claim on the
+  same percentage.
 - **Pass `--model auto`** so a per-model cap only gates work that actually uses
   that model, and so the right account is read when several are signed in.
 
