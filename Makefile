@@ -99,7 +99,8 @@ screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. He
 	@mkdir -p "$(REPO_ROOT)/docs/screenshots"
 	@bin="$(REPO_ROOT)/Build/Products/Debug/Pacer.app/Contents/MacOS/Pacer"; \
 	if [ ! -x "$$bin" ]; then echo "ERROR: build missing at $$bin (did 'make verify' succeed?)"; exit 1; fi; \
-	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin"; \
+	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin" \
+	  || { echo "ERROR: screenshot run failed (exit $$?) — see the lines above"; exit 1; }; \
 	echo "Wrote PNGs to $(REPO_ROOT)/docs/screenshots/"
 
 app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).

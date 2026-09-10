@@ -359,7 +359,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     await LiveRenderMode.run(container: container)
                 } else {
                     ScreenshotMode.seed(into: container)
+                    // Gate the render on the fixture satisfying what the app
+                    // assumes. A broken fixture does not produce a broken
+                    // image — it produces a plausible one, which is worse,
+                    // because it gets committed. Exit non-zero so
+                    // `make screenshots` stops instead.
+                    guard ScreenshotMode.validateFixture(container) else { exit(3) }
                     await ScreenshotMode.captureAll(container: container)
+                    // Again afterwards: scenes that build their own series
+                    // report through `ScreenshotMode.note` while rendering, and
+                    // those problems only exist once the render has run.
+                    guard ScreenshotMode.validateFixture(container) else { exit(3) }
                 }
                 exit(0)
             }

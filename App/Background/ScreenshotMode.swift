@@ -233,6 +233,86 @@ enum ScreenshotMode {
         log("screenshots complete")
     }
 
+    /// Fail the render when the fixture violates something the app relies on.
+    ///
+    /// Every drift in this harness has been the same shape: it re-implements
+    /// something the app already does — a width, a caption, a query, a scope
+    /// resolution — and the copy is the thing that rots. The copies get fixed
+    /// one at a time; this catches the *consequences* generically, so the next
+    /// one fails loudly instead of rendering a plausible-looking lie.
+    ///
+    /// This covers what is in the *store*. It does not, on its own, cover what
+    /// the harness then does with it: the share-card drift lived in a fetch of
+    /// its own, and the rows it mixed were individually fine. Verified by
+    /// re-breaking that bug — this check passed. `note(_:)` is the other half,
+    /// for series the harness assembles itself.
+    ///
+    /// Cheap enough to run every time — a few thousand rows, once per render.
+    /// Problems found while rendering, not while seeding — anything the
+    /// harness builds for itself can report here, and the run fails at the end.
+    nonisolated(unsafe) private(set) static var renderProblems: [String] = []
+
+    static func note(_ problem: String) {
+        renderProblems.append(problem)
+        log("⚠️ fixture: \(problem)")
+    }
+
+    /// Utilisation only climbs inside a cycle, so a series that falls is two
+    /// things spliced together — two accounts, or two cycles. The check the
+    /// share card needed and did not have.
+    static func checkMonotonic(_ points: [(Date, Double)], _ name: String) {
+        let ordered = points.sorted { $0.0 < $1.0 }
+        guard let drop = zip(ordered, ordered.dropFirst()).first(where: { $1.1 < $0.1 - 0.001 })
+        else { return }
+        note("\(name) falls from \(drop.0.1)% to \(drop.1.1)% — "
+             + "a cycle's utilisation only climbs, so this is two series spliced together")
+    }
+
+    @discardableResult
+    static func validateFixture(_ container: ModelContainer) -> Bool {
+        let ctx = ModelContext(container)
+        var problems: [String] = []
+
+        let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
+        let active = accounts.filter(\.isActive)
+        if accounts.count > 1, active.count != 1 {
+            problems.append("expected exactly one active account, found \(active.count)")
+        }
+
+        let rate = (try? ctx.fetch(FetchDescriptor<RateLimitSample>())) ?? []
+        // Matches `make verify-data`'s rule for the real store: a row nobody
+        // owns is invisible to every scoped read.
+        let orphans = rate.filter { $0.accountId == nil }.count
+        if !accounts.isEmpty, orphans > 0 {
+            problems.append("\(orphans) rate-limit row(s) carry no account")
+        }
+        // The active account must actually have history, or every scoped read
+        // — the engine's included — comes back empty and the scene renders
+        // "collecting…" with no forecast.
+        if let id = active.first?.id, !rate.contains(where: { $0.accountId == id }) {
+            problems.append("the active account has no rate-limit history")
+        }
+
+        // Utilisation only climbs inside a cycle. A series that goes *down* is
+        // two things spliced together — two accounts, or two cycles.
+        var byKey: [String: [(Date, Double)]] = [:]
+        for r in rate {
+            byKey["\(r.accountId ?? "-")|\(r.window)|\(r.resetsAt?.timeIntervalSince1970 ?? 0)",
+                  default: []].append((r.sampledAt, r.usedPercentage))
+        }
+        for (key, points) in byKey {
+            let ordered = points.sorted { $0.0 < $1.0 }
+            if let drop = zip(ordered, ordered.dropFirst()).first(where: { $1.1 < $0.1 - 0.001 }) {
+                problems.append("\(key) falls from \(drop.0.1)% to \(drop.1.1)% — "
+                                + "a cycle's utilisation only climbs")
+                break
+            }
+        }
+
+        for problem in problems { log("⚠️ fixture: \(problem)") }
+        return problems.isEmpty && renderProblems.isEmpty
+    }
+
     /// Render the branded 7-day pace share card the same way the in-app
     /// share action does (`App/Share`), from the seeded rate-limit trail,
     /// in light + dark. Documents the share feature and stays in sync via
@@ -269,6 +349,7 @@ enum ScreenshotMode {
         if points.last?.time != tailTime {
             points.append(.init(time: tailTime, value: latest.usedPercentage))
         }
+        checkMonotonic(points.map { ($0.time, $0.value) }, "share card 7-day series")
         let data = PaceChartView.Data(
             cycleStart: cycleStart, resetsAt: resets,
             durationSeconds: duration, points: points, usedPct: latest.usedPercentage
