@@ -196,23 +196,33 @@ struct MenuBarCard: View {
 
     /// Recent samples so the driver picker can offer the live window set —
     /// 5h / 7d plus every scoped per-model window currently reported.
-    @Query(MenuBarCard.recentRateDescriptor) private var rateSamples: [RateLimitSample]
-    @Query(MenuBarWindowSource.recentScopedDescriptor) private var scopedSamples: [UsageLimitSample]
-
-    private static let recentRateDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
+    /// The **active** login's windows, not the dashboard's scope. This picker
+    /// configures what the menu bar draws; which windows exist is a property
+    /// of the login you are signed in as, and a settings screen that reshuffled
+    /// itself because a chart elsewhere was filtered would be a surprise.
+    ///
+    /// Loaded once on appear rather than through `@Query`, for the reason
+    /// `MenuBarWindowSource.load` documents: an account-predicated `@Query`
+    /// re-fetches on every store change, and Pacer's store changes constantly.
+    @State private var rateSamples: [LimitSamplePoint] = []
+    @State private var scopedSamples: [ScopedWindowRow] = []
+    @Environment(\.modelContext) private var modelContext
 
     /// The live window set the picker chooses from (ordered like the dashboard).
+    @Query private var menuBarAccounts: [Account]
+
     private var windows: [MenuBarWindowItem] {
         MenuBarWindowSource.items(
             fiveHour: rateSamples.first { $0.window == RateLimitWindowName.fiveHour },
             sevenDay: rateSamples.first { $0.window == RateLimitWindowName.sevenDay },
             scoped: scopedSamples)
+    }
+
+    private func loadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            modelContext, account: UsageScope.storedActiveAccountId)
+        rateSamples = loaded.fixed
+        scopedSamples = loaded.scoped
     }
 
     /// Local mutable mirror of the persisted chip order (fixed + scoped). We
@@ -277,9 +287,29 @@ struct MenuBarCard: View {
         }
     }
 
+    /// A chip per account per fixed window, minus what is already enabled.
+    ///
+    /// The menu bar is the tightest surface in the app, and with several
+    /// accounts there is no honest combined number — two 5-hour windows are two
+    /// caps on two clocks, not one figure. So rather than Pacer guessing which
+    /// account belongs up there, this lets the user say, one window at a time.
+    private var addableAccountChips: [PacerSettings.MenuBarChipItem] {
+        guard menuBarAccounts.count > 1 else { return [] }
+        let enabled = Set(enabledOrder)
+        return menuBarAccounts
+            .sorted(by: Account.listOrder)
+            .flatMap { account in
+                [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay].map {
+                    PacerSettings.MenuBarChipItem.account(accountId: account.id, window: $0)
+                }
+            }
+            .filter { !enabled.contains($0) }
+    }
+
     /// Whether the "Add" section has anything to show.
     private var hasAddableChips: Bool {
         !addableFixedChips.isEmpty || !addableScopedWindows.isEmpty
+            || !addableAccountChips.isEmpty
     }
 
     private var iconIsEnabled: Bool {
@@ -298,6 +328,15 @@ struct MenuBarCard: View {
         case .fixed(let chip):
             return ChipRowInfo(symbol: chip.symbolName, title: chip.label,
                                subtitle: chip.blurb, isDormant: false)
+        case .account(let accountId, let key):
+            let name = menuBarAccounts.first { $0.id == accountId }?.shortLabel ?? "Account"
+            let windowName = key == RateLimitWindowName.fiveHour ? "5-hour"
+                : key == RateLimitWindowName.sevenDay ? "7-day"
+                : PacerSettings.MenuBarChipItem.scopedDisplayName(fromIdentity: key)
+            return ChipRowInfo(
+                symbol: "person.2", title: "\(name) · \(windowName) %",
+                subtitle: "Always this account, whichever one is signed in",
+                isDormant: false)
         case .scoped(let identity):
             if let window = windows.first(where: { $0.key == identity }) {
                 let pct = window.usedPercentage.map { " · \(Int($0.rounded()))% used" } ?? ""
@@ -376,7 +415,10 @@ struct MenuBarCard: View {
                 }
             }
         })
-        .onAppear { reload() }
+        .onAppear { reload(); loadWindows() }
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+            loadWindows()
+        }
         // Keep `enabledOrder` in sync if another surface (CLI, another
         // Settings window) writes to the store while we're open.
         .onReceive(NotificationCenter.default.publisher(
@@ -436,6 +478,12 @@ struct MenuBarCard: View {
             }
             ForEach(addableScopedWindows) { window in
                 let item = PacerSettings.MenuBarChipItem.scoped(identity: window.key)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
+            }
+            // Account-pinned chips, offered only when there is more than one
+            // account — with a single login they would say the same thing as
+            // the plain 5h/7d chips, at twice the width.
+            ForEach(addableAccountChips, id: \.id) { item in
                 AddChipRow(info: rowInfo(for: item)) { add(item) }
             }
         }
@@ -798,22 +846,28 @@ struct RateLimitAlertsCard: View {
     @AppStorage(PacerSettings.Key.notificationsEnabled, store: PacerSettings.store)
     private var enabled: Bool = false
 
+    /// Two rows on a switcher machine — cheap, and it decides whether the
+    /// per-account note below is worth saying at all.
+    @Query private var alertAccounts: [Account]
+    private var accountCount: Int { alertAccounts.count }
+
     /// Latest-poll scoped `limits[]` rows (active account) so the card can
     /// auto-list every per-model window alongside the fixed 5h/7d ones. Bounded
     /// so the query never scans the full append-only history.
-    @Query(RateLimitAlertsCard.scopedDescriptor) private var scopedSamples: [UsageLimitSample]
+    @Query private var scopedSamples: [UsageLimitSample]
     /// All alert rules — filtered to this card's `rateLimitPct` scoped rules,
     /// which back the per-window threshold lists and let a window that's gone
     /// missing surface as dormant (rules kept, not deleted).
     @Query private var alertRules: [AlertRule]
 
-    private static let scopedDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 200
-        return d
-    }()
+    /// The **active** login's scoped windows. Alerts evaluate against the
+    /// active account and never against the window's scope — an alarm a
+    /// display filter could silence is a footgun — so the card that configures
+    /// them lists the same account's windows the evaluator will see.
+    init() {
+        _scopedSamples = Query(
+            LimitScope.usageLimits(account: UsageScope.storedActiveAccountId, limit: 200))
+    }
 
     /// The per-model windows present in the latest poll, active-first then
     /// hottest (the dashboard's `latestBatch` order), excluding the account-wide
@@ -884,6 +938,18 @@ struct RateLimitAlertsCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Pacer fires a banner each time usage crosses a threshold upward (e.g. 50%, 75%, 90% in one 5-hour cycle). Each banner fires at most once per cycle. The first banner triggers the system permission prompt.")
                 Text("Per-model windows (e.g. a weekly Fable cap) appear automatically when your account reports them, and start with no alert. A window that stops being reported keeps its alerts but pauses until it returns.")
+                // Only with more than one account: on a single-account machine
+                // this is a distinction without a difference, and the card is
+                // already long.
+                //
+                // It earns the line because the behaviour is otherwise
+                // invisible. These thresholds are watched on *every* account,
+                // including the one you are not signed into — which is the
+                // whole point, since that account can still be filling up — and
+                // there is nothing on screen that would tell you.
+                if accountCount > 1 {
+                    Text("These thresholds apply to every account, including the one you're not signed into. Banners say which account they're about.")
+                }
                 HStack(spacing: 8) {
                     Text("Not seeing banners?")
                     Button("Open System Settings → Notifications") {
@@ -1208,6 +1274,20 @@ private struct CustomRulesCard: View {
     @State private var draftMetric: String = AlertRuleMetric.weeklyCost
     @State private var draftName: String = ""
     @State private var draftThreshold: Double = 100
+    /// Which account a new rule watches. `nil` = every account, which stays the
+    /// default: a spend cap should not narrow itself the day a second login
+    /// appears.
+    @State private var draftAccount: String?
+    /// Shown only when there is more than one — a picker with a single option
+    /// is a question with one answer.
+    @Query private var accounts: [Account]
+
+    private var isMultiAccount: Bool { accounts.count > 1 }
+
+    private func accountName(_ id: String?) -> String? {
+        guard let id, isMultiAccount else { return nil }
+        return accounts.first { $0.id == id }?.shortLabel
+    }
 
     var body: some View {
         PacerCard("Custom alerts", content: {
@@ -1216,7 +1296,7 @@ private struct CustomRulesCard: View {
                 // the auto-listed Rate-limit alerts card above — exclude them
                 // here so they don't read as broken custom rules.
                 ForEach(rules.filter { $0.metric != AlertRuleMetric.rateLimitPct }, id: \.id) { rule in
-                    RuleRow(rule: rule) {
+                    RuleRow(rule: rule, accountName: accountName(rule.accountId)) {
                         context.delete(rule)
                         try? context.save()
                     }
@@ -1242,6 +1322,16 @@ private struct CustomRulesCard: View {
             }
             .labelsHidden()
             .frame(width: 180)
+            if isMultiAccount {
+                Picker("", selection: $draftAccount) {
+                    Text("All accounts").tag(String?.none)
+                    ForEach(accounts.sorted(by: Account.listOrder), id: \.id) { account in
+                        Text(account.shortLabel).tag(String?.some(account.id))
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 150)
+            }
             thresholdField
             Spacer()
             Button("Add") {
@@ -1250,7 +1340,8 @@ private struct CustomRulesCard: View {
                 context.insert(AlertRule(
                     name: trimmed,
                     metric: draftMetric,
-                    thresholdValue: draftThreshold
+                    thresholdValue: draftThreshold,
+                    accountId: draftAccount
                 ))
                 try? context.save()
                 draftName = ""
@@ -1281,6 +1372,9 @@ private struct CustomRulesCard: View {
 
     private struct RuleRow: View {
         @Bindable var rule: AlertRule
+        /// Nil on a single-account machine, or for a rule that watches every
+        /// account — in both cases there is nothing worth saying.
+        let accountName: String?
         let onRemove: () -> Void
 
         var body: some View {
@@ -1290,7 +1384,7 @@ private struct CustomRulesCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rule.name)
                         .font(.system(size: 13, weight: .medium))
-                    Text("\(AlertRuleMetric.label(for: rule.metric)) ≥ \(formatThreshold)")
+                    Text(subtitle)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -1305,6 +1399,12 @@ private struct CustomRulesCard: View {
                 .buttonStyle(.borderless)
                 .help("Remove rule")
             }
+        }
+
+        private var subtitle: String {
+            let base = "\(AlertRuleMetric.label(for: rule.metric)) ≥ \(formatThreshold)"
+            guard let accountName else { return base }
+            return "\(base) · \(accountName)"
         }
 
         private var formatThreshold: String {
@@ -1866,15 +1966,23 @@ private struct TokensCard: View {
     /// token list exactly as before.
     private var accountsSwitcher: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("ACCOUNTS")
-                .font(.system(size: 9, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.tertiary)
+            HStack(spacing: 6) {
+                Text("ACCOUNTS")
+                    .font(.system(size: 9, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.tertiary)
+                Text("double-click a name to rename")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.quaternary)
+            }
             ForEach(pool.accounts) { account in
                 AccountSwitchRow(
                     account: account,
                     switching: switchingId == account.id,
-                    onSwitch: { switchTo(account.id) }
+                    onSwitch: { switchTo(account.id) },
+                    onRename: { name in
+                        Task { await TokenPoolStatus.shared.renameAccount(id: account.id, to: name) }
+                    }
                 )
             }
         }
@@ -1995,6 +2103,7 @@ private struct TokensCard: View {
         case .desktop:  return "Claude Desktop"
         case .override: return "manually-added"
         case .held:     return "saved"
+        case .parked:   return "switcher (signed out)"
         }
     }
 
@@ -2026,29 +2135,19 @@ private struct AccountSwitchRow: View {
     let account: AccountStatusSummary
     let switching: Bool
     let onSwitch: () -> Void
+    /// Renaming lives here rather than on the dashboard card: this is the
+    /// screen you open to configure an account, and the card is a readout.
+    let onRename: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(account.displayName)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    if let plan = account.subscriptionType, !plan.isEmpty {
-                        Text(plan)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Text(subtitle)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            usageReadout
-
+        PacerAccountRow(model: .init(
+            name: account.displayName,
+            plan: account.subscriptionType,
+            subtitle: subtitle,
+            fiveHourPercent: account.fiveHourPct,
+            sevenDayPercent: account.sevenDayPct,
+            isActive: account.isActive
+        ), onRename: PacerRenameAction(onRename)) {
             if account.isActive {
                 Text("Active")
                     .font(.system(size: 10, weight: .medium))
@@ -2064,16 +2163,6 @@ private struct AccountSwitchRow: View {
                     .frame(width: 60)
             }
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(account.isActive ? Color.accentColor.opacity(0.12) : Color.clear)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(account.isActive ? Color.accentColor.opacity(0.35) : Color.clear, lineWidth: 1)
-                )
-        )
     }
 
     private var subtitle: String {
@@ -2081,30 +2170,6 @@ private struct AccountSwitchRow: View {
         if let org = account.organizationId, !org.isEmpty { parts.append("org …\(String(org.suffix(4)))") }
         parts.append("\(account.laneCount) token\(account.laneCount == 1 ? "" : "s")")
         return parts.joined(separator: " · ")
-    }
-
-    private var usageReadout: some View {
-        HStack(spacing: 10) {
-            windowReadout("5h", account.fiveHourPct)
-            windowReadout("7d", account.sevenDayPct)
-        }
-    }
-
-    private func windowReadout(_ label: String, _ pct: Double?) -> some View {
-        HStack(spacing: 4) {
-            Text(label).font(.system(size: 9)).foregroundStyle(.tertiary)
-            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(pct.map(Self.color(forPct:)) ?? .secondary)
-                .monospacedDigit()
-        }
-        .frame(width: 52, alignment: .leading)
-    }
-
-    private static func color(forPct pct: Double) -> Color {
-        if pct >= 85 { return .red }
-        if pct >= 50 { return .orange }
-        return .green
     }
 }
 
@@ -2239,6 +2304,9 @@ private struct TokenLaneRow: View {
         case .desktop:  return "Claude Desktop"
         case .override: return "Manual"
         case .held:     return "Saved by Pacer"
+        // A login the account switcher has stashed — a real Claude Code
+        // credential, just not the one signed in right now.
+        case .parked:   return "Switcher"
         }
     }
 
@@ -2248,6 +2316,7 @@ private struct TokenLaneRow: View {
         case .desktop:  return "desktopcomputer"
         case .override: return "key.fill"
         case .held:     return "lock.fill"
+        case .parked:   return "arrow.left.arrow.right"
         }
     }
 }
@@ -2513,7 +2582,7 @@ private struct APIServerCard: View {
                 if enabled {
                     Divider().opacity(0.4)
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(["/v1/snapshot", "/metrics", "/v1/stream"], id: \.self) { path in
+                        ForEach(["/v1/snapshot", "/v1/accounts", "/metrics", "/v1/stream"], id: \.self) { path in
                             Text("http://\(savedHost):\(savedPort)\(path)")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
@@ -2527,6 +2596,7 @@ private struct APIServerCard: View {
                 Text("Exposes the same data the dashboard shows over local HTTP, so third-party apps (Stream Deck, scripts) and observability scrapers can read it without parsing Claude's logs themselves. Off by default; bound to loopback unless you widen the address.")
                 Text("`GET /v1/snapshot` full JSON · `GET /metrics` Prometheus (point Grafana Alloy here) · `GET /v1/stream` Server-Sent Events · `GET /healthz` liveness")
                     .padding(.top, 2)
+                Text("`GET /v1/accounts` lists accounts. `/v1/usage/daily` and `/v1/usage/models` report every account unless you pass `?account=<id>`; the dashboard's scope switcher does not affect them.")
                 Text("curl -s http://127.0.0.1:\(savedPort)/v1/snapshot\(savedToken.isEmpty ? "" : " -H 'Authorization: Bearer \(savedToken)'")")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)

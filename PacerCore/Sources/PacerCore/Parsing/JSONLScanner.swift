@@ -55,6 +55,11 @@ public actor JSONLScanner {
         let size: Int64
         let mtime: Date
         let cursor: CursorState?
+        /// The data root this file was enumerated under, or nil for the
+        /// default `~/.claude`. Attribution needs it: with two accounts
+        /// running at once, the profile directory a turn was written to is
+        /// the only thing that separates them.
+        let rootPath: String?
     }
 
     public init() {}
@@ -173,7 +178,9 @@ public actor JSONLScanner {
                     from: c.url,
                     startingAt: startOffset
                 ) { lineData in
-                    guard let entry = JSONLLineParser.parse(line: lineData, aliases: aliases) else { return }
+                    guard let entry = JSONLLineParser.parse(
+                        line: lineData, aliases: aliases, rootPath: c.rootPath
+                    ) else { return }
                     entriesParsed += 1
                     if let key = entry.dedupKey {
                         if let prior = bestByKey[key] {
@@ -260,7 +267,11 @@ public actor JSONLScanner {
                 path: path,
                 size: Int64(size),
                 mtime: mtime,
-                cursor: cursors[path]
+                cursor: cursors[path],
+                // An explicit file list carries no root context. nil reads
+                // as the default login, which is what a hand-pointed file
+                // almost always is.
+                rootPath: nil
             ))
         }
         return out
@@ -304,7 +315,14 @@ public actor JSONLScanner {
                     path: path,
                     size: Int64(size),
                     mtime: mtime,
-                    cursor: cursors[path]
+                    cursor: cursors[path],
+                    // The config root, not the projects dir — that is what
+                    // an activation is keyed on. The default `~/.claude`
+                    // is passed through as itself rather than special-cased
+                    // to nil: `AccountTrail` falls back to the default-login
+                    // spans for any root no activation has claimed, so the
+                    // ordinary case needs no branch here.
+                    rootPath: root.root.path
                 ))
             }
         }

@@ -13,9 +13,9 @@ import PacerUI
 /// that vanishes drops out of the next `latestBatch`.
 enum MenuBarWindowSource {
     static func items(
-        fiveHour: RateLimitSample?,
-        sevenDay: RateLimitSample?,
-        scoped: [UsageLimitSample]
+        fiveHour: LimitSamplePoint?,
+        sevenDay: LimitSamplePoint?,
+        scoped: [ScopedWindowRow]
     ) -> [MenuBarWindowItem] {
         var items: [MenuBarWindowItem] = [
             MenuBarWindowItem(
@@ -29,9 +29,10 @@ enum MenuBarWindowSource {
                 duration: MenuBarWindows.sevenDayDuration, group: "",
                 isScoped: false, isActive: false),
         ]
-        // Model/surface-scoped rows from the latest poll only — account-wide
-        // `session`/`weekly_all` rows are excluded (they duplicate 5h/7d).
-        for row in scoped.latestBatch().modelScoped() {
+        // Latest poll only. Account-wide `session`/`weekly_all` rows are
+        // excluded in the fetch (`LimitScope.modelScopedLimits`) rather than
+        // here — they duplicate 5h/7d and were two thirds of the rows.
+        for row in scoped.latestBatch() {
             items.append(MenuBarWindowItem(
                 key: row.identity, displayName: row.label,
                 usedPercentage: row.percent, resetsAt: row.resetsAt,
@@ -45,13 +46,39 @@ enum MenuBarWindowSource {
     /// resolve the latest poll's batch without scanning the append-only table.
     /// One poll writes a handful of scoped rows; 64 covers far more scoped
     /// windows than an account realistically has.
-    static let recentScopedDescriptor: FetchDescriptor<UsageLimitSample> = {
-        var d = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 64
-        return d
-    }()
+    /// A function rather than a `static let` because the bound and the scope
+    /// have to be applied together. With every account writing this table, an
+    /// unscoped "newest 64" can be entirely the other login's rows, and the
+    /// caller would render its windows as this account's.
+    static func recentScoped(account: String?) -> FetchDescriptor<UsageLimitSample> {
+        LimitScope.modelScopedLimits(account: account, limit: 64)
+    }
+
+    /// The menu bar's window inputs, fetched once per change rather than once
+    /// per body evaluation.
+    ///
+    /// These were `@Query`s. A `@Query` re-executes whenever the model context
+    /// changes, and Pacer's context changes every scan cycle — so the menu bar
+    /// re-ran two predicated fetches every couple of seconds, on the main
+    /// thread, forever. A profile put **91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches**, and `windows` is
+    /// computed more than once per body, so each evaluation paid twice.
+    ///
+    /// They were cheap before this session because they had no predicate and
+    /// CoreData could serve them from its row cache. Adding `accountId == x`
+    /// made every one a real fetch. The fix is not to un-scope them — that
+    /// would show the wrong account's windows — but to stop re-running them
+    /// when nothing has changed, which is the same signal-gated shape
+    /// `PaceChartCard` uses and documents.
+    @MainActor
+    static func load(_ context: ModelContext, account: String?)
+        -> (fixed: [LimitSamplePoint], scoped: [ScopedWindowRow]) {
+        let fixed = ((try? context.fetch(LimitScope.rateLimits(account: account, limit: 8))) ?? [])
+            .map(\.limitPoint)
+        let scoped = ((try? context.fetch(recentScoped(account: account))) ?? [])
+            .map(\.scopedWindowRow)
+        return (fixed, scoped)
+    }
 }
 
 /// What renders in the menu bar status item. The displayed content is
@@ -76,38 +103,110 @@ struct MenuBarLabel: View {
     /// Cap the fetch — we only ever look at the most-recent sample per
     /// window. Without the cap, every SwiftData save materialized the
     /// full ~4k-row history just to fire the menu-bar label re-render.
-    @Query(MenuBarLabel.recentRateLimitDescriptor)
-    private var rateSamples: [RateLimitSample]
+    @State private var rateSamples: [LimitSamplePoint] = []
 
     /// Today's aggregates for cost / tokens chips. Filtered by date so
     /// the daemon's per-scan re-fire stays bounded (~5 model rows max).
-    @Query private var todayAggregates: [DailyAggregate]
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @State private var menuScope = UsageScope.shared
+
+    /// Follows the window's account scope. The menu bar is ambient, so an
+    /// argument exists for it always showing every account — but two numbers
+    /// on screen at once disagreeing about "today's cost" is worse than
+    /// either answer, and the scope is a deliberate choice the user made.
+    private var todayAggregates: [DailyRow] {
+        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
 
     /// Single most recent TokenSample, for the active-model chip. Cap
     /// to 1 — we never need any other field besides `model`.
+    ///
+    /// Two of them, chosen at read time, the same shape as the today
+    /// aggregates above: unscoped this named whichever account wrote last, so
+    /// a menu bar scoped to one account showed the other's model.
     @Query(MenuBarLabel.recentTokenSampleDescriptor)
     private var recentSamples: [TokenSample]
+    @Query private var scopedRecentSamples: [TokenSample]
 
     /// Recent scoped `limits[]` rows — the source of the per-model windows the
     /// icon driver can point at. Bounded so this always-visible label never
     /// scans the append-only scoped history.
-    @Query(MenuBarWindowSource.recentScopedDescriptor)
-    private var scopedSamples: [UsageLimitSample]
+    @State private var scopedSamples: [ScopedWindowRow] = []
 
-    init() {
-        let today = TokenSample.formatDate(Date())
-        _todayAggregates = Query(
-            filter: #Predicate<DailyAggregate> { $0.date == today }
-        )
+    /// One row each, **unpredicated**. A `@Query` re-executes on every context
+    /// change, so what it costs matters: with no predicate CoreData serves it
+    /// from its row cache, which is why the pre-account versions of these were
+    /// free. These only say "something was written"; the scoped fetch they gate
+    /// is the expensive part, and now runs once per change instead of once per
+    /// body evaluation — a profile put 91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches.
+    @Query private var newestSignal: [RateLimitSample]
+    @Query private var newestScopedSignal: [UsageLimitSample]
+    @Environment(\.modelContext) private var menuModelContext
+
+    var reloadKey: String {
+        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(a)):\(Int(b)):"
+            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
-    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+    @MainActor
+    func reloadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            menuModelContext,
+            account: UsageScope.limitAccountId(in: menuModelContext))
+        rateSamples = loaded.fixed
+        scopedSamples = loaded.scoped
+
+        // Chips pinned to a named account need that account's own windows, not
+        // the scoped one's. Loaded only for accounts a chip actually names, so
+        // a user who pins nothing pays nothing — the ordinary case.
+        var pinned: [String: [MenuBarWindowItem]] = [:]
+        for id in Set(chipItems.compactMap(\.pinnedAccountId)) {
+            let other = MenuBarWindowSource.load(menuModelContext, account: id)
+            pinned[id] = MenuBarWindowSource.items(
+                fiveHour: other.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+                sevenDay: other.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+                scoped: other.scoped)
+        }
+        pinnedWindows = pinned
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        accountLabels = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.shortLabel) })
+    }
+
+    init() {
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
+        let today = TokenSample.formatDate(Date())
+        // Read from the shared store rather than taken as a parameter: the
+        // menu bar is constructed by AppKit, not by a parent view that could
+        // pass it down. A scope change is picked up on the next construction,
+        // which for a menu is every time it opens.
+        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        _globalToday = Query(
+            filter: #Predicate<DailyAggregate> { $0.date == today }
         )
-        d.fetchLimit = 8
-        return d
-    }()
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
+        )
+        var scopedRecent = FetchDescriptor<TokenSample>(
+            predicate: #Predicate<TokenSample> { $0.accountId == acct },
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedRecent.fetchLimit = 1
+        _scopedRecentSamples = Query(scopedRecent)
+    }
 
     private static let recentTokenSampleDescriptor: FetchDescriptor<TokenSample> = {
         var d = FetchDescriptor<TokenSample>(
@@ -138,6 +237,11 @@ struct MenuBarLabel: View {
 
     // MARK: - Derived state
 
+    /// Live windows for each account a chip names, keyed by account id.
+    @State private var pinnedWindows: [String: [MenuBarWindowItem]] = [:]
+    /// Short names for those accounts, so a chip reads "personal 42%".
+    @State private var accountLabels: [String: String] = [:]
+
     private var chipItems: [PacerSettings.MenuBarChipItem] {
         // Re-parse from the @AppStorage CSV so SwiftUI body-eval picks
         // up changes immediately (PacerSettings.menuBarChipItems() reads
@@ -146,13 +250,17 @@ struct MenuBarLabel: View {
         PacerSettings.MenuBarChipItem.parseList(chipsRaw)
     }
 
-    private var fiveHour: RateLimitSample? {
+    private var fiveHour: LimitSamplePoint? {
         rateSamples.first { $0.window == "five_hour" }
     }
 
-    private var sevenDay: RateLimitSample? {
+    private var sevenDay: LimitSamplePoint? {
         rateSamples.first { $0.window == "seven_day" }
     }
+
+    /// `windows` is read several times per body (the icon driver, the chips,
+    /// the rings), so fold it once.
+    private var windowsCache: [MenuBarWindowItem] { windows }
 
     private var iconStyle: PacerSettings.MenuBarIconStyle {
         PacerSettings.MenuBarIconStyle(rawValue: iconRaw) ?? .gaugeNeedle
@@ -234,7 +342,8 @@ struct MenuBarLabel: View {
     }
 
     private var activeModel: String? {
-        recentSamples.first.map { pacerModelDisplayName($0.model) }
+        let latest = menuScope.isAll ? recentSamples.first : scopedRecentSamples.first
+        return latest.map { pacerModelDisplayName($0.model) }
     }
 
     /// Whether the 5h-percent chip should prefix itself with "5h ". When
@@ -247,6 +356,7 @@ struct MenuBarLabel: View {
             switch item {
             case .fixed(.sevenDayPct): return true
             case .scoped:              return true
+            case .account:             return true
             default:                   return false
             }
         }
@@ -330,6 +440,14 @@ struct MenuBarLabel: View {
             return .text(pacerTokens(todayTokens))
         case .fixed(.activeModel):
             return .text(activeModel ?? "—")
+        case .account(let accountId, let key):
+            // The account's own windows, and its own name in front of the
+            // number — a chip that does not say whose percentage it is has no
+            // business existing on a surface with several accounts on it.
+            guard let window = pinnedWindows[accountId]?.first(where: { $0.key == key }),
+                  let pct = window.usedPercentage else { return nil }
+            let label = accountLabels[accountId] ?? window.displayName
+            return .percent(prefix: "\(label) ", pct: pct)
         case .scoped(let identity):
             // Read the scoped window's live % from the same dynamic window set
             // the dropdown / icon-driver use (active account's latest batch).
@@ -347,6 +465,7 @@ struct MenuBarLabel: View {
         // still re-evaluates on every save (cheap), but the hosted status
         // item only redraws when `rendered` actually differs.
         MenuBarLabelContent(rendered: rendered).equatable()
+            .task(id: reloadKey) { reloadWindows() }
     }
 
     /// Equatable render payload — captures exactly what the status item
@@ -462,65 +581,174 @@ private struct MenuBarLabelContent: View, Equatable {
 /// chip level via @AppStorage; this view is reactive at the data
 /// level via @Query.
 struct MenuStatusContent: View {
-    @Query(MenuStatusContent.recentDescriptor)
-    private var rateLimits: [RateLimitSample]
-    @Query private var todayAggregates: [DailyAggregate]
+    @State private var rateLimits: [LimitSamplePoint] = []
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @State private var menuScope = UsageScope.shared
+
+    /// Follows the window's account scope. The menu bar is ambient, so an
+    /// argument exists for it always showing every account — but two numbers
+    /// on screen at once disagreeing about "today's cost" is worse than
+    /// either answer, and the scope is a deliberate choice the user made.
+    private var todayAggregates: [DailyRow] {
+        menuScope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
 
     /// Recent scoped `limits[]` rows — the source of the dynamic per-model
     /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
-    @Query(MenuBarWindowSource.recentScopedDescriptor)
-    private var scopedSamples: [UsageLimitSample]
+    @State private var scopedSamples: [ScopedWindowRow] = []
+
+    /// One row each, **unpredicated**. A `@Query` re-executes on every context
+    /// change, so what it costs matters: with no predicate CoreData serves it
+    /// from its row cache, which is why the pre-account versions of these were
+    /// free. These only say "something was written"; the scoped fetch they gate
+    /// is the expensive part, and now runs once per change instead of once per
+    /// body evaluation — a profile put 91 of the 92 main-thread samples in
+    /// `MenuStatusContent.body` inside those two fetches.
+    @Query private var newestSignal: [RateLimitSample]
+    @Query private var newestScopedSignal: [UsageLimitSample]
+    @Environment(\.modelContext) private var menuModelContext
+
+    /// One account's windows, for the concurrent case. Empty otherwise.
+    struct AccountWindows: Identifiable {
+        let id: String
+        let label: String
+        let isActive: Bool
+        let windows: [MenuBarWindowItem]
+    }
+    @State private var perAccount: [AccountWindows] = []
+
+    var reloadKey: String {
+        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(a)):\(Int(b)):"
+            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
+    }
+
+    @MainActor
+    func reloadWindows() {
+        let loaded = MenuBarWindowSource.load(
+            menuModelContext,
+            account: UsageScope.limitAccountId(in: menuModelContext))
+        rateLimits = loaded.fixed
+        scopedSamples = loaded.scoped
+
+        // Concurrent accounts get a group each; sequential ones do not.
+        //
+        // When two accounts run at the same time both caps bind at once, and
+        // showing one is showing half. Used one at a time — the ordinary
+        // switcher case — only one binds, and a second group is noise in a menu
+        // that has to stay glanceable. The mode is decided from facts, not a
+        // heuristic: a session-mode config root, or activation spans that
+        // genuinely overlap.
+        guard AccountParallelism.mode(context: menuModelContext) == .concurrent else {
+            perAccount = []
+            return
+        }
+        let accounts = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        perAccount = accounts.sorted(by: Account.listOrder).map { account in
+            let its = MenuBarWindowSource.load(menuModelContext, account: account.id)
+            return AccountWindows(
+                id: account.id, label: account.shortLabel, isActive: account.isActive,
+                windows: MenuBarWindowSource.items(
+                    fiveHour: its.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+                    sevenDay: its.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+                    scoped: its.scoped))
+        }
+    }
 
     /// Engine answers for the outlook touches: per-window crossing (the
     /// trailing caption goes red "limit in 6 hr" when a pre-reset hit is
     /// projected) and the fixed Outlook row (projection once actionable,
     /// pace-vs-normal before). Row COUNT stays constant — NSMenuItem.view
     /// is measured at attach time, so conditional rows would clip.
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
 
     private func refreshEngine(scopedIdentities: [String]) async {
-        guard let engine else { return }
-        var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-        for w in RateLimitWindowKind.allCases {
-            if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+        // The menu bar follows the window's scope for spend, so its outlook
+        // captions come from the same scope's engine — otherwise the dropdown
+        // would show one account's cost above every account's projection.
+        guard let engine = engines?.engine(forAccount: UsageScope.storedAccountId) else { return }
+        // Off the main actor — `burnOutlook` runs `DiurnalBurnModel.fit`, and a
+        // launch-time profile found it doing exactly that on the main thread
+        // from here. See `askEngine`.
+        let ids = scopedIdentities
+        let computed = await askEngine {
+            () -> (outlooks: [String: UsageIntelligenceEngine.BurnOutlook],
+                   eod: Estimate, pace: Estimate) in
+            var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+            for w in RateLimitWindowKind.allCases {
+                if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+            }
+            // Scoped per-model windows ask the SAME forecast surface, keyed by
+            // identity — so each dynamic row gets the same "limit in N hr"
+            // caption.
+            for id in ids {
+                if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
+            }
+            return (next,
+                    await engine.ask(.projectedCost(.today)),
+                    await engine.ask(.pace))
         }
-        // Scoped per-model windows ask the SAME forecast surface, keyed by
-        // identity — so each dynamic row gets the same "limit in N hr" caption.
-        for id in scopedIdentities {
-            if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
-        }
-        outlooks = next
-        todayEOD = await engine.ask(.projectedCost(.today))
-        let pace = await engine.ask(.pace)
-        pacePercentile = pace.isInsufficient ? nil : pace.value
+        outlooks = computed.outlooks
+        todayEOD = computed.eod
+        pacePercentile = computed.pace.isInsufficient ? nil : computed.pace.value
     }
-
-    private static let recentDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
 
     init() {
+        var signal = FetchDescriptor<RateLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        signal.fetchLimit = 1
+        signal.propertiesToFetch = [\.sampledAt]
+        _newestSignal = Query(signal)
+        var scopedSignal = FetchDescriptor<UsageLimitSample>(
+            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        scopedSignal.fetchLimit = 1
+        scopedSignal.propertiesToFetch = [\.sampledAt]
+        _newestScopedSignal = Query(scopedSignal)
         let today = TokenSample.formatDate(Date())
-        _todayAggregates = Query(
+        // Read from the shared store rather than taken as a parameter: the
+        // menu bar is constructed by AppKit, not by a parent view that could
+        // pass it down. A scope change is picked up on the next construction,
+        // which for a menu is every time it opens.
+        let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
+        _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
+        )
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
         )
     }
 
-    private var fiveHour: RateLimitSample? { rateLimits.first { $0.window == "five_hour" } }
-    private var sevenDay: RateLimitSample? { rateLimits.first { $0.window == "seven_day" } }
+    private var fiveHour: LimitSamplePoint? { rateLimits.first { $0.window == "five_hour" } }
+    private var sevenDay: LimitSamplePoint? { rateLimits.first { $0.window == "seven_day" } }
 
     /// Every window the dropdown lists: 5h, 7d, then each scoped per-model
     /// window in the latest poll, in the dashboard's glued-heroes order.
     private var windows: [MenuBarWindowItem] {
         MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
     }
+
+    /// The account whose limits are on screen, named only when more than one
+    /// exists — a single-account user has no question to answer.
+    private var limitAccountLabel: String? {
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        guard all.count > 1 else { return nil }
+        return all.first { $0.id == UsageScope.limitAccountId(in: menuModelContext) }?.shortLabel
+    }
+
+    /// Whether that account is the one Claude Code is actually signed into.
+    private var ownerIsSignedIn: Bool {
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        guard let shown = UsageScope.limitAccountId(in: menuModelContext) else { return true }
+        return all.first { $0.isActive }?.id == shown
+    }
+
 
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
@@ -532,23 +760,84 @@ struct MenuStatusContent: View {
         }
     }
 
+    /// The popover's fixed width. Named because the screenshot harness used to
+    /// carry its own hard-coded copy (300pt) — close enough to pass unnoticed
+    /// while the real value was 280, and a visible clip once it became 336.
+    static let popoverWidth: CGFloat = 336
+
     var body: some View {
         // Width is fixed because the host (`NSMenuItem.view`) doesn't
-        // re-measure when the SwiftUI body changes size — the menu
-        // tracks the view's frame at attach time. 280pt is wide enough
-        // for "pace 50% · resets in 2 hr." without truncating and
-        // matches typical Apple status menu widths (Wi-Fi ~280pt,
-        // Battery ~260pt).
+        // re-measure when the SwiftUI body changes size — the menu tracks the
+        // view's frame at attach time.
+        //
+        // 280pt was sized for a row of "pace 50% · resets in 2 hr." Then the
+        // rows gained a 54pt label column, because scoped windows need naming
+        // and "5-HOUR" has to sit somewhere. Nothing re-measured, so the two
+        // captions absorbed the loss and both truncated: "pace 6…" cut a
+        // percentage mid-number, and "resets in…" said nothing at all. A menu
+        // whose numbers are ellipses is not a readout.
+        //
+        // 336pt is that 280 plus the label column and its gap, so the captions
+        // get back exactly what they lost. Still inside the range Apple's own
+        // status menus occupy (Wi-Fi ~280, Sound ~300).
         let windows = self.windows
         let scopedIds = windows.filter(\.isScoped).map(\.key)
         // Stable key so `.task(id:)` re-asks the engine when the window SET
         // changes (a scoped window appears / disappears), not on every save.
         let windowKey = windows.map(\.key).joined(separator: ",")
         return VStack(alignment: .leading, spacing: 4) {
-            // One pace row per window — 5h, 7d, then each scoped per-model
-            // window. Fully dynamic: rows appear/vanish with the latest poll.
-            ForEach(windows) { window in
-                paceRow(window: window, outlook: outlooks[window.key])
+            // Whose limits these are, when that is a question at all.
+            //
+            // The menu bar reads the picked account, or the signed-in one when
+            // the scope is "all accounts" — and said so nowhere. That is the
+            // worst surface to leave ambiguous: it is the one you read
+            // *without opening the app*, so there is no scope control on screen
+            // to check against, and a percentage with no owner is a number you
+            // cannot act on. Worse when the app is scoped to the account you
+            // are not signed into: real limits, belonging to a login your
+            // terminal is not billing.
+            if perAccount.isEmpty, let owner = limitAccountLabel {
+                HStack(spacing: 4) {
+                    Text(owner)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    if !ownerIsSignedIn {
+                        Text("· not signed in")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 2)
+                .help(ownerIsSignedIn
+                      ? "These limits belong to the account Claude Code is using."
+                      : "Pacer is scoped to this account, but Claude Code is signed "
+                        + "into a different one — your next message is billed elsewhere.")
+            }
+            if perAccount.isEmpty {
+                // One pace row per window — 5h, 7d, then each scoped per-model
+                // window. Fully dynamic: rows appear/vanish with the latest poll.
+                ForEach(windows) { window in
+                    paceRow(window: window, outlook: outlooks[window.key])
+                }
+            } else {
+                ForEach(perAccount) { group in
+                    HStack(spacing: 4) {
+                        Text(group.label)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if group.isActive {
+                            Text("· signed in")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.green)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, group.id == perAccount.first?.id ? 0 : 6)
+                    ForEach(group.windows) { window in
+                        paceRow(window: window, outlook: outlooks[window.key])
+                    }
+                }
             }
             // Native NSMenu items don't have inset separators; ours
             // here is a SwiftUI Divider that runs the content width —
@@ -561,10 +850,11 @@ struct MenuStatusContent: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .frame(width: 280, alignment: .leading)
+        .frame(width: Self.popoverWidth, alignment: .leading)
         // Re-ask when the window set changes (scoped windows discovered) so a
         // freshly-appeared row gets its outlook caption without waiting for the
         // next engine recompute.
+        .task(id: reloadKey) { reloadWindows() }
         .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshEngine(scopedIdentities: scopedIds) }
@@ -671,6 +961,11 @@ struct MenuStatusContent: View {
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(band.color)
+                        // Never the column that gives way: "pace 6…" is a
+                        // number cut in half, which reads as a smaller number
+                        // rather than as missing text.
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
 
                     Spacer(minLength: 4)
 

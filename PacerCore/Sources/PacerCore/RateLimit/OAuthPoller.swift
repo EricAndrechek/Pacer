@@ -119,14 +119,35 @@ public actor OAuthPoller: TokenPoolTesting {
             self.laneRediscoverInterval = laneRediscoverInterval
         }
 
-        /// Per-lane floor for the non-active accounts' slow sweep. Each
-        /// secondary lane is polled no more often than this (and never
-        /// below the per-token invariant). Wide enough to keep the switcher
-        /// fresh without background chatter.
+        /// Per-lane floor for a non-active account's lanes.
+        ///
+        /// **The per-token invariant and nothing more.** This used to add
+        /// `idleInterval` on top, putting the other account on a ten-minute
+        /// sweep while the signed-in one was read every minute — and the
+        /// account you have just switched *away* from is usually the one that
+        /// matters, because you switched away from it for a reason.
+        ///
+        /// What that cost, measured on a real switch: `~/.claude.json` flipped
+        /// to the other account for six minutes and flipped back. That is not a
+        /// bug — Pacer read it correctly, five seconds behind `cswap`'s own log
+        /// — but it demoted the account actually doing the work to the slow
+        /// tier while it climbed from 87% to 98%, so the dashboard sat on a
+        /// stale 87% through exactly the stretch where the number mattered.
+        ///
+        /// Five minutes is the floor, not a choice: `perTokenMinInterval` is
+        /// the usage endpoint's own budget per token, and it is shared with
+        /// whatever else is asking — `cswap` is already taking 429s on it. An
+        /// account with one token cannot be fresher than that; one with several
+        /// is read more often by rotating through them.
         var secondarySweepInterval: TimeInterval {
-            max(scheduler.idleInterval, scheduler.perTokenMinInterval)
+            scheduler.perTokenMinInterval
         }
     }
+
+    /// Last switcher-cache timestamp ingested per account, so an unchanged
+    /// file costs one comparison rather than a store query each cycle.
+    private var lastSwitcherIngestAt: [String: Date] = [:]
+    private let switcherCache: @Sendable () -> [SwitcherUsageCache.Reading]
 
     /// Categorized outcome of one poll, surfaced for tests and debug UI.
     public enum PollOutcome: Sendable, Equatable {
@@ -157,6 +178,16 @@ public actor OAuthPoller: TokenPoolTesting {
         public let primaryOrg: String?
         /// The active account's id (org key), if one has been established.
         public let activeAccountKey: String?
+        /// Lanes whose `.primary`/`.secondary` classification disagrees with
+        /// whether their token actually belongs to the active account.
+        ///
+        /// Should always be zero. It is not a derived nicety: the two facts are
+        /// persisted separately — `activeAccountKey` from `Account.isActive`,
+        /// the classification from `TokenLaneMeta` — so a restart can restore a
+        /// pair that disagrees, and the symptom is silent (the signed-in
+        /// account's token drops to the slow secondary sweep and its readings
+        /// are filed as some other account's).
+        public let misclassifiedLaneCount: Int
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -170,6 +201,14 @@ public actor OAuthPoller: TokenPoolTesting {
         /// The account this token resolved to (from a successful poll's
         /// `anthropic-organization-id`); nil until first polled.
         var resolvedOrg: String?
+
+        /// The highest window utilisation this lane last saw, and the soonest
+        /// reset it reported. Recorded for diagnostics — an earlier version
+        /// used them to sweep a near-the-cap account faster than an idle one,
+        /// which was the wrong shape: every account now gets the per-token
+        /// floor, so there is no slow tier left to escape from.
+        var lastTopPercent: Double?
+        var lastSoonestReset: Date?
 
         /// The account key this lane belongs to once classified, or nil.
         var accountKey: String? {
@@ -212,6 +251,9 @@ public actor OAuthPoller: TokenPoolTesting {
     /// publishes can report active/idle without another probe.
     private var lastActivityAt: Date?
     private var lastOutcome: PollOutcome?
+    /// Which lane the last logged poll used, so a change of token is worth a
+    /// line even when the outcome category has not moved.
+    private var lastPolledLaneId: String?
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
@@ -240,12 +282,17 @@ public actor OAuthPoller: TokenPoolTesting {
         clock: PollerClock = SystemPollerClock(),
         activityProbe: (@Sendable () async -> Date?)? = nil,
         poolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
+        /// Injected so tests do not read the developer's real switcher cache —
+        /// the same seam every other machine-touching source here has.
+        switcherCache: @escaping @Sendable () -> [SwitcherUsageCache.Reading]
+            = { SwitcherUsageCache.readings(at: SwitcherUsageCache.defaultURL()) },
         random: @escaping RandomSource = { Double.random(in: 0..<1) }
     ) {
         self.client = client
         self.container = container
         self.configuration = configuration
         self.clock = clock
+        self.switcherCache = switcherCache
         self.scheduler = OAuthPollScheduler(tuning: configuration.scheduler)
         self.activityProbe = activityProbe ?? Self.defaultActivityProbe(container: container)
         self.poolStore = poolStore
@@ -260,6 +307,14 @@ public actor OAuthPoller: TokenPoolTesting {
         stopping = false
         // Let the Settings "Tokens" section route Test clicks back here.
         Task { await MainActor.run { TokenPoolStatus.shared.tester = self } }
+        // Off the loop task on purpose: the fold is a pass over tens of
+        // thousands of rows on first run and polling must not wait on it. In
+        // steady state it is a handful of index probes.
+        let container = self.container
+        Task.detached {
+            await Self.reconcileScopeMirror(container: container)
+            await Self.foldArchiveIntoLiveTables(container: container)
+        }
         loopTask = Task { [weak self] in
             await self?.loop()
         }
@@ -313,7 +368,12 @@ public actor OAuthPoller: TokenPoolTesting {
             nextPollAt: nextPollAt,
             lastPollAt: lastPollAt,
             primaryOrg: primaryOrg,
-            activeAccountKey: activeAccountKey
+            activeAccountKey: activeAccountKey,
+            misclassifiedLaneCount: lanes.filter { lane in
+                guard lane.state.account != .unknown, let active = activeAccountKey else { return false }
+                let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
+                return belongs != (lane.state.account == .primary)
+            }.count
         )
     }
 
@@ -442,17 +502,58 @@ public actor OAuthPoller: TokenPoolTesting {
     public func setActiveAccount(id: String) async {
         await loadPersistedMetaIfNeeded()
         ensureLanes()
-        guard id != activeAccountKey else { return }
-        let outgoing = activeAccountKey
-        let newOrg = await swapActiveTimeline(from: outgoing, to: id)
-        activeAccountKey = id
-        primaryOrg = newOrg
-        // Reclassify every confirmed lane against the new active account.
+
+        // Reclassify even when the id already matches, rather than returning
+        // early. Lane classification is restored from persisted meta and can
+        // disagree with the restored `activeAccountKey` — a lane saved
+        // `.secondary` under a previous active account stays `.secondary`
+        // forever if the only thing that repairs it is a *change* of account.
+        // That is a silent, self-perpetuating wrong answer, and the repair is
+        // three comparisons.
+        let unchanged = (id == activeAccountKey)
+        if !unchanged {
+            let newOrg = await activateAccount(id)
+            activeAccountKey = id
+            primaryOrg = newOrg
+        }
+        var reclassified = 0
         for i in lanes.indices where lanes[i].state.account != .unknown {
             let belongsToActive = (lanes[i].resolvedOrg == nil) || (Account.key(forOrg: lanes[i].resolvedOrg) == id)
-            lanes[i].state.account = belongsToActive ? .primary : .secondary
+            let want: OAuthPollScheduler.AccountStatus = belongsToActive ? .primary : .secondary
+            if lanes[i].state.account != want { reclassified += 1 }
+            lanes[i].state.account = want
+        }
+        if unchanged {
+            guard reclassified > 0 else { return }
+            Log.write("OAuthPoller",
+                      "repaired \(reclassified) lane(s) whose account no longer matched the active one")
         }
         await saveAllLaneMeta()
+        await publishStatus()
+    }
+
+    /// Rename an account. Identity is the org id, so this touches nothing but
+    /// the label — `setActiveAccount`'s timeline swap has no counterpart here.
+    ///
+    /// Clearing the name restores the derived placeholder rather than leaving
+    /// an empty string, because `Account.label` treats a blank name as absent
+    /// and would fall through to the raw uuid.
+    public func renameAccount(id: String, to name: String) async {
+        let container = self.container
+        // On the main actor because that is where `recordPoll` upserts these
+        // rows. Two contexts writing one `Account` from different actors is a
+        // race worth not having for a field nobody writes twice.
+        await MainActor.run {
+            let context = ModelContext(container)
+            let descriptor = FetchDescriptor<Account>(predicate: #Predicate { $0.id == id })
+            guard let account = (try? context.fetch(descriptor))?.first else { return }
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            account.displayName = trimmed.isEmpty
+                ? Account.defaultName(forOrg: account.organizationId,
+                                      subscriptionType: account.subscriptionType)
+                : trimmed
+            try? context.save()
+        }
         await publishStatus()
     }
 
@@ -486,7 +587,15 @@ public actor OAuthPoller: TokenPoolTesting {
             laneCounts[Account.key(forOrg: lane.resolvedOrg), default: 0] += 1
         }
         let accounts = await accountSummaries(laneCounts: laneCounts)
+        // Only ever an id the *store* knows. `activeAccountKey` is the poller's
+        // in-memory guess and is `Account.defaultKey` until a response carries
+        // an org header — publishing that wrote "default" into App Group
+        // defaults, and every read scoped to it matched nothing at all. Not an
+        // empty chart you would notice as a bug: just gauges that stopped
+        // having a value.
+        let activeId = accounts.first(where: \.isActive)?.id
         await MainActor.run {
+            UsageScope.shared.setActiveAccount(activeId)
             TokenPoolStatus.shared.publish(
                 lanes: statuses, accounts: accounts,
                 isActive: active, effectiveIntervalSeconds: effective
@@ -507,18 +616,30 @@ public actor OAuthPoller: TokenPoolTesting {
                     AccountStatusSummary(
                         id: a.id,
                         organizationId: a.organizationId,
-                        displayName: a.displayName,
+                        // `label`, not `displayName`: two accounts on the
+                        // same plan derive the identical placeholder, and a
+                        // switcher is exactly the setup that produces two.
+                        displayName: a.label,
                         isActive: a.isActive || a.id == activeKey,
                         subscriptionType: a.subscriptionType,
                         fiveHourPct: a.latestFiveHourPct,
                         sevenDayPct: a.latestSevenDayPct,
                         extraUsageCents: a.latestExtraUsageCents,
                         lastPolledAt: a.latestPolledAt,
-                        laneCount: laneCounts[a.id] ?? 0
+                        laneCount: laneCounts[a.id] ?? 0,
+                        switcherSlot: a.switcherSlot
                     )
                 }
-                // Active first, then most-recently-polled.
+                // The switcher's slot order when there is one — someone who
+                // types `cswap switch 2` should find account 2 second here.
+                // Otherwise active first, then most-recently-polled.
                 .sorted { l, r in
+                    switch (l.switcherSlot, r.switcherSlot) {
+                    case let (a?, b?) where a != b: return a < b
+                    case (nil, _?): return false
+                    case (_?, nil): return true
+                    default: break
+                    }
                     if l.isActive != r.isActive { return l.isActive }
                     return (l.lastPolledAt ?? .distantPast) > (r.lastPolledAt ?? .distantPast)
                 }
@@ -573,6 +694,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
         while !stopping && !Task.isCancelled {
             ensureLanes()
+            await ingestSwitcherCache()
             let activity = await activityProbe()
             lastActivityAt = activity
 
@@ -613,15 +735,215 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    /// The least-recently-polled secondary lane that's due for its slow
-    /// sweep now (past its per-lane interval and not cooling), or nil.
+    /// Record anything the account switcher has fetched that Pacer has not.
+    ///
+    /// Free — it is a file read, not a request — and it is the only way to see
+    /// an account whose token Pacer cannot use: one it has never been signed
+    /// into on this machine, or one whose credential is being 429'd because
+    /// two clients are polling it. Measured at the time of writing: the
+    /// signed-in account's reading was 26 minutes old in Pacer and 30 seconds
+    /// old in the switcher's cache.
+    ///
+    /// Strictly additive. A reading is dropped unless it is newer than what
+    /// Pacer already holds for that account, so a stale cache can never walk a
+    /// live series backwards, and an absent file is simply nothing.
+    private func ingestSwitcherCache() async {
+        let readings = switcherCache()
+        forgetSwitcherSchedule(
+            exceptAccounts: Set(readings.map { Account.key(forOrg: $0.organizationId) }))
+        guard !readings.isEmpty else { return }
+        for reading in readings {
+            let key = Account.key(forOrg: reading.organizationId)
+
+            // The *schedule* is applied unconditionally, before any freshness
+            // test on the data.
+            //
+            // This was the other way round and it deadlocked: the guard that
+            // keeps Pacer clear of cswap's requests was only installed when a
+            // cswap reading was ingested, and a reading only appears when cswap
+            // *succeeds* — so while cswap was being 429'd, nothing told Pacer
+            // to leave it room, and Pacer's polling is what kept it 429'd.
+            // Measured in that state: Pacer took zero 429s over ten minutes and
+            // cswap took them steadily. Pacer winning is not the goal; cswap
+            // needs this data to switch accounts on a limit.
+            //
+            // When cswap will poll is a fact whether or not its last attempt
+            // worked. Only recording a sample needs the data to be new.
+            noteSwitcherActivity(account: key, with: reading)
+
+            if let seen = lastSwitcherIngestAt[key], seen >= reading.fetchedAt { continue }
+            guard await isNewerThanStored(reading.fetchedAt, account: key) else {
+                lastSwitcherIngestAt[key] = reading.fetchedAt
+                continue
+            }
+            lastSwitcherIngestAt[key] = reading.fetchedAt
+
+            let snapshot = RateLimitSnapshot(
+                sampledAt: reading.fetchedAt,
+                fiveHour: reading.fiveHour.map {
+                    RateLimitWindow(usedPercentage: $0.percent, resetsAt: $0.resetsAt)
+                },
+                sevenDay: reading.sevenDay.map {
+                    RateLimitWindow(usedPercentage: $0.percent, resetsAt: $0.resetsAt)
+                },
+                extraUsageCents: nil,
+                organizationId: reading.organizationId,
+                limits: reading.scoped.map { row in
+                    UsageLimit(
+                        kind: "weekly_scoped", group: "weekly", percent: row.percent,
+                        severity: UsageLimitSeverity("normal"), resetsAt: row.resetsAt,
+                        scope: UsageLimitScope(
+                            model: UsageLimitScope.Model(id: nil, displayName: row.name),
+                            surface: nil),
+                        isActive: false)
+                })
+            await recordPoll(snapshot, accountKey: key,
+                             organizationId: reading.organizationId,
+                             subscriptionType: nil,
+                             isActive: activeAccountKey == key,
+                             laneSource: .parked,
+                             source: RateLimitSource.cswap)
+        }
+    }
+
+    /// Tell the scheduler what cswap has spent on this account's tokens, and
+    /// when it will spend again.
+    ///
+    /// **Facts, not a schedule.** An earlier version computed a target time
+    /// itself — poll at the midpoint of cswap's gap — which worked and was the
+    /// wrong shape: it overrode a scheduler that already scales cadence with
+    /// token count (`perTokenMinInterval / usableLanes`, so five tokens is one
+    /// minute) and already backs a lane off on 429. Replacing that with a fixed
+    /// rule threw both away.
+    ///
+    /// So this only supplies the input that was missing. Backwards: cswap's
+    /// fetch counted as a poll of that token, because it spent the same budget.
+    /// Forwards: when cswap says it will poll next, so the scheduler can avoid
+    /// crowding it. What cadence falls out is then the scheduler's decision,
+    /// and it adapts — a wide cswap interval leaves room for Pacer at its own
+    /// floor, a narrow one does not.
+    private func noteSwitcherActivity(
+        account key: String, with reading: SwitcherUsageCache.Reading
+    ) {
+        let hold = Self.switcherHold(for: reading)
+        for i in lanes.indices
+        where lanes[i].accountKey == key && Self.sharesBudgetWithSwitcher(lanes[i].source) {
+            // Backwards: when cswap last spent this token's budget. Kept apart
+            // from `lastPolledAt`, which stays Pacer's own poll — the scheduler
+            // needs both, and folding them together is what let a stuck cswap
+            // hide how long Pacer had gone without a reading.
+            lanes[i].state.externalLastPollAt = hold.spentAt
+            // Forwards: where cswap says it is going next.
+            lanes[i].state.externalNextPollAt = hold.nextPollAt
+        }
+    }
+
+    /// What one cswap reading says about a shared token: when its budget was
+    /// last spent, and when the other client intends to spend it next.
+    ///
+    /// Split out from the lane walk because it is the whole policy, and the
+    /// lanes are just where it gets written.
+    struct SwitcherHold: Equatable {
+        let spentAt: Date
+        let nextPollAt: Date?
+    }
+
+    /// A request spends the budget whether or not it returns anything, so the
+    /// mark is the later of "asked" and "answered" — see
+    /// `SwitcherUsageCache.Reading.lastAttemptAt`.
+    ///
+    /// Counting failures deliberately has no escape hatch here. It looked like
+    /// it needed one — a client stuck retrying would hold the lane down
+    /// forever — but the answer to that is not to pretend its requests are not
+    /// happening. They are, and polling into them is what keeps a throttled
+    /// token throttled. The bound belongs on Pacer's own staleness instead, and
+    /// lives in the scheduler as `externalYieldMax`.
+    static func switcherHold(for reading: SwitcherUsageCache.Reading) -> SwitcherHold {
+        SwitcherHold(
+            spentAt: max(reading.fetchedAt, reading.lastAttemptAt ?? .distantPast),
+            nextPollAt: reading.nextPollAt)
+    }
+
+    /// Forget a schedule for lanes no reading covers.
+    ///
+    /// Without this, a `nextPollAt` from cswap's last write outlives cswap
+    /// itself: uninstall it, or have it drop an account, and the lane keeps
+    /// deferring to a client that is not running.
+    private func forgetSwitcherSchedule(exceptAccounts covered: Set<String>) {
+        for i in lanes.indices
+        where (lanes[i].state.externalNextPollAt != nil
+               || lanes[i].state.externalLastPollAt != nil)
+            && !covered.contains(lanes[i].accountKey ?? "") {
+            lanes[i].state.externalNextPollAt = nil
+            lanes[i].state.externalLastPollAt = nil
+        }
+    }
+
+    /// Whether a lane holds the same credential cswap polls.
+    ///
+    /// The budget is per token, so only the tokens cswap actually uses are
+    /// affected — and cswap swaps Claude Code's credential, nothing else. A
+    /// Claude Desktop token for the same account is a *different* credential
+    /// with its own budget and is untouched by anything cswap does.
+    ///
+    /// Getting this wrong is not theoretical: the first version marked every
+    /// lane of the account, which stamped all five of the work account's
+    /// Desktop lanes with one timestamp. That collapsed their stagger — they
+    /// had been polled about fifty seconds apart, and afterwards all became due
+    /// together — so an account with five tokens refreshed at the same rate as
+    /// one with a single token. Exactly the multi-token spreading this was
+    /// supposed to preserve.
+    private static func sharesBudgetWithSwitcher(_ source: CredentialCandidate.Source) -> Bool {
+        switch source {
+        case .keychain, .parked: return true
+        case .desktop, .held, .override: return false
+        }
+    }
+
+    /// Newest stored sample for an account, so an older cached reading is not
+    /// replayed over a fresher poll.
+    private func isNewerThanStored(_ at: Date, account: String) async -> Bool {
+        let container = self.container
+        return await MainActor.run {
+            let context = ModelContext(container)
+            var d = FetchDescriptor<RateLimitSample>(
+                predicate: LimitScope.rateLimitPredicate(account: account),
+                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+            d.fetchLimit = 1
+            guard let newest = (try? context.fetch(d))?.first else { return true }
+            return at > newest.sampledAt
+        }
+    }
+
+    /// The least-recently-polled secondary lane that's due for its sweep now
+    /// (past its per-lane interval and not cooling), or nil.
+    ///
+    /// **Per lane, deliberately — that is the multi-token design working.**
+    /// The budget Anthropic enforces is per *token*, so an account holding five
+    /// credentials really can be read five times as often without costing any
+    /// other account anything. Spreading load across an account's tokens to
+    /// shorten its refresh interval is the point of the token pool.
+    ///
+    /// This was briefly changed to budget per account, on the theory that five
+    /// Desktop lanes were starving the signed-in account's single lane. That
+    /// theory was wrong: the 429s only ever landed on the signed-in account's
+    /// own token, never on the five that were being polled twelve times as
+    /// often, which is exactly what a per-token budget looks like. The real
+    /// contention was Pacer and `cswap` polling the *same* token — fixed by
+    /// reading cswap's cache instead. Throttling by account fixed nothing and
+    /// gave up a real feature, so it is reverted.
+    ///
+    /// Eligibility itself is `OAuthPollScheduler.readyAt`, the same rule the
+    /// fast pool uses, differing only in the interval. This method had its own
+    /// partial copy of it — cooldown and Pacer's own spacing, plus half of the
+    /// external check — so a secondary lane could keep its distance from
+    /// Pacer's polls while landing squarely on another client's.
     private func dueSecondaryLaneIndex(now: Date) -> Int? {
         let interval = configuration.secondarySweepInterval
         return lanes.indices
-            .filter { i in
-                lanes[i].state.account == .secondary
-                    && (lanes[i].state.cooldownUntil.map { now >= $0 } ?? true)
-                    && ((lanes[i].state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast) <= now)
+            .filter {
+                lanes[$0].state.account == .secondary
+                    && scheduler.readyAt(lanes[$0].state, interval: interval, now: now) <= now
             }
             .min { (lanes[$0].state.lastPolledAt ?? .distantPast) < (lanes[$1].state.lastPolledAt ?? .distantPast) }
     }
@@ -630,10 +952,8 @@ public actor OAuthPoller: TokenPoolTesting {
     /// there are no secondary lanes.
     private func nextSecondaryWait(now: Date) -> TimeInterval? {
         let interval = configuration.secondarySweepInterval
-        let readyTimes = lanes.filter { $0.state.account == .secondary }.map { lane -> Date in
-            let byInterval = lane.state.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
-            let byCooldown = lane.state.cooldownUntil ?? .distantPast
-            return max(byInterval, byCooldown)
+        let readyTimes = lanes.filter { $0.state.account == .secondary }.map {
+            scheduler.readyAt($0.state, interval: interval, now: now)
         }
         guard let earliest = readyTimes.min() else { return nil }
         return max(configuration.scheduler.minWait, earliest.timeIntervalSince(now))
@@ -736,7 +1056,12 @@ public actor OAuthPoller: TokenPoolTesting {
             case .override: return 0
             case .keychain: return 1
             case .held:     return 2
-            case .desktop:  return 3
+            // Below the live sources, above Desktop: a parked credential
+            // speaks for a real Claude Code login, just not the current one,
+            // so it should establish its account before a Desktop token gets
+            // the chance to claim the same org.
+            case .parked:   return 3
+            case .desktop:  return 4
             }
         }
         lanes.sort { a, b in
@@ -762,10 +1087,20 @@ public actor OAuthPoller: TokenPoolTesting {
         lanes[idx].state.lastPolledAt = now
 
         let previous = lastOutcome
+        let previousLane = lastPolledLaneId
         let outcome = await apply(result: result, laneIndex: idx, now: now)
         lastOutcome = outcome
-        if !Self.sameCategory(previous, outcome) {
-            Log.write("OAuthPoller", Self.summarize(outcome: outcome, laneCount: lanes.count))
+        lastPolledLaneId = idx < lanes.count
+            ? Self.laneId(lanes[idx].credential.accessToken) : nil
+        // Log a change of lane as well as a change of outcome. Deduping on the
+        // outcome alone hid which token was being spent, which is the one thing
+        // that matters when two clients share one: a run of identical `ok`
+        // lines could be one lane every minute or six lanes in rotation, and
+        // there was no way to tell them apart from outside.
+        if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
+            Log.write("OAuthPoller", Self.summarize(
+                outcome: outcome, laneCount: lanes.count,
+                lane: idx < lanes.count ? lanes[idx] : nil))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
@@ -801,7 +1136,41 @@ public actor OAuthPoller: TokenPoolTesting {
         case .success(let snapshot):
             lanes[idx].consecutiveFailures = 0
             lanes[idx].state.cooldownUntil = nil
+            lanes[idx].lastTopPercent = [snapshot.fiveHour?.usedPercentage,
+                                         snapshot.sevenDay?.usedPercentage]
+                .compactMap { $0 }.max()
+            lanes[idx].lastSoonestReset = [snapshot.fiveHour?.resetsAt,
+                                           snapshot.sevenDay?.resetsAt]
+                .compactMap { $0 }.min()
             let org = snapshot.organizationId
+            // The live Claude Code credential outranks the config file.
+            //
+            // `ActiveAccountObserver` reads `oauthAccount` out of
+            // `~/.claude.json`, which is right whenever one Claude Code owns
+            // that file. Run several at once — all sharing `~/.claude`, which
+            // is the default — and a session that started under another account
+            // rewrites the object with *its* identity, undoing a switcher's
+            // work without the switcher knowing. Observed on the maintainer's
+            // machine: cswap logged three switches to the personal account and
+            // Pacer saw two reversions to the work account at times cswap
+            // logged nothing at all, because the credential said one thing and
+            // the config file said another.
+            //
+            // This lane holds the credential Claude Code actually bills, and
+            // the response just named its org. That is not a guess, and it
+            // costs nothing extra. It wins.
+            //
+            // No thrash: the observer only votes when the *file* changes, so
+            // adopting the credential here settles it until the next real
+            // switch.
+            if lanes[idx].source == .keychain, let org,
+               let key = Optional(Account.key(forOrg: org)), key != activeAccountKey,
+               activeAccountKey != nil, activeAccountKey != Account.defaultKey {
+                Log.write("OAuthPoller",
+                          "signed-in credential resolves to \(key.prefix(4)) but the config "
+                            + "said \(activeAccountKey?.prefix(4) ?? "-") — trusting the credential")
+                await setActiveAccount(id: key)
+            }
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
@@ -884,8 +1253,17 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    private static func summarize(outcome: PollOutcome, laneCount: Int) -> String {
-        let lanes = "lanes=\(laneCount)"
+    private static func summarize(
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil
+    ) -> String {
+        // Which credential, and whose. Enough to tell a Desktop token from the
+        // Claude Code one an account switcher is also holding, without ever
+        // putting the token itself in a log file.
+        let which = lane.map { l in
+            let org = l.accountKey.map { String($0.prefix(4)) } ?? "?"
+            return "\(l.source.rawValue)/\(org) "
+        } ?? ""
+        let lanes = "\(which)lanes=\(laneCount)"
         switch outcome {
         case .success(let fh, let sd):
             let f = fh.map { String(format: "%.1f%%", $0) } ?? "nil"
@@ -943,11 +1321,19 @@ public actor OAuthPoller: TokenPoolTesting {
 
     // MARK: - Non-monotonic usage diagnostics
 
-    /// Most recent persisted OAuth sample for a window (or nil).
+    /// Most recent persisted OAuth sample for one account's window (or nil).
+    ///
+    /// Scoped by account because the live table holds every account's rows.
+    /// Unscoped, "the previous reading" would routinely be a *different*
+    /// account's, and the non-monotonic diagnostic would fire on every poll
+    /// that happened to interleave two logins.
     @MainActor
-    private static func latestSample(_ context: ModelContext, window: String) -> RateLimitSample? {
+    private static func latestSample(_ context: ModelContext, window: String,
+                                     accountId: String) -> RateLimitSample? {
         var d = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.window == window && $0.source == "oauth" },
+            predicate: #Predicate {
+                $0.window == window && $0.source == "oauth" && $0.accountId == accountId
+            },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
         d.fetchLimit = 1
@@ -1123,7 +1509,11 @@ public actor OAuthPoller: TokenPoolTesting {
         organizationId: String?,
         subscriptionType: String?,
         isActive: Bool,
-        laneSource: CredentialCandidate.Source
+        laneSource: CredentialCandidate.Source,
+        /// Which mechanism produced this observation. Defaults to a live poll;
+        /// the switcher-cache path passes its own so the rows say where they
+        /// came from and the dashboard's source chip stays honest.
+        source: String = RateLimitSource.oauth
     ) async {
         let container = self.container
         let captured = snapshot
@@ -1165,83 +1555,95 @@ public actor OAuthPoller: TokenPoolTesting {
             if let cents = captured.extraUsageCents { account.latestExtraUsageCents = cents }
             account.latestPolledAt = captured.sampledAt
 
-            // --- History rows: active account only ---
-            var wroteAnyWindow = false
-            if isActive {
-                if let window = captured.fiveHour {
-                    Self.logIfUsageWentDown(
-                        windowName: RateLimitWindowName.fiveHour,
-                        prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour),
-                        newUsed: window.usedPercentage,
-                        newReset: window.resetsAt,
-                        laneSource: laneSource
-                    )
-                    context.insert(RateLimitSample(
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.fiveHour,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                if let window = captured.sevenDay {
-                    Self.logIfUsageWentDown(
-                        windowName: RateLimitWindowName.sevenDay,
-                        prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay),
-                        newUsed: window.usedPercentage,
-                        newReset: window.resetsAt,
-                        laneSource: laneSource
-                    )
-                    context.insert(RateLimitSample(
-                        sampledAt: captured.sampledAt,
-                        window: RateLimitWindowName.sevenDay,
-                        usedPercentage: window.usedPercentage,
-                        resetsAt: window.resetsAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                // Extra-usage is account-level (not per-window); write at
-                // most one row per snapshot when present. nil means the
-                // field was omitted — leave the prior row rather than
-                // overwrite with a phantom zero.
-                if let cents = captured.extraUsageCents {
-                    context.insert(ExtraUsageSample(
-                        sampledAt: captured.sampledAt,
-                        amountCents: cents,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
-                }
-                // The scoped `limits[]` representation (per-model weekly
-                // windows, severity, binding flag). One generic row per item,
-                // all stamped with the same `sampledAt` so the dashboard reads
-                // them back as one "latest batch" — a limit dropped from the
-                // response simply stops appearing. Keyed by a stable composite
-                // identity, so new models/kinds persist with no schema change.
-                // Gated to the active account, and stamped with `accountId` so
-                // the active-account timeline swap can archive/restore these
-                // rows alongside `RateLimitSample` — a secondary (non-active)
-                // account's limits never pollute the live timeline, and two
-                // accounts that share a model identity (e.g. both have a "Fable"
-                // weekly) keep separate scoped history.
-                for limit in captured.limits {
-                    context.insert(UsageLimitSample(
-                        from: limit,
-                        sampledAt: captured.sampledAt,
-                        source: RateLimitSource.oauth,
-                        accountId: key
-                    ))
-                    wroteAnyWindow = true
+            // --- History rows: every account, stamped ---
+            //
+            // This used to be `if isActive { live } else { archive }`, and the
+            // swap in `setActiveAccount` moved rows between the two so the
+            // live tables always held exactly one account. That kept every
+            // read site free of accounts at the price of the other account's
+            // pace chart not existing: 45,973 archived rows on this machine,
+            // current to the minute, that nothing could draw.
+            //
+            // Now every account writes here and reads filter by `accountId`.
+            // The archive keeps its second job — cold storage past
+            // `liveWindowDays` — and `evictStaleLiveRows` still fills it.
+            var wroteActiveWindow = false
+            if let window = captured.fiveHour {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.fiveHour,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.fiveHour, accountId: key),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
+                context.insert(RateLimitSample(
+                    sampledAt: captured.sampledAt,
+                    window: RateLimitWindowName.fiveHour,
+                    usedPercentage: window.usedPercentage,
+                    resetsAt: window.resetsAt,
+                    source: source,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            if let window = captured.sevenDay {
+                Self.logIfUsageWentDown(
+                    windowName: RateLimitWindowName.sevenDay,
+                    prior: Self.latestSample(context, window: RateLimitWindowName.sevenDay, accountId: key),
+                    newUsed: window.usedPercentage,
+                    newReset: window.resetsAt,
+                    laneSource: laneSource
+                )
+                context.insert(RateLimitSample(
+                    sampledAt: captured.sampledAt,
+                    window: RateLimitWindowName.sevenDay,
+                    usedPercentage: window.usedPercentage,
+                    resetsAt: window.resetsAt,
+                    source: source,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            // Extra-usage is account-level (not per-window); write at
+            // most one row per snapshot when present. nil means the
+            // field was omitted — leave the prior row rather than
+            // overwrite with a phantom zero.
+            if let cents = captured.extraUsageCents {
+                context.insert(ExtraUsageSample(
+                    sampledAt: captured.sampledAt,
+                    amountCents: cents,
+                    source: source,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            // The scoped `limits[]` representation (per-model weekly
+            // windows, severity, binding flag). One generic row per item,
+            // all stamped with the same `sampledAt` so the dashboard reads
+            // them back as one "latest batch" — a limit dropped from the
+            // response simply stops appearing. Keyed by a stable composite
+            // identity, so new models/kinds persist with no schema change.
+            // Two accounts that share a model identity (e.g. both have a
+            // "Fable" weekly) keep separate scoped history via `accountId`.
+            for limit in captured.limits {
+                context.insert(UsageLimitSample(
+                    from: limit,
+                    sampledAt: captured.sampledAt,
+                    source: source,
+                    accountId: key
+                ))
+                wroteActiveWindow = wroteActiveWindow || isActive
+            }
+            if Self.evictionIsDue(now: captured.sampledAt) {
+                let moved = Self.evictStaleLiveRows(context: context, accountId: key)
+                if moved > 0 {
+                    Log.write("OAuthPoller",
+                              "evicted \(moved) live row(s) older than \(Int(Self.liveWindowDays))d to the archive")
                 }
             }
             do {
                 try context.save()
-                if wroteAnyWindow {
+                if wroteActiveWindow {
                     postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
                 }
             } catch {
@@ -1250,126 +1652,312 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
-    /// Swap which account's timeline the live sample tables hold: archive
-    /// the outgoing active account's rows into `AccountUsageArchive`, then
-    /// restore the incoming account's archived rows into the live tables,
-    /// and flip `Account.isActive`. Returns the incoming account's org so
-    /// the caller can update `primaryOrg`. Runs on the main actor.
-    private func swapActiveTimeline(from outgoing: String?, to incoming: String) async -> String? {
+    /// Whether any live row predates `accountId`. One indexed count per table,
+    /// so the steady-state cost of re-running the fold every launch is three
+    /// index probes.
+    @ScanActor
+    private static func hasUnstampedLiveRows(_ context: ModelContext) -> Bool {
+        let rl = (try? context.fetchCount(FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        if rl > 0 { return true }
+        let ul = (try? context.fetchCount(FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        if ul > 0 { return true }
+        let eu = (try? context.fetchCount(FetchDescriptor<ExtraUsageSample>(
+            predicate: #Predicate { $0.accountId == nil }))) ?? 0
+        return eu > 0
+    }
+
+    /// Test seam for the eviction pass — it is the one piece of the swap
+    /// whose correctness is "nothing was lost", which is worth asserting
+    /// directly rather than through a full poll cycle.
+    @MainActor
+    static func testEvictStaleLiveRows(context: ModelContext, accountId: String) -> Int {
+        evictStaleLiveRows(context: context, accountId: accountId)
+    }
+
+    /// When eviction last ran. In-memory only: re-running once after a
+    /// restart costs one bounded pass and saves persisting a timestamp
+    /// nothing else needs.
+    nonisolated(unsafe) private static var lastEvictionAt: Date?
+
+    private static func evictionIsDue(now: Date) -> Bool {
+        guard let last = lastEvictionAt else {
+            lastEvictionAt = now
+            return true
+        }
+        guard now.timeIntervalSince(last) >= 3600 else { return false }
+        lastEvictionAt = now
+        return true
+    }
+
+    /// Move the active account's live rows older than the window into the
+    /// archive, so the live tables stay a bounded cache.
+    ///
+    /// Without this the bound only applies on a switch, and a single-account
+    /// user — who never switches — accumulates live rows forever. That is
+    /// exactly how this machine reached 90,200 live rate-limit rows: nothing
+    /// was ever wrong, they simply never left.
+    ///
+    /// Eviction, not deletion. Every row is written to the archive before it
+    /// is removed, and the archive is never pruned.
+    @MainActor
+    private static func evictStaleLiveRows(context: ModelContext, accountId: String) -> Int {
+        let cutoff = Date().addingTimeInterval(-liveWindowDays * 86_400)
+        var moved = 0
+
+        let rls = (try? context.fetch(FetchDescriptor<RateLimitSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for r in rls {
+            context.insert(AccountUsageArchive(
+                accountId: r.accountId ?? accountId,
+                kind: AccountUsageArchive.kindRateLimit,
+                sampledAt: r.sampledAt, window: r.window,
+                usedPercentage: r.usedPercentage, resetsAt: r.resetsAt,
+                source: r.source))
+            context.delete(r)
+            moved += 1
+        }
+
+        let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for e in extras {
+            context.insert(AccountUsageArchive(
+                accountId: e.accountId ?? accountId,
+                kind: AccountUsageArchive.kindExtraUsage,
+                sampledAt: e.sampledAt, amountCents: e.amountCents,
+                source: e.source))
+            context.delete(e)
+            moved += 1
+        }
+
+        let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>(
+            predicate: #Predicate { $0.sampledAt < cutoff }))) ?? []
+        for l in limits {
+            context.insert(AccountUsageArchive(
+                accountId: l.accountId ?? accountId,
+                kind: AccountUsageArchive.kindUsageLimit,
+                sampledAt: l.sampledAt, usedPercentage: l.percent,
+                resetsAt: l.resetsAt, source: l.source,
+                identity: l.identity, limitKind: l.kind, group: l.group,
+                label: l.label, severity: l.severity, isActive: l.isActive,
+                modelId: l.modelId, modelDisplayName: l.modelDisplayName,
+                surface: l.surface))
+            context.delete(l)
+            moved += 1
+        }
+        return moved
+    }
+
+    /// How much history the live sample tables hold.
+    ///
+    /// The live tables are a *cache of the active account's recent window*,
+    /// not the record — `AccountUsageArchive` is the record and keeps
+    /// everything, so bounding this evicts nothing. The widest reader is the
+    /// forecast engine's 32-day backtest (`fetchRate`/`fetchScopedLimits`);
+    /// every view reads 8 days. 35 days clears both with margin.
+    ///
+    /// Why it has to be bounded at all: the swap moves every row it touches
+    /// through a single `MainActor` block, and this machine had accumulated
+    /// **177,689** archived rows in five months — all of which would have
+    /// been restored into the live tables on the next switch back, on the
+    /// main thread, to satisfy readers that wanted the newest few thousand.
+    /// Unbounded, the freeze grows for as long as the app is installed.
+    static let liveWindowDays: Double = 35
+
+    /// Make `incoming` the active account. Returns its org so the caller can
+    /// update `primaryOrg`.
+    ///
+    /// This used to *move rows*: archive the outgoing account's live samples,
+    /// restore the incoming account's from the archive. That kept the live
+    /// tables holding exactly one account, which is why no read site had to
+    /// know about accounts — and why the other account's pace chart did not
+    /// exist. Measured at real row counts the swap was **107,705 rows and
+    /// 14.3 seconds**, several times a day for anyone auto-switching.
+    ///
+    /// Every sample now carries `accountId` and reads filter on it, so
+    /// switching is a flag flip. The rows never move.
+    private func activateAccount(_ incoming: String) async -> String? {
         let container = self.container
         return await MainActor.run {
-            let context = ModelContext(container)
-
-            // 1. Archive the outgoing active account's live rows.
-            if let outgoing {
-                let rls = (try? context.fetch(FetchDescriptor<RateLimitSample>())) ?? []
-                for r in rls {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindRateLimit,
-                        sampledAt: r.sampledAt,
-                        window: r.window,
-                        usedPercentage: r.usedPercentage,
-                        resetsAt: r.resetsAt,
-                        source: r.source
-                    ))
-                    context.delete(r)
-                }
-                let extras = (try? context.fetch(FetchDescriptor<ExtraUsageSample>())) ?? []
-                for e in extras {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindExtraUsage,
-                        sampledAt: e.sampledAt,
-                        amountCents: e.amountCents,
-                        source: e.source
-                    ))
-                    context.delete(e)
-                }
-                let limits = (try? context.fetch(FetchDescriptor<UsageLimitSample>())) ?? []
-                for l in limits {
-                    context.insert(AccountUsageArchive(
-                        accountId: outgoing,
-                        kind: AccountUsageArchive.kindUsageLimit,
-                        sampledAt: l.sampledAt,
-                        usedPercentage: l.percent,
-                        resetsAt: l.resetsAt,
-                        source: l.source,
-                        identity: l.identity,
-                        limitKind: l.kind,
-                        group: l.group,
-                        label: l.label,
-                        severity: l.severity,
-                        isActive: l.isActive,
-                        modelId: l.modelId,
-                        modelDisplayName: l.modelDisplayName,
-                        surface: l.surface
-                    ))
-                    context.delete(l)
-                }
-            }
-
-            // 2. Restore the incoming account's archived rows (if any).
-            let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
-                predicate: #Predicate { $0.accountId == incoming }
-            ))) ?? []
-            for a in archived {
-                switch a.kind {
-                case AccountUsageArchive.kindRateLimit:
-                    context.insert(RateLimitSample(
-                        sampledAt: a.sampledAt,
-                        window: a.window ?? RateLimitWindowName.fiveHour,
-                        usedPercentage: a.usedPercentage ?? 0,
-                        resetsAt: a.resetsAt,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                case AccountUsageArchive.kindUsageLimit:
-                    context.insert(UsageLimitSample(
-                        sampledAt: a.sampledAt,
-                        identity: a.identity ?? "",
-                        kind: a.limitKind ?? "",
-                        group: a.group ?? "",
-                        label: a.label ?? "",
-                        percent: a.usedPercentage ?? 0,
-                        resetsAt: a.resetsAt,
-                        severity: a.severity ?? "",
-                        isActive: a.isActive ?? false,
-                        modelId: a.modelId,
-                        modelDisplayName: a.modelDisplayName,
-                        surface: a.surface,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                default:   // kindExtraUsage
-                    context.insert(ExtraUsageSample(
-                        sampledAt: a.sampledAt,
-                        amountCents: a.amountCents ?? 0,
-                        source: a.source,
-                        accountId: incoming
-                    ))
-                }
-                context.delete(a)
-            }
-
-            // 3. Flip active flags.
-            let allAccounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
             var incomingOrg: String?
-            for acc in allAccounts {
-                acc.isActive = (acc.id == incoming)
-                if acc.id == incoming { incomingOrg = acc.organizationId }
-            }
-
-            do {
-                try context.save()
-                // Nudge every @Query consumer to refresh against the swapped
-                // timeline (they auto-refresh on save, but this also drives
-                // the coordination summary the rest of the app listens on).
-                postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
-            } catch {
-                Log.write("OAuthPoller", "account timeline swap failed: \(error)")
+            for account in accounts {
+                account.isActive = (account.id == incoming)
+                if account.id == incoming { incomingOrg = account.organizationId }
             }
             return incomingOrg
+        }
+    }
+
+    /// Point App Group defaults at the account the *store* says is active.
+    ///
+    /// The store's `isActive` flag is the truth; defaults are a mirror of it so
+    /// the widget process — which cannot see the app's standard defaults — can
+    /// resolve the same scope. A mirror that has drifted scopes every read to
+    /// an account with no rows, which is not an empty chart anyone files as a
+    /// bug: the gauges just quietly stop having a value.
+    ///
+    /// It drifted the first time this shipped. `publishStatus` was writing the
+    /// poller's in-memory `activeAccountKey`, which is `Account.defaultKey`
+    /// until a response carries an org header — so defaults held `"default"`
+    /// while the store held a uuid. Both ends now publish only ids the store
+    /// knows, and this runs at every launch to repair whatever is there.
+    @ScanActor
+    static func reconcileScopeMirror(container: ModelContainer) async {
+        let context = ModelContext(container)
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        guard let active = accounts.first(where: \.isActive)?.id ?? accounts.first?.id
+        else { return }
+        // Unconditional: see `republishActiveAccount`. A reconcile that skips
+        // the write when this process already agrees cannot repair a mirror
+        // that is missing or wrong for everyone else.
+        await MainActor.run { UsageScope.shared.republishActiveAccount(active) }
+    }
+
+    /// Bring every account's recent history back out of the archive.
+    ///
+    /// Before per-account reads, a non-active account's samples lived only in
+    /// `AccountUsageArchive` — on this machine 45,973 rate-limit rows spanning
+    /// four months, current to the minute, that nothing could draw. Now that
+    /// the live tables are account-aware, that history belongs in them.
+    ///
+    /// Bounded to `liveWindowDays`, matching what a switch used to restore and
+    /// what `evictStaleLiveRows` maintains. Older rows stay archived: they are
+    /// the permanent record, nothing reads them from the live tables, and
+    /// moving them would be a long pass that buys nothing.
+    ///
+    /// Runs on `@ScanActor`, batched and yielding, for the same reason the
+    /// swap did — it is tens of thousands of rows and the scan loop shares the
+    /// actor.
+    ///
+    /// **Runs every launch, not once.** It was written with a meta-key guard,
+    /// and the first real run moved 111,250 rows in 20.8 s but left 1,250
+    /// behind — the newest four hours, which a `sampledAt >= cutoff` fetch
+    /// should plainly have included. A one-shot pass turns whatever caused
+    /// that into a permanent hole in the chart; a pass that repeats fixes it
+    /// on the next launch and keeps costing nothing, because steady state is
+    /// one indexed predicate returning zero rows. `evictStaleLiveRows` moves
+    /// rows the other way only once they are *older* than the same window, so
+    /// the two can never trade the same row back and forth.
+    ///
+    /// The meta key is still written — it records when the first fold ran.
+    @ScanActor
+    static func foldArchiveIntoLiveTables(container: ModelContainer, now: Date = Date()) async {
+        let context = ModelContext(container)
+        let started = Date()
+
+        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+        let storeActiveId = accounts.first(where: \.isActive)?.id ?? accounts.first?.id
+        let cutoff = now.addingTimeInterval(-liveWindowDays * 86_400)
+        let archived = (try? context.fetch(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.sampledAt >= cutoff }))) ?? []
+
+        var pending = 0
+        func flush(force: Bool = false) async {
+            guard force || pending >= 2_000 else { return }
+            pending = 0
+            do { try context.save() } catch {
+                Log.write("OAuthPoller", "archive fold batch failed: \(error)")
+            }
+            await Task.yield()
+        }
+
+        guard !archived.isEmpty || hasUnstampedLiveRows(context) else { return }
+
+        for row in archived {
+            switch row.kind {
+            case AccountUsageArchive.kindRateLimit:
+                context.insert(RateLimitSample(
+                    sampledAt: row.sampledAt,
+                    window: row.window ?? RateLimitWindowName.fiveHour,
+                    usedPercentage: row.usedPercentage ?? 0,
+                    resetsAt: row.resetsAt,
+                    source: row.source,
+                    accountId: row.accountId))
+            case AccountUsageArchive.kindUsageLimit:
+                context.insert(UsageLimitSample(
+                    sampledAt: row.sampledAt,
+                    identity: row.identity ?? "",
+                    kind: row.limitKind ?? "",
+                    group: row.group ?? "",
+                    label: row.label ?? "",
+                    percent: row.usedPercentage ?? 0,
+                    resetsAt: row.resetsAt,
+                    severity: row.severity ?? "",
+                    isActive: row.isActive ?? false,
+                    modelId: row.modelId,
+                    modelDisplayName: row.modelDisplayName,
+                    surface: row.surface,
+                    source: row.source,
+                    accountId: row.accountId))
+            default:   // kindExtraUsage
+                context.insert(ExtraUsageSample(
+                    sampledAt: row.sampledAt,
+                    amountCents: row.amountCents ?? 0,
+                    source: row.source,
+                    accountId: row.accountId))
+            }
+            context.delete(row)
+            pending += 1
+            await flush()
+        }
+
+        // Adopt any unstamped live rows.
+        //
+        // They predate `accountId` entirely, which means they predate Pacer
+        // knowing about more than one account — so they are the active
+        // account's by definition. Stamping them here is what lets every read
+        // site be a plain `accountId == x` instead of carrying a "…or nil, but
+        // only when x is the active one" clause fifty times over.
+        if let activeId = storeActiveId {
+            var adopted = 0
+            for row in (try? context.fetch(FetchDescriptor<RateLimitSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            for row in (try? context.fetch(FetchDescriptor<UsageLimitSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            for row in (try? context.fetch(FetchDescriptor<ExtraUsageSample>(
+                predicate: #Predicate { $0.accountId == nil }))) ?? [] {
+                row.accountId = activeId
+                adopted += 1
+                pending += 1
+                await flush()
+            }
+            if adopted > 0 {
+                Log.write("OAuthPoller", "adopted \(adopted) unstamped live row(s) as \(activeId)")
+            }
+        }
+
+        let metaKey = ClaudeCodeMetaKey.archiveFoldedIntoLive
+        let recorded = (try? context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == metaKey })))?.first
+        if recorded == nil {
+            context.insert(ClaudeCodeMeta(
+                key: metaKey, value: ISO8601DateFormatter().string(from: now)))
+        }
+        await flush(force: true)
+
+        // Say so when the pass did not fully drain, rather than leaving a
+        // silent gap. The next launch will pick up whatever is named here.
+        let leftover = (try? context.fetchCount(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.sampledAt >= cutoff }))) ?? 0
+        Log.write("OAuthPoller",
+                  "folded \(archived.count) archived row(s) back into the live tables in "
+                    + "\(Int(Date().timeIntervalSince(started) * 1000))ms"
+                    + (leftover > 0 ? " — \(leftover) recent row(s) still archived" : ""))
+
+        Task { @MainActor in
+            postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
         }
     }
 }

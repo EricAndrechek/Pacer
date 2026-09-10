@@ -41,6 +41,72 @@ See `docs/design.md` for the full v1 design.
   per-cycle SwiftData fetches, or adding any new always-running
   background work.
 
+## Never take over the machine — no cursor, no windows, no focus
+
+**Never without the owner's explicit, in-the-moment go-ahead.** Someone is
+sitting at this Mac using it while you work. You do not get the input devices,
+the windows, the focus, or the active Space — not briefly, not "just to check
+something", not because a flag was set for you once in the past.
+
+There is exactly one way this is allowed, and it is narrow:
+
+1. You have already built and tested everything that *can* be tested off-screen,
+   so the on-machine run is confirming one specific thing.
+2. The whole run is scripted end to end, deterministic, and takes seconds. It
+   asks nothing, guesses no coordinates, and restores what it touched.
+3. You describe exactly what it will do, and the owner says go — **for that
+   run**. Consent does not carry to the next one.
+
+**Never explore, debug, or iterate on his screen.** If the scripted run fails,
+it fails; take the artifacts away and work out why off-screen. A second attempt
+needs a second go-ahead. "I'll just try it and see" is the thing that caused
+this rule.
+
+Concretely, never write, run, or leave behind anything that:
+
+- posts synthetic input — `CGEvent`, `NSEvent` posting, `CGWarpMouseCursorPosition`,
+  `CGDisplayMoveCursorToPoint`, `IOHIDPostEvent`;
+- drives the UI through Accessibility or AppleScript — `osascript` with System
+  Events, `AXUIElement` actions, `click`/`keystroke`/`key code`, `tell application
+  … to activate`;
+- runs an AppKit event loop against a *visible* window to simulate interaction —
+  an `NSApp.run()` harness that dispatches mouse-moved events is exactly the
+  thing this rule exists to stop;
+- activates, raises, resizes, moves, closes or Spaces-switches any window,
+  including Pacer's own;
+- records the screen or captures another app's windows.
+
+Reading is fine: `NSEvent.mouseLocation` to place a window the *user* asked
+for, `NSScreen.frame`, and so on. The line is between observing the machine and
+operating it.
+
+**What to do instead.** Everything Pacer needs to see it can render off-screen,
+headlessly, as a PNG — that is the entire reason `make render-live`,
+`make screenshots` and `OffscreenRenderer` exist (next section). Behaviour that
+is not visual belongs in a unit test. If something genuinely can only be
+confirmed on a real session — an `NSMenu` tooltip is the standing example,
+because NSMenu tracking cannot be exercised off-screen at all — then build it,
+test your half headlessly, and **hand over a single prepared run**. Reporting
+"this needs you to check" is a complete, acceptable answer.
+
+Prefer making the *app* drive its own check over scripting coordinates from
+outside: it knows where its own views are, so there is nothing to guess and
+nothing to retry. See `PACER_TOOLTIP_SELFTEST` in `MenuBarTooltipSelfTest` for
+the shape — env-gated, self-contained, restores the cursor, exits.
+
+**Make it report a verdict, not a photograph.** That harness took three
+authorised runs to produce an answer and all three failures were in the
+instrument: it captured the wrong monitor, then a frame with no cursor in it
+(`screencapture -C` does not composite the pointer under `-R`), so "the thing
+did not happen" and "we never actually did it" looked identical. It only became
+useful when it started asking the window server whether a window appeared and
+logging where the pointer actually was. Every run costs somebody their machine
+for a few seconds — spend the effort up front so one run is enough.
+
+This is written down because it happened: an agent investigating why `.help()`
+does not fire inside an `NSMenuItem` built an event-dispatch harness and took
+over the cursor while the repo owner was working.
+
 ## Non-negotiable correctness rules
 
 These are subtle, easy to miss, and break user-visible numbers:
@@ -88,6 +154,8 @@ These are subtle, easy to miss, and break user-visible numbers:
 
 ## What NOT to do
 
+- **Do not take over the cursor, the windows, or the focus.** Own section
+  above; it is the one rule here with no exceptions.
 - **Do not auto-write to `~/.claude/settings.json`** without explicit
   user confirmation per write. Coordination with `ccstatusline`,
   `claude-hud`, etc. depends on a "watch + notify + offer" UX, not silent
@@ -97,6 +165,81 @@ These are subtle, easy to miss, and break user-visible numbers:
 - **Do not rely on `~/.claude/stats-cache.json` for primary data.** It
   lags by hours and has fewer categories than JSONL. Use only as a
   sanity-check probe.
+
+## Look at the UI yourself — `make render-live`
+
+Pacer can render its own cards, against the real store, to PNGs:
+
+```sh
+make render-live                 # all-accounts plus every account
+make render-live SCOPES=all      # or name scopes explicitly
+```
+
+They land in `screenshots/live/` (gitignored) and an agent can open them. Use
+this before asking a human whether something looks right — several rounds of
+"does this look wrong to you?" in the account work could each have been one
+render and a look. It found two things no amount of reading the code would
+have: a `5-HOUR · SOMEBODY@EXAMPLE.COM` heading wrapping onto three lines,
+and a card confidently reporting "a quiet Friday so far" on the account's
+biggest day.
+
+It is **not** `make screenshots`. That one seeds synthetic data because its
+output ships in the README; this one shows what the user is actually seeing.
+
+This is also the *only* sanctioned way to look at the UI. Rendering off-screen
+is not a convenience over driving the real window — driving the real window is
+forbidden (see "Never take over the machine"). If a page you need is not in
+`LiveRenderMode.Page`, add a case; that is a one-line change and it is how
+Settings got there.
+
+Three things it does so you do not have to remember them, all in
+`LiveRenderMode` and `bin/dev-render-live.sh`:
+
+- **Read-only store.** A second process writing the live store while the app
+  runs is not something to discover later.
+- **`.prohibited` activation policy.** It runs as a second process of the *same
+  bundle* beside the app the user is working in. With `.accessory` macOS still
+  treats it as an activatable instance — launching it pulled the real window
+  onto the active Space and left it out of place. `.prohibited` cannot activate
+  at all.
+- **The real app is re-opened on the way out**, on success, failure or Ctrl-C.
+
+The view scope is set *ephemerally* while walking scopes — `UsageScope.select`
+persists to App Group defaults, which the running app reads, so walking scopes
+with it would leave the user's dashboard on whichever account the render
+stopped at.
+
+## UI components live in PacerUI — check before you build one
+
+**Before writing any view that shows something the app already shows
+somewhere, search `PacerCore/Sources/PacerUI/` for it.** If it exists, use it.
+If it nearly exists, extend it. Only write a new one when nothing fits, and
+put that new one in PacerUI if a second screen could plausibly want it.
+
+This is not a tidiness preference. Two hand-rolled copies of the same thing do
+not merely look different, they *disagree*: the Tokens settings account row and
+the dashboard's Accounts card both showed 5h/7d utilisation, and the settings
+copy carried its own colour thresholds (`>=85` red, `>=50` orange, else green)
+against `UsageBand`'s canonical mapping (`<50` green, `<75` yellow, `<90`
+orange). 60% rendered orange on one screen and yellow on the other — the same
+number, two answers, depending which screen you were on. Nobody decided that;
+it is just what happens to a copy.
+
+Rules that follow from it:
+
+- **Never re-derive a mapping that exists in `PacerCore`.** `UsageBand`,
+  `PaceBand`, `PacerModelPalette`, the project colour hash — these are the
+  definition, not a suggestion. A local `if pct >= 85` is a bug in waiting.
+- **A shared component takes a plain value, not a model type.** `PacerAccountRow`
+  takes its own `Model` struct rather than `Account` or `AccountStatusSummary`,
+  because the moment a third caller holds neither, a component typed on one of
+  them stops being shareable and gets copied instead.
+- **Give it a trailing slot rather than a mode flag.** Screens differ in what
+  they put on the right (an Active badge, a Switch button, a turn count); a
+  `@ViewBuilder` slot absorbs that without the component growing branches.
+- **Extending a shared component changes every caller.** That is the point, and
+  it also means a visual change needs the same sign-off any shared view does —
+  flag it, don't slip it in as a side effect of unrelated work.
 
 ## Conventions
 

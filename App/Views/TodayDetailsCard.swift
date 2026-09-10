@@ -9,12 +9,34 @@ import PacerUI
 /// output vs cache reads, how much cache writing happened, how many
 /// distinct models the user touched.
 struct TodayDetailsCard: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
 
-    init() {
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+
+    init(scopeAccountId: String? = nil) {
         let today = TokenSample.formatDate(Date())
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
+        )
+        // Taken as a parameter rather than read from `UsageScope` here, so a
+        // scope change re-runs this initialiser. A `@Query` predicate is
+        // captured once at init; reading the scope inside would pin the card
+        // to whichever account was selected when it first appeared.
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
         )
     }
 
@@ -129,6 +151,7 @@ struct TodayDetailsCard: View {
                 // with the label rather than the icon.
                 Spacer().frame(width: 21)
                 Text(subline(read: totals.cacheReadTokens, written: written, reuse: reuse))
+                    .help("\(pacerTokensExact(totals.cacheReadTokens)) read · \(pacerTokensExact(written)) written")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
@@ -158,7 +181,7 @@ struct TodayDetailsCard: View {
 /// applied for the savings calculation — a cross-model day priced at
 /// a single average rate would mis-attribute Haiku/Opus savings.
 private struct Totals {
-    let rows: [DailyAggregate]
+    let rows: [DailyRow]
     let inputTokens: Int64
     let outputTokens: Int64
     let cacheReadTokens: Int64
@@ -167,7 +190,7 @@ private struct Totals {
     let totalCostUSD: Double
     let distinctModels: Int
 
-    init(rows: [DailyAggregate]) {
+    init(rows: [DailyRow]) {
         self.rows = rows
         self.inputTokens = rows.reduce(0) { $0 + $1.inputTokens }
         self.outputTokens = rows.reduce(0) { $0 + $1.outputTokens }

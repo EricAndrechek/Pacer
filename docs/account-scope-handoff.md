@@ -1,0 +1,503 @@
+# Account scope — working state and continuation brief
+
+Operational companion to [`multi-account.md`](multi-account.md), which holds the
+*design*. This one holds the **state, the invariants, and the traps** — written
+so a session picking this up cold does not re-learn them the expensive way.
+
+Branch `feat/account-attribution`, 44 commits, 772 tests, `make verify-data`
+green. Schema at 28 models, cost recompute version **14**.
+
+---
+
+## Read this before touching anything
+
+### 1. `make verify-data` is the gate, and it must be run quiesced
+
+It cross-checks each per-account rollup against its global counterpart. **It has
+caught four real bugs that would otherwise have shipped**, three of them mine
+in the same session:
+
+- the daily incremental fast path never updating account rows,
+- a two-month-stale pricing snapshot billing new models at `$0`,
+- a session fetch that could not see the cycle's pending inserts,
+- `recomputeOne` missing a call site entirely.
+
+**Quit Pacer before trusting a failure.** With the app running, the global
+rollups legitimately trail the samples by a turn or two mid-cycle, and that
+reads as drift. Quit, verify, relaunch:
+
+```sh
+osascript -e 'quit app "Pacer"'; sleep 3
+make verify-data
+open -g -a Pacer
+```
+
+Do **not** wrap that in a retry loop that quits and relaunches each iteration.
+I did; it interrupted the rebuild before it could persist its version, so the
+rebuild ran 36 times and never completed, and the resulting failures were the
+harness's, not the code's.
+
+### 2. Adding a per-account rollup
+
+Four exist: `AccountDailyAggregate`, `AccountHourlyAggregate`,
+`AccountProjectDailyAggregate`, `AccountSessionInfo`. To add another:
+
+1. Sibling `@Model` **alongside** the global one — never add `accountId` to the
+   existing key. Views that map aggregates one-to-one onto rows (the per-model
+   breakdown) would list a model twice the moment two accounts used it the same
+   day.
+2. Emit from **all three write paths**: incremental fast path, per-bucket
+   recompute, bulk worker. Missing one is the single most likely mistake — I
+   made it twice.
+3. If the rollup has a **non-additive field** (a distinct count, a `topModel`
+   chosen by comparing totals), put the maths in a shared value type
+   (`ProjectRollupValues`, `SessionRollupValues`) so one algorithm writes both
+   rows. "Recompute twice" and "recompute once, write twice" differ here.
+4. Add a cross-check to `bin/dev-verify-data.sh`. Compare **tokens and cost
+   only** — session and model *counts* legitimately do not sum, because a
+   session spanning a switch belongs to both accounts' sets and once to the
+   global one.
+5. Bump `currentCostRecomputeVersion`; rows only exist for buckets recomputed
+   since.
+
+### 3. Making a view scope-aware
+
+Two live `@Query`s (global + scoped) and a computed property choosing between
+them. **The scope must arrive as an initialiser parameter** — a `@Query`
+predicate is captured once at init, so a view reading the scope itself stays
+pinned to whatever was selected when it first appeared. The parent holds
+`@State private var scope = UsageScope.shared` and passes `scope.accountId`.
+
+Views outside the view tree — widgets, the CSV exporter, the menu bar — read
+`UsageScope.storedAccountId` instead. It lives in **App Group** defaults; the
+widget process cannot see `UserDefaults.standard`.
+
+Normalise with `DailyRow` / `HourlyRow` / `SessionRow` / `ProjectDailyReadable`
+so the body renders either source.
+
+---
+
+## Traps that cost real time
+
+**A `str.replace()` without an assertion is a silent no-op.** One edit anchored
+on `sessionId: sessionId` where the code said `sessionId: sid`. It did nothing,
+built fine, and I reported the feature as landed. Every edit in this series that
+asserted was correct; the one that did not was the one that broke.
+**Assert every anchor.**
+
+**File-level greps overstate coverage.** `HistoryView.swift` counted as "scoped"
+because two of its three cards were, while `TopDaysContent` sat in the same file
+reading the global rollup. Audit **per struct**:
+
+```sh
+python3 - <<'PY'
+import pathlib, re
+files = list(pathlib.Path("App").rglob("*.swift")) + list(pathlib.Path("Widgets").rglob("*.swift"))
+rollups = re.compile(r"\[(DailyAggregate|HourlyAggregate|ProjectDailyAggregate|SessionInfo)\]")
+for p in sorted(files):
+    for part in re.split(r"\n(?=(?:private )?struct \w+)", p.read_text()):
+        m = re.match(r"(?:private )?struct (\w+)", part.strip())
+        if m and rollups.search(part) and "UsageScope" not in part and "ScopedReads" not in part:
+            print(f"global: {m.group(1)} ({p.name})")
+PY
+```
+
+**A native control failing app-wide is almost never the control.** Menus and
+popovers were opening in a screen corner. I replaced `Picker` with a hand-rolled
+popover, then a segmented control, then a `Stepper` — three commits of
+avoidance. The cause was mine four commits earlier:
+`MainWindowPlacement.holdPlacement` scheduled `setFrame` calls from
+`didBecomeKey`, so every click into the window moved it for two seconds,
+including out from under an open menu. Symptoms that should have pointed at my
+own change: **intermittent, sometimes self-correcting, affecting several
+different control types, not display-dependent.**
+
+**Scripted UI verification can falsify but not confirm.** I reported a window fix
+as verified because the frame was *identical* across an install — it was stably
+wrong. Synthetic AppleScript clicks are also not user gestures, so macOS refuses
+the activation they depend on; "0 windows" was measuring my own harness. Frame,
+focus and window counts can all be right while the thing still looks wrong. Ask
+Eric.
+
+**Headless diagnostic modes open a window unless stopped.** `.accessory` does not
+prevent macOS restoring one for the bundle, and these run as a *second* instance
+beside the user's real app. Fixed for all four modes; keep it that way if you
+add a fifth — and remember every mode must appear in **both** launch gates in
+`PacerAppDelegate`, or it silently gets an in-memory store and reports
+confidently on no data.
+
+---
+
+## Environment
+
+- `make install` needs Keychain access for notarization that an agent session
+  cannot get. Use `PACER_DEV_SKIP_NOTARIZE=1 make install`. **Every install this
+  session used it — the branch has never had a notarized build.**
+- The dev install relaunches with `open -g` and must not steal focus or move the
+  window. If it does, something re-entered the frame-setting path.
+- Eric keeps the dashboard open on a portrait display at x≈2500. Leave Pacer
+  running and its window where it was.
+- **A fresh git worktree cannot build until you give it two things.**
+  `Pacer.xcodeproj` is generated, so run `xcodegen generate` first (`make
+  verify` does it for you; a bare `xcodebuild` does not). And
+  `Vendor/DuckDB.xcframework` is gitignored, so copy it across from the main
+  worktree. Neither failure says what is wrong.
+
+---
+
+## What is done
+
+Attribution (`AccountActivation` trail, `TokenSample.accountId`, backfill,
+follow-the-login), four per-account rollups, and **23 scoped surfaces**: every
+dashboard card, history, projects, collections, models, heatmap, the three
+drill-down modals, the menu bar, four widgets, advisor badges, CSV export.
+
+**Rate limits are per account now too** — the big item on the old list. Every
+account writes the live sample tables stamped with `accountId`, switching is a
+flag flip rather than 107,705 rows moving, and `LimitScope` scopes every read.
+Read the "Rate limits are per account too" section of `multi-account.md` before
+touching any of it; the short version is that a read which forgets to scope is
+silently wrong, not empty.
+
+**The forecast engine is per account too** — this was the last item on the
+"what is next" list. `EngineHost` keeps one `UsageIntelligenceEngine` per
+`EngineScope`; `.allAccounts` is byte-identical to what shipped (its surfaces
+stay unsuffixed) and each account's surfaces are suffixed `#<accountId>`.
+Everything the engine feeds is therefore scoped: the Now tile, the pace
+projections and their bands, the advisor badges, the outlook chips.
+
+Two traps live in there. `await engine.x()` called from a `@MainActor` type
+runs the callee **inline on the main thread** — Swift's uncontended-actor
+optimisation — and so does a plain `Task {}` started from one; `askEngine`
+(`Task.detached`) exists because five call sites had that shape and cost 7.9 s
+of launch stall between them. And a projection refresh must be gated on
+*starting*, not debounced: the engine's ~14 s launch refit serializes every
+pending pass behind it, so they all complete in the same second no matter how
+long you delayed each one.
+
+The API asks explicitly: `GET /v1/accounts` lists the ids, `/v1/usage/daily`
+and `/v1/usage/models` take `?account=`, and `/metrics` emits per-account
+series. Unscoped output is unchanged. Accounts can be renamed (Settings →
+Tokens), and a typed name outranks the observed email in `Account.label`.
+
+Deliberately **not** scoped, with reasons in `multi-account.md`: alerts (a
+display filter must not silence a budget alarm), the HTTP snapshot (scripted
+consumers get the active login and are told which it is), and the three
+project-management views.
+
+Verified on the real store: a mixed day splits `$70.78` (work) + `$1,187.71`
+(personal) = `$1,258.49` (global). Fresh-install cold start builds all 28 models
+and 108,660 entries in 22.8 s with no migration.
+
+---
+
+## The open gap: the non-active account's rate limits go to 0%
+
+**Reported symptom.** Scope the window to the work account and the pace cards
+read `0%` on both 5-hour and 7-day, with no usage drawn — while Today, Today's
+traffic and Today by hour all show real spend for that same account.
+
+**It is wrong, and the spend is not the wrong half.** Verified on the real
+store:
+
+- Work is attributed $231 today, and the activation trail confirms it genuinely
+  was the active login for about two and a half hours (06:37-07:20, 08:40-08:45,
+  09:19-11:13, 11:27-11:33). Attribution is correct.
+- Work's 7-day has read *exactly* 0.0% since 09-07 06:06 — three days flat.
+- Personal's 7-day over the same day climbs 1% → 3 → 6 → 9 → 12 → 16%. That one
+  is tracking reality.
+
+**Cause — and a correction.** The first read of this was that Pacer cannot keep
+a second account's token. It can, and does: `ZTOKENLANEMETA` now shows a
+`source=keychain` lane *per account*, one primary and one secondary, and both
+accounts read real values (personal 5h 0% after its 12:20 reset, 7d 21%; work
+5h 29%, 7d 6%, both under a minute old). Retention works.
+
+What actually produced three days of `0.0%` is narrower: during that stretch the
+only lanes Pacer held for the work org were five `source=desktop` tokens, and
+Eric does not use Claude Desktop for work, so they honestly reported an idle
+account. Pacer captured work's *Code* token the next time work was signed in,
+and the numbers came right immediately.
+
+**The real limit is expiry, not retention.** A Claude Code access token lasts
+hours — the retained personal lane above expires about twenty minutes after the
+switch. Expired lanes are dropped when the pool is seeded, and nothing can renew
+them: auto-refresh is deliberately disabled because rotation invalidates the
+token the live session is using, and it would also invalidate the copy `cswap`
+holds to switch back with. So a parked account reports correctly for a few
+hours and then has no usable lane at all.
+
+**cswap cannot supply one.** `~/.claude-swap-backup/credentials/` holds only
+lock files; the credentials live in the keychain — the deferred
+keychain-access-group item.
+
+**Done in this branch:** the honest presentation. A reading Pacer cannot obtain
+must not render as `0%`. That is the exact failure
+mode this whole branch has been chasing — a number that is silently wrong rather
+than visibly absent. The card should say the window has no recent reading for
+that account and when the last one was, the same way the source chip already
+distinguishes fresh from stale. Polling both accounts properly is a separate
+piece of work gated on per-account token retention.
+
+---
+
+## Attribution was audited against Claude Code's own records — and is fine
+
+Worth writing down because the audit is easy to redo badly. I did, twice.
+
+Claude Code's transcripts carry `ownerOrganizationUuid` on **`bridge-session`**
+records, and those uuids are exactly Pacer's account ids. That looks like
+ground truth for "who owned this session", and it is tempting to attribute
+whole sessions from it.
+
+**It is not ground truth for a session.** Two things kill that:
+
+1. **A session's owner genuinely changes.** 7 of 82 sessions show
+   `427a → 7459` within one session. So "one session, one account" is false,
+   and Pacer splitting a session across accounts is *correct*. An early version
+   of this audit collapsed each session to its last owner and then reported the
+   collapse as a Pacer error — 9 fake disagreements.
+2. **The records only describe bridged activity, and carry no timestamp.** One
+   session had 595 owner records against 5,465 turns. They cannot say what
+   served the rest.
+
+Compared as *sets* of accounts per session: **76 of 82 match**, 4 sessions are
+not in Pacer's table, and 2 differ — in both, the transcript names only work
+while Pacer also credits a slice to personal. Given the records cover a subset
+of the session, that is what a partial record looks like, not evidence of
+misattribution.
+
+Corroborating from the other direction: after the 11:43 switch, personal's
+5-hour went flat at 98% and stayed there while work's climbed from 0%. If
+sessions had kept billing personal after the switch, personal would have kept
+rising.
+
+**Conclusion: leave attribution alone.** The activation trail is the best
+signal available, and nothing here contradicts it. If you change attribution,
+re-run this comparison as a set comparison, and do not treat the owner field as
+covering a whole session.
+
+---
+
+## What is next, with honest sizing
+
+**1. Notarized build + PR.** Both Eric's call. CI only runs on `main` or PRs, so
+this branch has no CI signal.
+
+Per-account alert rules are **done** — and the larger half of that turned out to
+be a bug rather than a feature. `NotificationsHost` scoped its rate-limit reads
+to the active login, so the account you were not signed into could fill its
+7-day window in silence. It now evaluates every account, with crossing state
+keyed by `(account, window)` and a `#<account>` suffix on the per-cycle dedup
+key so two logins cannot silence each other. `AlertRule.accountId` is the
+explicit per-rule target on top of that; `nil` still means every account,
+because a cap set before you had two logins must not quietly start covering
+half your usage. It is a target on the rule, never the window's display
+scope — the reason is in the model's doc comment.
+
+---
+
+## One more trap, from the API work
+
+**A leak the tests could not see, because they had never seen real data.**
+`pacer_account_info` published `organizationName` as its label, on the reasoning
+that the org name is coarser than the email. It is not: Anthropic *derives* the
+org name from the email, so it reads `"<someone>@<domain>'s Organization"` for
+every real account. The unit test passed because its fixture said `"Acme"`.
+Caught by curling the live endpoint after installing.
+
+The general shape: **a test fixture is an assumption about the world.** When the
+assertion is "this output never contains X", the fixture that proves it is the
+one taken from the real store, not the one that reads nicely in a diff. There is
+now a test using an email-derived org name, and `metricsName` falls back past
+everything observed to `Account <last 4 of id>`.
+
+---
+
+## Three more, from the rate-limit work
+
+**A migration that under-drains must be repeatable, not guarded.** The one-time
+fold moved 111,250 archived rows and then reported 1,250 still recent — rows a
+`sampledAt >= cutoff` fetch should plainly have returned. I never explained it.
+A meta-key guard would have made that a permanent hole in the chart; running
+the pass every launch cost three index probes and fixed it on the next start.
+When a one-shot migration's correctness is not provable, make it idempotent and
+let it run again.
+
+**A mirror in defaults will drift, so repair it rather than trusting it.** The
+active account id is mirrored into App Group defaults for the widget process.
+`publishStatus` wrote the poller's in-memory `activeAccountKey`, which is
+`Account.defaultKey` until a response carries an org header — so defaults said
+`"default"` while the store said a uuid, and every read scoped to it matched
+nothing. The failure mode is the dangerous kind: no error, no empty state, the
+gauges just stopped having a value. Both ends now publish only ids the store
+knows, and `reconcileScopeMirror` repairs whatever is there at launch.
+
+**`defaults read <group> <key>` reads a different file than the app writes.**
+Not staleness — a different domain. The installed app is sandboxed, so
+`UserDefaults(suiteName: <group>)` resolves inside the App Group *container*:
+
+    ~/Library/Group Containers/<group>/Library/Preferences/<group>.plist
+
+Any process that is **not** sandboxed — `swift test`, and any Pacer binary run
+straight from a shell, which includes the screenshot renderer and
+`bin/dev-render-live.sh` — gets the same suite name from the **user domain**:
+
+    ~/Library/Preferences/<group>.plist
+
+Both exist, with different contents, and `defaults` only ever shows you the
+second one. Read the group-container plist with `plutil -p` before concluding
+anything about what the app sees.
+
+The practical consequence is worse than the confusion: the two halves of the
+project that render UI headlessly read the *user*-domain copy, so a test that
+leaves a fixture account id behind scopes them to an account with no rows.
+`PacerPreferences.store` now gives a test process its own private suite for
+exactly this reason.
+
+**Adding a predicate to a hot `@Query` is a performance change.** This is the
+single most expensive lesson of the account work. A `@Query` re-executes on
+every model-context change, and Pacer's context changes every scan cycle. An
+*unpredicated* capped fetch survives that fine — CoreData serves it from its
+row cache — which is why the menu bar, the notification host and the toolbar
+pill all ran free before accounts existed. Adding `accountId == x` to each made
+every one a real fetch, several times a second, on the main thread. Scoping
+them was correct; leaving them as `@Query` was not. The pattern that works is
+a one-row **unpredicated** `@Query` as a signal plus the real load into
+`@State` behind it — `PaceChartCard` documents it and now so do the other four.
+
+And measure before fixing. I optimised the pace chart's fetch twice (off the
+main actor, then 2.5× fewer rows) and neither made a felt difference, because
+the cost was somewhere else entirely. `MainThreadStallWatchdog` plus a
+`sample` of the process found it in one pass: 91 of 92 main-thread samples in
+one view's body were two fetches. Three plausible culprits reasoned from the
+code, all three wrong.
+
+**SwiftData does not add indexes to an existing store.** `#Index` is applied
+when SwiftData *creates a table*; lightweight migration adds columns and
+silently skips the indexes. So the four rollup tables created new have theirs
+and every pre-existing table gained an `accountId` predicate on every read with
+nothing backing it. A fresh install and an upgraded one get *different query
+plans*, which makes a performance report impossible to reproduce.
+
+`StoreIndexRepair` fixes this: raw `CREATE INDEX` at launch, `pacer_ix_`-named,
+skipping anything already covered by a leading prefix, never dropping. **Adding
+an `#Index` to a model is only half the change** — add the same entry to
+`StoreIndexRepair.desired` and to the `make verify-data` index check, or it
+exists only for people who install fresh. Check with
+`sqlite3 <store> "SELECT name FROM sqlite_master WHERE type='index'"`.
+
+**A conditional body cannot start its own `.task`.** SwiftUI does not run
+lifecycle modifiers on an `EmptyView`, so a view whose body is `if let x { … }`
+with `.task { load x }` attached to it never loads: the task waits for a view
+that only exists once the task has run. This is a live hazard for exactly the
+pattern this work introduced everywhere — replacing a `@Query` (data present on
+the first body evaluation) with `@State` + a keyed fetch. Wrap the content in a
+real container before attaching the modifiers. It cost the dashboard's
+"via oauth · 1m ago" chip, which was simply absent for the whole branch.
+
+**Scoping is not finished until the *live* probes are scoped.** The rollups
+were the visible half. The invisible half is every "newest row in the table"
+fetch — last turn, last session, last sample — which under a scope reports
+whoever wrote last. The Now tile read "Nothing running." and "Last activity 15s
+ago" at the same time, one from scoped hourly rows and the other from the other
+account's newest turn, with a "live" chip from a third unscoped probe. Grep for
+`FetchDescriptor<TokenSample>` / `<SessionInfo>` before believing a surface is
+scoped.
+
+**A donut's legend and its hover index must walk one array.** Three cards had a
+metric picker (or a fixed metric) on the chart and a *separate* sort control on
+the table beside it, and took `rows.prefix(n)` from the table's order — so
+"Top projects" listed five arbitrary projects and hovering a wedge named the
+wrong model. Same class: a bar whose length is one metric under a heading that
+names another (History's "Heaviest token days" drew cost).
+
+**A view that reaches for `PacerStore.sharedModelContainer()` bypasses
+screenshot mode.** Screenshot mode renders a synthetic fixture into an
+in-memory container and promises never to touch the user's data; nothing
+installs that container as the shared one, so a view asking the process for the
+shared container reaches straight past the fixture into the real store.
+`PaceChartCard` did, which meant the README's pace chart was drawn from real
+rate-limit history while every number beside it came from the fixture — real
+data in a public repo, and a screenshot that could not render the same twice.
+Use `modelContext.container`: identical in the running app, correct everywhere
+else.
+
+**Tests write to the machine's real App Group suite.** `PacerPreferences.store`
+resolves to the live group container in the test process too, so a test that
+sets a scope leaves a fixture id where the running app reads it. Capture and
+restore, and mark the suite `.serialized` — parallel tests otherwise clobber
+each other's restore.
+
+## Sharing the usage endpoint with cswap
+
+The last thing fixed on this branch, and the one with the most misdiagnoses per
+line of code. Worth reading before touching `OAuthPoller` or the scheduler.
+
+**The endpoint's budget is per token.** Not per IP, not per account. Confirmed
+from both sides: Pacer's 429s only ever landed on the one credential it shared
+with cswap, while five Claude Desktop tokens for the *other* account, polled
+twelve times as often, never failed once. Any fix that throttles by account is
+solving the wrong problem — one was written and reverted.
+
+**cswap holds the same tokens.** It swaps Claude Code's keychain credential and
+parks the others as `Claude Code-credentials-<suffix>`. Both are lanes in
+Pacer's pool. Claude Desktop's tokens are separate credentials with separate
+budgets and cswap never touches them — `sharesBudgetWithSwitcher` is that
+distinction, and getting it wrong stamps every lane of an account with one
+timestamp and collapses the multi-token stagger that makes the fast cadence
+possible. That happened; the work account's refresh went from ~50 s to ~5 min.
+
+**Two polite clients are still over budget.** Each keeping to one request per
+five minutes on one token is two requests per five minutes. Observed: Pacer at
+14:45:40 (fine), 14:50:52 (429), 14:55:52 (429) — its own cadence, exactly —
+while cswap sat at `lastError: http-429` for fifty minutes and the signed-in
+account's reading aged from 0.4 to 12.4 minutes. Neither client was
+misbehaving alone.
+
+**The thing that made it invisible: `fetchedAt` only moves on success.** Pacer
+read that field alone, so a cswap stuck retrying every six minutes looked
+completely idle, and Pacer scheduled straight into it. `lastAttemptAt` is in the
+same file and says exactly when it last asked. Read both; take the later.
+
+**Three fixes that looked right and were not**, in the order I tried them:
+
+1. *Poll at the midpoint between cswap's polls.* Rejected — it discards the
+   lane-count and backoff logic the scheduler already does well. Feed the
+   external schedule into the existing rules instead.
+2. *Only install the guard when a cswap reading is ingested.* Deadlock: a
+   reading appears only when cswap succeeds, and it could not succeed while
+   Pacer was crowding it. Apply schedule facts unconditionally; only *recording
+   a sample* needs the data to be new.
+3. *Stop believing cswap's attempts once it has gone ten minutes without a
+   success.* Backwards. The requests are real whether or not they succeed, and
+   polling into them is what keeps a throttled token throttled. The bound
+   belongs on Pacer's own staleness — `externalYieldMax`, 15 min, after which
+   Pacer polls the lane itself regardless. One probe per fifteen minutes is far
+   under budget, so it cannot perpetuate a throttle.
+
+**`lastPolledAt` means Pacer's own poll.** An earlier version folded cswap's
+activity into it. That loses the distinction the probe floor needs, leaks one
+credential's external activity onto the endpoint-cadence gate every lane of the
+account shares, and gets persisted, so a restart inherits it.
+`externalLastPollAt` is the separate fact.
+
+**The secondary sweep is a second caller and had a partial copy of the rule.**
+`dueSecondaryLaneIndex` checked cooldown, Pacer's own interval, and an
+announced *future* external request — but nothing about requests already made.
+That path is where the collisions actually were: it polls the account you are
+not signed into, whose credential is exactly the one cswap has parked. Both
+callers now go through `OAuthPollScheduler.readyAt(_:interval:now:)`.
+
+**How to watch it.** `~/.claude-swap-backup/cache/usage.json` has per-account
+`fetchedAt` / `lastAttemptAt` / `nextPollAt` / `lastError`; Pacer's newest row
+per account is `ZRATELIMITSAMPLE` with `ZSOURCE` (`oauth` = Pacer polled,
+`cswap` = read from the cache); 429s are in `~/Library/Logs/Pacer/Pacer.err.log`
+as `[OAuthPoller] rate-limited`. Sampling all three together every 30 s is what
+made the diagnosis obvious after several wrong ones from static snapshots.
+Recovery looks like a `cswap` reading appearing for the account Pacer had been
+starving, then both staying fresh.
+
+**Give it time before drawing conclusions.** A burst keeps a token throttled
+for ~35 minutes, and both clients' retries inside that window extend it. A
+snapshot taken during the penalty looks identical whether or not the fix works.

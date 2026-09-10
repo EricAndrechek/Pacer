@@ -118,6 +118,57 @@ check "hourly cost equals daily"  "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOS
 check "project cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")"
 check "session cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")"
 
+# The per-account rollup is a second view of the same samples, kept so the app
+# can show one account or all of them without recomputing. Two rollups over one
+# source can drift, so they are checked against each other: every account row
+# must sum to its DailyAggregate counterpart, to the cent and to the token.
+printf '\n%s==>%s Per-account rollup — must sum to the global one\n' "$B" "$X"
+check "account tokens equal daily" 0 "$(q "
+  WITH a AS (SELECT ZDATE d, ZMODEL m, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTDAILYAGGREGATE GROUP BY d, m)
+  SELECT COUNT(*) FROM a JOIN ZDAILYAGGREGATE g ON g.ZDATE=a.d AND g.ZMODEL=a.m
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account cost equals daily" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZDAILYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTDAILYAGGREGATE")"
+check "no account row without a daily row" 0 "$(q "
+  SELECT COUNT(*) FROM (SELECT DISTINCT ZDATE d, ZMODEL m FROM ZACCOUNTDAILYAGGREGATE)
+  WHERE NOT EXISTS (SELECT 1 FROM ZDAILYAGGREGATE g WHERE g.ZDATE=d AND g.ZMODEL=m)")"
+check "account-hourly tokens equal hourly" 0 "$(q "
+  WITH a AS (SELECT ZDATE d, ZHOUR h, ZMODEL m, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTHOURLYAGGREGATE GROUP BY d, h, m)
+  SELECT COUNT(*) FROM a JOIN ZHOURLYAGGREGATE g
+    ON g.ZDATE=a.d AND g.ZHOUR=a.h AND g.ZMODEL=a.m
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account-hourly cost equals hourly" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZHOURLYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTHOURLYAGGREGATE")"
+# Turn counts, which the per-account hourly rollup only started carrying in
+# recompute version 15. It is checked because something *reads* it: the Now
+# tile gates its whole contents on it, and while it was silently 0 the tile
+# said "Nothing running." under every per-account scope.
+check "account-hourly turns equal hourly" "$(q "SELECT SUM(ZSAMPLECOUNT) FROM ZHOURLYAGGREGATE")" \
+  "$(q "SELECT SUM(ZSAMPLECOUNT) FROM ZACCOUNTHOURLYAGGREGATE")"
+# Tokens and cost only. Session and model COUNTS deliberately aren't checked:
+# a session spanning an account switch belongs to both accounts' sets and once
+# to the global one, so the per-account counts legitimately don't sum.
+check "account-project tokens equal project" 0 "$(q "
+  WITH a AS (SELECT ZPROJECTPATH p, ZDATE d, SUM(ZINPUTTOKENS) i, SUM(ZOUTPUTTOKENS) o
+             FROM ZACCOUNTPROJECTDAILYAGGREGATE GROUP BY p, d)
+  SELECT COUNT(*) FROM a JOIN ZPROJECTDAILYAGGREGATE g
+    ON g.ZPROJECTPATH=a.p AND g.ZDATE=a.d
+  WHERE g.ZINPUTTOKENS<>a.i OR g.ZOUTPUTTOKENS<>a.o")"
+check "account-project cost equals project" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")" \
+  "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZACCOUNTPROJECTDAILYAGGREGATE")"
+# A session spanning an account switch has real usage on both sides, so its
+# per-account rows SUM to the global row rather than partitioning it.
+check "account-session tokens equal session" 0 "$(q "
+  WITH a AS (SELECT ZSESSIONID s, SUM(ZCUMULATIVEINPUTTOKENS) i,
+                    SUM(ZCUMULATIVEOUTPUTTOKENS) o
+             FROM ZACCOUNTSESSIONINFO GROUP BY s)
+  SELECT COUNT(*) FROM a JOIN ZSESSIONINFO g ON g.ZSESSIONID=a.s
+  WHERE g.ZCUMULATIVEINPUTTOKENS<>a.i OR g.ZCUMULATIVEOUTPUTTOKENS<>a.o")"
+check "account-session cost equals session" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")" \
+  "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZACCOUNTSESSIONINFO")"
+
 # Two TokenSamples sharing a dedup key is the one thing the dedup guard exists
 # to prevent — it means the same turn was counted twice, inflating tokens and
 # cost for whatever day it lands on. Reported, never auto-repaired: raw samples
@@ -215,6 +266,56 @@ else
          "SELECT CAST(COALESCE(SUM(${dcol}),0) AS BIGINT) FROM turn ${a_where}" 2>/dev/null)"
   done
 fi
+
+# --- Rate-limit tables: every row scoped, nothing stranded -------------------
+#
+# Both of these caught a real bug the day per-account limits shipped.
+#
+# An unstamped row is invisible to every read: they all filter on `accountId`
+# now, so a row with none belongs to no account and simply stops existing.
+# `OAuthPoller.foldArchiveIntoLiveTables` adopts them into the active account
+# on launch; a non-zero count here means that pass is not running.
+#
+# A *recent* row still in the archive is the other half of the same pass. The
+# first real fold left 1,250 behind, which is four hours missing from the
+# chart and nothing on screen to suggest it. The window is `liveWindowDays`
+# (35) — anything older belongs in the archive and is not counted.
+printf '\n%s==>%s Rate-limit rows are account-scoped\n' "$B" "$X"
+rl_cut="strftime('%s','now','-35 days')-978307200"
+for t in ZRATELIMITSAMPLE:rate-limit ZUSAGELIMITSAMPLE:scoped-limit ZEXTRAUSAGESAMPLE:extra-usage; do
+  tbl="${t%%:*}"; name="${t##*:}"
+  check "every ${name} row carries an account" 0 \
+    "$(q "SELECT COUNT(*) FROM ${tbl} WHERE ZACCOUNTID IS NULL")"
+done
+check "no recent row left in the archive" 0 \
+  "$(q "SELECT COUNT(*) FROM ZACCOUNTUSAGEARCHIVE WHERE ZSAMPLEDAT >= ${rl_cut}")"
+
+# --- Indexes SwiftData declared but may not have built -----------------------
+#
+# `#Index` is applied when SwiftData *creates* a table. On an existing store,
+# lightweight migration adds the columns and silently skips the indexes — which
+# is how three tables that gained an `accountId` predicate on every read ended
+# up with no index on it, while the four tables created at the same time (and
+# therefore fresh) had theirs. `StoreIndexRepair` creates the missing ones at
+# launch; this is the check that it did.
+printf '\n%s==>%s Account indexes exist\n' "$B" "$X"
+for spec in \
+  ZRATELIMITSAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZRATELIMITSAMPLE:ZACCOUNTID,ZWINDOW,ZSAMPLEDAT \
+  ZUSAGELIMITSAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZUSAGELIMITSAMPLE:ZACCOUNTID,ZIDENTITY,ZSAMPLEDAT \
+  ZEXTRAUSAGESAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZTOKENSAMPLE:ZACCOUNTID,ZSAMPLEDAT \
+  ZACCOUNTSESSIONINFO:ZACCOUNTID,ZLASTSEENAT ; do
+  tbl="${spec%%:*}"; cols="${spec##*:}"
+  # An index covers the query if its leading columns match, whoever made it.
+  found=0
+  for idx in $(q "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='${tbl}'"); do
+    lead=$(q "SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info('${idx}') ORDER BY seqno)")
+    case "${lead}," in "${cols},"*) found=1; break;; esac
+  done
+  check "${tbl} indexed on ${cols}" 1 "$found"
+done
 
 printf '\n%s==>%s Store\n' "$B" "$X"
 printf '    %s rows · %s daily · %s hourly · %s project · %s sessions\n' \

@@ -288,6 +288,44 @@ import Testing
         #expect(latest.first?.isActive == true)
     }
 
+    /// Several poller lanes can belong to one account — one per token — and
+    /// each writes the same server-reported window within the same second.
+    /// A time-only filter turns each of those into its own pace column: the
+    /// dashboard drew four identical "Fable" cards beside one real one.
+    @MainActor
+    @Test func latestBatchKeepsOneRowPerIdentityWhenLanesOverlap() throws {
+        let container = try ModelContainer(
+            for: UsageLimitSample.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let context = ModelContext(container)
+
+        // Four lanes writing the same poll, jittered across one second — the
+        // exact shape seen in the store (08:21:29 ×2, 08:21:30 ×2).
+        let t0 = Date(timeIntervalSince1970: 1_752_000_000)
+        for offset in [0.0, 0.0, 1.0, 1.0] {
+            for l in parse(Self.realSample) {
+                context.insert(UsageLimitSample(
+                    from: l, sampledAt: t0.addingTimeInterval(offset), source: "oauth"))
+            }
+        }
+        try context.save()
+
+        let all = try context.fetch(FetchDescriptor<UsageLimitSample>())
+        #expect(all.count == 12)                   // every raw row retained
+
+        let latest = all.latestBatch()
+        #expect(latest.count == 3)                 // one per identity, not four
+        #expect(Set(latest.map(\.identity)).count == latest.count)
+        // The surviving row is the newest of its identity.
+        #expect(latest.allSatisfy { $0.sampledAt == t0.addingTimeInterval(1) })
+
+        // And the value-typed mirror the pace card actually reads.
+        let rows = all.map(\.scopedWindowRow).latestBatch()
+        #expect(rows.count == 3)
+        #expect(Set(rows.map(\.identity)).count == rows.count)
+    }
+
     @MainActor
     @Test func latestBatchEmptyWhenNoRows() throws {
         let empty: [UsageLimitSample] = []

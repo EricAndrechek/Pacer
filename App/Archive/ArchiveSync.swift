@@ -159,7 +159,7 @@ final class ArchiveSync {
         // called every one of them fine.
         let archived = try archive.outputByDedupKey(since: since)
 
-        var descriptor = FetchDescriptor<TokenSample>(
+        let descriptor = FetchDescriptor<TokenSample>(
             predicate: since.map { cutoff in
                 #Predicate<TokenSample> { $0.sampledAt >= cutoff }
             },

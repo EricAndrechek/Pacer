@@ -130,6 +130,17 @@ enum ScreenshotMode {
         // dormant one) and the live scoped windows offered in the Add list.
         // Writes only the `menubar-chips-*` shots (run with PACER_SCREENSHOT_DIR
         // → docs/mockups).
+        // Proof run for the multi-account menu bar: the popover grouped by
+        // account (concurrent mode), a status label carrying an account-pinned
+        // chip, and the Menu-bar settings card offering those chips in its Add
+        // list. Needs a fixture that is genuinely concurrent, which the README
+        // seed is not — see `seedConcurrentAccounts`.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_ACCOUNTS_ONLY"] == "1" {
+            await captureAccountMenuBarScenes(container: container)
+            log("account menu-bar screenshots complete")
+            return
+        }
+
         if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_CHIPS_ONLY"] == "1" {
             await captureMenuBarChips(container: container)
             log("menubar-chips screenshots complete")
@@ -233,6 +244,123 @@ enum ScreenshotMode {
         log("screenshots complete")
     }
 
+    /// The multi-account menu bar, in the mode that actually needs it.
+    ///
+    /// `AccountParallelism` reports `.concurrent` only for a session-mode
+    /// config root or genuinely overlapping activation spans, so this seeds an
+    /// overlap — two logins live at the same instant, which is what a user
+    /// running `cswap run` in two terminals has. Without it the popover
+    /// correctly shows one account and there is nothing to photograph.
+    @MainActor
+    private static func captureAccountMenuBarScenes(container: ModelContainer) async {
+        let ctx = ModelContext(container)
+        let now = Date()
+        // Overlapping spans: work live for two hours, personal starting an hour
+        // in and still open. That is the definition of concurrent.
+        ctx.insert(AccountActivation(
+            accountId: fixtureActiveAccountId, startedAt: now.addingTimeInterval(-7_200),
+            endedAt: nil, rootPath: nil, source: "screenshot"))
+        ctx.insert(AccountActivation(
+            accountId: fixtureOtherAccountId, startedAt: now.addingTimeInterval(-3_600),
+            endedAt: nil, rootPath: nil, source: "screenshot"))
+        try? ctx.save()
+
+        // A chip pinned to the account that is *not* signed in — the case the
+        // feature exists for, and the one a screenshot has to show.
+        let store = PacerPreferences.store
+        let previousChips = store.string(forKey: PacerSettings.Key.menuBarChips)
+        store.set("icon,five_hour_pct,account_pct:\(fixtureOtherAccountId)|five_hour",
+                  forKey: PacerSettings.Key.menuBarChips)
+        defer { store.set(previousChips, forKey: PacerSettings.Key.menuBarChips) }
+
+        await capture("accounts-menubar", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("accounts-menubar-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("accounts-menubar-settings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) { MenuBarSettingsMock() }
+    }
+
+    /// Fail the render when the fixture violates something the app relies on.
+    ///
+    /// Every drift in this harness has been the same shape: it re-implements
+    /// something the app already does — a width, a caption, a query, a scope
+    /// resolution — and the copy is the thing that rots. The copies get fixed
+    /// one at a time; this catches the *consequences* generically, so the next
+    /// one fails loudly instead of rendering a plausible-looking lie.
+    ///
+    /// This covers what is in the *store*. It does not, on its own, cover what
+    /// the harness then does with it: the share-card drift lived in a fetch of
+    /// its own, and the rows it mixed were individually fine. Verified by
+    /// re-breaking that bug — this check passed. `note(_:)` is the other half,
+    /// for series the harness assembles itself.
+    ///
+    /// Cheap enough to run every time — a few thousand rows, once per render.
+    /// Problems found while rendering, not while seeding — anything the
+    /// harness builds for itself can report here, and the run fails at the end.
+    nonisolated(unsafe) private(set) static var renderProblems: [String] = []
+
+    static func note(_ problem: String) {
+        renderProblems.append(problem)
+        log("⚠️ fixture: \(problem)")
+    }
+
+    /// Utilisation only climbs inside a cycle, so a series that falls is two
+    /// things spliced together — two accounts, or two cycles. The check the
+    /// share card needed and did not have.
+    static func checkMonotonic(_ points: [(Date, Double)], _ name: String) {
+        let ordered = points.sorted { $0.0 < $1.0 }
+        guard let drop = zip(ordered, ordered.dropFirst()).first(where: { $1.1 < $0.1 - 0.001 })
+        else { return }
+        note("\(name) falls from \(drop.0.1)% to \(drop.1.1)% — "
+             + "a cycle's utilisation only climbs, so this is two series spliced together")
+    }
+
+    @discardableResult
+    static func validateFixture(_ container: ModelContainer) -> Bool {
+        let ctx = ModelContext(container)
+        var problems: [String] = []
+
+        let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
+        let active = accounts.filter(\.isActive)
+        if accounts.count > 1, active.count != 1 {
+            problems.append("expected exactly one active account, found \(active.count)")
+        }
+
+        let rate = (try? ctx.fetch(FetchDescriptor<RateLimitSample>())) ?? []
+        // Matches `make verify-data`'s rule for the real store: a row nobody
+        // owns is invisible to every scoped read.
+        let orphans = rate.filter { $0.accountId == nil }.count
+        if !accounts.isEmpty, orphans > 0 {
+            problems.append("\(orphans) rate-limit row(s) carry no account")
+        }
+        // The active account must actually have history, or every scoped read
+        // — the engine's included — comes back empty and the scene renders
+        // "collecting…" with no forecast.
+        if let id = active.first?.id, !rate.contains(where: { $0.accountId == id }) {
+            problems.append("the active account has no rate-limit history")
+        }
+
+        // Utilisation only climbs inside a cycle. A series that goes *down* is
+        // two things spliced together — two accounts, or two cycles.
+        var byKey: [String: [(Date, Double)]] = [:]
+        for r in rate {
+            byKey["\(r.accountId ?? "-")|\(r.window)|\(r.resetsAt?.timeIntervalSince1970 ?? 0)",
+                  default: []].append((r.sampledAt, r.usedPercentage))
+        }
+        for (key, points) in byKey {
+            let ordered = points.sorted { $0.0 < $1.0 }
+            if let drop = zip(ordered, ordered.dropFirst()).first(where: { $1.1 < $0.1 - 0.001 }) {
+                problems.append("\(key) falls from \(drop.0.1)% to \(drop.1.1)% — "
+                                + "a cycle's utilisation only climbs")
+                break
+            }
+        }
+
+        for problem in problems { log("⚠️ fixture: \(problem)") }
+        return problems.isEmpty && renderProblems.isEmpty
+    }
+
     /// Render the branded 7-day pace share card the same way the in-app
     /// share action does (`App/Share`), from the seeded rate-limit trail,
     /// in light + dark. Documents the share feature and stays in sync via
@@ -242,8 +370,18 @@ enum ScreenshotMode {
     private static func captureShareCard(container: ModelContainer) {
         let ctx = ModelContext(container)
         let duration: TimeInterval = 7 * 86_400
+        // Scoped to one account, which it was not.
+        //
+        // The live share action builds its payload from the pace card's
+        // already-scoped per-account series, so it was never affected. This
+        // standalone fetch was not scoped, and the moment the fixture gained a
+        // second account it returned both — sorted by time, so the series
+        // alternated between one account's 62% and the other's 20% on every
+        // step. The card rendered as a red-and-green picket fence and the
+        // header quoted whichever account happened to sort last.
+        let account = fixtureActiveAccountId
         let descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.window == "seven_day" },
+            predicate: #Predicate { $0.window == "seven_day" && $0.accountId == account },
             sortBy: [SortDescriptor(\.sampledAt)]
         )
         guard let samples = try? ctx.fetch(descriptor),
@@ -259,6 +397,7 @@ enum ScreenshotMode {
         if points.last?.time != tailTime {
             points.append(.init(time: tailTime, value: latest.usedPercentage))
         }
+        checkMonotonic(points.map { ($0.time, $0.value) }, "share card 7-day series")
         let data = PaceChartView.Data(
             cycleStart: cycleStart, resetsAt: resets,
             durationSeconds: duration, points: points, usedPct: latest.usedPercentage
@@ -428,7 +567,8 @@ enum ScreenshotMode {
             // before/after evidence.
             ctx.insert(RateLimitSample(
                 sampledAt: now.addingTimeInterval(1), window: window,
-                usedPercentage: pct, resetsAt: reset, source: "oauth"))
+                usedPercentage: pct, resetsAt: reset, source: "oauth",
+                accountId: fixtureLimitAccount))
         }
         do { try ctx.save() } catch { log("⚠️ at-limit: seed save failed: \(error)") }
 
@@ -723,7 +863,7 @@ enum ScreenshotMode {
                 sampledAt: t, identity: "weekly_scoped|Fable|", kind: "weekly_scoped",
                 group: "weekly", label: "Fable", percent: pct, resetsAt: scopedReset,
                 severity: "normal", isActive: true,
-                modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: "Fable", surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             // The account-wide rows every poll also carries — they share the
             // row budget with the scoped window, which is what made a flat
             // fetch cap clip the scoped tail so aggressively.
@@ -731,12 +871,12 @@ enum ScreenshotMode {
                 sampledAt: t, identity: "session||", kind: "session", group: "session",
                 label: "All models", percent: 39, resetsAt: sessionReset.addingTimeInterval(jitter),
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             ctx.insert(UsageLimitSample(
                 sampledAt: t, identity: "weekly_all||", kind: "weekly_all", group: "weekly",
                 label: "All models", percent: 71, resetsAt: resetsAt.addingTimeInterval(jitter),
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             t = t.addingTimeInterval(interval)
             i += 1
         }
@@ -818,7 +958,7 @@ enum ScreenshotMode {
                     sampledAt: t, identity: identity, kind: kind, group: s.group,
                     label: s.model, percent: pct, resetsAt: reset,
                     severity: s.severity, isActive: s.active,
-                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             }
             var t = cycleStart
             var i = 0
@@ -859,20 +999,41 @@ enum ScreenshotMode {
         cornerRadius: CGFloat = 14,
         chrome: Bool = false,
         title: String = "",
+        /// What `navigationSubtitle` shows: the scoped account's 5h/7d.
+        subtitle: String = "",
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
         let margin: CGFloat = card ? 56 : 28
+        // Both engine keys. Views migrated to the per-scope `EngineHost`
+        // during the account work and the scenes only ever set the older
+        // single-engine key, so their forecasts quietly disappeared. Preseeded
+        // so the host uses this scene's already-fitted engine rather than
+        // warming a fresh one against a capture deadline.
+        let host = screenshotEngine.map {
+            EngineHost(container: container, preseeded: [.allAccounts: $0])
+        }
+        // The same string `navigationSubtitle` shows, from the same helper —
+        // the scoped account's 5h/7d, or the active login on a default scope.
+        let subtitle = chrome ? Self.windowSubtitle(container: container) : ""
         let inner = content()
             .modelContainer(container)
             .environment(\.usageEngine, screenshotEngine)
+            .environment(\.usageEngines, host)
             .frame(width: width, height: height)
 
         // Optional macOS window chrome — a titlebar with traffic-light
         // buttons above the content, so window scenes read like a real
         // app-window screenshot.
         let framed: AnyView = chrome
-            ? AnyView(VStack(spacing: 0) { MacWindowChrome(title: title); inner })
+            ? AnyView(VStack(spacing: 0) {
+                MacWindowChrome(title: title, subtitle: subtitle) {
+                    AccountScopeControl()
+                    ToolbarFreshness()
+                }
+                .modelContainer(container)
+                inner
+            })
             : AnyView(inner)
 
         let decorated: AnyView
@@ -1010,6 +1171,9 @@ extension ScreenshotMode {
         seedSessions(ctx, now: now)
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
+        seedAccounts(ctx, now: now)
+        seedSecondAccountLimits(ctx, now: now)
+        publishAccountTotals(now: now)
 
         ctx.insert(ClaudeCodeMeta(
             key: ClaudeCodeMetaKey.lastIncrementalScanAt,
@@ -1210,6 +1374,152 @@ extension ScreenshotMode {
     /// `now` lands partway through each cycle (≈60% of the 5-hour, ≈57%
     /// of the 7-day), and the final keyframe is the value the hero
     /// tiles / gauges / menu-bar readout display (42% and 61%).
+    /// The account id every synthetic rate-limit and scoped-limit row is
+    /// stamped with.
+    ///
+    /// The fixture used to leave these nil, which was fine while the reads
+    /// were unscoped and silently wrong once they were not: `LimitScope`
+    /// resolves an account for every limit read, so unstamped rows match
+    /// nothing and the pace card renders its cold-start empty state. That is
+    /// how the README's flagship dashboard screenshot came back saying
+    /// "Waiting for the first rate-limit reading".
+    ///
+    /// It follows whatever this process resolves rather than inventing an id,
+    /// because the surrounding views read the same scope — an id of our own
+    /// would only move the mismatch. `nil` (a machine that has never polled)
+    /// reads everything, which is the pre-account behaviour and still correct.
+    ///
+    /// The real store obeys this invariant too; `make verify-data` asserts it
+    /// ("every rate-limit row carries an account").
+    private static var fixtureLimitAccount: String? {
+        // The fixture's own active account, not whatever the renderer's
+        // defaults happen to hold.
+        //
+        // This used to read `UsageScope.storedLimitAccountId`, which is nil in
+        // the screenshot process — fine while the fixture had no `Account`
+        // rows, because an engine with no active account reads unscoped. The
+        // moment two accounts were seeded it stopped being fine: the engine
+        // scopes to `Account.activeId`, found the Acme row, and matched none
+        // of these nil-attributed samples. Every forecast vanished from the
+        // screenshots — no "≈52% at reset", no "limit in 2 days", no dashed
+        // projection lines — while the raw percentages carried on looking
+        // perfectly correct. Exactly the silent half of scoping the handoff
+        // doc warns about.
+        fixtureActiveAccountId
+    }
+
+    /// The account the fixture is signed into. Fictional, and obviously so.
+    static let fixtureActiveAccountId = "acct-acme-0000-0000-000000000001"
+    static let fixtureOtherAccountId = "acct-globex-0000-0000-00000000002"
+
+    /// Two accounts, because one is the case where the account UI is invisible.
+    ///
+    /// The pace card's per-account headers and the toolbar's
+    /// `AccountScopeControl` both render only
+    /// when `accounts.count > 1` — correctly, since a single-account user
+    /// should not be shown a switcher. But the fixture created no `Account`
+    /// rows at all, so every committed screenshot showed the app as if
+    /// multi-account support did not exist. The headline feature was missing
+    /// from its own README.
+    ///
+    /// Names are fictional and obviously so. Rate-limit and usage rows stay
+    /// attributed as they were: the scope defaults to "all accounts", so the
+    /// numbers on screen are unchanged, and only the account surfaces appear.
+    /// The active account's 5h/7d, formatted by `ContentView` itself.
+    @MainActor
+    private static func windowSubtitle(container: ModelContainer) -> String {
+        let ctx = ModelContext(container)
+        let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
+        return ContentView.windowSubtitle(
+            for: accounts.first { $0.isActive } ?? accounts.first)
+    }
+
+    /// Rate-limit history for the account that is *not* signed in.
+    ///
+    /// "All accounts" draws a pace column set per account, and without this the
+    /// second account renders "resets unknown / collecting…" — which is what a
+    /// never-polled account genuinely looks like, but not what a user with two
+    /// live accounts sees. Lower and flatter than the active account's, because
+    /// it is the one being used less.
+    private static func seedSecondAccountLimits(_ ctx: ModelContext, now: Date) {
+        let fiveHour = WindowSpec(
+            window: "five_hour",
+            resetsAt: now.addingTimeInterval(3 * 3_600),
+            duration: 5 * 3_600,
+            keyframes: [(0, 0), (0.15, 9), (0.30, 17), (0.45, 26),
+                        (0.55, 34), (0.62, 41), (0.66, 47)])
+        let sevenDay = WindowSpec(
+            window: "seven_day",
+            resetsAt: now.addingTimeInterval(4 * 86_400),
+            duration: 7 * 86_400,
+            keyframes: [(0, 0), (0.12, 6), (0.25, 12), (0.36, 17),
+                        (0.45, 21), (0.52, 26), (0.57, 30)])
+        let interval: TimeInterval = 5 * 60
+        var t = min(fiveHour.cycleStart, sevenDay.cycleStart)
+        var last: [String: Double] = [:]
+        while t <= now {
+            for spec in [fiveHour, sevenDay] where t >= spec.cycleStart {
+                let nowFrac = now.timeIntervalSince(spec.cycleStart) / spec.duration
+                let frac = min(nowFrac, max(0, t.timeIntervalSince(spec.cycleStart) / spec.duration))
+                var pct = interpolateKeyframes(spec.keyframes, at: frac)
+                pct = max(last[spec.window] ?? 0, min(99, pct))
+                last[spec.window] = pct
+                ctx.insert(RateLimitSample(
+                    sampledAt: t, window: spec.window, usedPercentage: pct,
+                    resetsAt: spec.resetsAt, source: "oauth",
+                    accountId: fixtureOtherAccountId))
+            }
+            t = t.addingTimeInterval(interval)
+        }
+    }
+
+    /// Turn counts and date spans, which the pace card's per-account header
+    /// shows beside the plan. Normally published by a background pass that the
+    /// renderer never runs.
+    @MainActor
+    private static func publishAccountTotals(now: Date) {
+        let cal = Calendar.current
+        AccountTotalsStatus.shared.publish([
+            AccountTotals(accountId: fixtureActiveAccountId, turns: 18_402,
+                          firstTurnAt: cal.date(byAdding: .day, value: -161, to: now),
+                          lastTurnAt: now),
+            AccountTotals(accountId: fixtureOtherAccountId, turns: 2_137,
+                          firstTurnAt: cal.date(byAdding: .day, value: -38, to: now),
+                          lastTurnAt: cal.date(byAdding: .minute, value: -25, to: now)),
+        ], at: now)
+    }
+
+    private static func seedAccounts(_ ctx: ModelContext, now: Date) {
+        let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
+            // Distinct local parts on purpose: `Account.shortLabel` is the
+            // email's local part, so "you@acme" and "you@globex" both render
+            // as "you" and the two accounts become indistinguishable in every
+            // header that uses it.
+            (fixtureActiveAccountId, "work@acme.example",
+             "Acme's Organization", true, 32, 62),
+            (fixtureOtherAccountId, "personal@globex.example",
+             "Globex's Organization", false, 47, 30),
+        ]
+        for a in accounts {
+            ctx.insert(Account(
+                id: a.id,
+                organizationId: a.id,
+                displayName: Account.defaultName(forOrg: a.id, subscriptionType: "max"),
+                isActive: a.active,
+                firstSeenAt: now.addingTimeInterval(-90 * 86_400),
+                lastSeenAt: a.active ? now : now.addingTimeInterval(-25 * 60),
+                subscriptionType: "max",
+                emailAddress: a.email,
+                organizationName: a.org,
+                latestFiveHourPct: a.five,
+                latestFiveHourResetsAt: now.addingTimeInterval(2 * 3_600),
+                latestSevenDayPct: a.seven,
+                latestSevenDayResetsAt: now.addingTimeInterval(2 * 86_400),
+                latestPolledAt: a.active ? now.addingTimeInterval(-40)
+                                         : now.addingTimeInterval(-25 * 60)))
+        }
+    }
+
     private static func seedRateLimits(_ ctx: ModelContext, now: Date) {
         // 5-hour: a steady, near-linear climb with a recent uptick, ending
         // ~32%. In real data the 5-hour window is rarely stressed (it
@@ -1234,8 +1544,18 @@ extension ScreenshotMode {
             window: "seven_day",
             resetsAt: now.addingTimeInterval(3 * 86_400),
             duration: 7 * 86_400,
+            // The last few keyframes are deliberately steep. The forecast is
+            // fitted from the recent slope, and this window is the one that
+            // demonstrates the *escalated* caption — "limit in 2 days" with a
+            // red projection crossing 100% — which is the single most useful
+            // thing the pace card says and the reason anyone opens it.
+            //
+            // It used to land there by luck: the projection came out at ~101%
+            // and tipped over, until a re-render put it at 97% and the whole
+            // state quietly disappeared from every screenshot. A demonstration
+            // that depends on rounding is not a demonstration.
             keyframes: [(0, 0), (0.08, 14), (0.18, 29), (0.26, 34),
-                        (0.36, 36), (0.46, 39), (0.52, 50), (0.55, 57), (0.57, 62)]
+                        (0.36, 36), (0.46, 39), (0.52, 50), (0.55, 58), (0.57, 65)]
         )
 
         // Walk a single 5-minute grid (the real OAuth poll cadence, which
@@ -1259,7 +1579,8 @@ extension ScreenshotMode {
                 last[spec.window] = pct
                 ctx.insert(RateLimitSample(
                     sampledAt: t, window: spec.window, usedPercentage: pct,
-                    resetsAt: spec.resetsAt, source: "oauth"
+                    resetsAt: spec.resetsAt, source: "oauth",
+                    accountId: fixtureLimitAccount
                 ))
             }
             t = t.addingTimeInterval(interval)
@@ -1283,6 +1604,14 @@ extension ScreenshotMode {
     /// windows in play. (model, target%, active/in-effect, severity.) The
     /// default README seed opts into just one of these (a single "Fable" cap)
     /// so the dashboard pace grid reads uncluttered — see `seed(into:)`.
+    ///
+    /// **These are deliberately unreal and must not reach `docs/screenshots`.**
+    /// Anthropic reports exactly one per-model window today; the extra caps
+    /// exist only to put several windows in play for a layout proof, and they
+    /// go to `docs/mockups` (untracked apart from two issue-125 images). A
+    /// committed screenshot is a claim about what a user gets — one of these
+    /// sets did reach `scoped-firstclass-widget.png` and advertised Haiku,
+    /// Opus and Sonnet caps that do not exist.
     private static let mockupScopedWindows:
         [(model: String, target: Double, active: Bool, severity: String)] = [
             ("Haiku",  93, true,  "warning"),
@@ -1310,7 +1639,7 @@ extension ScreenshotMode {
                 sampledAt: now, identity: "\(a.kind)||", kind: a.kind, group: a.group,
                 label: "All models", percent: a.pct, resetsAt: a.reset,
                 severity: "normal", isActive: false,
-                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth"))
+                modelId: nil, modelDisplayName: nil, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
         }
 
         // Scoped per-model weekly windows — the first-class pace columns.
@@ -1325,7 +1654,7 @@ extension ScreenshotMode {
                     sampledAt: t, identity: identity, kind: "weekly_scoped", group: "weekly",
                     label: s.model, percent: pct, resetsAt: weeklyReset,
                     severity: s.severity, isActive: s.active,
-                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth"))
+                    modelId: nil, modelDisplayName: s.model, surface: nil, source: "oauth", accountId: fixtureLimitAccount))
             }
             var t = cycleStart
             var i = 0
@@ -1509,26 +1838,91 @@ private struct CollectionEditorShowcase: View {
     }
 }
 
-private struct MacWindowChrome: View {
+/// A stand-in for the title bar, because the app does not own one.
+///
+/// `.navigationTitle`, `.navigationSubtitle` and `.toolbar { }` are
+/// instructions to AppKit, which draws the bar in a real window's frame view.
+/// There is no app-side code to reuse here — only a bar to approximate — and
+/// an approximation drifts: this one centred the title, omitted the subtitle
+/// and drew "All accounts" beside a glyph the real toolbar shows alone.
+///
+/// It was measured, not assumed. A titled `NSWindow` hosting `ContentView`
+/// off-screen *does* get the real thing — `title=Dashboard`,
+/// `subtitle=5h 32% • 7d 62%`, a live `NSToolbar` with four items — and its
+/// frame view captures without ever going on screen. Two things stopped it
+/// replacing this outright: the traffic lights render grey because the window
+/// never becomes key, and making it key means activating the app, which
+/// AGENTS.md forbids; and `.primaryAction` items do not take their trailing
+/// placement in a hand-built window. Tracked as a follow-up.
+///
+/// So: everything the app *does* own is the real thing — the toolbar items are
+/// the live views, and the subtitle comes from `ContentView.windowSubtitle`.
+/// Only what AppKit would draw is approximated here.
+///
+/// It also carries the **toolbar**, which is the only way those controls reach
+/// a screenshot at all: the scenes render a SwiftUI view into an offscreen
+/// `NSHostingView`, and a `.toolbar { }` modifier needs a real window's toolbar
+/// to attach to. There isn't one, so every trailing toolbar item — the account
+/// switcher and the freshness pill both — silently rendered nowhere. The
+/// screenshots were not showing a different app; they were showing this app
+/// with its title bar amputated.
+///
+/// Hosting the real views here rather than drawing a mock-up of them keeps the
+/// image honest: if `AccountScopeControl` changes, so does the screenshot.
+private struct MacWindowChrome<Trailing: View>: View {
     let title: String
+    let subtitle: String
+    @ViewBuilder var trailing: Trailing
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 8) {
-                dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
-                dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
-                dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
-                Spacer()
-            }
+        HStack(spacing: 10) {
+            dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
+            dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
+            dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
+
+            // The split-view toggle AppKit puts beside the lights.
+            Image(systemName: "sidebar.leading")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 6)
+
+            // Title and subtitle are LEADING and stacked — a
+            // `NavigationSplitView` detail title is not centred, and the
+            // subtitle under it is where `navigationSubtitle` puts the
+            // active account's 5h/7d. Centring it and dropping the subtitle
+            // made these screenshots visibly not the app.
             if !title.isEmpty {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.leading, 8)
             }
+
+            Spacer(minLength: 12)
+
+            // `.iconOnly` because that is what a real macOS toolbar does to a
+            // `Label`, and outside one SwiftUI defaults to title-and-icon. The
+            // first version of this let that default stand and drew "All
+            // accounts" beside the glyph — text the actual title bar never
+            // shows. A screenshot has to be the app, not a more legible
+            // version of it.
+            //
+            // `fixedSize` because a `Menu` in a plain HStack takes all the
+            // width it is offered; without it the control spanned the bar.
+            trailing
+                .labelStyle(.iconOnly)
+                .controlSize(.small)
+                .fixedSize()
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)
-        .frame(height: 40)
+        .frame(height: 52)
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
@@ -1559,7 +1953,9 @@ private struct MenuBarExperience: View {
             .environment(\.colorScheme, .dark)   // light chips on the dark bar
 
             MenuStatusContent()
-                .frame(width: 300)
+                // Deliberately not a width of its own: `MenuStatusContent`
+                // sets `popoverWidth`, and a second number here only ever
+                // drifts from it.
                 .background(Color(nsColor: .windowBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
@@ -1697,7 +2093,12 @@ private struct ScopedFirstClassWidgetGallery: View {
                 PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
                                     forcedFamily: .systemLarge)
             }
-            tile(w: 340, h: 384) {
+            // Shorter, because with one row of rings it has no use for the
+            // pace tile's height and a card two-thirds empty reads as one that
+            // failed to load. The widget itself is unchanged — a real
+            // `systemLarge` is whatever size the OS gives it; this is the
+            // mockup showing the card at the size its content wants.
+            tile(w: 340, h: 206) {
                 PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
                                      forcedFamily: .systemLarge)
             }
@@ -1750,9 +2151,14 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
             sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
+            // Fable only. Anthropic reports exactly one per-model window
+            // today, so caps for Haiku/Opus/Sonnet beside it advertised a
+            // product nobody has. The grid is built for N of these; a
+            // committed screenshot is a claim about what you get.
             scoped: [
-                .init(key: "weekly_scoped|Haiku|", label: "Haiku", state: chartWindow(duration: 7 * 86_400, usedPct: 93, projectTo: 100), isActive: true),
-                .init(key: "weekly_scoped|Opus|",  label: "Opus",  state: chartWindow(duration: 7 * 86_400, usedPct: 84, projectTo: 97), isActive: false),
+                .init(key: fableKey, label: "Fable",
+                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71),
+                      isActive: true),
             ],
             primaryKey: "five_hour", secondaryKey: "seven_day"
         )
@@ -1782,11 +2188,11 @@ private enum ScreenshotEntries {
             date: now,
             fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
             sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
+            // See `paceChartScopedLarge`: one real per-model window, not four
+            // invented ones.
             scoped: [
-                .init(key: "weekly_scoped|Haiku|",  label: "Haiku",  usedPct: 93, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
-                .init(key: "weekly_scoped|Opus|",   label: "Opus",   usedPct: 84, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(key: "weekly_scoped|Fable|",  label: "Fable",  usedPct: 49, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
-                .init(key: "weekly_scoped|Sonnet|", label: "Sonnet", usedPct: 22, resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: false),
+                .init(key: fableKey, label: "Fable", usedPct: 49,
+                      resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
             ],
             primaryKey: "five_hour", secondaryKey: "seven_day"
         )

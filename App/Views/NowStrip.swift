@@ -50,21 +50,28 @@ struct NowStrip: View {
     private static let refreshInterval: TimeInterval = 1
     @Environment(\.modelContext) private var modelContext
 
-    @State private var todayAggregates: [DailyAggregate] = []
+    /// Normalised so the strip renders whichever table the scope selects.
+    /// Fetched rather than `@Query`-bound, so unlike the card views these
+    /// predicates are rebuilt on every refresh and pick up a scope change
+    /// without needing the scope threaded through an initialiser.
+    @State private var todayAggregates: [DailyRow] = []
+    @State private var scope = UsageScope.shared
     /// Hour buckets for "recent" activity — the two most-recent hour
     /// buckets approximate a rolling last-hour rate (between exactly 1h
     /// and ~2h of span). Cost is baked into HourlyAggregate at recompute
     /// time, so no per-render pricing lookups.
-    @State private var recentHourlyRows: [HourlyAggregate] = []
+    @State private var recentHourlyRows: [HourlyRow] = []
     /// Most-recent sample (any age) so the quiet state can say "last
-    /// activity 3h ago" instead of a flat "no samples".
-    @State private var latestSamples: [TokenSample] = []
+    /// activity 3h ago" instead of a flat "no samples". **This account's**
+    /// most recent — see `refresh`.
+    @State private var latestSampleAt: Date?
+    @State private var latestSampleModel: String?
     /// Most-recently-touched session, for the Now tile's session line.
-    @State private var latestSessions: [SessionInfo] = []
+    @State private var latestSessions: [SessionRow] = []
     @State private var extraUsages: [ExtraUsageSample] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
 
     init(onTodayTap: (() -> Void)? = nil, onSessionTap: ((String, String) -> Void)? = nil) {
         self.onTodayTap = onTodayTap
@@ -80,8 +87,18 @@ struct NowStrip: View {
         let cal = Calendar.current
         let todayString = TokenSample.formatDate(now)
 
-        todayAggregates = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
-            predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? []
+        let acct = scope.accountId
+        if let acct {
+            todayAggregates = ((try? modelContext.fetch(
+                FetchDescriptor<AccountDailyAggregate>(
+                    predicate: #Predicate<AccountDailyAggregate> {
+                        $0.date == todayString && $0.accountId == acct
+                    }))) ?? []).map(\.dailyRow)
+        } else {
+            todayAggregates = ((try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
+                predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? [])
+                .map(\.dailyRow)
+        }
 
         // Current hour bucket + the previous one, as a (date, hour) range with
         // the midnight-crossing leg. Built here so it follows the clock.
@@ -96,34 +113,72 @@ struct NowStrip: View {
                 $0.date == todayString
                 || ($0.date == yesterdayString && $0.hour >= lowestHour)
             }
-        recentHourlyRows = (try? modelContext.fetch(
-            FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? []
+        if let acct {
+            let scopedHourly: Predicate<AccountHourlyAggregate> =
+                todayString == yesterdayString
+                ? #Predicate<AccountHourlyAggregate> {
+                    $0.accountId == acct && $0.date == todayString && $0.hour >= lowestHour
+                  }
+                : #Predicate<AccountHourlyAggregate> {
+                    $0.accountId == acct
+                    && ($0.date == todayString
+                        || ($0.date == yesterdayString && $0.hour >= lowestHour))
+                  }
+            recentHourlyRows = ((try? modelContext.fetch(
+                FetchDescriptor<AccountHourlyAggregate>(predicate: scopedHourly))) ?? [])
+                .map(\.hourlyRow)
+        } else {
+            recentHourlyRows = ((try? modelContext.fetch(
+                FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? [])
+                .map(\.hourlyRow)
+        }
 
-        latestSamples = (try? modelContext.fetch(Self.latestSampleProbe)) ?? []
-        latestSessions = (try? modelContext.fetch(Self.latestSessionProbe)) ?? []
-        extraUsages = (try? modelContext.fetch(Self.recentExtraUsage)) ?? []
+        // Scoped, like everything above them. These two were plain
+        // newest-row-in-the-table probes, so under a per-account scope the tile
+        // read the *other* account's newest turn: it said "Nothing running."
+        // (correctly, from this account's hourly rows) directly above "Last
+        // activity 15s ago" and a "live" chip (both the other account's).
+        // Same class as the rate-limit reads — no crash, no empty state, just
+        // someone else's number.
+        let latest = (try? modelContext.fetch(Self.latestSampleProbe(account: acct)))?.first
+        latestSampleAt = latest?.sampledAt
+        latestSampleModel = latest?.model
+        if let acct {
+            latestSessions = ((try? modelContext.fetch(
+                Self.latestAccountSessionProbe(account: acct))) ?? []).map(\.sessionRow)
+        } else {
+            latestSessions = ((try? modelContext.fetch(Self.latestSessionProbe)) ?? [])
+                .map(\.sessionRow)
+        }
+        extraUsages = (try? modelContext.fetch(LimitScope.extraUsage(account: scope.limitAccountId, limit: 1))) ?? []
         scanMeta = (try? modelContext.fetch(Self.scanMetaProbe)) ?? []
     }
 
-    private static let latestSampleProbe: FetchDescriptor<TokenSample> = {
+    private static func latestSampleProbe(account: String?) -> FetchDescriptor<TokenSample> {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
+        if let account {
+            d.predicate = #Predicate<TokenSample> { $0.accountId == account }
+        }
         d.fetchLimit = 1
         return d
-    }()
+    }
 
-    private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
-        var d = FetchDescriptor<SessionInfo>(
+    private static func latestAccountSessionProbe(
+        account: String
+    ) -> FetchDescriptor<AccountSessionInfo> {
+        var d = FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate<AccountSessionInfo> { $0.accountId == account },
             sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
-    }()
+    }
 
-    private static let recentExtraUsage: FetchDescriptor<ExtraUsageSample> = {
-        var d = FetchDescriptor<ExtraUsageSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
+    private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
+        var d = FetchDescriptor<SessionInfo>(
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
@@ -164,13 +219,21 @@ struct NowStrip: View {
         cached = next
     }
 
+    /// This view's own engine — fitted to the account on screen, or to every
+    /// account. Not a filtered global answer: the projection, the pace ladder
+    /// and the track record all come out of a fit trained on *this* series.
     private func refreshEngine() async {
-        guard let engine else { return }
-        todayEOD = await engine.ask(.projectedCost(.today))
-        record = await engine.eveningTrackRecord()
-        let vsNow = await engine.ask(.paceVsNow)
-        paceVsNow = vsNow.isInsufficient ? nil : vsNow.value
-        let pace = await engine.ask(.pace)
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
+        let answers = await askEngine {
+            (eod: await engine.ask(.projectedCost(.today)),
+             record: await engine.eveningTrackRecord(),
+             vsNow: await engine.ask(.paceVsNow),
+             pace: await engine.ask(.pace))
+        }
+        todayEOD = answers.eod
+        record = answers.record
+        paceVsNow = answers.vsNow.isInsufficient ? nil : answers.vsNow.value
+        let pace = answers.pace
         pacePercentile = pace.isInsufficient ? nil : pace.value
         if let p = pacePercentile {
             heldLadder = IntelligenceFormatting.heldIndex(p, held: heldLadder)
@@ -196,7 +259,7 @@ struct NowStrip: View {
             s.costLastHour += row.totalCostUSD
             s.sampleCount += row.sampleCount
         }
-        s.lastSampleAt = latestSamples.first?.sampledAt
+        s.lastSampleAt = latestSampleAt
         return s
     }
 
@@ -219,6 +282,15 @@ struct NowStrip: View {
         }
         .onAppear { refreshFacts() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
+        // The scope is a refresh trigger. `refresh()` re-reads the scoped rows
+        // on its own second-by-second tick, but the tile renders `cached`, and
+        // that was only rebuilt on a scan cycle — so the numbers stayed the
+        // previous account's until an unrelated write happened to land.
+        .onChange(of: scope.accountId) { _, _ in
+            refresh()
+            refreshFacts()
+            Task { await refreshEngine() }
+        }
         .onChange(of: costModeRaw) { _, _ in
             Task { await SampleCostCache.reload() }
         }
@@ -232,7 +304,7 @@ struct NowStrip: View {
 
     /// The session counts as "running" when its last write is recent —
     /// same 10-minute freshness window the live indicator uses.
-    private var runningSession: SessionInfo? {
+    private var runningSession: SessionRow? {
         guard let s = latestSessions.first,
               Date().timeIntervalSince(s.lastSeenAt) < 600 else { return nil }
         return s
@@ -251,7 +323,11 @@ struct NowStrip: View {
             tapHelp: "Open this session's details",
             header: { freshnessChip(stats: s) }
         ) {
-            if s.sampleCount == 0 {
+            // Gated on whether anything was *spent* this hour, not on the
+            // turn count. The count is the more precise signal and it is back
+            // in the per-account rollup — but a tile that goes blank the moment
+            // one rollup field is missing is a tile that will go blank again.
+            if s.tokensLastHour == 0 && s.costLastHour == 0 {
                 nowQuietState
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -277,7 +353,9 @@ struct NowStrip: View {
                             .truncationMode(.middle)
                             .help("Session total \(pacerCostExact(session.cumulativeCostUSD)) since \(session.firstSeenAt.formatted(date: .omitted, time: .shortened))")
                     } else {
-                        Text("\(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s") this hour")
+                        Text(s.sampleCount > 0
+                             ? "\(pacerTokens(s.tokensLastHour)) tokens · \(s.sampleCount) sample\(s.sampleCount == 1 ? "" : "s") this hour"
+                             : "\(pacerTokens(s.tokensLastHour)) tokens this hour")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -287,7 +365,7 @@ struct NowStrip: View {
         }
     }
 
-    private func sessionDuration(_ s: SessionInfo) -> String {
+    private func sessionDuration(_ s: SessionRow) -> String {
         let hours = s.lastSeenAt.timeIntervalSince(s.firstSeenAt) / 3600
         if hours < 1 {
             return "\(max(1, Int((hours * 60).rounded()))) min"
@@ -301,6 +379,7 @@ struct NowStrip: View {
             Chip(text: "live", systemImage: "bolt.fill", tint: .yellow, size: .compact)
         } else if let last = stats.lastSampleAt {
             Text("last sample \(pacerRelative(last))")
+                .help(pacerRelativeExact(last))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
@@ -308,12 +387,13 @@ struct NowStrip: View {
 
     @ViewBuilder
     private var nowQuietState: some View {
-        if let latest = latestSamples.first {
+        if let at = latestSampleAt, let model = latestSampleModel {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Nothing running.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Text("Last activity \(pacerRelative(latest.sampledAt)) — \(pacerModelDisplayName(latest.model)).")
+                Text("Last activity \(pacerRelative(at)) — \(pacerModelDisplayName(model)).")
+                    .help(pacerRelativeExact(at))
                     .font(.subheadline)
                     .foregroundStyle(.tertiary)
             }

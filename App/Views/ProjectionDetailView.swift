@@ -18,26 +18,44 @@ struct ProjectionCompareModal: View {
     /// generically by window key either way.
     let windowKey: String
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @Query private var samples: [RateLimitSample]
     @Query private var scopedSamples: [UsageLimitSample]
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
 
-    init(windowKey: String) {
+    /// The account whose actuals to plot, inherited from the card that opened
+    /// the modal — a drill-down that changed scope on the way in would be
+    /// showing a different question's answer.
+    let limitAccountId: String?
+
+    init(windowKey: String, limitAccountId: String? = nil) {
         self.windowKey = windowKey
+        self.limitAccountId = limitAccountId
         let cutoff = Date().addingTimeInterval(-8 * 86400)
+        let account = limitAccountId
         _samples = Query(
-            filter: #Predicate<RateLimitSample> {
-                $0.window == windowKey && $0.sampledAt >= cutoff
-            },
+            filter: account == nil
+                ? #Predicate<RateLimitSample> {
+                    $0.window == windowKey && $0.sampledAt >= cutoff
+                }
+                : #Predicate<RateLimitSample> {
+                    $0.window == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
+                },
             sort: \.sampledAt
         )
+        // Two accounts can report a scoped window under the *same* identity,
+        // so this one is not merely tidier — unscoped it would interleave two
+        // series into one line.
         _scopedSamples = Query(
-            filter: #Predicate<UsageLimitSample> {
-                $0.identity == windowKey && $0.sampledAt >= cutoff
-            },
+            filter: account == nil
+                ? #Predicate<UsageLimitSample> {
+                    $0.identity == windowKey && $0.sampledAt >= cutoff
+                }
+                : #Predicate<UsageLimitSample> {
+                    $0.identity == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
+                },
             sort: \.sampledAt
         )
     }
@@ -124,9 +142,19 @@ struct ProjectionCompareModal: View {
     }
 
     private func refresh() async {
-        guard let engine else { loaded = true; return }
-        trajectories = await engine.rateLimitTrajectories(windowKey: windowKey)
-        accuracy = await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(windowKey))
+        // This scope's engine, so the fan being compared was fitted to the
+        // actuals underneath it.
+        guard let engine = engines?.engine(forAccount: limitAccountId) else {
+            loaded = true
+            return
+        }
+        let key = windowKey
+        let computed = await askEngine { () -> ([BurnTrajectory.ScoredTrajectory], EngineSelfEval.Accuracy?) in
+            (await engine.rateLimitTrajectories(windowKey: key),
+             await engine.selfEvalAccuracy(surface: EngineSelfEval.rlSurface(key)))
+        }
+        trajectories = computed.0
+        accuracy = computed.1
         loaded = true
     }
 }
@@ -562,6 +590,7 @@ struct ProjectionDetailView: View {
                     Spacer()
                     if let crossAt = st.trajectory.crossesFullAt {
                         Text("limit \(pacerRelative(crossAt, style: .short))")
+                            .help(pacerRelativeExact(crossAt))
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
                     Text(st.medianAbsError.isFinite

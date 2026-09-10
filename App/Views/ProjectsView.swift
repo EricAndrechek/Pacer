@@ -16,6 +16,9 @@ import PacerUI
 /// `UserDefaults` under per-view keys so Models doesn't share state
 /// with Projects.
 struct ProjectsView: View {
+    /// Read here so a scope change re-runs the child initialiser — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
     @AppStorage("pacer.projects.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
@@ -80,6 +83,7 @@ struct ProjectsView: View {
         ) {
             ProjectsContent(
                 range: range,
+                scopeAccountId: scope.accountId,
                 sort: sort,
                 descending: sortDescending,
                 overviewMetric: overviewMetric,
@@ -216,7 +220,16 @@ enum ProjectMetric: String, CaseIterable, Identifiable {
 }
 
 private struct ProjectsContent: View {
-    @Query private var aggregates: [ProjectDailyAggregate]
+    @Query private var globalAggregates: [ProjectDailyAggregate]
+    /// The same rollup sliced to one account; `scope` picks which is read.
+    @Query private var scopedAggregates: [AccountProjectDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [any ProjectDailyReadable] {
+        scope.isAll ? globalAggregates : scopedAggregates
+    }
     /// Singleton-row probe that fires exactly once per completed scan
     /// cycle. Drives the cache refresh below — far cheaper than
     /// recomputing `allRows` on every SwiftData notification.
@@ -298,6 +311,7 @@ private struct ProjectsContent: View {
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: ProjectSort,
         descending: Bool,
         overviewMetric: ProjectMetric,
@@ -338,12 +352,21 @@ private struct ProjectsContent: View {
         self.onNewCollection = onNewCollection
         self.onManageCollections = onManageCollections
         self.onEditCollection = onEditCollection
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let cutoffString {
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.date >= cutoffString }
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                }
+            )
         } else {
-            _aggregates = Query()
+            _globalAggregates = Query()
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> { $0.accountId == acct }
+            )
         }
     }
 
@@ -622,22 +645,7 @@ private struct ProjectsContent: View {
         // / direction, or the view just appeared. Hover state changes
         // and chart re-renders no longer trigger the O(aggregates)
         // bucket+sort pipeline.
-        .onAppear { refreshAllRows() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
-        .onChange(of: rangeSince) { _, _ in refreshAllRows() }
-        .onChange(of: sort) { _, _ in refreshAllRows() }
-        .onChange(of: descending) { _, _ in refreshAllRows() }
-        .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
-        .onChange(of: collections.count) { _, _ in refreshAllRows() }
-        .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
-        // Probe count drives the badge state. Refreshing on count
-        // change picks up the very first probe write (first scan
-        // after install) plus any churn from the user clearing the
-        // probe table to force a re-walk.
-        .onChange(of: probes.count) { _, _ in refreshAllRows() }
-        // Search debounce: re-filter ~200ms after the last keystroke
-        // rather than on every character. Filtering is cheap relative
-        // to `refreshAllRows`, so a short debounce is enough.
+        .modifier(RefreshTriggers(owner: self))
         .onChange(of: searchText) { _, newValue in
             searchDebounceTask?.cancel()
             searchDebounceTask = Task { @MainActor in
@@ -647,6 +655,39 @@ private struct ProjectsContent: View {
                 refreshFilteredRows()
             }
         }
+    }
+
+    /// The cache-refresh triggers, lifted out of the body's modifier chain.
+    ///
+    /// Ten `.onChange` modifiers plus the `@Query` macros is past what the type
+    /// inferencer will do in reasonable time — adding the scope trigger tipped
+    /// it into a hard "unable to type-check" error. Splitting gives it two
+    /// small problems instead of one large one; the same fix `NotificationsHost`
+    /// needed.
+    struct RefreshTriggers: ViewModifier {
+        let owner: ProjectsContent
+        func body(content: Content) -> some View { owner.refreshTriggerModifiers(content) }
+    }
+
+    @ViewBuilder
+    fileprivate func refreshTriggerModifiers(_ base: some View) -> some View {
+        base
+            .onAppear { refreshAllRows() }
+            .onChange(of: scanMeta.first?.value) { _, _ in refreshAllRows() }
+            // The scope is a refresh trigger like any other. Without it the
+            // cache holds the previous account's numbers until the *next scan
+            // cycle* happens to fire — on an idle machine seven to ten seconds,
+            // which looks like a very slow render rather than a stale one.
+            .onChange(of: scope.accountId) { _, _ in refreshAllRows() }
+            .onChange(of: rangeSince) { _, _ in refreshAllRows() }
+            .onChange(of: sort) { _, _ in refreshAllRows() }
+            .onChange(of: descending) { _, _ in refreshAllRows() }
+            .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
+            .onChange(of: collections.count) { _, _ in refreshAllRows() }
+            .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
+            // Probe count drives the badge state — picks up the very first
+            // probe write, plus churn from a forced re-walk.
+            .onChange(of: probes.count) { _, _ in refreshAllRows() }
     }
 
     /// Submenu listing every other project as a possible canonical.
@@ -761,13 +802,27 @@ private struct ProjectsContent: View {
     /// app feels consistent.
     @State private var hoveredOverviewAngle: Double?
 
+    /// The five rows the donut draws: the largest by the metric the donut is
+    /// *showing*.
+    ///
+    /// This was `rows.prefix(5)` — the first five of the **table's** sort,
+    /// which is a separate control. Sorted by sessions, or by last-active, or
+    /// ascending by name, the card headed "Top projects" drew five arbitrary
+    /// projects and called them the top five.
+    private var overviewTop: [ProjectRow] {
+        let metric = overviewMetric
+        return Array(
+            rows.sorted { value(for: metric, in: $0) > value(for: metric, in: $1) }
+                .prefix(5))
+    }
+
     /// Cumulative-angle index over the top-5 rows for the active
     /// metric. Derived synchronously so a Projects-tab mount renders
     /// the donut at its real size on the first frame — the previous
     /// @State + .onAppear pattern showed an empty donut briefly, then
     /// snapped to the populated layout one tick later.
     private var overviewIndex: (cumulative: [(row: ProjectRow, max: Double)], total: Double) {
-        let top = Array(rows.prefix(5))
+        let top = overviewTop
         var running = 0.0
         var built: [(row: ProjectRow, max: Double)] = []
         built.reserveCapacity(top.count)
@@ -787,7 +842,7 @@ private struct ProjectsContent: View {
     }
 
     private var overviewCard: some View {
-        let top = Array(rows.prefix(5))
+        let top = overviewTop
         let index = overviewIndex
         let totalForMetric = index.total
         let hovered = hoveredOverviewProject(cumulative: index.cumulative)
@@ -1292,7 +1347,7 @@ private struct ProjectsContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 70, alignment: .trailing)
-            Text(pacerRelative(row.lastActive))
+            Text(pacerRelative(row.lastActive)).help(pacerRelativeExact(row.lastActive))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .trailing)

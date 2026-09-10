@@ -443,8 +443,14 @@ mkdir -p "${LOG_DIR}"
 
 if [ "${APP_WAS_RUNNING}" = "1" ] || [ "${RESTORE_APP}" = "1" ]; then
     echo
-    echo "==> Re-opening Pacer.app (was running before install)"
-    open "${INSTALLED_APP}"
+    echo "==> Re-opening Pacer.app in the background (was running before install)"
+    # -g: do NOT bring Pacer to the front. A dev install can run many times
+    # an hour while the maintainer is working in another app, and each
+    # foreground relaunch pulls focus off whatever they were doing and drags
+    # the window onto the active Space. Pacer is a background agent
+    # (LSUIElement) whose window is meant to sit where it was left, so
+    # activating it on relaunch was never right — it was just the default.
+    open -g "${INSTALLED_APP}"
 fi
 
 echo

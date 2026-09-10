@@ -109,10 +109,19 @@ public actor PricingTable {
             do {
                 modelsDevData = try await urlSession.data(from: ModelsDevCatalog.url).0
             } catch {
-                Log.write("PricingTable", "models.dev fetch failed (\(error)) — LiteLLM-only refresh")
+                Log.write("PricingTable", "models.dev fetch failed (\(error)) — skipping that source")
             }
-            let mergedJSON = Self.gapFill(
-                modelsDevData: modelsDevData,
+            var catwalkData: Data?
+            do {
+                catwalkData = try await urlSession.data(from: CatwalkCatalog.url).0
+            } catch {
+                Log.write("PricingTable", "catwalk fetch failed (\(error)) — skipping that source")
+            }
+            let mergedJSON = Self.reconcile(
+                secondaries: [
+                    ("models.dev", modelsDevData.map(ModelsDevCatalog.anthropicEntries(from:))),
+                    ("catwalk", catwalkData.map(CatwalkCatalog.anthropicEntries(from:))),
+                ],
                 into: rawJSON,
                 covered: liteDecoded
             )
@@ -152,24 +161,148 @@ public actor PricingTable {
     /// purpose: an async signature would send the non-Sendable JSON
     /// dictionaries across an isolation boundary. Best-effort: nil or
     /// unparseable data returns the input unchanged.
-    static func gapFill(
-        modelsDevData: Data?,
+    /// The four per-token cost fields consensus is taken over. Kept as one
+    /// list so a source that publishes three of them and omits the fourth
+    /// contributes to the three it has, rather than being discarded whole.
+    static let costFields = [
+        "input_cost_per_token",
+        "output_cost_per_token",
+        "cache_creation_input_token_cost",
+        "cache_read_input_token_cost",
+    ]
+
+    /// Reconcile every pricing catalog into one table by **per-field
+    /// consensus**, rather than letting whichever source is listed first win.
+    ///
+    /// Tiering — LiteLLM, then fill gaps from the others — can only ever add
+    /// a price nobody had. It cannot correct one that is wrong, and a wrong
+    /// price is indistinguishable from a right one downstream: it produces a
+    /// legal-looking total that nothing revisits. With three independent
+    /// catalogs there is enough information to do better, so a majority of
+    /// sources outvotes any single one, including the primary.
+    ///
+    /// Per *field*, not per model, because coverage is ragged: a catalog may
+    /// publish input and output but omit the cache tiers. Discarding its
+    /// whole entry over the fields it lacks would throw away votes on the
+    /// fields it has.
+    ///
+    /// Resolution, in order:
+    ///   - one source has the field → use it (nothing to reconcile);
+    ///   - a strict majority agrees → use the agreed value, even against
+    ///     LiteLLM, and log it when it overrides the primary;
+    ///   - no majority (every source differs) → keep the primary's value and
+    ///     log the split, because an arbitrary tie-break dressed up as
+    ///     consensus is worse than a known-provenance number.
+    ///
+    /// Values are compared at 1e-12 to keep JSON float noise from splitting
+    /// a unanimous vote three ways.
+    static func reconcile(
+        secondaries: [(name: String, entries: [String: [String: Any]]?)],
         into rawJSON: [String: Any],
         covered: [String: LiteLLMModelPricing]
     ) -> [String: Any] {
-        guard let modelsDevData else { return rawJSON }
-        let entries = ModelsDevCatalog.anthropicEntries(from: modelsDevData)
         var merged = rawJSON
         var added: [String] = []
-        for (id, entry) in entries where liteLLMMatch(id, in: covered) == nil {
-            merged[id] = entry
-            added.append(id)
+        var corrected: [String] = []
+        var split: [String] = []
+
+        // Every model id any secondary knows about.
+        var ids = Set<String>()
+        for source in secondaries { ids.formUnion(source.entries?.keys ?? [:].keys) }
+
+        for id in ids.sorted() {
+            // Which key in the primary table this id corresponds to, if any.
+            // Lookups are fuzzy (`anthropic/claude-x`, `claude-x-20260416`),
+            // so the vote has to be cast against the entry a lookup would
+            // actually find, not the bare id.
+            let primaryKey = liteLLMMatchKey(id, in: covered)
+            let primaryEntry = primaryKey.flatMap { merged[$0] as? [String: Any] }
+
+            var winner: [String: Any] = primaryEntry ?? [:]
+            var changedField = false
+
+            for field in costFields {
+                var votes: [(source: String, value: Double)] = []
+                if let v = (primaryEntry?[field] as? NSNumber)?.doubleValue, v > 0 {
+                    votes.append(("litellm", v))
+                }
+                for source in secondaries {
+                    if let v = (source.entries?[id]?[field] as? NSNumber)?.doubleValue, v > 0 {
+                        votes.append((source.name, v))
+                    }
+                }
+                guard !votes.isEmpty else { continue }
+
+                // Tally by value, tolerating float noise.
+                var tally: [(value: Double, count: Int)] = []
+                for vote in votes {
+                    if let i = tally.firstIndex(where: { abs($0.value - vote.value) < 1e-12 }) {
+                        tally[i].count += 1
+                    } else {
+                        tally.append((vote.value, 1))
+                    }
+                }
+                let best = tally.max { $0.count < $1.count }!
+                let isMajority = best.count * 2 > votes.count
+                let primaryValue = (primaryEntry?[field] as? NSNumber)?.doubleValue
+
+                if tally.count == 1 || isMajority {
+                    if let primaryValue, abs(primaryValue - best.value) >= 1e-12 {
+                        corrected.append("\(id).\(field): \(primaryValue) → \(best.value) (\(best.count)/\(votes.count))")
+                    }
+                    if winner[field] == nil
+                        || abs(((winner[field] as? NSNumber)?.doubleValue ?? .nan) - best.value) >= 1e-12 {
+                        winner[field] = best.value
+                        changedField = true
+                    }
+                } else if let primaryValue {
+                    // Every source differs. Keep provenance over arithmetic.
+                    split.append("\(id).\(field): \(votes.map { "\($0.source)=\($0.value)" }.joined(separator: " "))")
+                    winner[field] = primaryValue
+                } else {
+                    // No primary to fall back on; take the first source's
+                    // reading and say so.
+                    split.append("\(id).\(field): \(votes.map { "\($0.source)=\($0.value)" }.joined(separator: " "))")
+                    winner[field] = votes[0].value
+                    changedField = true
+                }
+            }
+
+            guard !winner.isEmpty else { continue }
+
+            // Context limits are informational; take them from whoever has
+            // one, preferring what is already there.
+            for field in ["max_input_tokens", "max_output_tokens"] where winner[field] == nil {
+                for source in secondaries {
+                    if let v = source.entries?[id]?[field] {
+                        winner[field] = v
+                        break
+                    }
+                }
+            }
+
+            if let primaryKey {
+                if changedField { merged[primaryKey] = winner }
+            } else {
+                merged[id] = winner
+                added.append(id)
+            }
         }
+
         if !added.isEmpty {
-            Log.write(
-                "PricingTable",
-                "models.dev gap-fill: +\(added.count) model(s) LiteLLM lacks: \(added.sorted().joined(separator: ", "))"
-            )
+            Log.write("PricingTable",
+                      "pricing: +\(added.count) model(s) no primary entry covered: "
+                        + added.joined(separator: ", "))
+        }
+        if !corrected.isEmpty {
+            Log.write("PricingTable",
+                      "pricing: consensus overrode the primary on \(corrected.count) field(s): "
+                        + corrected.joined(separator: "; "))
+        }
+        if !split.isEmpty {
+            Log.write("PricingTable",
+                      "pricing: no majority on \(split.count) field(s), kept primary: "
+                        + split.joined(separator: "; "))
         }
         return merged
     }
@@ -208,6 +341,29 @@ public actor PricingTable {
     /// covers BY ITSELF — including the fallback layer there would
     /// wrongly suppress gap-fill for any model the static table
     /// carries).
+    /// The *key* a lookup for `model` would resolve to, using exactly the
+    /// order `liteLLMMatch` uses. Consensus needs the key, not the value:
+    /// a vote has to be written back to the entry a lookup will actually
+    /// find, and the primary table keys entries under names Claude Code
+    /// never emits (`anthropic/claude-x`, `claude-x-20260416`).
+    static func liteLLMMatchKey(
+        _ model: String,
+        in table: [String: LiteLLMModelPricing]
+    ) -> String? {
+        if table[model] != nil { return model }
+        for prefix in providerPrefixes where table[prefix + model] != nil {
+            return prefix + model
+        }
+        let modelLower = model.lowercased()
+        for key in table.keys {
+            let keyLower = key.lowercased()
+            if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
+                return key
+            }
+        }
+        return nil
+    }
+
     static func liteLLMMatch(
         _ model: String,
         in table: [String: LiteLLMModelPricing]
@@ -322,7 +478,7 @@ public actor PricingTable {
     /// Per-entry decode of an already-parsed top-level dictionary —
     /// the shared tail of `decode(data:)` and the refresh merge path
     /// (which needs the parsed dictionary anyway for gap-filling).
-    private static func decode(json: [String: Any]) -> [String: LiteLLMModelPricing] {
+    static func decode(json: [String: Any]) -> [String: LiteLLMModelPricing] {
         var result: [String: LiteLLMModelPricing] = [:]
         result.reserveCapacity(json.count)
         let decoder = JSONDecoder()

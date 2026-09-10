@@ -22,10 +22,15 @@ public final class UsageLimitSample {
     // The read path fetches "the most recent poll's rows" (sort by
     // sampledAt desc, then take the top batch) and occasionally "one
     // identity's history over time". Both are served by these indexes.
+    // Both are now also filtered by `accountId` — two accounts can report a
+    // window under the same identity, so the account is part of every key
+    // that has to be selective.
     #Index<UsageLimitSample>(
         [\.sampledAt],
         [\.sampledAt, \.identity],
-        [\.identity, \.sampledAt]
+        [\.identity, \.sampledAt],
+        [\.accountId, \.sampledAt],
+        [\.accountId, \.identity, \.sampledAt]
     )
 
     public var sampledAt: Date
@@ -73,13 +78,15 @@ public final class UsageLimitSample {
     /// source can be distinguished.
     public var source: String
 
-    /// Which account (`Account.id`) this scoped sample belongs to. Optional +
-    /// additive: existing rows decode as nil (they were the single account's
-    /// history). The multi-account poller stamps this going forward, and the
-    /// active-account timeline swap (`OAuthPoller.swapActiveTimeline`) archives/
-    /// restores this table alongside `RateLimitSample`, so it holds exactly the
-    /// active account's scoped rows and two accounts that share a model identity
-    /// (e.g. both have a "Fable" weekly) never mix. See `Account`.
+    /// Which account (`Account.id`) this scoped sample belongs to.
+    ///
+    /// **Every read must filter on this**, and this table is where forgetting
+    /// hurts most: two accounts routinely report a window under the *same*
+    /// `identity` (both have a "Fable" weekly), so nothing else tells the rows
+    /// apart. An unscoped read does not look wrong — it interleaves two series
+    /// into one line. `LimitScope` exists so no call site has to remember.
+    ///
+    /// Optional only for the migration; see `RateLimitSample.accountId`.
     public var accountId: String?
 
     public init(
@@ -141,9 +148,20 @@ public final class UsageLimitSample {
     /// `UsageLimit.displayBand` so a persisted row colors identically to a
     /// live one.
     public var displayBand: UsageBand {
+        UsageBand.blending(percent: percent, severity: severityValue)
+    }
+}
+
+public extension UsageBand {
+    /// A percentage blended with a severity floor: whichever is worse wins.
+    ///
+    /// Shared rather than reimplemented per row type — the last time a colour
+    /// rule was copied instead of extracted, 60% rendered orange on one screen
+    /// and yellow on another.
+    static func blending(percent: Double, severity: UsageLimitSeverity) -> UsageBand {
         let byPercent = UsageBand(percentage: percent)
-        let floor = severityValue.floor
-        return Self.rank(byPercent) >= Self.rank(floor) ? byPercent : floor
+        let floor = severity.floor
+        return rank(byPercent) >= rank(floor) ? byPercent : floor
     }
 
     private static func rank(_ band: UsageBand) -> Int {
@@ -171,11 +189,20 @@ public extension Sequence where Element == UsageLimitSample {
         let all = Array(self)
         guard let newest = all.map(\.sampledAt).max() else { return [] }
         let cutoff = newest.addingTimeInterval(-tolerance)
-        return all
-            .filter { $0.sampledAt >= cutoff }
+        // One row per identity. Several poller lanes can belong to the same
+        // account and each writes the same window within the same second, so
+        // the time filter alone yields duplicates — see the `ScopedWindowRow`
+        // version for what that looked like on screen.
+        var best: [String: UsageLimitSample] = [:]
+        for row in all where row.sampledAt >= cutoff {
+            guard let existing = best[row.identity] else { best[row.identity] = row; continue }
+            if row.sampledAt > existing.sampledAt { best[row.identity] = row }
+        }
+        return best.values
             .sorted { a, b in
                 if a.isActive != b.isActive { return a.isActive && !b.isActive }
-                return a.percent > b.percent
+                if a.percent != b.percent { return a.percent > b.percent }
+                return a.identity < b.identity
             }
     }
 

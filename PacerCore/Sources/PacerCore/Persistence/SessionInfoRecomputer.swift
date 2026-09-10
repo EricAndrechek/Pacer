@@ -123,6 +123,22 @@ public final class SessionInfoRecomputer {
             if s.model != topModel { return false }
         }
 
+        // With more than one account, take the full recompute instead.
+        //
+        // The account rows cannot be maintained incrementally the way the
+        // global row can: `topModel` is chosen by comparing per-model totals,
+        // and an account's top model may differ from the session's (one
+        // account ran Opus, the other Sonnet), so the guard above proves
+        // nothing about either account's row. Re-deriving them here from a
+        // fetch was worse — that fetch does not see the cycle's *pending*
+        // inserts, so the account rows sat exactly one batch behind the
+        // global row. `verify-data` caught it at one session and $0.85.
+        //
+        // So the fast path is now conditional on there being one account,
+        // which is almost every install: those keep it, and anyone running
+        // two pays a full session recompute for correctness.
+        if try context.fetchCount(FetchDescriptor<Account>()) > 1 { return false }
+
         for s in pending {
             existing.cumulativeInputTokens += s.breakdown.inputTokens
             existing.cumulativeOutputTokens += s.breakdown.outputTokens
@@ -181,6 +197,9 @@ public final class SessionInfoRecomputer {
                 predicate: #Predicate<SessionInfo> { $0.sessionId == sid }
             )
         ).first
+        try syncAccountSessionRows(
+            context: context, sessionId: sid, samples: samples,
+            mode: mode, snapshot: snapshot)
         Self.applySamples(
             sessionId: sid,
             samples: samples,
@@ -211,87 +230,100 @@ public final class SessionInfoRecomputer {
             return
         }
 
-        var firstSeen: Date = .distantFuture
-        var lastSeen: Date = .distantPast
-        var inputTokens: Int64 = 0
-        var outputTokens: Int64 = 0
-        var cacheReadTokens: Int64 = 0
-        var cache5m: Int64 = 0
-        var cache1h: Int64 = 0
-        var cost: Double = 0
-        var modelTokens: [String: Int64] = [:]
-        var projectPath: String?
-        var ccVersion: String?
-        var firstModel: String?
-
-        for s in samples {
-            if s.sampledAt < firstSeen { firstSeen = s.sampledAt }
-            if s.sampledAt > lastSeen {
-                lastSeen = s.sampledAt
-                ccVersion = s.ccVersion ?? ccVersion
-                projectPath = s.projectPath ?? projectPath
-            }
-            inputTokens += s.breakdown.inputTokens
-            outputTokens += s.breakdown.outputTokens
-            cacheReadTokens += s.breakdown.cacheReadTokens
-            cache5m += s.breakdown.cacheCreation5mTokens
-            cache1h += s.breakdown.cacheCreation1hTokens
-            // Cost via the cost-mode-aware path. See same comment in
-            // ProjectAggregateRecomputer.applySamples — fall back to
-            // tokens × pricing when CC didn't store a cost.
-            let breakdown = TokenBreakdown(
-                inputTokens: s.breakdown.inputTokens,
-                outputTokens: s.breakdown.outputTokens,
-                cacheReadTokens: s.breakdown.cacheReadTokens,
-                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
-            )
-            cost += CostCalculator.cost(
-                storedCostUSD: s.sourceCostUSD,
-                model: s.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            let t = s.breakdown.inputTokens + s.breakdown.outputTokens
-            modelTokens[s.model, default: 0] += t
-            if firstModel == nil { firstModel = s.model }
-        }
-        let topModel = modelTokens.max { $0.value < $1.value }?.key
-            ?? firstModel
-            ?? ""
-        let path = projectPath ?? ""
+        var values = SessionRollupValues()
+        for sample in samples { values.add(sample, mode: mode, snapshot: snapshot) }
+        let path = values.projectPath ?? ""
 
         if let existing {
-            existing.firstSeenAt = firstSeen
-            existing.lastSeenAt = lastSeen
+            existing.firstSeenAt = values.firstSeenAt
+            existing.lastSeenAt = values.lastSeenAt
             existing.projectPath = path
-            existing.ccVersion = ccVersion
-            existing.cumulativeCostUSD = cost
-            existing.cumulativeInputTokens = inputTokens
-            existing.cumulativeOutputTokens = outputTokens
-            existing.cumulativeCacheReadTokens = cacheReadTokens
-            existing.cumulativeCacheCreation5mTokens = cache5m
-            existing.cumulativeCacheCreation1hTokens = cache1h
-            existing.topModel = topModel
+            existing.ccVersion = values.ccVersion
+            existing.cumulativeCostUSD = values.totalCostUSD
+            existing.cumulativeInputTokens = values.inputTokens
+            existing.cumulativeOutputTokens = values.outputTokens
+            existing.cumulativeCacheReadTokens = values.cacheReadTokens
+            existing.cumulativeCacheCreation5mTokens = values.cacheCreation5mTokens
+            existing.cumulativeCacheCreation1hTokens = values.cacheCreation1hTokens
+            existing.topModel = values.topModel
         } else {
             insert(SessionInfo(
                 sessionId: sessionId,
-                firstSeenAt: firstSeen,
-                lastSeenAt: lastSeen,
+                firstSeenAt: values.firstSeenAt,
+                lastSeenAt: values.lastSeenAt,
                 projectPath: path,
-                ccVersion: ccVersion,
-                cumulativeCostUSD: cost,
-                cumulativeInputTokens: inputTokens,
-                cumulativeOutputTokens: outputTokens,
-                cumulativeCacheReadTokens: cacheReadTokens,
-                cumulativeCacheCreation5mTokens: cache5m,
-                cumulativeCacheCreation1hTokens: cache1h,
-                topModel: topModel
+                ccVersion: values.ccVersion,
+                cumulativeCostUSD: values.totalCostUSD,
+                cumulativeInputTokens: values.inputTokens,
+                cumulativeOutputTokens: values.outputTokens,
+                cumulativeCacheReadTokens: values.cacheReadTokens,
+                cumulativeCacheCreation5mTokens: values.cacheCreation5mTokens,
+                cumulativeCacheCreation1hTokens: values.cacheCreation1hTokens,
+                topModel: values.topModel
             ))
         }
         stats.sessionsUpserted += 1
     }
+}
+
+/// Bring `AccountSessionInfo` for one session in line with its samples.
+///
+/// A conversation that spans an account switch has real usage on both sides,
+/// so this is a split rather than a partition: each row's `firstSeenAt` /
+/// `lastSeenAt` are that account's first and last turns *within* the session.
+func syncAccountSessionRows<S: AggregatableSample>(
+    context: ModelContext,
+    sessionId: String,
+    samples: [S],
+    mode: CostMode,
+    snapshot: PricingTable.Snapshot
+) throws {
+    var byAccount: [String: SessionRollupValues] = [:]
+    for sample in samples {
+        let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
+        var values = byAccount[key] ?? SessionRollupValues()
+        values.add(sample, mode: mode, snapshot: snapshot)
+        byAccount[key] = values
+    }
+
+    let sid = sessionId
+    let existing = try context.fetch(
+        FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate<AccountSessionInfo> { $0.sessionId == sid }
+        )
+    )
+    var rows: [String: AccountSessionInfo] = [:]
+    for row in existing { rows[row.accountId] = row }
+
+    for (accountId, values) in byAccount {
+        let path = values.projectPath ?? ""
+        if let row = rows.removeValue(forKey: accountId) {
+            row.firstSeenAt = values.firstSeenAt
+            row.lastSeenAt = values.lastSeenAt
+            row.projectPath = path
+            row.ccVersion = values.ccVersion
+            row.cumulativeCostUSD = values.totalCostUSD
+            row.cumulativeInputTokens = values.inputTokens
+            row.cumulativeOutputTokens = values.outputTokens
+            row.cumulativeCacheReadTokens = values.cacheReadTokens
+            row.cumulativeCacheCreation5mTokens = values.cacheCreation5mTokens
+            row.cumulativeCacheCreation1hTokens = values.cacheCreation1hTokens
+            row.topModel = values.topModel
+        } else {
+            context.insert(AccountSessionInfo(
+                accountId: accountId, sessionId: sessionId,
+                firstSeenAt: values.firstSeenAt, lastSeenAt: values.lastSeenAt,
+                projectPath: path, ccVersion: values.ccVersion,
+                cumulativeCostUSD: values.totalCostUSD,
+                cumulativeInputTokens: values.inputTokens,
+                cumulativeOutputTokens: values.outputTokens,
+                cumulativeCacheReadTokens: values.cacheReadTokens,
+                cumulativeCacheCreation5mTokens: values.cacheCreation5mTokens,
+                cumulativeCacheCreation1hTokens: values.cacheCreation1hTokens,
+                topModel: values.topModel))
+        }
+    }
+    for orphan in rows.values { context.delete(orphan) }
 }
 
 /// Off-main bulk recompute path for SessionInfo. Owns its own
@@ -324,6 +356,9 @@ actor SessionInfoBulkWorker {
         var processed = 0
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
+            try syncAccountSessionRows(
+                context: modelContext, sessionId: sid, samples: grouped[sid] ?? [],
+                mode: mode, snapshot: snapshot)
             SessionInfoRecomputer.applySamples(
                 sessionId: sid,
                 samples: grouped[sid] ?? [],

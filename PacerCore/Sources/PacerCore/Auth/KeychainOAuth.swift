@@ -109,6 +109,51 @@ public struct KeychainOAuth: Sendable {
     /// community statusline tool; Anthropic has not changed it in ~a year.
     public static let serviceName = "Claude Code-credentials"
 
+    /// Account switchers stash each login's credential beside the live one,
+    /// under `Claude Code-credentials-<suffix>`.
+    ///
+    /// This is what makes a *parked* account readable at all. Pacer captures an
+    /// account's Claude Code token while it is signed in, but that token expires
+    /// in hours and nothing can renew it: refreshing rotates it, which
+    /// invalidates both the live session and the copy the switcher holds to
+    /// switch back with. So without these, an account you switched away from
+    /// reports correctly for a few hours and then has no usable token at all.
+    ///
+    /// Reading the switcher's own stash sidesteps the whole problem — no
+    /// rotation, nothing else's copy invalidated, and it stays valid exactly as
+    /// long as the account does.
+    public static let parkedServicePrefix = "Claude Code-credentials-"
+
+    /// Service names of the parked credentials present right now.
+    ///
+    /// Attributes only — `kSecReturnData` is deliberately absent, so this
+    /// enumerates without unlocking anything and cannot raise a password
+    /// prompt. The prompt risk is in `read(service:)`, which is why callers
+    /// only reach for a parked credential when the one they hold has expired.
+    public static func parkedServiceNames() -> [String] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]]
+        else { return [] }
+        let names = items.compactMap { $0[kSecAttrService as String] as? String }
+            .filter { $0.hasPrefix(parkedServicePrefix) && $0 != serviceName }
+        return Array(Set(names)).sorted()
+    }
+
+    /// Read one parked credential by service name.
+    ///
+    /// Separate from `defaultRawReader` because that one carries the
+    /// per-user-versus-legacy `acct` fallback, which is a Claude Code 2.x
+    /// upgrade concern and does not apply to a switcher's own items.
+    public static func readParked(service: String) -> Result<Data, KeychainOAuthError> {
+        runSecurityCLI(args: ["find-generic-password", "-s", service, "-w"])
+    }
+
     /// The injection point. Returns the raw JSON blob bytes on success,
     /// or a typed error mapping known OSStatus values to our domain
     /// errors. Marked `@Sendable` because the poller actor calls it

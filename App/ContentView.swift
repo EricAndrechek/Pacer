@@ -69,32 +69,42 @@ struct ContentView: View {
         )
     }
 
-    /// Cap the @Query so the window-title computation doesn't fan
-    /// out to thousands of rows — we just need the most recent
-    /// sample per window.
-    @Query(ContentView.recentRateLimitDescriptor)
-    private var recentRateLimits: [RateLimitSample]
-
-    private static let recentRateLimitDescriptor: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 8
-        return d
-    }()
+    /// Every account's latest readings, cached on its own row by the poller.
+    ///
+    /// Reads `Account` rather than the last N `RateLimitSample`s, which is
+    /// what this used to do. With one account in the live table a
+    /// `fetchLimit: 8` reliably held the newest of each window; with every
+    /// account in it, the newest eight rows can be one login's and the
+    /// subtitle then reports the wrong account's pacing. Two rows of cached
+    /// latest-readings answer the question exactly, and cost nothing.
+    @Query private var accounts: [Account]
+    @State private var scope = UsageScope.shared
 
     /// Composed window subtitle — "5h 23% • 7d 41%". When dragged to
     /// the Dock or Cmd+Tab'd, macOS shows the title bar text; with
     /// this in place the user gets at-a-glance pacing without
     /// surfacing the dashboard.
-    private var windowSubtitle: String {
-        let fiveHour = recentRateLimits.first { $0.window == "five_hour" }
-        let sevenDay = recentRateLimits.first { $0.window == "seven_day" }
+    private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
+
+    /// Shared with the screenshot harness, which draws its own title bar and
+    /// would otherwise carry a second copy of this format — a copy that could
+    /// only ever drift away from what the window actually says.
+    static func windowSubtitle(for account: Account?) -> String {
+        guard let account else { return "" }
         let parts: [String?] = [
-            fiveHour.map { "5h \(Int($0.usedPercentage.rounded()))%" },
-            sevenDay.map { "7d \(Int($0.usedPercentage.rounded()))%" }
+            account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
+            account.latestSevenDayPct.map { "7d \(Int($0.rounded()))%" }
         ]
         return parts.compactMap { $0 }.joined(separator: " • ")
+    }
+
+    /// The account the window is showing limits for: the picked scope, else
+    /// the active login — and on a single-account install, the only one.
+    private var scopedAccount: Account? {
+        if let id = scope.limitAccountId, let match = accounts.first(where: { $0.id == id }) {
+            return match
+        }
+        return accounts.first { $0.isActive } ?? accounts.first
     }
 
     var body: some View {
@@ -109,6 +119,14 @@ struct ContentView: View {
                     // sidebar used to host this; moving it to the
                     // toolbar matches Linear / Reeder / Things / etc.
                     // and frees the sidebar to be all-navigation.
+                    // Account scope belongs in the toolbar: it governs every
+                    // view, and it sits beside the title bar's 5h/7d subtitle
+                    // — the ACTIVE account's — so it reads as qualifying
+                    // those numbers. Segmented, because every popup in this
+                    // app currently mis-anchors.
+                    ToolbarItem(placement: .primaryAction) {
+                        AccountScopeControl()
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         ToolbarFreshness()
                     }
@@ -441,7 +459,10 @@ private struct SidebarItem: View {
 /// Previously lived in the sidebar header; moved to the toolbar to
 /// match macOS-native chrome conventions (Linear / Reeder / Things
 /// all surface live state in their toolbars, not their sidebars).
-private struct ToolbarFreshness: View {
+/// Not `private` only so the screenshot harness can host it in its synthetic
+/// title bar — a `.toolbar` item cannot render into an offscreen `NSHostingView`
+/// on its own. See `MacWindowChrome`.
+struct ToolbarFreshness: View {
     // MARK: Why these are fetched on a timer instead of via `@Query`
     //
     // `@Query` re-evaluates whenever the model context changes, and Pacer's
@@ -463,8 +484,9 @@ private struct ToolbarFreshness: View {
     /// were `@Query` arrays, and everything downstream is unchanged.
     @State private var tokens: [TokenSample] = []
     @State private var rateLimits: [RateLimitSample] = []
-    @State private var sessions: [SessionInfo] = []
+    @State private var sessionRows: [SessionRow] = []
     @State private var scanMeta: [ClaudeCodeMeta] = []
+    @State private var scope = UsageScope.shared
     @Environment(\.modelContext) private var modelContext
 
     /// Re-read the four probes and recompute the pill's value.
@@ -472,28 +494,67 @@ private struct ToolbarFreshness: View {
     /// Each is capped (`fetchLimit = 1`, or a single keyed meta row) and
     /// `sampledAt` is indexed, so this is four index seeks — the problem was
     /// never the cost of one refresh, it was doing it on every save forever.
+    /// The 1 Hz tick. Only the *label* needs re-deriving each second — the
+    /// timestamps it formats change when the scanner writes, not when the
+    /// clock moves — so this reads the one cheap unpredicated row and rebuilds
+    /// the display; everything account-predicated is loaded on the write
+    /// signal instead. See `refreshScopedProbes`.
     @MainActor
     private func refresh() {
-        tokens = (try? modelContext.fetch(Self.tokenProbe)) ?? []
-        rateLimits = (try? modelContext.fetch(Self.rateLimitProbe)) ?? []
-        sessions = (try? modelContext.fetch(Self.sessionProbe)) ?? []
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
         scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))) ?? []
         display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
-    private static let tokenProbe: FetchDescriptor<TokenSample> = {
-        var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        d.fetchLimit = 1
-        return d
-    }()
+    /// The account-predicated probes, re-read on the write signal rather than
+    /// at 1 Hz.
+    ///
+    /// They used to be unpredicated and refreshed every second, which is what
+    /// the perf note above describes: CoreData served them from its row cache
+    /// for nothing *because* they were unpredicated. Predicating one at 1 Hz
+    /// measured as the second-heaviest thing on the main thread, which is why
+    /// the rate-limit probe already moved to this path.
+    ///
+    /// They now have to be predicated. The pill sits in the same window as a
+    /// scoped dashboard, and unscoped it reported the other account's
+    /// liveness: with work active and the window scoped to personal, the
+    /// toolbar said "● live" over a Now card that said "Nothing running."
+    /// Both were reading correctly; they were reading different accounts.
+    @MainActor
+    private func refreshScopedProbes() {
+        let account = UsageScope.shared.accountId
+        rateLimits = (try? modelContext.fetch(
+            LimitScope.rateLimits(account: UsageScope.shared.limitAccountId, limit: 1))) ?? []
+        tokens = (try? modelContext.fetch(Self.tokenProbe(account: account))) ?? []
+        if let account {
+            sessionRows = ((try? modelContext.fetch(
+                Self.accountSessionProbe(account: account))) ?? []).map(\.sessionRow)
+        } else {
+            sessionRows = ((try? modelContext.fetch(Self.sessionProbe)) ?? []).map(\.sessionRow)
+        }
+        display = Display(state: freshness, label: label, tooltip: tooltip)
+    }
 
-    private static let rateLimitProbe: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+    private static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
+        var d = FetchDescriptor<TokenSample>(sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
+        if let account {
+            d.predicate = #Predicate<TokenSample> { $0.accountId == account }
+        }
         d.fetchLimit = 1
         return d
-    }()
+    }
+
+    private static func accountSessionProbe(
+        account: String
+    ) -> FetchDescriptor<AccountSessionInfo> {
+        var d = FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate<AccountSessionInfo> { $0.accountId == account },
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
+        )
+        d.fetchLimit = 1
+        return d
+    }
 
     /// Most-recent session row for the live-activity overlay. Cap to
     /// 1 — same probe pattern as the other two; we only ever read
@@ -509,7 +570,7 @@ private struct ToolbarFreshness: View {
     /// the active state in the toolbar — recent/idle is covered by
     /// the regular freshness label.
     private var sessionActivity: LiveSessionActivity? {
-        sessions.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
+        sessionRows.first.map { LiveSessionActivity.from(lastSeen: $0.lastSeenAt) }
     }
 
     private var lastActivity: Date? {
@@ -578,7 +639,7 @@ private struct ToolbarFreshness: View {
     /// Long-form tooltip on hover so the user can see the exact
     /// timestamp without parsing the relative label.
     private var tooltip: String {
-        if sessionActivity == .active, let s = sessions.first {
+        if sessionActivity == .active, let s = sessionRows.first {
             let f = DateFormatter()
             f.dateStyle = .none
             f.timeStyle = .medium
@@ -608,7 +669,16 @@ private struct ToolbarFreshness: View {
         // The difference now is that this outer body runs on a 1 s timer
         // rather than on every store save.
         PillBody(display: display).equatable()
+            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+                refreshScopedProbes()
+            }
+            // The probes are scoped, so a scope change invalidates them —
+            // otherwise the pill reports the other account's freshness until
+            // the next scan cycle happens to fire.
+            .onChange(of: scope.limitAccountId) { _, _ in refreshScopedProbes() }
+            .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
             .task {
+                refreshScopedProbes()
                 refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window

@@ -14,6 +14,7 @@ struct PacerUsageTests {
         let usage = PacerDailyUsage(
             schemaVersion: 1,
             generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            account: nil,
             today: "2026-06-22",
             rows: [row(date: "2026-06-21", model: "claude-opus-4-8", inProgress: false),
                    row(date: "2026-06-22", model: "claude-opus-4-8", inProgress: true)])
@@ -29,6 +30,7 @@ struct PacerUsageTests {
         let usage = PacerModelUsage(
             schemaVersion: 1,
             generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            account: nil,
             models: [PacerModelUsage.Row(model: "claude-opus-4-8", input: 1000, output: 2000,
                                          cacheRead: 3000, cacheCreation5m: 100, cacheCreation1h: 50,
                                          costUSD: 42.5, firstDate: "2026-01-01", lastDate: "2026-06-22")])

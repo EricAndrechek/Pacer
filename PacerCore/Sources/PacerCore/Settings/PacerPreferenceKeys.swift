@@ -136,8 +136,63 @@ public enum PacerPreferenceKeys {
 /// back to `.standard` if the suite can't open (test contexts that
 /// aren't running with the App Group entitlement).
 public enum PacerPreferences {
-    nonisolated(unsafe) public static let store: UserDefaults =
-        UserDefaults(suiteName: PacerStore.appGroupIdentifier) ?? .standard
+    /// True when this process is a test runner.
+    ///
+    /// Tests write real, persistent defaults. `OAuthPollerTests` publishes
+    /// fixture account ids through `setActiveAccount`, which lands on
+    /// `PacerActiveAccountId` — the key every rate-limit surface resolves its
+    /// scope from — and nothing restores it.
+    ///
+    /// The installed app is sandboxed, so its `UserDefaults(suiteName:)`
+    /// resolves inside the App Group *container* and it was never affected.
+    /// A test process is not sandboxed, so the same suite name resolves to the
+    /// **user-domain** plist — and so does any Pacer binary run straight from
+    /// a shell, which is what the screenshot renderer and `dev-render-live.sh`
+    /// are. That is how this was caught: the README's dashboard came back with
+    /// an empty pace card, having scoped itself to an account called `orgA`
+    /// that a test had left behind hours earlier.
+    ///
+    /// Two files that look like one domain is a trap on its own; see
+    /// docs/account-scope-handoff.md.
+    ///
+    /// Suites that need the shared store *within* a test process still get
+    /// consistent reads and writes, because this is one private suite for the
+    /// whole process rather than per call.
+    /// Detection is deliberately belt-and-braces, because getting it wrong in
+    /// the "not a test" direction silently re-arms the bug.
+    ///
+    /// `PACER_ISOLATED_DEFAULTS` is the reliable half — `make test` and
+    /// `make verify` set it. The rest catch a bare `swift test`, where none of
+    /// the obvious signals exist: the process is
+    /// `swiftpm-testing-helper`, no `XCTest*` environment variables are set,
+    /// and `NSClassFromString("XCTestCase")` is nil because Swift Testing does
+    /// not link XCTest. What is always present is the `.xctest` bundle among
+    /// the arguments. The XCTest signals are kept for `xcodebuild test`.
+    /// Also read outside this type — a test process must not touch the
+    /// machine's keychain either, for the same reason it must not write its
+    /// defaults: it is somebody's real machine and the side effects outlive the
+    /// run. See `OAuthClient.defaultParkedCredentials`.
+    public static let isTestProcess: Bool = {
+        let info = ProcessInfo.processInfo
+        let env = info.environment
+        if env["PACER_ISOLATED_DEFAULTS"] == "1" { return true }
+        if env["XCTestConfigurationFilePath"] != nil || env["XCTestBundlePath"] != nil {
+            return true
+        }
+        if info.processName == "swiftpm-testing-helper" { return true }
+        if info.arguments.contains(where: { $0.contains(".xctest") }) { return true }
+        return NSClassFromString("XCTestCase") != nil
+    }()
+
+    nonisolated(unsafe) public static let store: UserDefaults = {
+        if isTestProcess {
+            // Per-process, so a parallel run cannot clobber another's writes
+            // and nothing survives to the next run.
+            let suite = "pacer.testprocess.\(ProcessInfo.processInfo.processIdentifier)"
+            return UserDefaults(suiteName: suite) ?? .standard
+        }
+        return UserDefaults(suiteName: PacerStore.appGroupIdentifier) ?? .standard
+    }()
 
     /// Reads the user's cost-mode preference, mapping the string the
     /// Settings UI writes to a typed `CostMode`. Defaults to `.auto`

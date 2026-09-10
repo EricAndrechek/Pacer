@@ -15,6 +15,10 @@ import PacerUI
 /// updates stay incremental: a new TokenSample only invalidates the
 /// cards that read TokenSample/DailyAggregate, not the rate-limit charts.
 struct DashboardView: View {
+    /// Read here, not inside each card, so a scope change re-runs their
+    /// initialisers — a `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
+
     @State private var modalRoot: PacerModalDestination?
 
     var body: some View {
@@ -35,7 +39,7 @@ struct DashboardView: View {
                 // AdvisorBadges owns the whole header strip now — the notices
                 // *and* the data-source chip flow together in one wrapping
                 // layout, so they spill to a tidy second row when several fire.
-                AdvisorBadges()
+                AdvisorBadges(scopeAccountId: scope.accountId)
             }
         ) {
             WelcomeCard()
@@ -51,17 +55,21 @@ struct DashboardView: View {
             // first-class, identically-treated columns. `window` is the fixed
             // window name or the scoped `limits[]` identity; the projection
             // modal accepts both.
-            PaceChartCard(onCompare: { window in
-                modalRoot = .projection(window: window)
+            PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window, account in
+                modalRoot = .projection(window: window, accountId: account)
             })
-            TodayDetailsCard()
-            TodayTimelineCard(onTodayTap: openToday)
-            PerModelTodayCard()
-            WeeklyComparisonCard()
-            DailyCostChartCard(onDayTap: { dayKey in
+            // Directly under the pace chart, because it answers the question
+            // that chart raises the moment a second account exists: whose
+            // numbers am I looking at? Renders nothing at all for a
+            // single-account user, which is almost everyone.
+            TodayDetailsCard(scopeAccountId: scope.accountId)
+            TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scope.accountId)
+            PerModelTodayCard(scopeAccountId: scope.accountId)
+            WeeklyComparisonCard(scopeAccountId: scope.accountId)
+            DailyCostChartCard(scopeAccountId: scope.accountId, onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
-            MonthOutlookCard()
+            MonthOutlookCard(scopeAccountId: scope.accountId)
         }
         .pacerModalNavigation(root: $modalRoot)
     }
@@ -82,18 +90,64 @@ struct DashboardView: View {
 /// than one card. Goes yellow with a warning triangle when an OAuth feed
 /// stalls past 15 minutes — commonly an expired Claude Code token.
 struct RateLimitSourceChip: View {
-    @Query(RateLimitSourceChip.newestSample) private var newest: [RateLimitSample]
+    let limitAccountId: String?
 
-    private static let newestSample: FetchDescriptor<RateLimitSample> = {
-        var d = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-        )
-        d.fetchLimit = 1
-        return d
-    }()
+    /// `@State` + a keyed fetch rather than `@Query`.
+    ///
+    /// It has to be scoped: `fetchLimit: 1` and "every account writes the live
+    /// table" do not compose — the newest row is whoever polled last, which on
+    /// an idle login is the *other* account, so an unscoped chip would call
+    /// stale data fresh. But a `@Query` predicate is fixed at init, so a scoped
+    /// one goes stale the moment the scope changes and reports the previous
+    /// account's freshness for as long as the view lives. One row is cheap
+    /// enough to just re-read on the two events that can change it.
+    @State private var latest: Sample?
+    /// Whose reading this is, shown only when there is more than one account.
+    ///
+    /// Without it the chip is ambiguous exactly when it matters: the pace card
+    /// lists two accounts with two different ages — "3 min ago" and "1 min
+    /// ago" — and a bare "via oauth · just now" beside them names neither. The
+    /// reader cannot tell which number the header is describing, or whether it
+    /// is describing a third thing.
+    @State private var owner: String?
+    @Environment(\.modelContext) private var modelContext
 
+    struct Sample: Equatable {
+        let sampledAt: Date
+        let source: String
+    }
+
+    /// The container is not decoration.
+    ///
+    /// `content` is `if let latest { … }`, so before the first fetch this
+    /// view's body IS an `EmptyView` — and SwiftUI does not run lifecycle
+    /// modifiers on an `EmptyView`. Attached directly, `.task` was waiting for
+    /// a view that only existed once the task had run: the chip never
+    /// appeared, on any scope, from the moment this stopped being a `@Query`
+    /// and became `@State` + a keyed fetch. An `HStack` is a real view with a
+    /// real (zero-sized) identity, so its modifiers fire.
     var body: some View {
-        if let latest = newest.first {
+        HStack(spacing: 0) { content }
+            .task(id: limitAccountId) { refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
+                refresh()
+            }
+    }
+
+    @MainActor
+    private func refresh() {
+        latest = (try? modelContext.fetch(
+            LimitScope.rateLimits(account: limitAccountId, limit: 1)))?
+            .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+
+        let accounts = (try? modelContext.fetch(FetchDescriptor<Account>())) ?? []
+        owner = accounts.count > 1
+            ? accounts.first { $0.id == limitAccountId }?.shortLabel
+            : nil
+    }
+
+    @ViewBuilder private var content: some View {
+        if let latest {
             // OAuth samples ought to arrive every 5 min; statusline samples
             // are irregular by nature, so the staleness warning is
             // oauth-only. See #3.
@@ -104,13 +158,14 @@ struct RateLimitSourceChip: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                 }
-                Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
+                Text(owner.map { "\($0) · via \(latest.source) · \(pacerRelative(latest.sampledAt))" }
+                     ?? "via \(latest.source) · \(pacerRelative(latest.sampledAt))")
                     .font(.system(size: 11))
             }
             .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
             .help(isStaleOAuth
                 ? "Pacer hasn't received fresh data in \(pacerRelative(latest.sampledAt)). The OAuth token may have expired — try launching or quitting/reopening Claude Code to refresh it. See ~/Library/Logs/Pacer/Pacer.err.log for the poller's last outcome."
-                : "")
+                : pacerRelativeExact(latest.sampledAt))
         }
     }
 }

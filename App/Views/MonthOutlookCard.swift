@@ -9,10 +9,22 @@ import PacerUI
 /// chip, the spent→projected bar, and the pace context — the calibrated
 /// range and exact figures live in tooltips.
 struct MonthOutlookCard: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     @Query(MonthOutlookCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
 
     @State private var cached = MonthFacts()
     @State private var projection: Estimate?
@@ -26,13 +38,19 @@ struct MonthOutlookCard: View {
         var hasAnyData: Bool = false
     }
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         let cal = Calendar.current
         let now = Date()
         let firstOfMonth = cal.dateInterval(of: .month, for: now)?.start ?? now
         let lowerStr = TokenSample.formatDate(firstOfMonth)
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= lowerStr && $0.accountId == acct
+            }
         )
     }
 
@@ -62,8 +80,10 @@ struct MonthOutlookCard: View {
     }
 
     private func refreshProjection() async {
-        guard let engine else { return }
-        projection = await engine.ask(.projectedCost(.thisMonth))
+        // This card's scope, so the month-end projection is the account the
+        // rest of the card is counting.
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
+        projection = await askEngine { await engine.ask(.projectedCost(.thisMonth)) }
     }
 
     var body: some View {

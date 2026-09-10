@@ -115,14 +115,16 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
-            var descriptor = FetchDescriptor<RateLimitSample>(
-                sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
-            )
-            descriptor.fetchLimit = 50
-            let rows = try context.fetch(descriptor)
+            // The window's scope, else the active login, from App Group
+            // defaults — the widget is a separate process. Scoping is what
+            // makes `fetchLimit: 50` correct again: with every account writing
+            // the live table, the newest fifty rows can be one login's, and
+            // `rows.first { window == ... }` would then gauge the wrong one.
+            let account = UsageScope.storedLimitAccountId
+            let rows = try context.fetch(LimitScope.rateLimits(account: account, limit: 50))
             let five = rows.first { $0.window == "five_hour" }
             let seven = rows.first { $0.window == "seven_day" }
-            let scoped = Self.scopedGauges(context: context)
+            let scoped = Self.scopedGauges(context: context, account: account)
             let (primaryKey, secondaryKey) = Self.resolveKeys(primary: primary, secondary: secondary, scoped: scoped)
             return PaceGaugesEntry(
                 date: Date(),
@@ -141,11 +143,10 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     /// The scoped per-model windows as gauges, active-first then hottest. Reads
     /// the latest poll's model/surface-scoped `limits[]` rows — fully dynamic,
     /// empty when the account has none.
-    private static func scopedGauges(context: ModelContext) -> [PaceGaugesEntry.ScopedGauge] {
-        var descriptor = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        descriptor.fetchLimit = 200
-        let rows = (try? context.fetch(descriptor)) ?? []
+    private static func scopedGauges(context: ModelContext,
+                                     account: String?) -> [PaceGaugesEntry.ScopedGauge] {
+        let rows = (try? context.fetch(
+            LimitScope.usageLimits(account: account, limit: 200))) ?? []
         return rows.latestBatch()
             .filter {
                 ($0.modelId?.isEmpty == false)
@@ -211,15 +212,29 @@ struct PaceGaugesWidgetView: View {
     @ViewBuilder
     private var large: some View {
         let cells = largeCells
+        // Anthropic reports a handful of windows, not a dozen: the common
+        // shape is 5h + 7d, sometimes with one per-model cap. At three or
+        // fewer the grid is a single row, and sizing every ring for the
+        // crowded case left that row hugging the top of the widget with two
+        // thirds of it empty — a card that looks like it failed to load.
+        //
+        // So the rings take the room they are given. Same layout, same grid,
+        // one number that follows the window count.
+        // 92 is the largest ring that still lets three sit across a large
+        // widget (3 × 92 + 2 × 12 of spacing clears the content width). Going
+        // bigger reflowed them to 2 + 1 and looked worse than the problem.
+        let singleRow = cells.count <= 3
+        let ring: CGFloat = singleRow ? 92 : 74
         VStack(alignment: .leading, spacing: 10) {
             WidgetTitleBar(title: "RATE LIMITS")
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 92, maximum: .infinity), spacing: 12)],
                 alignment: .leading, spacing: 14
             ) {
-                ForEach(cells) { gaugeCell($0) }
+                ForEach(cells) { gaugeCell($0, ring: ring) }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: singleRow ? .center : .top)
         }
         .padding(WidgetStyle.largePad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -227,7 +242,7 @@ struct PaceGaugesWidgetView: View {
     }
 
     @ViewBuilder
-    private func gaugeCell(_ cell: GaugeCell) -> some View {
+    private func gaugeCell(_ cell: GaugeCell, ring: CGFloat = 74) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 4) {
                 // Accent dot marks the scoped window currently in effect; fixed
@@ -242,12 +257,9 @@ struct PaceGaugesWidgetView: View {
                     .lineLimit(1)
             }
             ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
-                      lineWidth: 8, labelSize: 20)
-                .frame(width: 74, height: 74)
-            Text(resetText(cell.resetsAt, durationSeconds: cell.durationSeconds))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+                      lineWidth: ring > 80 ? 10 : 8, labelSize: ring > 80 ? 24 : 20)
+                .frame(width: ring, height: ring)
+            resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds)
         }
         .frame(maxWidth: .infinity)
     }
@@ -270,10 +282,7 @@ struct PaceGaugesWidgetView: View {
                 Spacer()
             }
             Spacer(minLength: 2)
-            Text(resetText(target.state?.resetsAt, durationSeconds: target.durationSeconds))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            resetCaption(target.state?.resetsAt, durationSeconds: target.durationSeconds)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(WidgetStyle.smallPad)
@@ -327,10 +336,8 @@ struct PaceGaugesWidgetView: View {
             }
             ringGauge(for: state, lineWidth: lineWidth, labelSize: labelSize)
                 .frame(width: ringSize, height: ringSize)
-            Text(resetText(state?.resetsAt, durationSeconds: durationSeconds))
-                .font(large ? .caption : .caption2)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+            resetCaption(state?.resetsAt, durationSeconds: durationSeconds,
+                         font: large ? .caption : .caption2)
         }
         .frame(maxWidth: .infinity)
     }
@@ -355,17 +362,36 @@ struct PaceGaugesWidgetView: View {
         return UsageBand(percentage: state.usedPct).color
     }
 
-    /// Reset caption: relative duration plus the wall-clock anchor —
-    /// "resets in 2h · 9 PM" for 5h, "resets in 4d · Mon 3 PM" for 7d.
-    /// Mirrors `App/Views/PaceChartCard.swift:resetLabel(resets:)` so
-    /// the gauge widget reads the same as the dashboard pace card.
-    private func resetText(_ date: Date?, durationSeconds: TimeInterval) -> String {
+    /// Reset caption, via the shared `pacerResetCaption`.
+    ///
+    /// This used to be a private re-implementation of that helper — same
+    /// intent, one missing feature: the shared one takes `compact:` for
+    /// narrow columns and this copy did not, so the large widget's three-across
+    /// grid truncated every caption to "resets in 2d · Sat…". `ViewThatFits`
+    /// below picks the full form when the column can hold it and the compact
+    /// one when it cannot, which is better than either hard-coding.
+    private func resetText(
+        _ date: Date?, durationSeconds: TimeInterval, compact: Bool = false
+    ) -> String {
         guard let date else { return "no data" }
-        let rel = pacerRelative(date)
-        let clock = durationSeconds <= 6 * 3600
-            ? pacerClockTime(date)
-            : pacerWeekdayClock(date)
-        return "resets \(rel) · \(clock)"
+        return pacerResetCaption(
+            resetsAt: date, durationSeconds: durationSeconds, compact: compact)
+    }
+
+    /// The caption at whichever detail level survives the width on offer.
+    @ViewBuilder
+    private func resetCaption(
+        _ date: Date?, durationSeconds: TimeInterval, font: Font = .caption2
+    ) -> some View {
+        ViewThatFits(in: .horizontal) {
+            ForEach([false, true], id: \.self) { compact in
+                Text(resetText(date, durationSeconds: durationSeconds, compact: compact))
+                    .font(font)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+        }
     }
 }
 

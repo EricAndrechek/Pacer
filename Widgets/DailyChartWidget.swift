@@ -81,11 +81,14 @@ struct DailyChartProvider: AppIntentTimelineProvider {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -(range.days - 1), to: Date()) ?? Date()
             )
-            let descriptor = FetchDescriptor<DailyAggregate>(
-                predicate: #Predicate<DailyAggregate> { $0.date >= cutoffString },
-                sortBy: [SortDescriptor(\.date, order: .reverse)]
-            )
-            let aggregates = try context.fetch(descriptor)
+            let aggregates = ScopedReads.daily(
+                context,
+                wherePredicate: #Predicate<DailyAggregate> { $0.date >= cutoffString },
+                scopedPredicate: { acct in
+                    #Predicate<AccountDailyAggregate> {
+                        $0.date >= cutoffString && $0.accountId == acct
+                    }
+                })
             let grouped = Dictionary(grouping: aggregates, by: \.date)
             let sortedDates = grouped.keys.sorted()
             let recent = sortedDates.suffix(range.days)

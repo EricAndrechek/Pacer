@@ -37,6 +37,13 @@ public struct DiurnalBurnModel: BurnTrajectory.Model {
     /// Forward-integration step (smaller = more exact, 10 min is plenty).
     public let stepSeconds: TimeInterval
 
+    /// How much of a cycle's *expected* activity must have happened before the
+    /// level scalar is trustworthy. 5% of a 7-day window is roughly a third of
+    /// a day of typical usage — enough for the ratio to stop being dominated by
+    /// its denominator, and early enough that the model still covers most of
+    /// the cycle it is good at.
+    public static let minObservedShare = 0.05
+
     public init(rate: [[Double]], calendar: Calendar = .current, stepSeconds: TimeInterval = 600) {
         self.rate = rate
         self.calendar = calendar
@@ -51,6 +58,23 @@ public struct DiurnalBurnModel: BurnTrajectory.Model {
         let observed = Self.integrate(table: rate, calendar: calendar,
                                       from: cycle.cycleStart, to: cycle.now, step: stepSeconds)
         guard observed > 0 else { return nil }
+
+        // `level` is a ratio whose denominator is the expected accrual *so far*,
+        // and right after a reset that denominator is nearly zero — so a couple
+        // of percent burned in the first minutes of a cycle scales the whole
+        // forward shape by a huge factor. Observed live: a 7-day window three
+        // hours into its cycle, 3% used, projecting **3% → 100%**, while the
+        // same window mid-cycle projects sensibly.
+        //
+        // The fix is not to clamp the output but to decline the fit: a level
+        // estimated from 1% of a cycle's expected activity is not an estimate.
+        // Below the floor a simpler model takes the window, which is the right
+        // answer early in a cycle anyway — there is no diurnal structure to
+        // exploit yet.
+        let full = Self.integrate(table: rate, calendar: calendar,
+                                  from: cycle.cycleStart, to: cycle.resetsAt, step: stepSeconds)
+        guard full > 0, observed >= full * Self.minObservedShare else { return nil }
+
         let level = used / observed              // the single fitted degree of freedom
         let table = rate, cal = calendar, step = stepSeconds
         let origin = cycle.now, base = used

@@ -21,6 +21,9 @@ import PacerUI
 /// felt like one picker was controlling the other.
 struct HistoryView: View {
     @State private var modalRoot: PacerModalDestination?
+    /// Read here so a scope change re-runs the child initialisers — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
 
     @AppStorage("pacer.history.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.all.rawValue
@@ -47,10 +50,10 @@ struct HistoryView: View {
             }
         ) {
             LifetimeSummaryCard(range: range)
-            HeatmapCard { dayKey in
+            HeatmapCard(scopeAccountId: scope.accountId) { dayKey in
                 modalRoot = .day(date: dayKey)
             }
-            MonthlyChartCard()
+            MonthlyChartCard(scopeAccountId: scope.accountId)
             TopDaysCard(range: range) { dayKey in
                 modalRoot = .day(date: dayKey)
             }
@@ -74,6 +77,7 @@ struct HistoryView: View {
 /// predicate into the fetch layer instead of filtering 700+ rows in
 /// memory on every scan tick.
 private struct LifetimeSummaryCard: View {
+    @State private var scope = UsageScope.shared
     let range: TimeRange
 
     var body: some View {
@@ -83,23 +87,41 @@ private struct LifetimeSummaryCard: View {
         // card and TopDaysContent (which also re-init on range change)
         // as the same view and dropped one — the bottom of the page
         // was just empty space where TopDays should have rendered.
-        LifetimeSummaryContent(range: range)
-            .id("lifetime-summary-\(range.rawValue)")
+        LifetimeSummaryContent(range: range, scopeAccountId: scope.accountId)
+            .id("lifetime-summary-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
 }
 
 private struct LifetimeSummaryContent: View {
     let range: TimeRange
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
 
-    init(range: TimeRange) {
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+
+    init(range: TimeRange, scopeAccountId: String? = nil) {
         self.range = range
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \DailyAggregate.date,
+                order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date,
                 order: .reverse
             )
         } else {
@@ -107,8 +129,12 @@ private struct LifetimeSummaryContent: View {
             // "lifetime since YYYY-MM-DD" without it. Acceptable
             // because (a) .all is opt-in, and (b) it's still cached
             // behind a scan-meta tick so the walk runs once per cycle.
-            _aggregates = Query(
+            _globalAggregates = Query(
                 sort: \DailyAggregate.date, order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date, order: .reverse
             )
         }
     }
@@ -222,17 +248,33 @@ private struct MonthlyChartCard: View {
     /// just so `refreshMonthly()` could group, sort, and `.suffix(12)`.
     /// 13 months of leeway covers any partial first month inside the
     /// chart's leftmost bar.
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
     @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
     private var scanMeta: [ClaudeCodeMeta]
 
-    init() {
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
+
+    init(scopeAccountId: String? = nil) {
         let cutoffString = TokenSample.formatDate(
             Calendar.current.date(byAdding: .month, value: -13, to: Date()) ?? .distantPast
         )
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
             sort: \DailyAggregate.date,
+            order: .reverse
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= cutoffString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.date,
             order: .reverse
         )
     }
@@ -303,14 +345,23 @@ private struct MonthlyChartCard: View {
         }
         .onAppear { refreshMonthly() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshMonthly() }
+        // The scope is a refresh trigger like any other. Without it the cache
+        // holds the previous account's numbers until the *next scan cycle*
+        // happens to fire — which on an idle machine is seven to ten seconds,
+        // and looks exactly like a very slow render rather than a stale one.
+        .onChange(of: scope.accountId) { _, _ in refreshMonthly() }
     }
 
     private var chart: some View {
         Chart {
             ForEach(monthly) { m in
+                // Capped for the same reason `DailyCostChartCard` caps its
+                // bars: an account one month old drew a single slab across the
+                // whole card.
                 BarMark(
                     x: .value("Month", m.month),
-                    y: .value("Cost", m.cost)
+                    y: .value("Cost", m.cost),
+                    width: PacerSparseBars.width(count: monthly.count, cap: 56)
                 )
                 .foregroundStyle(.tint)
                 .cornerRadius(2)
@@ -408,6 +459,7 @@ enum TopDaysSort: String, CaseIterable, Identifiable {
 }
 
 private struct TopDaysCard: View {
+    @State private var scope = UsageScope.shared
     let range: TimeRange
     let onDayTap: (String) -> Void
 
@@ -427,13 +479,14 @@ private struct TopDaysCard: View {
         // matching comment on LifetimeSummaryCard for why.
         TopDaysContent(
             range: range,
+            scopeAccountId: scope.accountId,
             sort: sort,
             descending: descending,
             onDayTap: onDayTap,
             sortBinding: sortBinding,
             descendingBinding: $descending
         )
-        .id("top-days-\(range.rawValue)")
+        .id("top-days-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
 }
 
@@ -445,10 +498,21 @@ private struct TopDaysContent: View {
     let sortBinding: Binding<TopDaysSort>
     let descendingBinding: Binding<Bool>
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: TopDaysSort,
         descending: Bool,
         onDayTap: @escaping (String) -> Void,
@@ -461,16 +525,28 @@ private struct TopDaysContent: View {
         self.onDayTap = onDayTap
         self.sortBinding = sortBinding
         self.descendingBinding = descendingBinding
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \DailyAggregate.date,
                 order: .reverse
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date,
+                order: .reverse
+            )
         } else {
-            _aggregates = Query(
+            _globalAggregates = Query(
                 sort: \DailyAggregate.date, order: .reverse
+            )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date, order: .reverse
             )
         }
     }
@@ -540,7 +616,16 @@ private struct TopDaysContent: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                let maxCost = visible.map(\.cost).max() ?? 1
+                // The bar encodes whatever the list is ranked BY. It was
+                // hard-wired to cost while the sort switched between cost,
+                // tokens and date — so under "Heaviest token days" the rows
+                // read 13.2M, 10.5M, 9.8M downwards while the bars beside them
+                // went 58%, 68%, 63%: the length was the day's cost. A bar
+                // that disagrees with the number next to it is worse than no
+                // bar. Date-sorted there is no ranking magnitude, so it keeps
+                // cost — the bolder of the two numbers on the row.
+                let barMetric: DayBarMetric = sort == .tokens ? .tokens : .cost
+                let maxValue = visible.map { barMetric.value(of: $0) }.max() ?? 1
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 12) {
                         // Empty rank column header
@@ -579,7 +664,7 @@ private struct TopDaysContent: View {
                     // rows until scrolled into view.
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
-                            topRow(idx: idx, row: row, maxCost: maxCost)
+                            topRow(idx: idx, row: row, maxValue: maxValue, metric: barMetric)
                         }
                     }
                     if all.count > 10 {
@@ -608,8 +693,21 @@ private struct TopDaysContent: View {
         }
     }
 
+    /// Which of the row's two numbers the bar draws.
+    private enum DayBarMetric {
+        case cost, tokens
+        func value(of row: DayRow) -> Double {
+            switch self {
+            case .cost:   return row.cost
+            case .tokens: return Double(row.tokens)
+            }
+        }
+    }
+
     @ViewBuilder
-    private func topRow(idx: Int, row: DayRow, maxCost: Double) -> some View {
+    private func topRow(
+        idx: Int, row: DayRow, maxValue: Double, metric: DayBarMetric
+    ) -> some View {
         HoverRow(action: { onDayTap(row.date) }) {
             HStack(alignment: .center, spacing: 12) {
                 Text("#\(idx + 1)")
@@ -627,7 +725,8 @@ private struct TopDaysContent: View {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(Color.accentColor.opacity(0.85))
                             .frame(
-                                width: geo.size.width * CGFloat(row.cost / max(maxCost, 0.0001)),
+                                width: geo.size.width
+                                    * CGFloat(metric.value(of: row) / max(maxValue, 0.0001)),
                                 height: 6
                             )
                     }

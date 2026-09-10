@@ -101,8 +101,14 @@ public final class NotificationCoordinator {
     /// crossed). Cycle dedup is keyed on `(window, threshold,
     /// resetsAt)` so re-launching mid-cycle doesn't re-fire any
     /// banner that's already been delivered.
+    /// `account` namespaces the per-cycle dedup so two logins crossing 90% in
+    /// the same window do not silence each other; `accountLabel` names the
+    /// account in the banner and is nil on a single-account machine, where the
+    /// wording is unchanged.
     public func handleRateLimitUpdate(
         window: String,
+        account: String?,
+        accountLabel: String?,
         currentPct: Double,
         previousPct: Double?,
         resetsAt: Date?,
@@ -113,9 +119,32 @@ public final class NotificationCoordinator {
         let thresholds = PacerSettings.thresholds(forWindow: window)
         let label: String = window == "five_hour" ? "5-hour" : "7-day"
         await postThresholdCrossings(
-            windowKey: window, label: label, thresholds: thresholds,
+            windowKey: Self.scopedKey(window, account: account),
+            label: Self.decorate(label, with: accountLabel),
+            thresholds: thresholds,
             currentPct: currentPct, previousPct: previousPct,
             resetsAt: resetsAt, context: context)
+    }
+
+    /// `<key>#<account>`, the same `#` suffix `EngineScope` uses for a scoped
+    /// surface. Unsuffixed when there is no account, so a store that predates
+    /// account stamping keeps the keys it already wrote.
+    ///
+    /// Changing a dedup key means a crossing already notified in the *current*
+    /// cycle can fire once more. That is a one-time cost on the cycle in flight
+    /// when this ships, and the alternative — keeping the bare key for whichever
+    /// account happens to be active — is the ambiguity that made the scope
+    /// mirror hard to reason about.
+    static func scopedKey(_ key: String, account: String?) -> String {
+        guard let account, !account.isEmpty else { return key }
+        return "\(key)#\(account)"
+    }
+
+    /// Banner wording. `nil` label ⇒ a single-account machine, where naming the
+    /// account would be noise.
+    static func decorate(_ label: String, with accountLabel: String?) -> String {
+        guard let accountLabel, !accountLabel.isEmpty else { return label }
+        return "\(label) · \(accountLabel)"
     }
 
     /// Scoped per-model / per-surface window equivalent of
@@ -131,6 +160,8 @@ public final class NotificationCoordinator {
     /// never evaluated (its rules are kept) and resumes when it returns.
     public func handleScopedRateLimitUpdate(
         identity: String,
+        account: String?,
+        accountLabel: String?,
         label: String,
         thresholds: [Int],
         currentPct: Double,
@@ -141,7 +172,9 @@ public final class NotificationCoordinator {
         let defaults = PacerSettings.store
         guard defaults.bool(forKey: PacerSettings.Key.notificationsEnabled) else { return }
         await postThresholdCrossings(
-            windowKey: identity, label: label, thresholds: thresholds,
+            windowKey: Self.scopedKey(identity, account: account),
+            label: Self.decorate(label, with: accountLabel),
+            thresholds: thresholds,
             currentPct: currentPct, previousPct: previousPct,
             resetsAt: resetsAt, context: context)
     }
@@ -304,6 +337,8 @@ public final class NotificationCoordinator {
 
     public func handleRateLimitReset(
         window: String,
+        account: String? = nil,
+        accountLabel: String? = nil,
         currentPct: Double,
         previousPct: Double?,
         resetsAt: Date?,
@@ -324,7 +359,8 @@ public final class NotificationCoordinator {
             return
         }
 
-        let cycleKey = "notif.reset.\(window).\(ISO8601DateFormatter().string(from: resetsAt))"
+        let cycleKey = "notif.reset.\(Self.scopedKey(window, account: account))."
+            + ISO8601DateFormatter().string(from: resetsAt)
         if alreadyNotified(key: cycleKey, in: context) {
             return
         }
@@ -333,7 +369,8 @@ public final class NotificationCoordinator {
         let content = UNMutableNotificationContent()
         // Scoped windows pass their human name; fixed windows fall back to the
         // 5h/7d label derived from the key.
-        let label: String = labelOverride ?? (window == "five_hour" ? "5-hour" : "7-day")
+        let base: String = labelOverride ?? (window == "five_hour" ? "5-hour" : "7-day")
+        let label = Self.decorate(base, with: accountLabel)
         content.title = "Pacer \(label) limit reset"
         content.body = "You're back to \(Int(currentPct.rounded()))%. Next reset \(Self.formatRelative(resetsAt))."
         content.sound = nil  // informational — no need to startle

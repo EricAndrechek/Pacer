@@ -10,8 +10,23 @@ import PacerUI
 /// when the underlying conditions are clearly true. Hidden entirely when
 /// no hints fire, so the header stays calm in the common case.
 struct AdvisorBadges: View {
-    @Query private var todayAggregates: [DailyAggregate]
-    @Query private var weekAggregates: [DailyAggregate]
+    @Query private var globalToday: [DailyAggregate]
+    @Query private var scopedToday: [AccountDailyAggregate]
+    @Query private var globalWeek: [DailyAggregate]
+    @Query private var scopedWeek: [AccountDailyAggregate]
+    /// Every day this account has, for the ranking badge. ~240 rows on a store
+    /// with two years of history, so unbounded is the right shape here.
+    @Query private var scopedAllDays: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. A "spending faster than usual" notice about
+    /// usage the user has scoped out of view would be noise.
+    private var todayAggregates: [DailyRow] {
+        scope.isAll ? globalToday.map(\.dailyRow) : scopedToday.map(\.dailyRow)
+    }
+    private var weekAggregates: [DailyRow] {
+        scope.isAll ? globalWeek.map(\.dailyRow) : scopedWeek.map(\.dailyRow)
+    }
     @Query(AdvisorBadges.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Hints cached behind the scan-meta tick. Without this, the
@@ -24,7 +39,7 @@ struct AdvisorBadges: View {
     /// on your heaviest pace in weeks). Counting statements against the
     /// user's own history — they only fire when clearly notable, matching
     /// this card's hidden-when-calm contract.
-    @Environment(\.usageEngine) private var engine
+    @Environment(\.usageEngines) private var engines
     @State private var engineHints: [EngineHint] = []
 
     struct EngineHint: Identifiable {
@@ -35,19 +50,33 @@ struct AdvisorBadges: View {
         let detail: String
     }
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         let today = TokenSample.formatDate(Date())
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         let cal = Calendar.current
         let weekAgo = TokenSample.formatDate(
             cal.date(byAdding: .day, value: -6, to: Date()) ?? Date()
         )
-        _todayAggregates = Query(
+        _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
         )
-        _weekAggregates = Query(
+        _scopedToday = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
+        )
+        _globalWeek = Query(
             filter: #Predicate<DailyAggregate> {
                 $0.date >= weekAgo && $0.date <= today
             }
+        )
+        _scopedWeek = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= weekAgo && $0.date <= today && $0.accountId == acct
+            }
+        )
+        _scopedAllDays = Query(
+            filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct }
         )
     }
 
@@ -65,7 +94,7 @@ struct AdvisorBadges: View {
         )
     }
 
-    private static func toTotals(_ row: DailyAggregate) -> UsageHints.ModelTotals {
+    private static func toTotals(_ row: DailyRow) -> UsageHints.ModelTotals {
         UsageHints.ModelTotals(
             model: row.model,
             costUSD: row.totalCostUSD,
@@ -92,10 +121,16 @@ struct AdvisorBadges: View {
             ForEach(cachedHints.indices, id: \.self) { idx in
                 hintBadge(cachedHints[idx])
             }
-            RateLimitSourceChip()
+            RateLimitSourceChip(limitAccountId: scope.limitAccountId)
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is a refresh trigger. Without it the hints kept describing
+        // the previous account until an unrelated scan cycle fired.
+        .onChange(of: scope.accountId) { _, _ in
+            refreshCache()
+            Task { await refreshEngineHints() }
+        }
         .task { await refreshEngineHints() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshEngineHints() }
@@ -106,9 +141,13 @@ struct AdvisorBadges: View {
     /// it ranked in the user's top few; today's pace fires only at the
     /// ladder's top rungs (≥85th percentile of their own days).
     private func refreshEngineHints() async {
-        guard let engine else { return }
+        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
         var next: [EngineHint] = []
-        if let y = await engine.yesterdayRank(), y.rankFromTop <= max(3, y.of / 10), y.of >= 14 {
+
+        // Both notices come from this scope's own fit, so they describe the
+        // account on screen rather than a blend of every account.
+        let ranked = await askEngine { await engine.yesterdayRank() }
+        if let y = ranked, y.rankFromTop <= max(3, y.of / 10), y.of >= 14 {
             let weeks = max(1, Int((Double(y.of) / 7.0).rounded()))
             next.append(EngineHint(
                 id: "yesterday-high",
@@ -117,7 +156,7 @@ struct AdvisorBadges: View {
                 title: "Yesterday: \(IntelligenceFormatting.ordinal(y.rankFromTop))-highest in \(weeks)w",
                 detail: "\(pacerCostExact(y.cost)) — higher than \(y.of - y.rankFromTop) of your \(y.of) tracked days."))
         }
-        let pace = await engine.ask(.pace)
+        let pace = await askEngine { await engine.ask(.pace) }
         if !pace.isInsufficient, IntelligenceFormatting.ladderIndex(pace.value) >= 3 {
             let dayName = Date().formatted(.dateTime.weekday(.wide))
             next.append(EngineHint(

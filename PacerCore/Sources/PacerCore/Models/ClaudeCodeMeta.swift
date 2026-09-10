@@ -32,6 +32,11 @@ public enum ClaudeCodeMetaKey {
     /// scan knows to do a full re-scan on first launch after upgrade.
     public static let scanVersion = "scan_version"
 
+    /// ISO-8601 timestamp of the one-time pass that moved every account's
+    /// recent rows out of `AccountUsageArchive` and back into the live sample
+    /// tables, when those tables became account-aware. Present ⇒ done.
+    public static let archiveFoldedIntoLive = "archive_folded_into_live"
+
     /// ISO-8601 timestamp of the last full historical scan (any root).
     /// Used for diagnostics; the actual decision to do a fresh full
     /// scan keys off `scanVersion`.
@@ -103,6 +108,11 @@ public enum ClaudeCodeMetaKey {
     /// Independent of `pathCanonicalizationVersion` because it only
     /// touches a UI-facing flag, never re-attributes samples.
     public static let aliasOriginClassificationVersion = "alias_origin_classification_version"
+    /// Which generation of the one-time account backfill has run. Only
+    /// ever does anything for a store with exactly one known account, where
+    /// "every unattributed turn is that account's" is a fact rather than a
+    /// guess. See `AccountBackfill.backfillIfUnambiguous`.
+    public static let accountBackfillVersion = "account_backfill_version"
 
     /// Bumped to force a one-time backfill that records a stable color
     /// seed (`ProjectMeta.colorSeed`) for every existing project.

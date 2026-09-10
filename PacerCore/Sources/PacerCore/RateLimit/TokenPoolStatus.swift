@@ -77,6 +77,8 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
     public let lastPolledAt: Date?
     /// How many pollable lanes (tokens) currently resolve to this account.
     public let laneCount: Int
+    /// The external switcher's slot, for ordering. See `Account.switcherSlot`.
+    public let switcherSlot: Int?
 
     public init(
         id: String,
@@ -88,7 +90,8 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         sevenDayPct: Double?,
         extraUsageCents: Int?,
         lastPolledAt: Date?,
-        laneCount: Int
+        laneCount: Int,
+        switcherSlot: Int? = nil
     ) {
         self.id = id
         self.organizationId = organizationId
@@ -100,6 +103,7 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         self.extraUsageCents = extraUsageCents
         self.lastPolledAt = lastPolledAt
         self.laneCount = laneCount
+        self.switcherSlot = switcherSlot
     }
 }
 
@@ -127,6 +131,9 @@ public protocol TokenPoolTesting: AnyObject, Sendable {
     /// account's timeline the shared sample tables hold; no-op if it's
     /// already active or unknown.
     func setActiveAccount(id: String) async
+    /// Give the account a name of the user's choosing. An empty or
+    /// whitespace-only name clears the rename and restores the derived one.
+    func renameAccount(id: String, to name: String) async
 }
 
 /// Process-wide, MainActor-isolated snapshot of the OAuth token pool —
@@ -198,5 +205,9 @@ public final class TokenPoolStatus {
 
     public func setActiveAccount(id: String) async {
         await tester?.setActiveAccount(id: id)
+    }
+
+    public func renameAccount(id: String, to name: String) async {
+        await tester?.renameAccount(id: id, to: name)
     }
 }

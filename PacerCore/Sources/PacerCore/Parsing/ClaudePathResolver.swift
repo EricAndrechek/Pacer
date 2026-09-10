@@ -61,6 +61,28 @@ public struct ClaudePathResolver: @unchecked Sendable {
         return defaultRoots()
     }
 
+    /// Validate roots discovered by some means other than the environment —
+    /// today, an external switcher's per-account session profiles.
+    ///
+    /// Pacer is a background agent and never has `CLAUDE_CONFIG_DIR` set, so
+    /// `resolve()` structurally cannot see a profile a *terminal* pinned. It
+    /// applies the same `projects/` requirement as every other root and
+    /// silently drops anything that fails, because a discovered path is a
+    /// guess about another tool's layout and must never be able to break the
+    /// scan.
+    public func resolveAdditional(_ roots: [URL]) -> [ResolvedRoot] {
+        var seen = Set<URL>()
+        var results: [ResolvedRoot] = []
+        for url in roots {
+            let standardized = url.standardizedFileURL
+            guard seen.insert(standardized).inserted else { continue }
+            if let resolved = try? validate(root: standardized) {
+                results.append(resolved)
+            }
+        }
+        return results
+    }
+
     private func parseConfigDirOverride(_ raw: String) -> [ResolvedRoot] {
         var seen = Set<URL>()
         var results: [ResolvedRoot] = []

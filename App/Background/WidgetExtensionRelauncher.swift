@@ -125,7 +125,12 @@ enum WidgetExtensionRelauncher {
             // orphan whose bundle was replaced (where `proc_pidpath`
             // fails). That's exactly the case that matters here.
             guard proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 else { continue }
-            if String(cString: nameBuffer) == extProcessName {
+            // `String(cString:)` is deprecated. `proc_name` NUL-terminates,
+            // so truncate there and decode as UTF-8 — CChar is signed, hence
+            // the bit-pattern hop.
+            let name = String(decoding: nameBuffer.prefix { $0 != 0 }
+                .map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            if name == extProcessName {
                 matched.append(pid)
             }
         }

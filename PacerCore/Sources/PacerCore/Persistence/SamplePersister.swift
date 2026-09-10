@@ -330,6 +330,15 @@ public final class SamplePersister {
     /// Newest `sampledAt` the in-memory map accounts for.
     private var indexWatermark = Date(timeIntervalSince1970: 0)
 
+    /// Which account each incoming sample should be attributed to, resolved
+    /// by timestamp. Refreshed by `ScanCoordinator` at the top of every
+    /// cycle from `AccountTrailRecorder`.
+    ///
+    /// Empty by default, and an empty trail attributes nothing — so a build
+    /// that never sets this writes `accountId == nil` on every row, which is
+    /// exactly the honest answer for a Pacer that isn't watching the login.
+    public var accountTrail: AccountTrail = .empty
+
     /// How long to let the index lag before rewriting it.
     ///
     /// The file is rewritten whole, so writing every cycle meant re-emitting
@@ -394,6 +403,20 @@ public final class SamplePersister {
             bestOutputByKey[hashed] = entry.breakdown.outputTokens
         }
         let sample = TokenSample(from: entry)
+        // Attribute by *when the turn happened*, not by who is logged in
+        // now — a cycle picks up transcript lines written before the last
+        // switch, and stamping those with the current account would move
+        // usage across the boundary that just occurred.
+        //
+        // The entry's own root decides, not the default login. A root no
+        // activation has claimed falls back to the default-login spans, so
+        // the ordinary single-profile case is unaffected — but a session
+        // pinned to its own `CLAUDE_CONFIG_DIR` is now separable, which is
+        // the whole point: with two accounts live at once the timestamp
+        // alone has two answers.
+        sample.accountId = accountTrail.accountId(
+            at: sample.sampledAt, rootPath: entry.rootPath
+        )
         context.insert(sample)
         if sample.sampledAt > indexWatermark { indexWatermark = sample.sampledAt }
         indexNeedsWrite = true

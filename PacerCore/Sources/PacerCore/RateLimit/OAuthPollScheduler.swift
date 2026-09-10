@@ -48,19 +48,33 @@ public struct OAuthPollScheduler: Sendable {
         /// Floor on any returned wait, so a tiny/near-zero delay doesn't
         /// spin the loop.
         public var minWait: TimeInterval
+        /// The longest Pacer will go without polling a lane itself while
+        /// standing aside for another client.
+        ///
+        /// Standing aside is usually the right trade — the other client's
+        /// answer is on disk and costs no budget — but it must not be
+        /// unconditional. A client that asks constantly and never succeeds
+        /// would otherwise hold a lane down forever, and on an account with a
+        /// single token that means Pacer watching its own reading age with no
+        /// way out. Fifteen minutes: rare enough not to perpetuate a throttle
+        /// (well under one request per five minutes on its own), often enough
+        /// to bound staleness and to notice the other client has gone.
+        public var externalYieldMax: TimeInterval
 
         public init(
             perTokenMinInterval: TimeInterval = 300,
             activeInterval: TimeInterval = 0,
             idleInterval: TimeInterval = 600,
             activeWindow: TimeInterval = 900,
-            minWait: TimeInterval = 1
+            minWait: TimeInterval = 1,
+            externalYieldMax: TimeInterval = 900
         ) {
             self.perTokenMinInterval = perTokenMinInterval
             self.activeInterval = activeInterval
             self.idleInterval = idleInterval
             self.activeWindow = activeWindow
             self.minWait = minWait
+            self.externalYieldMax = externalYieldMax
         }
     }
 
@@ -84,12 +98,40 @@ public struct OAuthPollScheduler: Sendable {
 
     public struct LaneState: Sendable, Equatable {
         public var lastPolledAt: Date?
+        /// When another client on this machine will next spend this token's
+        /// budget, if it publishes a schedule.
+        ///
+        /// The budget Anthropic enforces is per token, and Pacer is not the
+        /// only thing holding these: `cswap` polls the same credentials. Two
+        /// clients each politely respecting `perTokenMinInterval` still land
+        /// requests seconds apart and both take 429s, because neither counts
+        /// the other's.
+        ///
+        /// Knowing when the other one will go is what turns that from a
+        /// collision into a schedule — see `laneReadyAt`. nil when nothing else
+        /// is known to be polling, which is the ordinary case.
+        public var externalNextPollAt: Date?
+
+        /// When another client last *spent* this token's budget, successfully
+        /// or not.
+        ///
+        /// Separate from `lastPolledAt`, which is Pacer's own poll and nothing
+        /// else. Folding the two together — which is what the poller used to do
+        /// — loses the distinction the probe floor needs, and leaks one
+        /// account's external activity onto the endpoint-cadence gate that all
+        /// its lanes share, delaying tokens the other client never touches.
+        public var externalLastPollAt: Date?
+
         /// Set after a 429/transport failure; the lane is ineligible until
         /// this passes. The poller grows it per-lane on repeated failures.
         public var cooldownUntil: Date?
         public var account: AccountStatus
 
-        public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil, account: AccountStatus = .unknown) {
+        public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil,
+                    externalNextPollAt: Date? = nil, externalLastPollAt: Date? = nil,
+                    account: AccountStatus = .unknown) {
+            self.externalNextPollAt = externalNextPollAt
+            self.externalLastPollAt = externalLastPollAt
             self.lastPolledAt = lastPolledAt
             self.cooldownUntil = cooldownUntil
             self.account = account
@@ -138,9 +180,7 @@ public struct OAuthPollScheduler: Sendable {
         // When each lane individually becomes eligible again (per-token
         // invariant + cooldown), and the earliest such time overall.
         func laneReadyAt(_ l: LaneState) -> Date {
-            let byInterval = l.lastPolledAt?.addingTimeInterval(tuning.perTokenMinInterval) ?? .distantPast
-            let byCooldown = l.cooldownUntil ?? .distantPast
-            return max(byInterval, byCooldown)
+            readyAt(l, interval: tuning.perTokenMinInterval, now: now)
         }
         let earliestLaneReady = usableIdx.map { laneReadyAt(lanes[$0]) }.min() ?? .distantPast
 
@@ -160,5 +200,85 @@ public struct OAuthPollScheduler: Sendable {
         }
         // `eligible` is non-empty because earliestLaneReady ≤ nextPoll ≤ now.
         return .poll(laneIndex: pick ?? usableIdx[0])
+    }
+
+    /// When one lane may next be polled: the per-token invariant, its own
+    /// cooldown, and whatever another client on the same token is doing.
+    ///
+    /// Public and parameterised on `interval` because the fast pool is not the
+    /// only caller — `OAuthPoller` sweeps secondary lanes on its own cadence
+    /// and has to obey exactly the same rules. It used to carry a partial copy
+    /// of them, which is how a lane could keep its spacing from Pacer's own
+    /// polls and still land on top of another client's.
+    public func readyAt(_ l: LaneState, interval: TimeInterval, now: Date) -> Date {
+        let byCooldown = l.cooldownUntil ?? .distantPast
+
+        // Past the floor, another client's schedule stops being a reason to
+        // wait: Pacer is owed a reading of its own. Its cooldown still applies
+        // — a throttled token is not helped by asking again.
+        if overdueForOwnPoll(l, now: now) {
+            let byOwnInterval = l.lastPolledAt?.addingTimeInterval(interval) ?? .distantPast
+            // Owed a reading is not the same as owed it this second. Still step
+            // around a request the other client has just made, since landing on
+            // top of one is how both end up with nothing — observed at 68
+            // seconds behind cswap's attempt, and both took a 429.
+            //
+            // Capped at one interval so this cannot become the pin again: a
+            // client asking every minute forever delays the probe once, not
+            // indefinitely.
+            let afterExternal = l.externalLastPollAt?.addingTimeInterval(interval) ?? .distantPast
+            let politeness = min(afterExternal, now.addingTimeInterval(interval))
+            return max(byCooldown, byOwnInterval, politeness)
+        }
+
+        // The per-token invariant counts every request on the token, not just
+        // Pacer's — so the interval runs from whichever client asked last.
+        let lastRequest = [l.lastPolledAt, l.externalLastPollAt].compactMap { $0 }.max()
+        let byInterval = lastRequest?.addingTimeInterval(interval) ?? .distantPast
+        let own = max(byInterval, byCooldown)
+        return max(own, byExternalSchedule(l, earliest: own, interval: interval, now: now))
+    }
+
+    /// True when Pacer has stood aside for this lane longer than it is willing
+    /// to. Only meaningful where another client is known to be on the token; a
+    /// lane it has never polled qualifies immediately, since the first reading
+    /// is what proves the token works at all.
+    private func overdueForOwnPoll(_ l: LaneState, now: Date) -> Bool {
+        guard l.externalNextPollAt != nil || l.externalLastPollAt != nil else { return false }
+        guard let own = l.lastPolledAt else { return true }
+        return now.timeIntervalSince(own) >= tuning.externalYieldMax
+    }
+
+    /// Keep clear of another client's known request on the same token.
+    ///
+    /// The rule is the per-token invariant applied in both directions:
+    /// requests on one token must be `interval` apart no matter who makes
+    /// them. Backwards is `externalLastPollAt`, folded into the interval above.
+    /// This is forwards: do not poll so close in front of a known upcoming
+    /// request that the pair breaches the same spacing.
+    ///
+    /// It stays adaptive rather than fixed. A wide external interval leaves
+    /// room and Pacer slots in at its own floor; a narrow one leaves none and
+    /// Pacer waits until after the other request, then resumes. No hard-coded
+    /// "poll at the midpoint" — that was an earlier attempt, and it threw away
+    /// the lane-count and backoff logic this scheduler already does well.
+    private func byExternalSchedule(
+        _ l: LaneState, earliest: Date, interval: TimeInterval, now: Date
+    ) -> Date {
+        guard let announced = l.externalNextPollAt else { return .distantPast }
+        // An overdue time means the other client wants to poll *now* and has
+        // not managed to — which is precisely when it needs the room, not when
+        // it stops deserving it. Treating a past time as "no upcoming poll" had
+        // Pacer crowd a client that was already failing: cswap's next poll ran
+        // 24 minutes overdue while it took 429 after 429, and Pacer, seeing a
+        // stale timestamp, kept taking the budget.
+        //
+        // Bounded by `externalYieldMax` in `readyAt`, so a client that is
+        // overdue forever cannot park this lane forever.
+        let external = max(announced, now)
+        // Room in front of it: taking `earliest` still leaves a full interval
+        // before the other client goes.
+        if external.timeIntervalSince(earliest) >= interval { return .distantPast }
+        return external.addingTimeInterval(interval)
     }
 }

@@ -64,6 +64,11 @@ public enum OAuthClientError: Error, Sendable {
 public struct CredentialCandidate: Sendable, Equatable {
     public enum Source: String, Sendable, Equatable, Codable {
         case override, keychain, held, desktop
+        /// A credential an account switcher stashed for a login that is not
+        /// currently signed in. Distinct from `.keychain` because it is the
+        /// only source that can speak for an account you are *not* using —
+        /// see `KeychainOAuth.parkedServicePrefix`.
+        case parked
     }
     public let credential: OAuthCredential
     public let source: Source
@@ -94,6 +99,17 @@ public struct OAuthClient: Sendable {
     public typealias Transport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
     private let keychain: KeychainOAuth
+    /// Credentials an account switcher has stashed for logins that are not
+    /// currently signed in.
+    ///
+    /// Injected rather than called statically, and that is not ceremony: the
+    /// first version reached straight for `KeychainOAuth.parkedServiceNames()`
+    /// from inside `candidateCredentials`, which meant every test — with a
+    /// fully mocked keychain — quietly scanned the developer's real one and
+    /// shelled out to `security` for each hit. One of them went from passing to
+    /// polling zero times. Anything that touches the machine belongs behind the
+    /// same seam as everything else here.
+    private let parkedCredentials: @Sendable () -> [OAuthCredential]
     private let transport: Transport
     private let now: @Sendable () -> Date
     /// Optional manual access-token source. Default reads from the
@@ -133,6 +149,8 @@ public struct OAuthClient: Sendable {
 
     public init(
         keychain: KeychainOAuth = KeychainOAuth(),
+        parkedCredentials: @escaping @Sendable () -> [OAuthCredential]
+            = OAuthClient.defaultParkedCredentials,
         transport: @escaping Transport = OAuthClient.defaultTransport,
         now: @escaping @Sendable () -> Date = { Date() },
         tokenOverride: @escaping @Sendable () -> String? = { PacerPreferences.oauthTokenOverride() },
@@ -144,6 +162,7 @@ public struct OAuthClient: Sendable {
         desktopKeyStore: DesktopKeyStoring = EphemeralDesktopKeyStore()
     ) {
         self.keychain = keychain
+        self.parkedCredentials = parkedCredentials
         self.transport = transport
         self.now = now
         self.tokenOverride = tokenOverride
@@ -297,6 +316,10 @@ public struct OAuthClient: Sendable {
         // has anymore (e.g. after logout) — which is exactly the case the
         // held store exists to cover.
         if case .success(let c) = keychain.read() { add(c, .keychain) }
+        // Parked logins. Deliberately after the live keychain read, so a token
+        // that is both live and stashed is labelled by where it actually lives.
+        // `seen` then keeps the duplicate out.
+        for cred in parkedCredentials() { add(cred, .parked) }
         if desktopEnabled() {
             let (tokens, newKey) = resolveDesktopTokens(cachedDesktop: cachedDesktopTokens, now: referenceNow)
             if let newKey { desktopKeyStore.save(newKey) }
@@ -310,6 +333,25 @@ public struct OAuthClient: Sendable {
             let a = $0.credential.expiresAt ?? .distantFuture
             let b = $1.credential.expiresAt ?? .distantFuture
             return a != b ? a > b : $0.credential.accessToken < $1.credential.accessToken
+        }
+    }
+
+    /// Reads every `Claude Code-credentials-<suffix>` item the switcher has
+    /// stashed. Enumeration is attributes-only and cannot prompt; the reads
+    /// themselves can, which is why this is only consulted when building the
+    /// candidate list rather than on every poll.
+    public static let defaultParkedCredentials: @Sendable () -> [OAuthCredential] = {
+        // Never in tests. Twenty test sites build an `OAuthClient` with a fully
+        // mocked keychain and would otherwise have scanned the developer's real
+        // one and shelled out to `security` per hit — which is both a side
+        // effect on somebody's machine and, on a locked keychain, a password
+        // prompt in the middle of a test run.
+        guard !PacerPreferences.isTestProcess else { return [] }
+        return KeychainOAuth.parkedServiceNames().compactMap { service in
+            guard case .success(let data) = KeychainOAuth.readParked(service: service),
+                  case .success(let cred) = KeychainOAuth(rawReader: { .success(data) }).read()
+            else { return nil }
+            return cred
         }
     }
 

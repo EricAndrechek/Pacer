@@ -1,0 +1,415 @@
+# Multi-account: attribution, switching, and parallel sessions
+
+> Working state, invariants and traps live in
+> [`account-scope-handoff.md`](account-scope-handoff.md). This file is the
+> design.
+
+How Pacer knows which account a turn belongs to, why that needed a new
+mechanism, and what is still open.
+
+Written 2026-09-03, when the maintainer started running two accounts through
+[claude-swap](https://github.com/realiti4/claude-swap) (`cswap`) — work and
+personal — and Pacer turned out to be reporting the wrong one.
+
+## The symptom
+
+Pacer's menu bar, dashboard, `/metrics` and `/v1/snapshot` all read
+`7d = 100%`: a weekly window belonging to an account that had not served a
+request in over three hours. Claude Code was billing a different account
+sitting at 1%. Every consumer of that API — including the `usage-guard` skill
+that paces long agent runs — was being told to slow down for a limit that did
+not apply.
+
+## Why the account dimension stopped halfway
+
+Pacer had tracked accounts since the multi-account work landed, but only on
+one side of the app.
+
+| Fed by | Tables | `accountId`? |
+|---|---|---|
+| The OAuth poller | `RateLimitSample`, `ExtraUsageSample`, `UsageLimitSample`, `AccountUsageArchive`, `AlertRule` | yes |
+| Parsing JSONL transcripts | `TokenSample` | **no** |
+
+The poller resolves each token's `anthropic-organization-id` from a response
+header, so it *knows* whose usage it just read. The transcript side has no
+such luxury, and this is the load-bearing fact for everything below:
+
+> **Claude Code's JSONL carries no account identity on a billable turn.**
+> `accountUuid` appears only on `artifact-autoreact-ledger` bookkeeping lines
+> — 12 occurrences across a 283,000-turn corpus, none of them on an assistant
+> message. `~/.claude.json`'s `oauthAccount` names only whoever is logged in
+> *right now*, and is overwritten in place on every switch.
+
+So the account a turn belongs to is **not recoverable from the turn**. It has
+to be recorded as it happens, or it is gone.
+
+## The design
+
+### An activation trail
+
+`AccountActivation` records intervals: *account X was the active login from
+T1 to T2*. `ActiveAccountObserver` watches `oauthAccount` in Claude Code's own
+config — the object Claude Code rewrites on every login change — so a switch
+is noticed no matter what caused it.
+
+Deliberately **tool-agnostic**. It works for a switcher, for someone typing
+`/logout` and `/login`, and for a tool that does not exist yet. Nothing in the
+core depends on `cswap` being installed.
+
+Not the keychain: a credential blob says a token changed, not whose it is.
+Resolving that costs an API call, while `oauthAccount` already carries the org
+id for free. Reads are gated on the file's mtime, because the config is
+~180 KB and a JSON parse of it on every 20-second scan cycle is exactly the
+kind of unwatched background work that once cost a quarter of a CPU core.
+
+**The write rule is asymmetric, on purpose.** An activation is only ever
+closed by a *successful* read showing a *different* account. An unreadable
+config, a missing `oauthAccount`, a file caught mid-rewrite: all leave the
+trail untouched. A missed switch self-corrects on the next cycle; a false
+switch splits one account's session across two and is undetectable
+afterwards.
+
+### Attribution by timestamp, and by root
+
+`SamplePersister` stamps each sample from the trail using **when the turn
+happened**, not who is logged in now — a scan cycle routinely ingests lines
+written before the last switch.
+
+That is enough while one account is live at a time. It is not enough for
+parallel sessions, where the trail has two valid answers for one instant. The
+tie-break already exists on disk: a session pinned to its own
+`CLAUDE_CONFIG_DIR` writes to that profile's own `projects/` directory, and
+that directory belongs to exactly one account. `ParsedUsageEntry.rootPath`
+carries it from scanner to persister.
+
+A pinned root that no activation covers resolves to **nil, never the default
+account** — those turns are known not to be the default account's, so
+"unknown" is the honest answer.
+
+### The data model is always parallel; only the presentation adapts
+
+Activations may overlap. `AccountTrail.hasConcurrentAccounts` reads
+switching-vs-parallel off the trail, so someone who switches gets the simple
+view and someone running accounts in parallel gets the richer one, with no
+mode to configure — and history stays correct across the transition, because
+the model was parallel the whole time.
+
+### Unattributable stays unattributed
+
+`TokenSample.accountId` is nullable, and nil is a **permanent, expected
+state** for every row written before the trail existed. Splitting that history
+by "whoever is logged in now" would produce a per-account cost breakdown that
+is confidently fiction — the same shape as a missing price rendering as `$0`,
+where a legal-looking number means nothing ever revisits it.
+
+There is exactly one automatic backfill, and it is a fact rather than a
+convenience: **a store that has only ever seen one account** attributes its
+whole history to it, because there is no other candidate. Two accounts gets
+nothing automatic. `make assign-accounts SPEC='<accountId>|<from>|<through>'`
+is where the user supplies what Pacer cannot know.
+
+### Session profiles are discovered, not configured
+
+`ClaudePathResolver` resolves roots from the environment, and Pacer is a
+background agent that never has `CLAUDE_CONFIG_DIR` set — so it structurally
+could not find a directory that a *terminal* pinned. That was not
+misattribution; it was **absence**. Every turn from a parallel session was
+missing from tokens, cost and project history with nothing to indicate a hole.
+
+`resolveAllRoots()` adds any per-account profile a switcher has created. Each
+is bound to its account from the profile's *own* `oauthAccount` — never the
+switcher's say-so — before its transcripts are parsed.
+
+### Labels
+
+Two accounts on the same plan derive the identical placeholder
+("Claude account (max)"), and running two accounts on one plan is precisely
+what a switcher is for. `Account.label` falls through email → org name →
+display name → id. The live login's identity comes free from `oauthAccount`;
+accounts Pacer has only met as a second token get theirs from
+`ExternalAccountDirectory`, which reads a switcher's roster.
+
+A roster can attach a name to an org id Pacer resolved for itself. It can
+never *establish* identity. A tool mislabelling a slot can make a label wrong;
+it cannot move usage between accounts.
+
+## How claude-swap works, in the parts Pacer depends on
+
+The join key is free: cswap's `sequence.json` records `organizationUuid` per
+account, and `Account.id` **is** the `anthropic-organization-id`.
+
+**Switch mode** (`cswap switch` / `auto`) swaps the active login in place — on
+macOS the `Claude Code-credentials` keychain item plus `oauthAccount`. Both
+accounts' transcripts land in the same `~/.claude/projects/`.
+
+**Session mode** (`cswap run N`) sets
+`CLAUDE_CONFIG_DIR=~/.claude-swap-backup/sessions/<n>-<slug>/` for one
+terminal. Claude Code sha256s that env *string* (NFC, first 8 hex) into a
+per-profile keychain service `Claude Code-credentials-<digest>` — one-way, so
+Pacer can go path→digest but never digest→path. The profile gets its own
+`projects/` unless `--share-history` symlinks it back.
+
+Machine-readable surfaces worth knowing: `cswap list|status|switch --json`
+(all `schemaVersion: 1`), and `cswap auto --json`, a newline-delimited event
+stream documented as additive.
+
+## The live tables are a cache, not the record
+
+`AccountUsageArchive` is the record and is never pruned. The live sample
+tables hold the **active account's recent window** — the widest reader is the
+engine's 32-day backtest, every view reads 8 days, so the bound is 35 days.
+
+This matters because the swap moves every row it touches. Measured at the
+counts a real machine reaches: **107,705 rows, 14.3 seconds** in memory
+(`SwapCostBench`), and 177,689 archived rows had accumulated in five months.
+Three things keep it survivable — the 35-day bound, an hourly eviction pass so
+single-account users stay bounded too, and running the swap on `@ScanActor`
+rather than the main thread, batched and yielding.
+
+Eviction is not deletion: every row is written to the archive before it is
+removed.
+
+## What follows the scope, and what doesn't
+
+A menu in the window toolbar selects "all accounts" or one, persisted in **App
+Group** defaults so the widget extension — a separate process — can read it
+too. It renders nothing when only one account exists.
+
+**Follows the scope**: every dashboard card, history, projects and
+collections, models, the heatmap, all three drill-down modals, the menu bar,
+all four data widgets, the advisor badges, CSV export — and, since the
+per-account rate-limit work below, the pace chart, the menu-bar gauges, the
+window subtitle and the toolbar freshness pill.
+
+**Deliberately doesn't:**
+
+| surface | why |
+|---|---|
+| Alerts | A view shows what you asked to see; an alert tells you what you didn't. A spend threshold a display filter can silence is a footgun — scope to work in the morning, stop hearing about personal spend all day. Per-account *rules* are a fine feature; inheriting the window's scope is not the way to get them. |
+| The HTTP API | A scripted consumer wants to say what it means, not get different numbers depending on what a human last clicked in an app it cannot see. Per-account figures live behind an explicit parameter instead — see below. |
+| `ToolbarFreshness` | Data freshness, not usage. |
+| Project management (merge sheet, collections manager, alias manager) | They list *paths*; totals are ordering context. Scoping could hide a project you are trying to merge. |
+
+### Rate limits are per account too
+
+They were not, for a while, and the reason is worth keeping: the live sample
+tables held exactly *one* account's rows by construction. Switching accounts
+*moved rows* — the outgoing login's went to `AccountUsageArchive`, the
+incoming login's came back. Every read site could then ignore accounts
+entirely, which is a real benefit, but it was bought with the other account's
+history: 45,973 archived rate-limit rows on the machine this was built for,
+current to the minute, that nothing in the app could draw. The swap also
+measured 107,705 rows and 14.3 seconds, several times a day for anyone running
+an auto-switcher.
+
+Now every account writes the live tables, stamped with `accountId`, and
+switching is a flag flip. `OAuthPoller.foldArchiveIntoLiveTables` brought the
+archived history back on first launch; the archive keeps its other job, cold
+storage past `liveWindowDays`.
+
+**`LimitScope` is not optional.** A read that forgets to scope returns two
+logins' windows interleaved and shows whichever sorted first — no crash, no
+empty state, just someone else's number. With `fetchLimit`, which most of these
+reads use, the newest eight rows can be entirely the other account's. And
+`UsageLimitSample` is worse still: two accounts routinely report a window under
+the *same* identity string, so nothing but the stamp tells the rows apart and
+an unscoped read draws two series as one line. Use the descriptor builders.
+
+Which account a surface reads depends on what it is for:
+
+| | resolves to | why |
+|---|---|---|
+| Displays — pace chart, menu bar, widgets, subtitle, freshness | `UsageScope.limitAccountId`: the picked scope, else the active login | "All accounts" is not a number. Two 5-hour windows do not sum into a third, so unscoped falls back to the active login — exactly what every gauge showed before accounts existed. |
+| Decisions — forecast engine, alerts, global-reset detector, `/v1/snapshot` | the active login alone | An alarm a display filter can silence is a footgun, and a scripted consumer must not get different numbers because a human clicked something in an app it cannot see. |
+
+**The forecast overlay is honest rather than silently wrong.** The engine fits
+one login's history — its parameters, snapshot trail and golden fixtures are
+all the active account's — so scoping the chart to a different account hides
+the projection and the model-comparison fan, and says so: *History only.
+Forecasts follow the active account.* A per-account engine is real work and
+remains undone.
+
+### The engine is per account too
+
+Everything is scoped now, predictions included. The rollups were the easy half;
+the engine was the one that mattered, because it *learns* — hour-of-day and
+weekday profiles, per-cut model pools, conformal bands, a self-evaluation
+scoreboard that decides which model gets used. With two accounts that learning
+was a blend of two habits, and every number it produced quietly described both.
+
+**One engine instance per scope**, not one engine filtered. `EngineScope` is
+either `.allAccounts` or `.account(id)`, and `EngineHost` owns the instances.
+`.allAccounts` is always live — the menu bar's gauges, alerts, the HTTP API and
+the widgets read it whatever the window shows. A per-account engine is created
+the first time a view asks for one and then kept warm.
+
+Three things make that affordable and safe:
+
+- **A refit is closed-form over pre-aggregated rows** — ~1.1 s per scope per
+  five-minute cycle. Two scopes is under 1% duty, and the engines are separate
+  actors so their refits overlap rather than queue.
+- **`.allAccounts` is byte-identical to what shipped before.** It reads the same
+  global rollups, writes the same unsuffixed surface ids, and keeps the same
+  snapshot export key — so the accumulated scoreboard, the prediction trail and
+  the golden fixtures all carry over untouched. Per-account scopes are purely
+  additive: new rows under `<surface>#<accountId>`.
+- **Scopes cannot read each other.** Qualification happens at exactly two
+  points, `fetchAllEvalRows` in and `persist` out, so everything between works
+  in base surface ids; and `.allAccounts` claims *only* unsuffixed ids, so a
+  scoped row can never be mistaken for a global one. There is a test in both
+  directions.
+
+Rate limits are the one asymmetry. `.allAccounts` has no rate-limit meaning —
+two 5-hour windows do not sum — so the global engine keeps fitting the *active*
+login's windows, exactly as before. A per-account engine fits its own.
+
+**Never `await engine.x()` from a view.** Swift's uncontended-actor
+optimisation runs the callee inline on the caller's thread, and a background
+actor idle between five-minute refits is always uncontended — so a
+`.task { await engine.ask(...) }` in a view body executes the forecast fit on
+the main thread. This cost a measured **7.9 second** launch stall, with
+`MenuStatusContent → burnOutlook → DiurnalBurnModel.fit` at the top of the
+profile. Every engine ask from a view goes through `askEngine`, which is a
+`Task.detached`. Launch stall after: 239 ms.
+
+### Naming an account
+
+Every real account arrives with the identical derived name — `Account.defaultName`
+keys off the subscription tier, and a switcher is by definition two accounts on
+the same plan — so `label` reached past it for the observed email. That reads
+fine on a dashboard and badly everywhere else: it is the string in the scope
+dropdown, and it was the string a Prometheus scrape would have carried off the
+machine.
+
+So Settings → Tokens → Accounts lets you rename one: double-click the name, or
+use the row's context menu, which also offers **Reset Name**. Two consequences
+worth knowing:
+
+- **A name you typed outranks everything observed.** `label` used to prefer the
+  email unconditionally; a rename under that rule would have been a control
+  that visibly does nothing.
+- Clearing the name restores the *derived* placeholder, not an empty string —
+  `label` treats a blank as absent and would fall through to the raw uuid.
+
+Identity is still the org id, so a rename touches nothing but the label. It is
+also the only way to get a readable `pacer_account_info` label out of the
+metrics endpoint.
+
+### The HTTP API asks explicitly
+
+`GET /v1/accounts` lists what Pacer tracks — id, label, lifetime usage, each
+account's latest window readings, and `activeAccountId` (the login whose limits
+`/v1/snapshot` describes). Those ids are what `/v1/usage/daily` and
+`/v1/usage/models` accept as `?account=`; both default to every account, so an
+existing consumer sees no change. The payloads echo the scope back, so a saved
+response says which question it answered.
+
+Two details worth knowing:
+
+- **`unattributed` is a row, not a remainder.** Turns recorded before the
+  activation trail existed can never be attributed, and hiding them would make
+  a consumer's per-account sum quietly disagree with the unscoped total. It is
+  also the URL-safe alias for a rollup key that starts with U+0000 precisely so
+  nobody could type it.
+- **An unknown id is a `400` naming the legal values**, not an empty `200` —
+  which would be indistinguishable from an account that had a quiet month.
+
+`/metrics` gains `pacer_account_cost_usd` and `pacer_account_tokens`, labelled
+by account **id**, plus a `pacer_account_info` join series. The id rather than
+the display label because a metrics endpoint is the one surface whose output
+routinely ends up in a hosted time-series database, and the label is an email
+address whenever Pacer has observed one. Both are omitted on a single-account
+install, where they would only restate the totals.
+
+The `_info` series' `name` deserves its own note, because the obvious
+implementation is wrong and shipped for about ten minutes. Falling back to
+`organizationName` looks safe and is not: Anthropic derives the org name from
+the account's email, so it reads `"<someone>@<domain>'s Organization"` for
+every real account. `metricsName` publishes a name the *user* typed verbatim —
+they chose it knowing where it goes — and otherwise falls back past anything
+observed to `Account <last 4 of the id>`.
+
+### How a view becomes scope-aware
+
+Two live `@Query`s — global and per-account — and a computed property picking
+between them. The scope arrives as an **initialiser parameter**, because a
+`@Query` predicate is captured once at init: a view that read the scope itself
+would stay pinned to whatever was selected when it first appeared.
+
+`DailyRow`, `HourlyRow`, `SessionRow` and the `ProjectDailyReadable` protocol
+normalise the two tables so a view body renders either without knowing which.
+That is what keeps the switch a change of *source* rather than a second copy
+of every view. `SessionsTable` and `CollectionUsageRollup` moved onto those
+types for the same reason.
+
+Surfaces outside the view tree — the widgets, the CSV exporter, the menu bar —
+read `UsageScope.storedAccountId` directly, since they have no parent to pass
+a parameter down.
+
+One asymmetry worth knowing: `HourlyRow.sampleCount` exists only on the global
+rollup, so a scoped row reports 0. It feeds a "quiet hour" hint, never a number
+anyone reads.
+
+## Four rollups, and what they cost
+
+`AccountDailyAggregate`, `AccountHourlyAggregate`,
+`AccountProjectDailyAggregate` and `AccountSessionInfo` sit **alongside** their
+global counterparts rather than replacing them, so no existing read site
+changed and both scopes are always available without a recompute.
+
+Each is written by the same pass that writes its global counterpart, across
+all three write paths (incremental fast path, per-bucket recompute, bulk
+worker). Where a rollup has non-additive fields — a distinct-session count, a
+`topModel` chosen by comparing per-model totals — the computation moved into a
+shared value type (`ProjectRollupValues`, `SessionRollupValues`) so one
+algorithm produces both rows. "Recompute twice" and "recompute once, write
+twice" are genuinely different once a field is not a sum.
+
+**`make verify-data` cross-checks every pair.** That check has caught four real
+bugs that would otherwise have shipped: the daily fast path skipping account
+rows, the pricing drift, a session fetch that could not see pending inserts,
+and a call site that was never added. It compares tokens and cost but *not*
+session or model counts — a session spanning an account switch belongs to both
+accounts' sets and once to the global one, so those legitimately do not sum.
+
+The session fast path is single-account only. It cannot maintain account rows
+incrementally, because an account's `topModel` may differ from the session's;
+installs with one account keep it, anyone running two pays a full session
+recompute for correctness.
+
+## Deferred, with the reasoning
+
+**Double-polling.** cswap and Pacer both poll Anthropic's usage endpoint for
+the same accounts, neither aware of the other. Measured on the maintainer's
+machine: cswap every 600s (busy account) and 1800s (idle); Pacer holds each
+token to ≤1 poll per 300s across 7 discovered lanes, of which 5 sit in long
+cooldown, so ~2 are effectively live. Not currently a problem, and cswap's
+`cache/usage.json` (schemaVersion 2, with `lastGood`, `fetchedAt`,
+`nextPollAt`, `pollIntervalS`) is the obvious thing to read instead of issuing
+our own calls if it becomes one. Deliberately *not* re-tuning the scheduler on
+speculation: the adaptive multi-token cadence was carefully derived and is
+load-bearing.
+
+**Absorbing the switcher.** Decided against, for now. The complaint about
+cswap is its *packaging* — a uv tool install, a foreground menubar process, a
+launchd plist, `launchctl kickstart` after every upgrade — and Pacer is
+already a signed, auto-updating `.app` with a menu bar. But its switching
+carries real hard-won correctness: it takes Claude Code's own credential locks
+so a swap cannot interleave with a token refresh, quarantines accounts whose
+refresh token died, uses hysteresis and a cooldown to stop flip-flopping, and
+seeds session profiles with MCP mirroring. Reimplementing that has a "logged
+out mid-session" failure mode. Delegate first; absorb only if it proves out.
+
+## Things that will bite the next person
+
+- **A diagnostic mode omitted from either launch gate in `PacerAppDelegate`
+  silently gets an in-memory store** and reports confidently on no data. This
+  cost an hour: `PACER_ACCOUNT_ASSIGN=list` cheerfully printed "every turn is
+  attributed to an account" against an empty database.
+- **Session roots and `rootPath` must land together.** Adding a root to the
+  scan without threading its path through `ParsedUsageEntry` attributes a
+  second account's turns to the first — the exact failure the nullable
+  `accountId` exists to prevent, arriving through the back door.
+- **`make install` needs Keychain access for notarization** that an agent
+  session cannot get. `PACER_DEV_SKIP_NOTARIZE=1 make install` is the local
+  iteration path; a real notarized build is required before any release.

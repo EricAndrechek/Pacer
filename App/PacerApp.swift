@@ -61,6 +61,7 @@ struct PacerApp: App {
                 // cards can ask it typed questions. Created in the background
                 // service's init, so it's non-nil here.
                 .environment(\.usageEngine, appDelegate.backgroundService.engine)
+                .environment(\.usageEngines, appDelegate.backgroundService.engines)
         }
         .modelContainer(appDelegate.container)
         // First-launch placement. These apply only when AppKit has no

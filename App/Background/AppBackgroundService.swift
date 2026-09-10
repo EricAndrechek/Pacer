@@ -103,9 +103,16 @@ final class AppBackgroundService {
     /// config when the Settings UI toggles it or edits port/host/token.
     private var apiSettingsObserver: NSObjectProtocol?
 
+    /// One engine per scope. `engine` stays as the all-accounts instance for
+    /// everything that must not follow the window (alerts, the menu bar's
+    /// gauges, the HTTP API); scope-aware views resolve their own through the
+    /// host.
+    let engines: EngineHost
+
     init(container: ModelContainer) {
         self.container = container
-        self.engine = UsageIntelligenceEngine(modelContainer: container)
+        self.engines = EngineHost(container: container)
+        self.engine = engines.global
     }
 
     func start() {
@@ -316,6 +323,13 @@ final class AppBackgroundService {
     private func startHistoryPruneTask() {
         guard historyPruneTask == nil else { return }
         let container = self.container
+        // Off the main actor and before the prune: building an index takes the
+        // store's write lock for as long as it takes, and it only ever has
+        // work to do on the first launch after a schema change.
+        Task.detached(priority: .utility) {
+            guard let url = try? PacerStore.storeURL() else { return }
+            StoreIndexRepair.run(storeURL: url)
+        }
         historyPruneTask = Task { @MainActor in
             while !Task.isCancelled {
                 StoreMaintenance.pruneHistory(container: container)
@@ -411,7 +425,7 @@ final class AppBackgroundService {
             guard samplesChanged else { return }
             Task { @ScanActor [weak self] in
                 guard let self else { return }
-                await self.syncArchive(archiveURL: archiveURL)
+                self.syncArchive(archiveURL: archiveURL)
             }
         }
     }
@@ -532,11 +546,31 @@ final class AppBackgroundService {
         // optimization — confirmed on Main via sample(1) during a scroll).
         // A detached task forces it onto the engine's executor.
         let started = Date()
-        await Task.detached(priority: .utility) { [engine] in
-            await engine.recompute(now: now)
+        // Every scope anything is still reading — not every scope ever asked
+        // for. See `EngineHost.live`.
+        //
+        // Still concurrent, and deliberately so after trying the alternative.
+        // Serialising them looked right — 83% of the pace card's multi-second
+        // loads land inside a refit — until the two numbers were measured
+        // against each other: one engine fits in ~13.2 s and three concurrent
+        // in ~15.9 s, so engines two and three add under three seconds of wall
+        // time. They overlap almost perfectly. Running them one at a time
+        // would stretch the window the rest of the app has to get through from
+        // ~16 s to ~40 s for exactly the same work, which is the wrong
+        // direction. Fewer scopes is the lever; ordering is not.
+        //
+        // Detached for the reason above: an `await` from `@MainActor` resumes
+        // the fit inline on the main thread.
+        let live = engines.live
+        await Task.detached(priority: .utility) {
+            await withTaskGroup(of: Void.self) { group in
+                for entry in live {
+                    group.addTask { await entry.engine.recompute(now: now) }
+                }
+            }
         }.value
         let refitMs = Int(Date().timeIntervalSince(started) * 1000)
-        await exportEngineSnapshot()
+        await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
 
         // The refit is the most expensive recurring thing Pacer does and it
@@ -561,7 +595,17 @@ final class AppBackgroundService {
     /// Upsert the engine's outlook snapshot into `ClaudeCodeMeta` so the
     /// widget process can draw the same trajectory + outlook the dashboard
     /// shows.
-    private func exportEngineSnapshot() async {
+    private func exportEngineSnapshots(
+        _ live: [(scope: EngineScope, engine: UsageIntelligenceEngine)]
+    ) async {
+        for entry in live {
+            await exportEngineSnapshot(entry.engine, scope: entry.scope)
+        }
+    }
+
+    private func exportEngineSnapshot(
+        _ engine: UsageIntelligenceEngine, scope: EngineScope
+    ) async {
         // `engine.snapshot()` fits the forecast models; run it off the main
         // actor (same inline-on-main hazard as recomputeEngineIfDue) so it
         // can't block the UI. The small SwiftData write stays on main.
@@ -570,7 +614,7 @@ final class AppBackgroundService {
         }.value
         guard let json = snapshotJSON else { return }
         let context = ModelContext(container)
-        let key = EngineSnapshot.metaKey
+        let key = EngineSnapshot.metaKey(for: scope)
         let descriptor = FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })
         if let existing = try? context.fetch(descriptor).first {
@@ -592,12 +636,21 @@ final class AppBackgroundService {
 
         for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {
             let cutoff = Date().addingTimeInterval(-globalResetLookback(forWindow: window))
+            // The **active** login's, like every other decision surface: a
+            // global reset is something to be told about, not a view. Scoping
+            // is also load-bearing here — an unscoped series would interleave
+            // two accounts' utilisation and the collapse detector would read
+            // the gap between them as a reset.
+            let account = Account.activeId(in: context)
             let descriptor = FetchDescriptor<RateLimitSample>(
-                predicate: #Predicate {
-                    $0.source == oauthSource
-                        && $0.window == window
-                        && $0.sampledAt >= cutoff
-                },
+                predicate: account == nil
+                    ? #Predicate<RateLimitSample> {
+                        $0.source == oauthSource && $0.window == window && $0.sampledAt >= cutoff
+                    }
+                    : #Predicate<RateLimitSample> {
+                        $0.source == oauthSource && $0.window == window
+                            && $0.sampledAt >= cutoff && $0.accountId == account
+                    },
                 sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
             )
             guard let rows = try? context.fetch(descriptor) else { continue }

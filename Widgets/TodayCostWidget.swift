@@ -38,10 +38,17 @@ struct TodayCostProvider: TimelineProvider {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
             let today = TokenSample.formatDate(Date())
-            let descriptor = FetchDescriptor<DailyAggregate>(
-                predicate: #Predicate<DailyAggregate> { $0.date == today }
-            )
-            let rows = try context.fetch(descriptor)
+            // Follows the window's account scope, read from App Group
+            // defaults — a widget disagreeing with the dashboard beside it
+            // about today's cost is worse than either answer.
+            let rows = ScopedReads.daily(
+                context,
+                wherePredicate: #Predicate<DailyAggregate> { $0.date == today },
+                scopedPredicate: { acct in
+                    #Predicate<AccountDailyAggregate> {
+                        $0.date == today && $0.accountId == acct
+                    }
+                })
             let cost = rows.reduce(0) { $0 + $1.totalCostUSD }
             let tokens = rows.reduce(Int64(0)) {
                 $0 + $1.inputTokens + $1.outputTokens

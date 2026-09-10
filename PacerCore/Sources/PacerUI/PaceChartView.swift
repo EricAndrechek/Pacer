@@ -315,7 +315,40 @@ private struct AxisModifier: ViewModifier {
     /// Computed outside the AxisContentBuilder so we're free to use
     /// for-loops + early returns + var locals.
     private var ticks: [Date] {
-        let cal = Calendar.current
+        PaceChartView.axisTicks(cycleStart: cycleStart, resetsAt: resetsAt,
+                                durationSeconds: durationSeconds)
+    }
+}
+
+public extension PaceChartView {
+
+    /// How close to the reset a tick may sit and still have room for its label.
+    ///
+    /// Short-cycle labels are *leading*-aligned (`AxisValueLabel(centered:)` is
+    /// false for the 5-hour window), so a tick a few minutes before the reset
+    /// starts its text at the very right edge of the plot and the text runs off
+    /// it: the 5-hour column read `9|` instead of `9p`, in every render of the
+    /// card. A tick that close adds nothing anyway — the reset time is already
+    /// spelled out in the column header.
+    ///
+    /// The day/month axis (`pacerDateAxis`) drops its edge bands for exactly
+    /// this reason and has done for a while; this is the same rule for the one
+    /// axis that did not have it.
+    nonisolated static let tickEdgeMargin = 0.08
+
+    /// The x-axis ticks for a cycle: hourly inside a short window, midnight
+    /// inside a long one, with any tick too close to the reset dropped.
+    ///
+    /// Static and `public` so it can be tested without hosting a chart — the
+    /// clipping it prevents is invisible to every check except looking.
+    /// `nonisolated` because it is pure date arithmetic and a `View`'s statics
+    /// are main-actor-isolated by default — which made the test process trap
+    /// rather than fail, with no message.
+    nonisolated static func axisTicks(
+        cycleStart: Date, resetsAt: Date, durationSeconds: TimeInterval,
+        calendar: Calendar = .current
+    ) -> [Date] {
+        let cal = calendar
         var out: [Date] = []
         if durationSeconds <= 6 * 3600 {
             // Hourly ticks inside the cycle.
@@ -344,6 +377,7 @@ private struct AxisModifier: ViewModifier {
                 t = next
             }
         }
-        return out
+        let margin = durationSeconds * tickEdgeMargin
+        return out.filter { resetsAt.timeIntervalSince($0) >= margin }
     }
 }

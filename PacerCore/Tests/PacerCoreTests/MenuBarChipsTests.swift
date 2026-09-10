@@ -122,4 +122,42 @@ struct MenuBarChipsTests {
         #expect(MenuBarChipItem.scopedDisplayName(fromIdentity: "weekly_all||")
                 == "weekly_all||")
     }
+
+    // MARK: - Account-pinned chips
+
+    /// The menu bar is the tightest surface in the app and there is no honest
+    /// combined number across accounts, so a chip can name the account it
+    /// means. Round-trip, including a scoped identity whose own pipes must not
+    /// confuse the split.
+    @Test("an account-pinned chip round-trips, pipes and all")
+    func accountChipRoundTrips() {
+        let fixed = MenuBarChipItem.account(
+            accountId: "00000000-1111-2222-3333-444444444444", window: "five_hour")
+        #expect(fixed.serialized
+                == "account_pct:00000000-1111-2222-3333-444444444444|five_hour")
+        #expect(MenuBarChipItem.parse(token: fixed.serialized) == fixed)
+        #expect(fixed.pinnedAccountId == "00000000-1111-2222-3333-444444444444")
+
+        // A scoped identity carries pipes of its own; only the first splits.
+        let scoped = MenuBarChipItem.account(
+            accountId: "acct-1", window: "weekly_scoped|Fable|")
+        #expect(MenuBarChipItem.parse(token: scoped.serialized) == scoped)
+    }
+
+    /// Same forward-compat contract the scoped prefix has: a client that does
+    /// not know this token skips it rather than choking, and malformed tokens
+    /// are skipped rather than rendering a phantom chip.
+    @Test("malformed account tokens are skipped, not rendered")
+    func malformedAccountTokensSkipped() {
+        for bad in ["account_pct:", "account_pct:|five_hour", "account_pct:acct-1|",
+                    "account_pct:no-pipe-here"] {
+            #expect(MenuBarChipItem.parse(token: bad) == nil, "\(bad)")
+        }
+        // And it survives a round trip through a full CSV beside other kinds.
+        let csv = "icon,five_hour_pct,account_pct:acct-2|seven_day,scoped_pct:weekly_scoped|Fable|"
+        let items = MenuBarChipItem.parseList(csv)
+        #expect(items.count == 4)
+        #expect(items[2] == .account(accountId: "acct-2", window: "seven_day"))
+        #expect(MenuBarChipItem.serializeList(items) == csv)
+    }
 }

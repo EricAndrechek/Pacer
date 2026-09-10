@@ -20,7 +20,7 @@ struct DailyCostChartCard: View {
     /// can decide whether to open the day modal locally or stay quiet.
     let onDayTap: ((String) -> Void)?
 
-    init(onDayTap: ((String) -> Void)? = nil) {
+    init(scopeAccountId: String? = nil, onDayTap: ((String) -> Void)? = nil) {
         self.onDayTap = onDayTap
         // Scope the @Query to the chart's display window. Card renders
         // exactly 30 days; the prior unbounded query materialized every
@@ -31,14 +31,34 @@ struct DailyCostChartCard: View {
         let cutoffString = TokenSample.formatDate(
             Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
         )
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
             sort: \DailyAggregate.date,
             order: .reverse
         )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= cutoffString && $0.accountId == acct
+            },
+            sort: \AccountDailyAggregate.date,
+            order: .reverse
+        )
     }
 
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     /// Singleton-row probe — fires once per scan cycle. Drives the
     /// `Derived` cache refresh so the Dictionary(grouping:) +
     /// `.sorted()` + `.suffix(30)` pipeline runs at most once per
@@ -120,18 +140,33 @@ struct DailyCostChartCard: View {
         }
         .onAppear { refreshDerived() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+        // The scope is a refresh trigger like any other. Without it the cache
+        // holds the previous account's numbers until the *next scan cycle*
+        // happens to fire — which on an idle machine is seven to ten seconds,
+        // and looks exactly like a very slow render rather than a stale one.
+        .onChange(of: scope.accountId) { _, _ in refreshDerived() }
     }
+
+    /// See `PacerSparseBars`: a cap only while the series is short enough that
+    /// capping is the smaller number.
+    static func barWidth(count: Int) -> MarkDimension { PacerSparseBars.width(count: count) }
 
     private func chart(annotateDates: Set<String>, totals: [DailyTotal]) -> some View {
         let dateAxis = pacerDateAxis(totals.map(\.date))
         return Chart {
             ForEach(totals) { d in
+                // The width cap keeps a sparse series from rendering as one
+                // slab filling the card: a two-day account's "last 30 days"
+                // drew a single bar the width of the chart, which reads as a
+                // rendering fault rather than as "you have two days".
                 BarMark(
                     x: .value("Date", d.date),
-                    y: .value("Cost", d.cost)
+                    y: .value("Cost", d.cost),
+                    width: Self.barWidth(count: totals.count)
                 )
                 .foregroundStyle(barColor(for: d.cost))
                 .cornerRadius(2)
+
                 .annotation(position: .top, alignment: .center, spacing: 2) {
                     if annotateDates.contains(d.date) {
                         Text(pacerCost(d.cost)).help(pacerCostExact(d.cost))

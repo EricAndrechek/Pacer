@@ -101,11 +101,37 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // `applicationDidFinishLaunching` drive the capture run instead of
         // the normal scan/menu-bar bring-up.
         if ScreenshotMode.isActive {
+            // Tag every line this process writes. It shares the user's log
+            // file with the app it is running beside, and an untagged
+            // multi-second `[MainThread] stalled` from a renderer that loads
+            // every page of every scope back to back reads exactly like a
+            // beachball in the app.
+            Log.processTag = LiveRenderMode.isActive ? "render" : "shot"
             PacerSettings.registerDefaults()
             do {
-                container = try PacerStore.makeInMemoryContainer()
+                // The live renderer is the same off-screen path pointed at the
+                // real store, read-only — see `LiveRenderMode`. Everything else
+                // about screenshot mode applies: no scan, no menu bar, no
+                // single-instance gate, exit when done.
+                container = LiveRenderMode.isActive
+                    ? try LiveRenderMode.container()
+                    : try PacerStore.makeInMemoryContainer()
             } catch {
-                Self.showFatalContainerError(error)
+                // Never a modal here. This runs headless, beside the app the
+                // user is working in, and a diagnostic that puts up a dialog
+                // saying "Pacer can't open its data store" is indistinguishable
+                // from the real app failing — which is exactly how it read when
+                // it happened.
+                //
+                // It happens for a specific, expected reason: the render opens
+                // the store READ-ONLY, and a schema change needs a write to
+                // migrate. So the first render after a model change fails until
+                // the app itself has launched once. Say that, and exit.
+                FileHandle.standardError.write(Data("""
+                    [Pacer live-render] could not open the store: \(error)
+                    [Pacer live-render] if a model changed, launch Pacer once to migrate, then re-run.
+                    """.utf8))
+                exit(2)
             }
             backgroundService = AppBackgroundService(container: container)
             super.init()
@@ -118,12 +144,21 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // while the real Pacer is going, and would otherwise just exit. It
         // also skips the stderr redirect so its report lands on the
         // terminal instead of the log file.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
+            || AccountAssignMode.isActive {
             PacerSettings.registerDefaults()
             do {
-                // The backfill reads the REAL store (read-only); the cold-start
-                // probe wants an empty one.
-                container = (ArchiveBackfill.isActive || ArchiveRoundTrip.isActive)
+                // Which store a mode gets is part of its contract, so
+                // spell it out: the archive modes READ the real store,
+                // account assignment READS AND WRITES it, and the
+                // cold-start probe wants an empty one. A mode omitted
+                // here silently gets an in-memory store and reports
+                // confidently on no data — which looks like a clean
+                // result rather than a mistake.
+                let needsRealStore = ArchiveBackfill.isActive
+                    || ArchiveRoundTrip.isActive
+                    || AccountAssignMode.isActive
+                container = needsRealStore
                     ? try PacerStore.makeModelContainer()
                     : try PacerStore.makeInMemoryContainer()
             } catch {
@@ -290,21 +325,78 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Screenshot/demo mode: skip scan, menu bar, hotkey, and Dock
         // policy. Seed synthetic data, capture the views off-screen, exit.
         if ScreenshotMode.isActive {
-            NSApp.setActivationPolicy(.accessory)
+            // `.prohibited` for the live renderer, not `.accessory`.
+            //
+            // It runs as a *second process of the same bundle* beside the app
+            // the user is working in, and `.accessory` still lets macOS treat
+            // it as an activatable instance: launching it pulled the real
+            // Pacer's window to the active Space and left it out of place when
+            // the render exited. `.prohibited` means "not a UI app" — it cannot
+            // activate, cannot own the menu bar, and cannot take a Space with
+            // it. Off-screen `NSWindow` rendering still works, because that is
+            // drawing rather than presentation.
+            //
+            // The README screenshot run keeps `.accessory`: it is invoked
+            // deliberately by `make screenshots`, not alongside a live app.
+            NSApp.setActivationPolicy(LiveRenderMode.isActive ? .prohibited : .accessory)
+            // Suppress any window macOS restores for the bundle — the same
+            // guard the other diagnostic modes carry.
+            Self.suppressWindowsWhileDiagnosticRuns()
             Task { @MainActor in
                 await SampleCostCache.reload()
-                ScreenshotMode.seed(into: container)
-                await ScreenshotMode.captureAll(container: container)
+                // The one mode that is *allowed* to touch the screen, and only
+                // with the owner's go-ahead for that run — read
+                // `MenuBarTooltipSelfTest` and the AGENTS.md rule it points at
+                // before invoking it. It rides the screenshot-mode bypasses
+                // (in-memory store, no scan, no single-instance gate) but needs
+                // `.accessory` rather than `.prohibited`, because it has to own
+                // a real status item.
+                if MenuBarTooltipSelfTest.isActive {
+                    ScreenshotMode.seed(into: container)
+                    await MenuBarTooltipSelfTest.run(container: container)
+                }
+                if LiveRenderMode.isActive {
+                    await LiveRenderMode.run(container: container)
+                } else {
+                    ScreenshotMode.seed(into: container)
+                    // Gate the render on the fixture satisfying what the app
+                    // assumes. A broken fixture does not produce a broken
+                    // image — it produces a plausible one, which is worse,
+                    // because it gets committed. Exit non-zero so
+                    // `make screenshots` stops instead.
+                    guard ScreenshotMode.validateFixture(container) else { exit(3) }
+                    await ScreenshotMode.captureAll(container: container)
+                    // Again afterwards: scenes that build their own series
+                    // report through `ScreenshotMode.note` while rendering, and
+                    // those problems only exist once the render has run.
+                    guard ScreenshotMode.validateFixture(container) else { exit(3) }
+                }
                 exit(0)
             }
             return
         }
 
         // Cold-start measurement harness — see `ColdStartProbe`.
-        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive {
+        //
+        // Every mode below must be listed here as well as in the early-exit
+        // gate above. Missing one doesn't fail loudly — it falls through to
+        // `backgroundService.start()` and the mode's work then queues behind
+        // the scan pipeline on `@ScanActor`, where it can wait out a whole
+        // multi-second cycle before running.
+        if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
+            || AccountAssignMode.isActive {
             NSApp.setActivationPolicy(.accessory)
+            // `.accessory` keeps the diagnostic out of the Dock but does NOT
+            // stop macOS restoring a window for the bundle — these modes run
+            // as a *second* instance of an app the user already has open, and
+            // a restored window from the probe landed on the wrong display in
+            // front of them. Close anything that appears for as long as the
+            // mode runs; every one of these exits in seconds.
+            Self.suppressWindowsWhileDiagnosticRuns()
             Task { @MainActor in
-                if ArchiveBackfill.isActive {
+                if AccountAssignMode.isActive {
+                    await AccountAssignMode.run(container: container)
+                } else if ArchiveBackfill.isActive {
                     await ArchiveBackfill.run(container: container)
                 } else if ArchiveRoundTrip.isActive {
                     await ArchiveRoundTrip.run(
@@ -323,12 +415,30 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Pacer" prompt is moot. Also preempts a pending request that
         // the prior process scheduled but couldn't fully deliver
         // before SIGKILL during a dev-cycle quit→relaunch.
+        MainWindowPlacement.noteLaunch()
+        // Bring the dashboard back if it was open when we were quit. A dev
+        // install runs many times an hour and `LSUIElement` means nothing
+        // reopens it on its own, so without this the window the maintainer
+        // keeps on a second monitor simply disappears.
+        MainWindowPlacement.reopenIfPreviouslyOpen()
+
+        // Catch a window AppKit restored before the observers above were
+        // installed — the ordering is not guaranteed, and a missed window
+        // keeps SwiftUI's per-instance autosave name for the whole session.
+        Task { @MainActor in
+            for window in NSApp.windows where window.canBecomeMain && !(window is NSPanel) {
+                Self.ensureWindowAutosaves(window)
+                Self.ensureWindowOnScreen(window)
+            }
+        }
+
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
         // or `make install`), the old widget extension is still running
         // its now-stale binary and chronod won't relaunch it on its own.
         // Bounce it here so widgets pick up the new build's code + data.
         WidgetExtensionRelauncher.bounceIfBundleReplaced()
+        MainThreadStallWatchdog.shared.start()
         backgroundService.start()
         installWindowObservers()
         installMenuBar()
@@ -381,10 +491,67 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         false
     }
 
+    /// Close any window that appears while a headless diagnostic mode runs.
+    ///
+    /// Observing rather than closing once, because window restoration is
+    /// asynchronous — a single sweep at launch runs before the window exists.
+    /// The observer dies with the process, which these modes end explicitly.
+    private static func suppressWindowsWhileDiagnosticRuns() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil, queue: .main
+        ) { note in
+            // Extract the window outside the @MainActor Task, for the same
+            // reason the observers below do — capturing the whole `note` would
+            // carry a non-Sendable userInfo dict across the boundary. The hop
+            // itself is required because the block is nonisolated even though
+            // `queue: .main` delivers it on the main thread.
+            let window = note.object as? NSWindow
+            Task { @MainActor in window?.close() }
+        }
+        DispatchQueue.main.async {
+            for window in NSApp.windows { window.close() }
+        }
+    }
+
     // MARK: - Activation policy management
 
     private func installWindowObservers() {
         let center = NotificationCenter.default
+        // A window that is merely *restored* never becomes key. Relaunching
+        // in the background (`open -g`, which is what a dev install now
+        // does) brings the dashboard back without activating Pacer, so
+        // hanging window setup off `didBecomeKey` alone meant the frame
+        // adoption below simply never ran on exactly the relaunch it was
+        // written for.
+        //
+        // Occlusion state is AppKit's "this window became visible" signal
+        // (there is no `didBecomeVisible` here — that is UIKit) and it fires
+        // whether or not we are frontmost. It is also rare, unlike
+        // `didUpdateNotification`, which fires per event loop per window.
+        let didBecomeVisible = center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            let window = note.object as? NSWindow
+            Task { @MainActor in
+                guard let window else { return }
+                // Deliberately does NOT touch the activation policy.
+                // Occlusion fires while a window is still materializing, and
+                // `applyActivationPolicyForCurrentWindows` counts *visible*
+                // windows — so calling it here flipped the app to
+                // `.accessory` mid-creation and the dashboard never
+                // appeared at all. Policy stays owned by the key/close
+                // observers, which fire once the window's state is settled.
+                Self.ensureWindowAutosaves(window)
+                Self.ensureWindowOnScreen(window)
+                if window.canBecomeMain, !(window is NSPanel), window.isVisible {
+                    MainWindowPlacement.wasOpen = true
+                }
+            }
+        }
+        windowObservers.append(didBecomeVisible)
         let didBecomeKey = center.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
@@ -413,19 +580,38 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { note in
+                let window = note.object as? NSWindow
+                Task { @MainActor in
+                    guard let window else { return }
+                    MainWindowPlacement.record(window)
+                }
+            }
+            windowObservers.append(observer)
+        }
         let willClose = center.addObserver(
             forName: NSWindow.willCloseNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] note in
+            let window = note.object as? NSWindow
             // willClose fires before the window leaves NSApp.windows,
             // so dispatching on the main queue lets the count reflect
             // post-close state.
             Task { @MainActor in
                 self?.applyActivationPolicyForCurrentWindows()
+                // A dashboard the user closed should stay closed across a
+                // relaunch — only one they left open comes back.
+                if let window, window.canBecomeMain, !(window is NSPanel) {
+                    MainWindowPlacement.wasOpen = false
+                }
             }
         }
-        windowObservers = [didBecomeKey, willClose]
+        // Append, never assign: the visibility and move/resize observers
+        // registered above are in this array too, and overwriting it
+        // silently dropped them.
+        windowObservers.append(contentsOf: [didBecomeKey, willClose])
     }
 
     /// Fallback AppKit autosave name we install when SwiftUI didn't
@@ -447,11 +633,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// modifiers handle first-launch placement on the SwiftUI side,
     /// so this function doesn't touch the frame.
     private static func ensureWindowAutosaves(_ window: NSWindow) {
-        guard window.canBecomeMain, !(window is NSPanel) else { return }
-        if window.frameAutosaveName.isEmpty {
-            window.setFrameAutosaveName(mainWindowAutosaveName)
-        }
-        applyMenuBarAppBehavior(window)
+        // Placement is owned by `MainWindowPlacement`, not AppKit autosave —
+        // see that type for why sharing the mechanism with SwiftUI could not
+        // be made to work.
+        MainWindowPlacement.adopt(window)
+        MainWindowPlacement.holdPlacement(for: window)
     }
 
     /// Make the main window behave like a tool window for a menu-bar
@@ -472,6 +658,27 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Manager normally).
     private static func applyMenuBarAppBehavior(_ window: NSWindow) {
         window.collectionBehavior.insert(.moveToActiveSpace)
+    }
+
+    /// Undo `applyMenuBarAppBehavior` once the window has been brought
+    /// across.
+    ///
+    /// `.moveToActiveSpace` is not a property of the *gesture*, it is a
+    /// property of the *window* — so leaving it applied means the window
+    /// follows onto the active Space every time it is shown, including on
+    /// the relaunch after a dev install, which is nobody's intent. Pairing
+    /// each apply with a removal keeps the behavior scoped to the moment
+    /// the user asked for the window, and lets it otherwise belong to the
+    /// Space and display they left it on.
+    ///
+    /// Removal is deferred one runloop turn so it lands after AppKit has
+    /// finished ordering the window front; clearing it synchronously can
+    /// race the move it was meant to cause. Once the window is on a Space,
+    /// dropping the behavior does not move it back.
+    private static func releaseMenuBarAppBehavior(_ window: NSWindow) {
+        DispatchQueue.main.async {
+            window.collectionBehavior.remove(.moveToActiveSpace)
+        }
     }
 
     /// macOS persists the main window's frame across launches via the
@@ -734,6 +941,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     MenuStatusContent()
                         .modelContainer(self.container)
                         .environment(\.usageEngine, self.backgroundService.engine)
+                        .environment(\.usageEngines, self.backgroundService.engines)
                 }
             )
         )
@@ -836,12 +1044,34 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // than bouncing the user via Mission Control to wherever
             // the window was last left.
             Self.applyMenuBarAppBehavior(window)
-            // Follow the user to the screen they opened us from (no-op
-            // if it's already there). Done before ordering front so
-            // there's no visible jump across displays.
-            if let target { Self.reposition(window, onto: target) }
+            // Where the user *parked* it wins over where their cursor is.
+            //
+            // Two systems owned this and they fought. `MainWindowPlacement`
+            // exists precisely so a dashboard kept on a second monitor stays
+            // there across relaunches; `reposition(_:onto:)` predates it and
+            // drags the window to whichever screen the menu bar was clicked
+            // on. Opening from the menu bar ran the second, so the window
+            // arrived on the wrong display *and* in the wrong spot — and the
+            // `didBecomeKey` observer then recorded that as the new home, so
+            // it stuck.
+            //
+            // Following the cursor is still right for someone who has never
+            // placed the window, which is exactly when there is no stored
+            // frame. So: stored placement first, cursor only as the fallback.
+            if let stored = MainWindowPlacement.storedFrame,
+               MainWindowPlacement.isUsable(stored) {
+                MainWindowPlacement.apply(to: window)
+            } else if let target {
+                Self.reposition(window, onto: target)
+            }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
+            // Re-assert after ordering front: AppKit can nudge a window as it
+            // comes forward, and this is the gesture where being a few points
+            // off is most visible.
+            MainWindowPlacement.apply(to: window)
+            // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
+            Self.releaseMenuBarAppBehavior(window)
             return true
         }
         // Cold open: the window doesn't exist yet and will materialize

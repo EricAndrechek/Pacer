@@ -118,64 +118,52 @@ public final class ProjectAggregateRecomputer {
         ).first
         guard let existing else { return false }
 
-        // Decode existing JSON aggregates. Defaults to empty when the
-        // stored Data is empty/corrupt — the bucket then behaves as if
-        // it had no prior contributors, which is what the legacy
-        // recompute path would produce on first insert anyway.
-        let decoder = JSONDecoder()
-        var sessions: Set<String> = []
-        if !existing.sessionIdsJSON.isEmpty,
-           let decoded = try? decoder.decode([String].self, from: existing.sessionIdsJSON) {
-            sessions = Set(decoded)
-        }
-        var modelTokens: [String: Int64] = [:]
-        if !existing.modelTokensJSON.isEmpty,
-           let decoded = try? decoder.decode([String: Int64].self, from: existing.modelTokensJSON) {
-            modelTokens = decoded
-        }
-        var modelCost: [String: Double] = [:]
-        if !existing.modelCostJSON.isEmpty,
-           let decoded = try? decoder.decode([String: Double].self, from: existing.modelCostJSON) {
-            modelCost = decoded
-        }
+        // Hydrate the running totals from the stored row, fold the new
+        // samples in, write back. `ProjectRollupValues` owns the
+        // decode-merge-encode so the global and per-account rollups share it
+        // rather than keeping two copies that can disagree about, say, how a
+        // corrupt JSON blob is treated.
+        var values = ProjectRollupValues(hydrating: existing)
+        for sample in pending { values.add(sample, mode: mode, snapshot: snapshot) }
+        values.write(to: existing)
 
-        for s in pending {
-            existing.inputTokens += s.breakdown.inputTokens
-            existing.outputTokens += s.breakdown.outputTokens
-            existing.cacheReadTokens += s.breakdown.cacheReadTokens
-            existing.cacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
-            existing.cacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
-            let breakdown = TokenBreakdown(
-                inputTokens: s.breakdown.inputTokens,
-                outputTokens: s.breakdown.outputTokens,
-                cacheReadTokens: s.breakdown.cacheReadTokens,
-                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
-            )
-            let cost = CostCalculator.cost(
-                storedCostUSD: s.sourceCostUSD,
-                model: s.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            existing.totalCostUSD += cost
-            if let sid = s.sessionId, !sid.isEmpty {
-                sessions.insert(sid)
+        // The same increment, per account. Rows are keyed by account so a
+        // bucket's accounts are maintained independently.
+        var perAccount: [String: [TokenSample]] = [:]
+        for sample in pending {
+            perAccount[sample.accountId ?? AccountDailyAggregate.unattributedKey,
+                       default: []].append(sample)
+        }
+        for (accountId, samples) in perAccount {
+            let accountKey = AccountProjectDailyAggregate.makeKey(
+                accountId: accountId, projectPath: pair.projectPath, date: pair.date)
+            let row = try context.fetch(
+                FetchDescriptor<AccountProjectDailyAggregate>(
+                    predicate: #Predicate<AccountProjectDailyAggregate> {
+                        $0.accountProjectDateKey == accountKey
+                    }
+                )
+            ).first
+            var accountValues = row.map { ProjectRollupValues(hydrating: $0) }
+                ?? ProjectRollupValues()
+            for sample in samples {
+                accountValues.add(sample, mode: mode, snapshot: snapshot)
             }
-            modelTokens[s.model, default: 0] += s.breakdown.inputTokens + s.breakdown.outputTokens
-            modelCost[s.model, default: 0] += cost
-            if s.sampledAt > existing.lastActive {
-                existing.lastActive = s.sampledAt
+            if let row {
+                accountValues.write(to: row)
+            } else {
+                let fresh = AccountProjectDailyAggregate(
+                    accountId: accountId, projectPath: pair.projectPath, date: pair.date,
+                    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                    cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+                    totalCostUSD: 0, sessionCount: 0, modelCount: 0,
+                    lastActive: .distantPast, sessionIdsJSON: Data(),
+                    modelTokensJSON: Data(), modelCostJSON: Data())
+                accountValues.write(to: fresh)
+                context.insert(fresh)
             }
         }
 
-        let encoder = JSONEncoder()
-        existing.sessionIdsJSON = (try? encoder.encode(Array(sessions))) ?? Data()
-        existing.modelTokensJSON = (try? encoder.encode(modelTokens)) ?? Data()
-        existing.modelCostJSON = (try? encoder.encode(modelCost)) ?? Data()
-        existing.sessionCount = sessions.count
-        existing.modelCount = modelTokens.count
         stats.aggregatesUpserted += 1
         stats.fastPathApplied += 1
         return true
@@ -225,6 +213,9 @@ public final class ProjectAggregateRecomputer {
             delete: { context.delete($0) },
             stats: &stats
         )
+        try syncAccountProjectRows(
+            context: context, projectPath: path, date: dateString,
+            samples: samples, mode: mode, snapshot: snapshot)
     }
 
     fileprivate nonisolated static func applySamples<S: AggregatableSample>(
@@ -247,90 +238,112 @@ public final class ProjectAggregateRecomputer {
             return
         }
 
-        var inputTokens: Int64 = 0
-        var outputTokens: Int64 = 0
-        var cacheReadTokens: Int64 = 0
-        var cacheCreation5mTokens: Int64 = 0
-        var cacheCreation1hTokens: Int64 = 0
-        var totalCost: Double = 0
-        var sessions: Set<String> = []
-        var modelTokens: [String: Int64] = [:]
-        var modelCost: [String: Double] = [:]
-        var lastActive: Date = .distantPast
-
-        for s in samples {
-            inputTokens += s.breakdown.inputTokens
-            outputTokens += s.breakdown.outputTokens
-            cacheReadTokens += s.breakdown.cacheReadTokens
-            cacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
-            cacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
-            // Cost via the same per-sample path AggregateRecomputer
-            // uses: prefer Claude Code's stored value when present
-            // (auto/display modes), fall back to tokens × pricing.
-            // Previously this was just `s.sourceCostUSD ?? 0`, which
-            // silently treated every CC line without a stored cost as
-            // free — that's why the Projects tab showed $0 across the
-            // board for many users.
-            let breakdown = TokenBreakdown(
-                inputTokens: s.breakdown.inputTokens,
-                outputTokens: s.breakdown.outputTokens,
-                cacheReadTokens: s.breakdown.cacheReadTokens,
-                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
-            )
-            let cost = CostCalculator.cost(
-                storedCostUSD: s.sourceCostUSD,
-                model: s.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            totalCost += cost
-            if let sid = s.sessionId, !sid.isEmpty {
-                sessions.insert(sid)
-            }
-            modelTokens[s.model, default: 0] += s.breakdown.inputTokens + s.breakdown.outputTokens
-            modelCost[s.model, default: 0] += cost
-            if s.sampledAt > lastActive { lastActive = s.sampledAt }
-        }
-
-        let sessionIdsJSON = (try? JSONEncoder().encode(Array(sessions))) ?? Data()
-        let modelTokensJSON = (try? JSONEncoder().encode(modelTokens)) ?? Data()
-        let modelCostJSON = (try? JSONEncoder().encode(modelCost)) ?? Data()
+        var values = ProjectRollupValues()
+        for sample in samples { values.add(sample, mode: mode, snapshot: snapshot) }
 
         if let existing {
-            existing.inputTokens = inputTokens
-            existing.outputTokens = outputTokens
-            existing.cacheReadTokens = cacheReadTokens
-            existing.cacheCreation5mTokens = cacheCreation5mTokens
-            existing.cacheCreation1hTokens = cacheCreation1hTokens
-            existing.totalCostUSD = totalCost
-            existing.sessionCount = sessions.count
-            existing.modelCount = modelTokens.count
-            existing.lastActive = lastActive
-            existing.sessionIdsJSON = sessionIdsJSON
-            existing.modelTokensJSON = modelTokensJSON
-            existing.modelCostJSON = modelCostJSON
+            existing.inputTokens = values.inputTokens
+            existing.outputTokens = values.outputTokens
+            existing.cacheReadTokens = values.cacheReadTokens
+            existing.cacheCreation5mTokens = values.cacheCreation5mTokens
+            existing.cacheCreation1hTokens = values.cacheCreation1hTokens
+            existing.totalCostUSD = values.totalCostUSD
+            existing.sessionCount = values.sessionCount
+            existing.modelCount = values.modelCount
+            existing.lastActive = values.lastActive
+            existing.sessionIdsJSON = values.sessionIdsJSON
+            existing.modelTokensJSON = values.modelTokensJSON
+            existing.modelCostJSON = values.modelCostJSON
         } else {
             insert(ProjectDailyAggregate(
                 projectPath: path,
                 date: dateString,
-                inputTokens: inputTokens,
-                outputTokens: outputTokens,
-                cacheReadTokens: cacheReadTokens,
-                cacheCreation5mTokens: cacheCreation5mTokens,
-                cacheCreation1hTokens: cacheCreation1hTokens,
-                totalCostUSD: totalCost,
-                sessionCount: sessions.count,
-                modelCount: modelTokens.count,
-                lastActive: lastActive,
-                sessionIdsJSON: sessionIdsJSON,
-                modelTokensJSON: modelTokensJSON,
-                modelCostJSON: modelCostJSON
+                inputTokens: values.inputTokens,
+                outputTokens: values.outputTokens,
+                cacheReadTokens: values.cacheReadTokens,
+                cacheCreation5mTokens: values.cacheCreation5mTokens,
+                cacheCreation1hTokens: values.cacheCreation1hTokens,
+                totalCostUSD: values.totalCostUSD,
+                sessionCount: values.sessionCount,
+                modelCount: values.modelCount,
+                lastActive: values.lastActive,
+                sessionIdsJSON: values.sessionIdsJSON,
+                modelTokensJSON: values.modelTokensJSON,
+                modelCostJSON: values.modelCostJSON
             ))
         }
         stats.aggregatesUpserted += 1
     }
+}
+
+/// Bring `AccountProjectDailyAggregate` for one (project, date) bucket in line
+/// with its samples.
+///
+/// Folds through the same `ProjectRollupValues` the global rollup uses, once
+/// per account, so the only difference between the two is which samples went
+/// in. Note that a *session* spanning an account switch legitimately appears
+/// in both accounts' sets and once in the global one — so account session
+/// counts do not have to sum to the global count, and `verify-data` checks
+/// tokens and cost rather than counts.
+func syncAccountProjectRows<S: AggregatableSample>(
+    context: ModelContext,
+    projectPath: String,
+    date: String,
+    samples: [S],
+    mode: CostMode,
+    snapshot: PricingTable.Snapshot
+) throws {
+    var byAccount: [String: ProjectRollupValues] = [:]
+    for sample in samples {
+        let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
+        var values = byAccount[key] ?? ProjectRollupValues()
+        values.add(sample, mode: mode, snapshot: snapshot)
+        byAccount[key] = values
+    }
+
+    let existing = try context.fetch(
+        FetchDescriptor<AccountProjectDailyAggregate>(
+            predicate: #Predicate<AccountProjectDailyAggregate> {
+                $0.projectPath == projectPath && $0.date == date
+            }
+        )
+    )
+    var rows: [String: AccountProjectDailyAggregate] = [:]
+    for row in existing { rows[row.accountId] = row }
+
+    for (accountId, values) in byAccount {
+        if let row = rows.removeValue(forKey: accountId) {
+            row.inputTokens = values.inputTokens
+            row.outputTokens = values.outputTokens
+            row.cacheReadTokens = values.cacheReadTokens
+            row.cacheCreation5mTokens = values.cacheCreation5mTokens
+            row.cacheCreation1hTokens = values.cacheCreation1hTokens
+            row.totalCostUSD = values.totalCostUSD
+            row.sessionCount = values.sessionCount
+            row.modelCount = values.modelCount
+            row.lastActive = values.lastActive
+            row.sessionIdsJSON = values.sessionIdsJSON
+            row.modelTokensJSON = values.modelTokensJSON
+            row.modelCostJSON = values.modelCostJSON
+        } else {
+            context.insert(AccountProjectDailyAggregate(
+                accountId: accountId, projectPath: projectPath, date: date,
+                inputTokens: values.inputTokens,
+                outputTokens: values.outputTokens,
+                cacheReadTokens: values.cacheReadTokens,
+                cacheCreation5mTokens: values.cacheCreation5mTokens,
+                cacheCreation1hTokens: values.cacheCreation1hTokens,
+                totalCostUSD: values.totalCostUSD,
+                sessionCount: values.sessionCount,
+                modelCount: values.modelCount,
+                lastActive: values.lastActive,
+                sessionIdsJSON: values.sessionIdsJSON,
+                modelTokensJSON: values.modelTokensJSON,
+                modelCostJSON: values.modelCostJSON
+            ))
+        }
+    }
+    for orphan in rows.values { context.delete(orphan) }
 }
 
 /// Off-main bulk recompute path. Owns its own `ModelContext` via
@@ -378,6 +391,9 @@ actor ProjectAggregateBulkWorker {
                 delete: { modelContext.delete($0) },
                 stats: &stats
             )
+            try syncAccountProjectRows(
+                context: modelContext, projectPath: pair.projectPath,
+                date: pair.date, samples: samples, mode: mode, snapshot: snapshot)
             processed += 1
             if processed.isMultiple(of: Self.yieldInterval) {
                 await Task.yield()

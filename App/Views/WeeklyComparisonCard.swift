@@ -13,7 +13,19 @@ import PacerUI
 /// We pull a 14-day predicate from SwiftData; the in-view group is
 /// over ≤70 rows (14 × ~5 models/day) so it stays sub-millisecond.
 struct WeeklyComparisonCard: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    /// The same rollup sliced to one account. Which of the two is
+    /// rendered is the scope switch; the card's layout does not change.
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// What the card renders: every account, or one. Both queries are
+    /// live, so switching is a re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     @Query(WeeklyComparisonCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
 
     /// Cached totals refreshed on scan-meta tick. Per AGENTS.md, every
@@ -22,7 +34,7 @@ struct WeeklyComparisonCard: View {
     @State private var cachedThisWeek = WeekTotals()
     @State private var cachedLastWeek = WeekTotals()
 
-    init() {
+    init(scopeAccountId: String? = nil) {
         // 14-day window covering this week + last week. Predicate is
         // anchored on the date string format (`YYYY-MM-DD`) so it
         // sorts/compares lexicographically and uses the existing
@@ -31,8 +43,14 @@ struct WeeklyComparisonCard: View {
         let cal = Calendar.current
         let lowerBound = cal.date(byAdding: .day, value: -13, to: now) ?? now
         let lowerStr = TokenSample.formatDate(lowerBound)
-        _aggregates = Query(
+        _globalAggregates = Query(
             filter: #Predicate<DailyAggregate> { $0.date >= lowerStr }
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedAggregates = Query(
+            filter: #Predicate<AccountDailyAggregate> {
+                $0.date >= lowerStr && $0.accountId == acct
+            }
         )
     }
 
@@ -147,7 +165,7 @@ struct WeeklyComparisonCard: View {
                 value: pacerCost(thisWeek.cost),
                 label: "cost",
                 hint: deltaHint(this: thisWeek.cost, last: lastWeek.cost, formatter: pacerCost),
-                tooltip: pacerCostExact(thisWeek.cost)
+                tooltip: deltaTooltip(this: thisWeek.cost, last: lastWeek.cost, exact: pacerCostExact)
             )
             MetricTile(
                 value: pacerTokens(thisWeek.totalTokens),
@@ -157,7 +175,11 @@ struct WeeklyComparisonCard: View {
                     last: Double(lastWeek.totalTokens),
                     formatter: { pacerTokens(Int64($0)) }
                 ),
-                tooltip: pacerTokensExact(thisWeek.totalTokens)
+                tooltip: deltaTooltip(
+                    this: Double(thisWeek.totalTokens),
+                    last: Double(lastWeek.totalTokens),
+                    exact: { pacerTokensExact(Int64($0)) }
+                )
             )
             MetricTile(
                 value: "\(thisWeek.distinctDates.count)",
@@ -198,6 +220,22 @@ struct WeeklyComparisonCard: View {
         let pct = abs((ratio - 1) * 100)
         let arrow: String = ratio >= 1.05 ? "↑" : ratio <= 0.95 ? "↓" : "≈"
         return String(format: "%@ %.0f%% (vs %@)", arrow, pct, formatter(last))
+    }
+
+    /// Both endpoints of the week-over-week comparison, exact —
+    /// "$4,203.11 → $14,602.55". The tile already shows this week
+    /// compact as its value and last week compact inside `deltaHint`,
+    /// so the one thing hover can still add is the pair at full
+    /// precision, in the order the change happened. Falls back to this
+    /// week alone when there is no prior week, matching `deltaHint`'s
+    /// own "first 7 days" case.
+    private func deltaTooltip(
+        this: Double,
+        last: Double,
+        exact: (Double) -> String
+    ) -> String {
+        guard last > 0 else { return exact(this) }
+        return "\(exact(last)) → \(exact(this))"
     }
 
     /// "82% cache hits" — only when there's enough data and only when

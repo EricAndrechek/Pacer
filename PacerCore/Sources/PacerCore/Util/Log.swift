@@ -17,8 +17,22 @@ public enum Log {
         return f
     }()
 
+    /// Marks lines written by a process other than the user's running app.
+    ///
+    /// The off-screen renderer is a second process of the same bundle writing
+    /// to the same log, and its lines were indistinguishable from the app's.
+    /// That is actively misleading: the renderer loads every page of every
+    /// scope back to back on its main thread, so it logs multi-second
+    /// `[MainThread] stalled` lines as a matter of course — and reading those
+    /// as the app's is how you end up investigating a beachball nobody had.
+    ///
+    /// Set once at startup, before anything logs. Nil in the real app, so its
+    /// lines are unchanged and old logs stay greppable.
+    nonisolated(unsafe) public static var processTag: String?
+
     public static func write(_ tag: String, _ message: String) {
-        let line = "\(formatter.string(from: Date())) [\(tag)] \(message)\n"
+        let prefix = processTag.map { "\($0):" } ?? ""
+        let line = "\(formatter.string(from: Date())) [\(prefix)\(tag)] \(message)\n"
         FileHandle.standardError.write(Data(line.utf8))
     }
 }

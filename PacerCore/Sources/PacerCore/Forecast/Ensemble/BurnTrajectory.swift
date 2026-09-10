@@ -217,6 +217,14 @@ public enum BurnTrajectory {
         public let coverage: Double
         public let isSelected: Bool
         public var id: String { modelId }
+
+        /// The same trajectory, marked as the one on display. Used when the
+        /// scoreboard's pick could not fit this cycle and a present model has
+        /// to stand in — see `rateLimitTrajectories`.
+        public func selecting() -> ScoredTrajectory {
+            ScoredTrajectory(modelId: modelId, complexity: complexity, trajectory: trajectory,
+                             medianAbsError: medianAbsError, coverage: coverage, isSelected: true)
+        }
     }
 
     /// Friendly display name for a model id.

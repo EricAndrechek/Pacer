@@ -42,12 +42,28 @@ public final class AlertRule {
     /// if the window returns. See `ScopedRateLimitAlerts`.
     public var scopedWindow: String?
 
+    /// Which account this rule watches, as an `Account.id`. `nil` means
+    /// **every account**, which is both the old behaviour and the right
+    /// default: a spend cap you set before you had two logins should not
+    /// quietly start covering half your usage.
+    ///
+    /// This is an explicit target on the rule, deliberately *not* the window's
+    /// display scope. A view shows what you asked to see; an alert tells you
+    /// what you did not, so a budget alarm a display filter could silence is a
+    /// footgun. See `NotificationsHost`, which carries the long version.
+    ///
+    /// Additive + optional ⇒ lightweight-migration-safe, same as
+    /// `scopedWindow`. A rule targeting an account that later disappears goes
+    /// dormant rather than firing against nothing — it is simply never matched.
+    public var accountId: String?
+
     public init(
         id: String = UUID().uuidString,
         name: String,
         metric: String,
         thresholdValue: Double,
         scopedWindow: String? = nil,
+        accountId: String? = nil,
         enabled: Bool = true,
         createdAt: Date = Date()
     ) {
@@ -56,6 +72,7 @@ public final class AlertRule {
         self.metric = metric
         self.thresholdValue = thresholdValue
         self.scopedWindow = scopedWindow
+        self.accountId = accountId
         self.enabled = enabled
         self.createdAt = createdAt
     }

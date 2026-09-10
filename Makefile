@@ -37,6 +37,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 .PHONY: help build verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
         verify-archive \
+        assign-accounts \
         pricing-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
@@ -69,13 +70,27 @@ verify-archive:  ## Prove the DuckDB archive can give back every field it was gi
 	@osascript -e 'quit app "Pacer"' 2>/dev/null || true
 	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
 	@PACER_ARCHIVE_ROUNDTRIP=1 /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep roundtrip || true
-	@open -a Pacer
+	@open -g -a Pacer
+
+assign-accounts:  ## Assign historical usage to an account. SPEC='<accountId>|<fromISO|->|<throughISO|->[;…]' or SPEC=list. Quits Pacer for the store, then restarts it.
+	@osascript -e 'quit app "Pacer"' 2>/dev/null || true
+	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
+	@PACER_ACCOUNT_ASSIGN='$(SPEC)' /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep -E "^(assign|accounts|unattributed|every|activation|  )" || true
+	@open -g -a Pacer
 
 verify-data:  ## Check every rollup against the raw samples in the REAL store. Read-only; exits non-zero on any inconsistency.
 	@$(REPO_ROOT)/bin/dev-verify-data.sh
 
 test:  ## Run the PacerCore unit + ground-truth tests.
-	@cd PacerCore && swift test 2>&1 | tail -3
+	@# PACER_ISOLATED_DEFAULTS keeps the suite off the machine's App Group
+	@# defaults. Tests publish fixture account ids through the same keys the
+	@# running app reads, and one leaked `orgA` scoped the live app (and the
+	@# screenshot renderer) to an account with no rows. PacerPreferences also
+	@# detects a test process on its own; this is the half that cannot drift.
+	@cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3
+
+verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — only run it with the machine owner's explicit go-ahead, for that run. See AGENTS.md "Never take over the machine".
+	@bin/verify-menubar-tooltip.sh
 
 pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
 	@bin/update-pricing-snapshot.sh
@@ -84,7 +99,8 @@ screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. He
 	@mkdir -p "$(REPO_ROOT)/docs/screenshots"
 	@bin="$(REPO_ROOT)/Build/Products/Debug/Pacer.app/Contents/MacOS/Pacer"; \
 	if [ ! -x "$$bin" ]; then echo "ERROR: build missing at $$bin (did 'make verify' succeed?)"; exit 1; fi; \
-	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin"; \
+	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin" \
+	  || { echo "ERROR: screenshot run failed (exit $$?) — see the lines above"; exit 1; }; \
 	echo "Wrote PNGs to $(REPO_ROOT)/docs/screenshots/"
 
 app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
@@ -168,3 +184,10 @@ clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for c
 	else \
 		echo "Cancelled."; \
 	fi
+
+.PHONY: render-live
+## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).
+## Usage: make render-live            (all accounts + each account)
+##        make render-live SCOPES=all
+render-live:
+	@bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"

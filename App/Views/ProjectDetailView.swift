@@ -24,8 +24,22 @@ struct ProjectDetailView: View {
 
     @Environment(\.pacerModalPush) private var push
     @Environment(\.modelContext) private var modelContext
-    @Query private var aggregates: [ProjectDailyAggregate]
-    @Query private var sessionRows: [SessionInfo]
+    @Query private var globalAggregates: [ProjectDailyAggregate]
+    @Query private var scopedAggregates: [AccountProjectDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one — a project's detail should show the same scope
+    /// the Projects list you came from was showing.
+    private var aggregates: [any ProjectDailyReadable] {
+        scope.isAll ? globalAggregates : scopedAggregates
+    }
+    private var sessionRows: [SessionRow] {
+        scope.isAll
+            ? globalSessionRows.map(\.sessionRow)
+            : scopedSessionRows.map(\.sessionRow)
+    }
+    @Query private var globalSessionRows: [SessionInfo]
+    @Query private var scopedSessionRows: [AccountSessionInfo]
     /// Probe row for this project, if any. Drives the status badge
     /// under the modal subtitle. Scoped via `init` so SwiftData
     /// only fetches the one row we care about (path-keyed unique).
@@ -80,37 +94,69 @@ struct ProjectDetailView: View {
     /// because the predicate is path-keyed unique.
     @Query private var budgetRows: [ProjectBudget]
 
-    init(projectPath: String, displayName: String, since: Date?) {
+    init(
+        projectPath: String, displayName: String, since: Date?,
+        scopeAccountId: String? = nil
+    ) {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
         let path = projectPath
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         _budgetRows = Query(
             filter: #Predicate<ProjectBudget> { $0.projectPath == path }
         )
         if let cutoffDate = since {
             let cutoffString = TokenSample.formatDate(cutoffDate)
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> {
                     $0.projectPath == path && $0.date >= cutoffString
                 },
                 sort: \.date
             )
-            _sessionRows = Query(
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> {
+                    $0.accountId == acct && $0.projectPath == path
+                    && $0.date >= cutoffString
+                },
+                sort: \AccountProjectDailyAggregate.date
+            )
+            _globalSessionRows = Query(
                 filter: #Predicate<SessionInfo> {
                     $0.projectPath == path && $0.lastSeenAt >= cutoffDate
                 },
                 sort: \.lastSeenAt,
                 order: .reverse
             )
+            _scopedSessionRows = Query(
+                filter: #Predicate<AccountSessionInfo> {
+                    $0.accountId == acct && $0.projectPath == path
+                    && $0.lastSeenAt >= cutoffDate
+                },
+                sort: \AccountSessionInfo.lastSeenAt,
+                order: .reverse
+            )
         } else {
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<ProjectDailyAggregate> { $0.projectPath == path },
                 sort: \.date
             )
-            _sessionRows = Query(
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountProjectDailyAggregate> {
+                    $0.accountId == acct && $0.projectPath == path
+                },
+                sort: \AccountProjectDailyAggregate.date
+            )
+            _globalSessionRows = Query(
                 filter: #Predicate<SessionInfo> { $0.projectPath == path },
                 sort: \.lastSeenAt,
+                order: .reverse
+            )
+            _scopedSessionRows = Query(
+                filter: #Predicate<AccountSessionInfo> {
+                    $0.accountId == acct && $0.projectPath == path
+                },
+                sort: \AccountSessionInfo.lastSeenAt,
                 order: .reverse
             )
         }

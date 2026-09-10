@@ -16,7 +16,7 @@ struct TodayTimelineCard: View {
     /// other surface.
     let onTodayTap: (() -> Void)?
 
-    init(onTodayTap: (() -> Void)? = nil) {
+    init(onTodayTap: (() -> Void)? = nil, scopeAccountId: String? = nil) {
         self.onTodayTap = onTodayTap
         let today = TokenSample.formatDate(Date())
         // Today-scoped `HourlyAggregate` rows are at most 24 × N_models
@@ -26,12 +26,28 @@ struct TodayTimelineCard: View {
         // `effectiveCostUSD(mode:)` per row. The recomputer applies
         // cost mode once at write time, so the read path here is just
         // sum-by-hour over the prebuilt rollup.
-        _hourlyRows = Query(
+        _globalHourly = Query(
             filter: #Predicate<HourlyAggregate> { $0.date == today }
+        )
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
+        _scopedHourly = Query(
+            filter: #Predicate<AccountHourlyAggregate> {
+                $0.date == today && $0.accountId == acct
+            }
         )
     }
 
-    @Query private var hourlyRows: [HourlyAggregate]
+    @Query private var globalHourly: [HourlyAggregate]
+    @Query private var scopedHourly: [AccountHourlyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var hourlyRows: [HourlyRow] {
+        scope.isAll
+            ? globalHourly.map(\.hourlyRow)
+            : scopedHourly.map(\.hourlyRow)
+    }
     @Query(TodayTimelineCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
     @State private var cached = Cached()
 

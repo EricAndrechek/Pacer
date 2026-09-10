@@ -42,6 +42,19 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// makes `projectPath` nil.
     public let originalProjectPath: String?
     public let claudeCodeVersion: String?
+    /// The Claude Code data root this line was read from, or nil for the
+    /// default root (`~/.claude`).
+    ///
+    /// Carries the ONE fact that separates two accounts running at the same
+    /// time. A session pinned to its own `CLAUDE_CONFIG_DIR` writes to that
+    /// profile's own `projects/` directory, and that directory belongs to
+    /// exactly one account — so the root a turn was found under is decisive
+    /// where a timestamp is not, because with concurrent sessions the
+    /// activation trail has two answers for the same instant.
+    ///
+    /// Nil means the default login, which is the only case the trail can
+    /// answer on time alone.
+    public let rootPath: String?
     public let isApiErrorMessage: Bool
 
     /// Whether this line is the **finished** message rather than a
@@ -95,6 +108,7 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         projectPath: String? = nil,
         originalProjectPath: String? = nil,
         claudeCodeVersion: String? = nil,
+        rootPath: String? = nil,
         isApiErrorMessage: Bool = false,
         isComplete: Bool = true
     ) {
@@ -108,6 +122,7 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         self.projectPath = projectPath
         self.originalProjectPath = originalProjectPath
         self.claudeCodeVersion = claudeCodeVersion
+        self.rootPath = rootPath
         self.isApiErrorMessage = isApiErrorMessage
     }
 }

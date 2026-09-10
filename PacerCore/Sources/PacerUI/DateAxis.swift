@@ -79,6 +79,14 @@ public func pacerDateAxis(_ dates: [String], target: Int = 6, dayThreshold: Int 
 
     if sorted.count <= dayThreshold {
         let picks = interiorIndices(count: sorted.count, target: target).map { sorted[$0] }
+        // Two or three bands are all edge, so the interior rule leaves the
+        // chart with no labels at all (two bands) or one (three) — a two-day
+        // account's Models trend drew two bars over an empty axis. Edge labels
+        // can crowd the plot edge; an unlabelled axis is worse. From four
+        // bands up there is an interior to pick from and the rule stands.
+        if sorted.count <= 3 {
+            return PacerDateAxis(values: sorted, monthly: false, straddlesYear: straddlesYear)
+        }
         return PacerDateAxis(values: picks, monthly: false, straddlesYear: straddlesYear)
     }
 

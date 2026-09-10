@@ -1,0 +1,189 @@
+import Foundation
+import Testing
+@testable import PacerCore
+
+private func account(
+    id: String = "org-1",
+    displayName: String = "Claude account (max)",
+    email: String? = nil,
+    orgName: String? = nil
+) -> Account {
+    Account(id: id, organizationId: id, displayName: displayName,
+            isActive: true, firstSeenAt: .distantPast, lastSeenAt: .distantPast,
+            emailAddress: email, organizationName: orgName)
+}
+
+@Suite("Account labels")
+struct AccountLabelTests {
+
+    @Test("email wins when we have one")
+    func emailIsPreferred() {
+        #expect(account(email: "a@example.com", orgName: "Acme").label == "a@example.com")
+    }
+
+    @Test("org name is the fallback before the placeholder")
+    func orgNameBeatsPlaceholder() {
+        #expect(account(orgName: "Acme").label == "Acme")
+    }
+
+    @Test("the derived placeholder is still better than a raw uuid")
+    func placeholderBeatsId() {
+        #expect(account().label == "Claude account (max)")
+    }
+
+    @Test("an empty display name falls through to the id rather than showing blank")
+    func emptyNameFallsThroughToId() {
+        #expect(account(displayName: "").label == "org-1")
+    }
+
+    @Test("empty strings are treated as absent, not as a label")
+    func emptyStringsAreNotLabels() {
+        #expect(account(email: "", orgName: "").label == "Claude account (max)")
+    }
+
+    /// The rename would otherwise be a control that visibly does nothing:
+    /// every real account has an observed email, and the email used to win.
+    @Test("a name the user typed beats the observed email")
+    func renameBeatsEverythingObserved() {
+        #expect(account(displayName: "Work", email: "a@example.com", orgName: "Globex").label == "Work")
+    }
+
+    @Test("clearing the rename hands the label back to what was observed")
+    func clearedRenameFallsBackToObserved() {
+        let restored = Account.defaultName(forOrg: "org-1", subscriptionType: "max")
+        #expect(account(displayName: restored, email: "a@example.com").label == "a@example.com")
+    }
+
+    @Test("auto-derived names are recognised so a rename is never clobbered")
+    func derivedNamesAreRecognised() {
+        #expect(account(displayName: "Claude account (max20x)").hasDerivedName)
+        #expect(account(displayName: "Account 8f7d").hasDerivedName)
+        #expect(account(displayName: "Primary account").hasDerivedName)
+        #expect(account(displayName: "").hasDerivedName)
+        #expect(account(displayName: "Work").hasDerivedName == false)
+    }
+}
+
+/// `cswap alias <n> <name>` is the one thing the switcher's roster holds that
+/// Pacer cannot observe for itself — everything else (email, org uuid, org
+/// name) it already sees, and the org name is email-derived anyway.
+@Suite("Borrowing the switcher's alias")
+struct ExternalAliasTests {
+
+    private func writeRoster(_ json: String) throws -> URL {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let dir = home.appendingPathComponent(".claude-swap-backup")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try json.write(to: dir.appendingPathComponent("sequence.json"),
+                       atomically: true, encoding: .utf8)
+        return home
+    }
+
+    @Test func anAliasIsRead() throws {
+        let home = try writeRoster("""
+        {"accounts":{"1":{"email":"a@example.com","organizationUuid":"org-a",
+          "organizationName":"a@example.com's Organization","alias":"work"}}}
+        """)
+        let entry = ExternalAccountDirectory.discover(homeDirectory: home).entries["org-a"]
+        #expect(entry?.alias == "work")
+        #expect(entry?.emailAddress == "a@example.com")
+    }
+
+    @Test func noAliasIsNilRatherThanEmpty() throws {
+        let home = try writeRoster("""
+        {"accounts":{"1":{"organizationUuid":"org-a","alias":""}}}
+        """)
+        #expect(ExternalAccountDirectory.discover(homeDirectory: home).entries["org-a"]?.alias == nil)
+    }
+}
+
+@Suite("External account directory")
+struct ExternalAccountDirectoryTests {
+
+    private func writeRoster(_ json: String) throws -> URL {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        let dir = home.appendingPathComponent(".claude-swap-backup")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try json.write(to: dir.appendingPathComponent("sequence.json"),
+                       atomically: true, encoding: .utf8)
+        return home
+    }
+
+    @Test("a claude-swap roster yields one entry per account, keyed by org")
+    func readsClaudeSwapRoster() throws {
+        let home = try writeRoster("""
+        {"activeAccountNumber":2,"accounts":{
+          "1":{"email":"work@example.com","uuid":"u1","organizationUuid":"org-work",
+               "organizationName":"Work Org"},
+          "2":{"email":"me@example.com","uuid":"u2","organizationUuid":"org-personal",
+               "organizationName":"Personal Org"}}}
+        """)
+        let directory = ExternalAccountDirectory.discover(homeDirectory: home)
+        #expect(directory.entries.count == 2)
+        #expect(directory.entries["org-work"]?.emailAddress == "work@example.com")
+        #expect(directory.entries["org-personal"]?.organizationName == "Personal Org")
+        #expect(directory.entries["org-work"]?.source == "claude-swap slot 1")
+    }
+
+    @Test("an account with no org uuid is skipped, not keyed on an empty string")
+    func skipsEntriesWithoutAnOrg() throws {
+        let home = try writeRoster("""
+        {"accounts":{"1":{"email":"a@example.com","organizationUuid":""},
+                     "2":{"email":"b@example.com","organizationUuid":"org-2"}}}
+        """)
+        let directory = ExternalAccountDirectory.discover(homeDirectory: home)
+        #expect(directory.entries.count == 1)
+        #expect(directory.entries["org-2"]?.emailAddress == "b@example.com")
+    }
+
+    @Test("no switcher installed is an empty directory, not a failure")
+    func missingRosterIsEmpty() {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        #expect(ExternalAccountDirectory.discover(homeDirectory: home).isEmpty)
+    }
+
+    @Test("malformed json is ignored rather than crashing the scan")
+    func malformedRosterIsIgnored() throws {
+        let home = try writeRoster("{ not json at all")
+        #expect(ExternalAccountDirectory.discover(homeDirectory: home).isEmpty)
+    }
+}
+
+/// Pacer lists accounts in the order the user already switches between them.
+@Suite("Account list order")
+struct AccountListOrderTests {
+
+    private func make(_ id: String, slot: Int?, active: Bool = false) -> Account {
+        let a = Account(id: id, organizationId: id, displayName: "n", isActive: active,
+                        firstSeenAt: .distantPast, lastSeenAt: .distantPast)
+        a.switcherSlot = slot
+        return a
+    }
+
+    @Test("the switcher's slot wins")
+    func slotOrders() {
+        let two = make("b", slot: 2, active: true)      // active, but slot 2
+        let one = make("a", slot: 1)
+        #expect([two, one].sorted(by: Account.listOrder).map(\.id) == ["a", "b"])
+    }
+
+    /// An account the switcher does not know sorts after the ones it does,
+    /// rather than jumbling into the middle of a numbered list.
+    @Test("un-slotted accounts follow the numbered ones")
+    func unslottedLast() {
+        let numbered = make("a", slot: 2)
+        let unknown = make("z", slot: nil, active: true)
+        #expect([unknown, numbered].sorted(by: Account.listOrder).map(\.id) == ["a", "z"])
+    }
+
+    /// With no switcher at all, the active login leads — the old behaviour.
+    @Test("no slots means active first")
+    func activeFirstWithoutSlots() {
+        let idle = make("a", slot: nil)
+        let active = make("b", slot: nil, active: true)
+        #expect([idle, active].sorted(by: Account.listOrder).map(\.id) == ["b", "a"])
+    }
+}

@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 import PacerCore
 
-/// Shared sortable table of `SessionInfo` rows. Used by both
+/// Shared sortable table of session rows. Used by both
 /// `ProjectDetailView` (project's sessions) and `DayDetailView`
 /// (sessions active on a specific day) so both surfaces have the
 /// same look-and-feel + sort behavior.
@@ -22,23 +22,23 @@ import PacerCore
 public struct SessionsTable: View {
     /// Already filtered + ready-to-sort. Caller supplies the rows
     /// from its own @Query so SwiftData updates stay incremental.
-    public let rows: [SessionInfo]
+    public let rows: [SessionRow]
     /// Show the "Project" column. The project-detail modal already
     /// scopes by one project so the column is redundant there; the
     /// day-detail modal benefits from it.
     public let showProjectColumn: Bool
     /// Callback for opening a session's detail modal.
-    public let onSessionTap: (SessionInfo) -> Void
+    public let onSessionTap: (SessionRow) -> Void
 
     @Binding public var sort: SessionsTableSort
     @Binding public var sortDescending: Bool
 
     public init(
-        rows: [SessionInfo],
+        rows: [SessionRow],
         showProjectColumn: Bool,
         sort: Binding<SessionsTableSort>,
         sortDescending: Binding<Bool>,
-        onSessionTap: @escaping (SessionInfo) -> Void
+        onSessionTap: @escaping (SessionRow) -> Void
     ) {
         self.rows = rows
         self.showProjectColumn = showProjectColumn
@@ -89,8 +89,8 @@ public struct SessionsTable: View {
         }
     }
 
-    private var sortedRows: [SessionInfo] {
-        let primary: (SessionInfo, SessionInfo) -> Bool
+    private var sortedRows: [SessionRow] {
+        let primary: (SessionRow, SessionRow) -> Bool
         switch sort {
         case .id:
             primary = { $0.sessionId < $1.sessionId }
@@ -171,7 +171,7 @@ public struct SessionsTable: View {
     }
 
     @ViewBuilder
-    private func rowView(_ row: SessionInfo) -> some View {
+    private func rowView(_ row: SessionRow) -> some View {
         HoverRow(action: { onSessionTap(row) }) {
             HStack(alignment: .firstTextBaseline) {
                 Text(String(row.sessionId.prefix(8)))
@@ -201,7 +201,7 @@ public struct SessionsTable: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .frame(width: 70, alignment: .trailing)
-                Text(pacerRelative(row.lastSeenAt))
+                Text(pacerRelative(row.lastSeenAt)).help(pacerRelativeExact(row.lastSeenAt))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .frame(width: 90, alignment: .trailing)

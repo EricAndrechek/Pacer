@@ -73,6 +73,15 @@ public enum EngineQuestion: Sendable, Equatable {
 @ModelActor
 public actor UsageIntelligenceEngine {
 
+    /// Which usage this instance is fitted to. `@ModelActor` generates the
+    /// `init(modelContainer:)`, so the scope is adopted immediately after —
+    /// `EngineHost` is the only thing that constructs engines and it always
+    /// does both. Defaulting to `.allAccounts` means every existing call site
+    /// (the screenshot harness, tests) keeps today's behaviour untouched.
+    public private(set) var scope: EngineScope = .allAccounts
+
+    public func adopt(scope: EngineScope) { self.scope = scope }
+
     /// The most recent feature snapshot, or nil before the first recompute.
     private var features: EngineFeatures?
     /// The per-user fit derived from `features`.
@@ -132,13 +141,30 @@ public actor UsageIntelligenceEngine {
     /// samples (save for a single most-recent token timestamp), and the fits
     /// are closed-form. Failures degrade to an empty fit rather than throwing.
     public func recompute(now: Date = Date(), calendar: Calendar = .current) {
-        let f = EngineFeatures.build(
-            now: now, calendar: calendar,
-            daily: fetchDaily(),
-            hourly: fetchHourly(),
-            rate: fetchRate(now: now),
-            lastArrivalAt: fetchLastArrival(),
-            scoped: fetchScopedLimits(now: now))
+        // Phase timings. A refit is the most expensive recurring thing Pacer
+        // does — measured at ~13 s for a single scope — and until now the only
+        // number anyone had was the total, which says nothing about where it
+        // goes. Five `Date()` reads against thirteen seconds is free.
+        var phase: [String: Int] = [:]
+        func timed<T>(_ label: String, _ body: () -> T) -> T {
+            let t = Date()
+            let out = body()
+            phase[label, default: 0] += Int(Date().timeIntervalSince(t) * 1000)
+            return out
+        }
+        let recomputeStarted = Date()
+
+        let daily = timed("daily") { fetchDaily() }
+        let hourly = timed("hourly") { fetchHourly() }
+        let rate = timed("rate") { fetchRate(now: now) }
+        let arrival = timed("arrival") { fetchLastArrival() }
+        let scopedLimits = timed("scopedLimits") { fetchScopedLimits(now: now) }
+        let f = timed("features") {
+            EngineFeatures.build(
+                now: now, calendar: calendar,
+                daily: daily, hourly: hourly, rate: rate,
+                lastArrivalAt: arrival, scoped: scopedLimits)
+        }
         self.features = f
 
         // Self-eval feedback loop: score newly-completed periods into the
@@ -150,7 +176,7 @@ public actor UsageIntelligenceEngine {
         // it holds thousands of rows, and the previous five separate fetches
         // (existing-keys ×2 + per-surface records ×3) were a measured ~0.4s
         // of every refit.
-        var allRows = fetchAllEvalRows()
+        var allRows = timed("evalRows") { fetchAllEvalRows() }
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
@@ -206,17 +232,48 @@ public actor UsageIntelligenceEngine {
             }
         }
 
-        self.fit = Self.makeFit(f, eodPools: pools, rlSelection: rlSelection)
+        self.fit = timed("makeFit") { Self.makeFit(f, eodPools: pools, rlSelection: rlSelection) }
 
         // Prediction trail: record what this refit would tell the user —
         // the live answers with their bands, residual evidence, and version
         // tags — behind the change/heartbeat policy.
-        recordPredictionSnapshots(f, now: now)
+        timed("snapshots") { recordPredictionSnapshots(f, now: now) }
+
+        let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
+        // Only when it is worth reading about. A warm refit on a small store
+        // is milliseconds and does not need a line each time.
+        if total >= 1000 {
+            let detail = phase.sorted { $0.value > $1.value }
+                .filter { $0.value > 0 }
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            // Which account's limits this fit read — the global engine reads
+            // the active login's, so this is how you see two engines doing the
+            // same expensive work in one cycle.
+            let acct = "limitAcct:" + (limitAccountId.map { String($0.suffix(4)) } ?? "nil")
+            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)} \(acct)")
+        }
+    }
+
+    /// Short scope tag for the phase log — which engine this was.
+    private var scopeLabel: String {
+        switch scope {
+        case .allAccounts: return "all"
+        case .account(let id): return String(id.suffix(4))
+        }
     }
 
     /// Number of historical days the fit was trained on — for a future
     /// "the engine knows X days about you" affordance and for tests.
     public func trainingDayCount() -> Int { features?.dailyPeriods.count ?? 0 }
+
+    // MARK: - Diagnostics (see `EngineScopeProbe`)
+
+    public func windowSpecsForProbe() -> [WindowSpec] { features?.windows ?? [] }
+    public func rateLimitHistoryCountForProbe(_ key: String) -> Int {
+        features?.rateLimit[key]?.count ?? 0
+    }
+    public func rateLimitCyclesForProbe(_ key: String) -> Int { fit.rl[key]?.cyclesObserved ?? 0 }
 
     /// The scoped per-model windows the engine is currently forecasting —
     /// discovered dynamically from the latest poll's model/surface-scoped
@@ -252,9 +309,7 @@ public actor UsageIntelligenceEngine {
     /// counting-statement copy ("your 3rd-highest day in 10 weeks") instead of
     /// indefensible smooth tail probabilities from ~50 points.
     public func yesterdayRank() -> (cost: Double, rankFromTop: Int, of: Int)? {
-        guard let yesterday = fit.dailyBaseline.last, fit.dailyBaseline.count >= 7 else { return nil }
-        let higher = fit.dailyBaseline.filter { $0 > yesterday }.count
-        return (yesterday, higher + 1, fit.dailyBaseline.count)
+        DailyBaseline.yesterdayRank(baseline: fit.dailyBaseline)
     }
 
     /// How each prediction method is doing on this user's own data for a surface
@@ -645,7 +700,7 @@ public actor UsageIntelligenceEngine {
         let statFor = { (id: String) -> EngineSelfEval.Accuracy.MethodStat? in
             accuracy?.methods.first { $0.method == id }
         }
-        return rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
+        let scored: [BurnTrajectory.ScoredTrajectory] = rf.roster.compactMap { model -> BurnTrajectory.ScoredTrajectory? in
             guard let projection = model.fit(current) else { return nil }
             // Anchor to the live value (same rule as `burnOutlook`): smoothed
             // fits sit under a spiking last sample, and an un-anchored curve
@@ -683,13 +738,40 @@ public actor UsageIntelligenceEngine {
                 coverage: stat == nil ? 0 : 1,
                 isSelected: model.id == rf.selectedId)
         }
+
+        // The scoreboard can name a model that is not in the roster: selection
+        // reads the accumulated record, while the roster is what will actually
+        // *fit this cycle*, and a model may decline (the diurnal model early in
+        // a cycle, every model at 0%). When that happened nothing was marked
+        // selected, and the chart drew `first` — roster order, which is
+        // arbitrary. On a 7-day window three hours past its reset that meant an
+        // unvetted curve presented as the forecast.
+        //
+        // Fall back explicitly: best realized accuracy among the models that
+        // did fit, ties to the simpler one — the same rule the scoreboard uses.
+        guard !scored.contains(where: \.isSelected), let best = scored.min(by: {
+            $0.medianAbsError != $1.medianAbsError
+                ? $0.medianAbsError < $1.medianAbsError
+                : $0.complexity < $1.complexity
+        }) else { return scored }
+        return scored.map {
+            $0.modelId == best.modelId ? $0.selecting() : $0
+        }
     }
 
     // MARK: - Pace vs norm
 
+    /// Days of history a percentile needs before it means anything. The same
+    /// floor `paceVsNow` and `yesterdayRank` already use — `pace` was the one
+    /// that only checked the baseline was *non-empty*, so a two-day-old account
+    /// got a confident percentile computed against a single prior day. Rendered
+    /// live, that read as "**a quiet Friday so far**" on the account's biggest
+    /// day: $545 and 1.4M tokens.
+    static let minPaceBaselineDays = 7
+
     static func pace(_ f: EngineFeatures, _ fit: Fit) -> Estimate {
         let projected = projectedCostToday(f, fit).value
-        guard projected.isFinite, !fit.dailyBaseline.isEmpty,
+        guard projected.isFinite, fit.dailyBaseline.count >= minPaceBaselineDays,
               let rank = UsageNorms.paceRank(value: projected, baseline: fit.dailyBaseline) else {
             return .insufficient(method: "pace-rank", note: "not enough history to judge pace",
                                  support: fit.dailyBaseline.count)
@@ -800,8 +882,23 @@ public actor UsageIntelligenceEngine {
             // "measured null" on the 5h block gets re-tested by the accumulating
             // record instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
-            let table = DiurnalBurnModel.rateTable(cycles: history, calendar: f.calendar, prior: f.activityGrid)
-            roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
+            // ...but only once there is a completed cycle to learn a shape
+            // from. With none, `rateTable` is the activity prior alone, and on
+            // a thin history that prior is zero in almost every (weekday, hour)
+            // cell — so integrating it forward yields no growth and the model
+            // draws a **flat line** through a window that is visibly climbing.
+            //
+            // Seen on a two-day-old account: the 7-day and weekly-scoped
+            // windows projected 88% → 88% while the same windows under the
+            // all-accounts scope, where a simpler model won, projected
+            // 88% → 92% → 95% → 99%. A model with nothing to say should not be
+            // in the tournament; its own doc comment already scopes it to
+            // "rests on few completed 7-day cycles".
+            if !history.isEmpty {
+                let table = DiurnalBurnModel.rateTable(
+                    cycles: history, calendar: f.calendar, prior: f.activityGrid)
+                roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
+            }
 
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default
@@ -922,20 +1019,10 @@ public actor UsageIntelligenceEngine {
     /// oldest → newest. Missing day = $0 is load-bearing (the anomalies on this
     /// user are lulls, not spikes), so gaps are real zeros, not skipped.
     static func priorDays(_ f: EngineFeatures) -> [DayPoint] {
-        let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
-        guard let minKey = f.dailyCosts.keys.filter({ $0 < todayKey }).min(),
-              let start = EngineFeatures.parseDay(minKey, calendar: f.calendar) else { return [] }
-        var out: [DayPoint] = []
-        var day = start
-        while true {
-            let key = TokenSample.formatDate(day, timeZone: f.calendar.timeZone)
-            guard key < todayKey else { break }
-            out.append(DayPoint(weekday: f.calendar.component(.weekday, from: day),
-                                cost: f.dailyCosts[key] ?? 0))
-            guard let next = f.calendar.date(byAdding: .day, value: 1, to: day) else { break }
-            day = next
-        }
-        return out
+        // The day enumeration lives in `DailyBaseline` so a *scoped* caller can
+        // rank one account's days by the same rule — see its doc comment.
+        DailyBaseline.priorDays(costsByDay: f.dailyCosts, now: f.now, calendar: f.calendar)
+            .map { DayPoint(weekday: f.calendar.component(.weekday, from: $0.day), cost: $0.cost) }
     }
 
     static func normBands(_ prior: [DayPoint]) -> [Int: UsageNorms.Band] {
@@ -1165,7 +1252,7 @@ public actor UsageIntelligenceEngine {
             let sig = d.signature
             guard Self.shouldRecordSnapshot(prev: lastSnapshotSig[d.surface], now: now, signature: sig) else { continue }
             modelContext.insert(PredictionSnapshot(
-                recordedAt: now, surface: d.surface, method: d.method,
+                recordedAt: now, surface: scope.qualify(d.surface), method: d.method,
                 paramsVersion: EngineParams.version, engineVersion: engineVersion,
                 periodKey: d.periodKey, periodEnd: d.periodEnd,
                 value: d.value, lo80: d.lo80, hi80: d.hi80, lo50: d.lo50, hi50: d.hi50,
@@ -1195,39 +1282,125 @@ public actor UsageIntelligenceEngine {
 
     // MARK: - Store reads
 
+    /// Whose rate-limit history this instance fits: its own account, or the
+    /// active login when it is the all-accounts instance.
+    /// The file **this engine's own container** is backed by, or nil when there
+    /// is not one.
+    ///
+    /// Emphatically not `PacerStore.storeURL()`. That is the process-wide
+    /// on-disk store, and an engine does not always run against it: the tests
+    /// build in-memory containers per case, screenshot mode renders a synthetic
+    /// fixture, and the live renderer opens the real store read-only. Asking
+    /// the process for "the" store rather than asking this context reads a
+    /// different database than the one being fitted — the same mistake
+    /// `PaceChartCard.reload` made, where it reached past the screenshot
+    /// fixture into real data. Here it made three tests fit against the
+    /// developer's live store instead of their own fixtures.
+    ///
+    /// Nil for in-memory containers, which falls back to the SwiftData query —
+    /// correct, and no slower than before this existed.
+    private var rawStoreURL: URL? {
+        guard let config = modelContext.container.configurations.first,
+              !config.isStoredInMemoryOnly
+        else { return nil }
+        return config.url
+    }
+
+    private var limitAccountId: String? {
+        scope.accountId ?? Account.activeId(in: modelContext)
+    }
+
     private func fetchDaily() -> [EngineFeatures.DailyRow] {
-        let rows = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+        guard let account = scope.accountId else {
+            let rows = (try? modelContext.fetch(FetchDescriptor<DailyAggregate>())) ?? []
+            return rows.map { .init(date: $0.date, cost: $0.totalCostUSD) }
+        }
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountDailyAggregate>(
+            predicate: #Predicate { $0.accountId == account }))) ?? []
         return rows.map { .init(date: $0.date, cost: $0.totalCostUSD) }
     }
 
     private func fetchHourly() -> [EngineFeatures.HourlyRow] {
-        let rows = (try? modelContext.fetch(FetchDescriptor<HourlyAggregate>())) ?? []
-        return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: $0.sampleCount) }
+        guard let account = scope.accountId else {
+            let rows = (try? modelContext.fetch(FetchDescriptor<HourlyAggregate>())) ?? []
+            return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: $0.sampleCount) }
+        }
+        // The per-account hourly rollup carries no `sampleCount` — see
+        // `HourlyRow`. Nothing in the fit reads it; it is carried for a
+        // "quiet hour" affordance that does not exist yet.
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountHourlyAggregate>(
+            predicate: #Predicate { $0.accountId == account }))) ?? []
+        return rows.map { .init(date: $0.date, hour: $0.hour, cost: $0.totalCostUSD, sampleCount: 0) }
     }
 
     /// ~32 days of rate-limit samples — enough to hold several complete 7-day
     /// cycles for the backtest while staying a small read.
     private func fetchRate(now: Date) -> [EngineFeatures.RateRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
-        let descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        // Raw SQLite first — see `RawLimitReader`. Thirty-two days is ~30,000
+        // rows and SwiftData spends ~1.3 s materialising them; the same read
+        // through sqlite3 is a small fraction of that. `nil` means the reader
+        // could not do it (no file, schema surprise), and the SwiftData query
+        // below runs instead, so this can only ever be slower, never wrong.
+        if let url = rawStoreURL,
+           let rows = RawLimitReader.rateRows(
+               storeURL: url, account: limitAccountId, since: cutoff) {
+            return rows
+        }
+        // This instance's account. `.allAccounts` has no rate-limit meaning —
+        // two 5-hour windows do not sum — so it keeps reading the *active*
+        // login, exactly as it did before scopes existed, which is what makes
+        // the global fit byte-identical.
+        var descriptor = FetchDescriptor<RateLimitSample>(
+            predicate: LimitScope.rateLimitPredicate(
+                account: limitAccountId, since: cutoff))
+        descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
+        // No `propertiesToFetch` here, and that is a measured decision rather
+        // than an oversight. The projection is the obvious move — the mapping
+        // reads four scalars out of ~30,000 rows — and on this table it is
+        // *slower*: 1.10-1.33 s became 1.56-1.79 s across steady-state refits,
+        // consistently, about 35% worse. Same for the scoped fetch below. The
+        // pace card's loader does benefit from it, so this is a property of
+        // these queries rather than of the API. Do not re-add it without
+        // numbers.
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
     }
 
     /// ~32 days of scoped `limits[]` samples (`UsageLimitSample`) mapped to the
     /// engine's `ScopedRow` — the per-model weekly windows the driver forecasts
-    /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`. The poller keeps
-    /// this table holding only the active account's rows (the archive-swap
-    /// parity added in Decision D), so no accountId filter is applied here.
+    /// alongside the fixed 5h/7d blocks. Mirrors `fetchRate`, including its
+    /// active-account scope — and needs it more: two accounts can hold a
+    /// weekly window under the *same* identity string, so unscoped this table
+    /// would interleave two series into one and the driver would fit the
+    /// resulting sawtooth.
     /// `inLatestBatch` marks the most-recent poll's rows (the staleness guard:
     /// a limit that vanished from the latest response goes quiet).
     private func fetchScopedLimits(now: Date) -> [EngineFeatures.ScopedRow] {
         let cutoff = now.addingTimeInterval(-32 * 24 * 3600)
-        let descriptor = FetchDescriptor<UsageLimitSample>(
-            predicate: #Predicate { $0.sampledAt >= cutoff },
-            sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
+        // Same as `fetchRate`, and the bigger half: ~45,000 rows and ~3.4 s
+        // through SwiftData. `inLatestBatch` is stamped here rather than in the
+        // reader because it depends on the newest row in the returned set.
+        if let url = rawStoreURL,
+           let rows = RawLimitReader.scopedRows(
+               storeURL: url, account: limitAccountId, since: cutoff) {
+            guard let newest = rows.map(\.at).max() else { return [] }
+            let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance
+            return rows.map { r in
+                EngineFeatures.ScopedRow(
+                    identity: r.identity, group: r.group, label: r.label,
+                    modelId: r.modelId, modelDisplayName: r.modelDisplayName,
+                    surface: r.surface, at: r.at, usedPercentage: r.usedPercentage,
+                    resetsAt: r.resetsAt, inLatestBatch: r.at >= batchCutoff,
+                    isActive: r.isActive)
+            }
+        }
+        var descriptor = FetchDescriptor<UsageLimitSample>(
+            predicate: LimitScope.usageLimitPredicate(
+                account: limitAccountId, since: cutoff))
+        descriptor.sortBy = [SortDescriptor(\.sampledAt, order: .forward)]
+        // Deliberately no `propertiesToFetch` — see `fetchRate`. Tried and
+        // measured: 2.86-3.36 s became 3.62-4.57 s. Worse, every sample.
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         guard let newest = rows.map(\.sampledAt).max() else { return [] }
         let batchCutoff = newest.addingTimeInterval(-2)   // latest-poll tolerance
@@ -1249,12 +1422,25 @@ public actor UsageIntelligenceEngine {
     // MARK: - Self-eval persistence
 
     /// One pass over the whole eval table — `recompute` slices it in memory.
+    /// This scope's scoreboard rows, with the scope suffix stripped.
+    ///
+    /// Scoping happens at exactly two points — here on the way in and in
+    /// `persist` on the way out — so everything between them works in base
+    /// surface ids and needs no notion of accounts at all.
     private func fetchAllEvalRows() -> [(key: String, surface: String, record: EngineSelfEval.Record)] {
         let rows = (try? modelContext.fetch(FetchDescriptor<EngineEvalOutcome>())) ?? []
-        return rows.map {
-            ($0.key, $0.surface,
-             EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey,
-                                   predicted: $0.predicted, truth: $0.truth))
+        return rows.compactMap { row in
+            guard let base = scope.unqualify(row.surface) else { return nil }
+            // The *base* key, not the persisted one. `existing` is compared
+            // against keys built from base surfaces, so returning the stored
+            // key would never match for a scoped engine and every refit would
+            // try to re-persist the whole scoreboard.
+            let key = EngineEvalOutcome.makeKey(surface: base, method: row.method,
+                                                bucket: row.bucket, periodKey: row.periodKey)
+            return (key, base,
+                    EngineSelfEval.Record(method: row.method, bucket: row.bucket,
+                                          periodKey: row.periodKey,
+                                          predicted: row.predicted, truth: row.truth))
         }
     }
 
@@ -1262,7 +1448,8 @@ public actor UsageIntelligenceEngine {
         guard !news.isEmpty else { return }
         for n in news {
             modelContext.insert(EngineEvalOutcome(
-                surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                surface: scope.qualify(n.surface), method: n.method, bucket: n.bucket,
+                periodKey: n.periodKey,
                 predicted: n.predicted, truth: n.truth, recordedAt: now))
         }
         try? modelContext.save()

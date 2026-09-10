@@ -8,6 +8,9 @@ import PacerUI
 /// name. Useful for "is sonnet doing the bulk of work or am I always
 /// reaching for opus?" / "did I switch off haiku 3 months ago?"
 struct ModelsView: View {
+    /// Read here so a scope change re-runs the child initialiser — a
+    /// `@Query` predicate is captured once at init.
+    @State private var scope = UsageScope.shared
     @AppStorage("pacer.models.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
@@ -74,6 +77,7 @@ struct ModelsView: View {
         ) {
             ModelsContent(
                 range: range,
+                scopeAccountId: scope.accountId,
                 sort: sort,
                 descending: sortDescending,
                 metric: metric,
@@ -155,7 +159,17 @@ enum ModelGrouping: String, CaseIterable, Identifiable {
 }
 
 private struct ModelsContent: View {
-    @Query private var aggregates: [DailyAggregate]
+    @Query private var globalAggregates: [DailyAggregate]
+    @Query private var scopedAggregates: [AccountDailyAggregate]
+    @State private var scope = UsageScope.shared
+
+    /// Every account, or one. Both queries are live, so switching is a
+    /// re-read rather than a recompute.
+    private var aggregates: [DailyRow] {
+        scope.isAll
+            ? globalAggregates.map(\.dailyRow)
+            : scopedAggregates.map(\.dailyRow)
+    }
     /// Singleton-row probe that fires exactly once per completed scan
     /// cycle. Drives the cache refresh below so the O(aggregates)
     /// rollup runs at most once per cycle instead of once per body
@@ -187,6 +201,7 @@ private struct ModelsContent: View {
 
     init(
         range: TimeRange,
+        scopeAccountId: String? = nil,
         sort: ModelsSort,
         descending: Bool,
         metric: ModelMetric,
@@ -206,16 +221,26 @@ private struct ModelsContent: View {
         self.sortDescendingBinding = sortDescendingBinding
         self.metricBinding = metricBinding
         self.onSelectDay = onSelectDay
+        let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let days = range.days {
             let cutoffString = TokenSample.formatDate(
                 Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
             )
-            _aggregates = Query(
+            _globalAggregates = Query(
                 filter: #Predicate<DailyAggregate> { $0.date >= cutoffString },
                 sort: \.date
             )
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> {
+                    $0.date >= cutoffString && $0.accountId == acct
+                },
+                sort: \AccountDailyAggregate.date
+            )
         } else {
-            _aggregates = Query(sort: \DailyAggregate.date)
+            _globalAggregates = Query(sort: \DailyAggregate.date)
+            _scopedAggregates = Query(
+                filter: #Predicate<AccountDailyAggregate> { $0.accountId == acct },
+                sort: \AccountDailyAggregate.date)
         }
     }
 
@@ -247,7 +272,17 @@ private struct ModelsContent: View {
     private struct DerivedData {
         var rows: [ModelRow] = []
         var dailyMix: [DailyMix] = []
+        /// Distinct days in `dailyMix` — the bar-width input. Cached with the
+        /// mix rather than derived from it at render time: computed in the
+        /// chart's `ForEach` it was O(n²) over (days × models) and beachballed
+        /// the tab, and even hoisted it is an O(n) pass this cache exists to
+        /// avoid paying on every hover.
+        var trendDayCount: Int = 0
         var trendBuckets: [String: [(model: String, tokens: Int64)]] = [:]
+        /// `rows` re-sorted by the metric the donut is *showing*, largest
+        /// first. The donut, its legend and its hover table all read this one
+        /// array — see `shareCumulative` for what happens when they don't.
+        var shareRows: [ModelRow] = []
         var shareCumulative: [(row: ModelRow, max: Double)] = []
     }
 
@@ -262,9 +297,21 @@ private struct ModelsContent: View {
 
     private var rows: [ModelRow] { derived.rows }
     private var dailyMix: [DailyMix] { derived.dailyMix }
+    private var trendDayCount: Int { derived.trendDayCount }
 
     private func refreshDerived() {
+        let started = Date()
         cachedDerived = computeDerived()
+        // The trend chart is the heaviest thing on this page and it is rebuilt
+        // from here. A regression that put an O(n) pass inside the chart's
+        // `ForEach` made the tab beachball and left no trace beyond a run of
+        // main-thread stalls; this says which page it was.
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if ms >= 100 {
+            Log.write("ModelsView",
+                      "derived \(ms)ms for \(cachedDerived?.dailyMix.count ?? 0) mark(s) "
+                        + "across \(cachedDerived?.trendDayCount ?? 0) day(s)")
+        }
     }
 
     /// Pure computation over `aggregates` + `sort` + `descending`.
@@ -343,12 +390,20 @@ private struct ModelsContent: View {
         }
         let rows: [ModelRow] = descending ? sorted.reversed() : sorted
 
+        // The donut is drawn largest-wedge-first, which is not the table's
+        // sort — the table can be ordered by name, or by days, or ascending.
+        // Both the wedges and the cumulative-angle table below must walk the
+        // SAME array: when they disagreed, hovering a wedge named whichever
+        // model happened to sort first in the table.
+        let shareRows = Self.foldedShareRows(
+            rows.sorted { metricValue($0) > metricValue($1) })
+
         // Share-donut cumulative-angle table, sized by the chosen metric so a
         // per-hover `body` doesn't have to walk it.
         var running = 0.0
         var cumulative: [(row: ModelRow, max: Double)] = []
-        cumulative.reserveCapacity(rows.count)
-        for r in rows {
+        cumulative.reserveCapacity(shareRows.count)
+        for r in shareRows {
             running += metricValue(r)
             cumulative.append((r, running))
         }
@@ -389,9 +444,45 @@ private struct ModelsContent: View {
         return DerivedData(
             rows: rows,
             dailyMix: dailyMix,
+            trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
+            shareRows: shareRows,
             shareCumulative: cumulative
         )
+    }
+
+    /// How many models the share legend names before it starts folding.
+    private static let shareLegendCap = 8
+
+    /// The legend used to stop at `shareLegendCap` while the donut kept
+    /// drawing every row, so with nine models the ninth was an unlabelled
+    /// sliver and the legend's percentages summed to less than 100. The tail
+    /// is now one real wedge, so the two always agree.
+    ///
+    /// Folding a *single* row into "Other" would be worse than showing it, so
+    /// the fold only starts once at least two rows would be hidden.
+    /// Both metrics are summed, so the folded row is correct whichever one
+    /// the picker is showing.
+    private static func foldedShareRows(_ ordered: [ModelRow]) -> [ModelRow] {
+        guard ordered.count > shareLegendCap + 1 else { return ordered }
+        let head = Array(ordered.prefix(shareLegendCap))
+        let tail = ordered.dropFirst(shareLegendCap)
+        let other = ModelRow(
+            key: "__other__",
+            model: "",
+            displayName: "Other",
+            subtitle: "\(tail.count) models",
+            color: .secondary,
+            cost: tail.reduce(0) { $0 + $1.cost },
+            inputTokens: tail.reduce(0) { $0 + $1.inputTokens },
+            outputTokens: tail.reduce(0) { $0 + $1.outputTokens },
+            cacheReadTokens: tail.reduce(0) { $0 + $1.cacheReadTokens },
+            totalTokens: tail.reduce(0) { $0 + $1.totalTokens },
+            activeDays: 0,
+            firstSeen: tail.map(\.firstSeen).min() ?? "",
+            lastSeen: tail.map(\.lastSeen).max() ?? ""
+        )
+        return head + [other]
     }
 
     /// The metric that sizes the donut for a row.
@@ -438,6 +529,11 @@ private struct ModelsContent: View {
         // O(aggregates) rollup to re-run.
         .onAppear { refreshDerived() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshDerived() }
+        // The scope is a refresh trigger like any other. Without it the cache
+        // holds the previous account's numbers until the *next scan cycle*
+        // happens to fire — which on an idle machine is seven to ten seconds,
+        // and looks exactly like a very slow render rather than a stale one.
+        .onChange(of: scope.accountId) { _, _ in refreshDerived() }
         .onChange(of: sort) { _, _ in refreshDerived() }
         .onChange(of: descending) { _, _ in refreshDerived() }
         .onChange(of: metric) { _, _ in refreshDerived() }
@@ -470,7 +566,7 @@ private struct ModelsContent: View {
     private var shareSummary: String {
         let total = shareTotal
         guard total > 0 else { return "no data yet" }
-        return rows.prefix(5).map { r in
+        return derived.shareRows.prefix(5).map { r in
             let pct = Int(metricValue(r) / total * 100)
             return "\(r.displayName) \(pct) percent"
         }.joined(separator: ", ")
@@ -517,8 +613,14 @@ private struct ModelsContent: View {
             }
         }) {
             HStack(alignment: .top, spacing: 24) {
+                // Ordered by the metric the donut is *showing*, not by the
+                // table's sort. They are different controls: the table was
+                // sorted by cost while this showed tokens, so the legend read
+                // 5.6B, 661M, 795M — a list of token counts in cost order,
+                // which just looks broken.
+                let shareRows = derived.shareRows
                 PacerDonut(
-                    slices: rows.map {
+                    slices: shareRows.map {
                         PacerDonutSlice(id: $0.key, value: metricValue($0), color: $0.color)
                     },
                     size: 180,
@@ -528,7 +630,7 @@ private struct ModelsContent: View {
                     accessibilityValue: shareSummary
                 )
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(rows.prefix(8)) { row in
+                    ForEach(shareRows) { row in
                         PacerDonutLegendRow(
                             color: row.color,
                             label: row.displayName
@@ -600,11 +702,18 @@ private struct ModelsContent: View {
             }
         }) {
             VStack(alignment: .leading, spacing: 8) {
+                // Hoisted out of the `ForEach`, which is the whole point.
+                // Inside it, this rebuilt a Set of every date once *per bar* —
+                // O(n²) over (days × models), so ~1,350 marks on a full history
+                // meant well over a million operations per render, on every
+                // hover and every state change. It beachballed the Models tab.
+                let barWidth = PacerSparseBars.width(count: trendDayCount)
                 Chart {
                     ForEach(dailyMix) { d in
                         BarMark(
                             x: .value("Date", d.date),
-                            y: .value("Tokens", d.tokens)
+                            y: .value("Tokens", d.tokens),
+                            width: barWidth
                         )
                         .foregroundStyle(by: .value("Model", d.displayName))
                         .cornerRadius(1.5)

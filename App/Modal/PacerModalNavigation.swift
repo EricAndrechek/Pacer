@@ -1,4 +1,5 @@
 import SwiftUI
+import PacerCore
 import AppKit
 import PacerUI
 
@@ -51,15 +52,19 @@ public enum PacerModalDestination: Hashable, Identifiable {
     /// One session's full transcript metadata.
     case session(sessionId: String, projectDisplayName: String)
     /// The compare-models projection detail for one rate-limit window
-    /// ("five_hour" / "seven_day").
-    case projection(window: String)
+    /// ("five_hour" / "seven_day", or a scoped identity).
+    ///
+    /// Carries the account because the all-accounts view can list several
+    /// accounts' windows side by side, and two of those columns share a window
+    /// key. Without it, tapping personal's 5-hour column would open work's.
+    case projection(window: String, accountId: String?)
 
     public var id: String {
         switch self {
         case .day(let d):                return "day:\(d)"
         case .project(let path, _, _):   return "project:\(path)"
         case .session(let sid, _):       return "session:\(sid)"
-        case .projection(let w):         return "projection:\(w)"
+        case .projection(let w, let a):  return "projection:\(a ?? "all"):\(w)"
         }
     }
 }
@@ -131,24 +136,32 @@ public extension EnvironmentValues {
 /// Resolves a `PacerModalDestination` to its concrete view.
 struct PacerModalRouter: View {
     let destination: PacerModalDestination
+    /// Drill-downs inherit the scope of the view they were opened from —
+    /// clicking a bar in a scoped chart and getting all-accounts detail
+    /// would be a silent change of subject. Read here so a scope change
+    /// re-runs the child initialisers.
+    @State private var scope = UsageScope.shared
 
     var body: some View {
         switch destination {
         case .day(let date):
-            DayDetailView(date: date)
+            DayDetailView(date: date, scopeAccountId: scope.accountId)
         case .project(let path, let displayName, let since):
             ProjectDetailView(
                 projectPath: path,
                 displayName: displayName,
-                since: since
+                since: since,
+                scopeAccountId: scope.accountId
             )
         case .session(let sessionId, let projectDisplayName):
             SessionDetailView(
                 sessionId: sessionId,
-                projectDisplayName: projectDisplayName
+                projectDisplayName: projectDisplayName,
+                scopeAccountId: scope.accountId
             )
-        case .projection(let window):
-            ProjectionCompareModal(windowKey: window)
+        case .projection(let window, let accountId):
+            ProjectionCompareModal(windowKey: window,
+                                   limitAccountId: accountId ?? scope.limitAccountId)
         }
     }
 }

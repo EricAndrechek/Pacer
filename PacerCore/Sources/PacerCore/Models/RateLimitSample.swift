@@ -26,9 +26,17 @@ public final class RateLimitSample {
     // that's ~200K rows. The unindexed scans were the longest-running
     // queries in the read path; they just weren't visible because
     // each one was sub-10ms.
+    //   - Every read is now also filtered by `accountId`: the table holds
+    //     every account's rows, so the leading column of the hot queries
+    //     changed. Without these, a scoped "newest N" degrades to a scan of
+    //     the whole table filtered afterwards — which is the same shape as
+    //     the pre-index regression above, just arrived at from a different
+    //     direction.
     #Index<RateLimitSample>(
         [\.sampledAt],
-        [\.sampledAt, \.window]
+        [\.sampledAt, \.window],
+        [\.accountId, \.sampledAt],
+        [\.accountId, \.window, \.sampledAt]
     )
 
     public var sampledAt: Date
@@ -49,13 +57,18 @@ public final class RateLimitSample {
     /// `"statusline"` or `"oauth"`. Lets the read path prefer one source
     /// over the other when both are fresh, and lets us debug-compare.
     public var source: String
-    /// Which account (`Account.id`) this sample belongs to. Optional +
-    /// additive: existing rows decode as nil, which every read treats as
-    /// "the active account" (they were all the single account's history).
-    /// The multi-account poller stamps this going forward, and the
-    /// active-account timeline swap (`OAuthPoller.setActiveAccount`) keeps
-    /// this table holding exactly the active account's rows — so no read
-    /// site has to filter on it. See `Account`.
+    /// Which account (`Account.id`) this sample belongs to.
+    ///
+    /// **Every read must filter on this.** The table holds every account's
+    /// rows; a read that forgets returns two logins' windows interleaved and
+    /// shows whichever sorted first — no crash, no empty state, just someone
+    /// else's number. `LimitScope` exists so no call site has to remember.
+    ///
+    /// Optional only for the migration: rows written before Pacer knew about
+    /// accounts decode as nil, and `OAuthPoller.foldArchiveIntoLiveTables`
+    /// adopts them into the active account on first launch. After that pass
+    /// nothing is unstamped, which is what lets the predicates stay a plain
+    /// equality. See `Account`.
     public var accountId: String?
 
     public init(

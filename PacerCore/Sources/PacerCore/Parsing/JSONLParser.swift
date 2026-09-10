@@ -49,21 +49,33 @@ public enum JSONLLineParser {
     /// `ProjectPathCanonicalizer.canonicalize(_:aliases:)` after the
     /// worktree-stripping pass. Pass `[:]` (the default) for "no user
     /// aliases" — the worktree-strip behaviour is still applied.
-    public static func parse(line: Data, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
+    public static func parse(
+        line: Data,
+        aliases: [String: String] = [:],
+        rootPath: String? = nil
+    ) -> ParsedUsageEntry? {
         guard !line.isEmpty,
               let raw = try? decoder.decode(RawJSONLine.self, from: line)
         else {
             return nil
         }
-        return entry(from: raw, aliases: aliases)
+        return entry(from: raw, aliases: aliases, rootPath: rootPath)
     }
 
-    public static func parse(line: String, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
+    public static func parse(
+        line: String,
+        aliases: [String: String] = [:],
+        rootPath: String? = nil
+    ) -> ParsedUsageEntry? {
         guard let data = line.data(using: .utf8) else { return nil }
-        return parse(line: data, aliases: aliases)
+        return parse(line: data, aliases: aliases, rootPath: rootPath)
     }
 
-    static func entry(from raw: RawJSONLine, aliases: [String: String] = [:]) -> ParsedUsageEntry? {
+    static func entry(
+        from raw: RawJSONLine,
+        aliases: [String: String] = [:],
+        rootPath: String? = nil
+    ) -> ParsedUsageEntry? {
         guard raw.type == "assistant" else { return nil }
         guard let model = raw.message?.model, !model.isEmpty else { return nil }
         if model == syntheticModelSentinel { return nil }
@@ -100,6 +112,7 @@ public enum JSONLLineParser {
             // about WHERE inside that repo a session ran.
             originalProjectPath: raw.cwd,
             claudeCodeVersion: raw.version,
+            rootPath: rootPath,
             isApiErrorMessage: raw.isApiErrorMessage ?? false,
             // A finished message carries a stop_reason; a mid-stream
             // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.

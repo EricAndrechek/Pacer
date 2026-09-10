@@ -108,8 +108,17 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   GitHub-style activity heatmap of the last six months.
 - **Live "today" view.** Your current burn rate plus a running "at this pace,
   today will end at about $X" projection.
-- **Multiple accounts.** Signed into more than one Claude account? Pacer tracks
-  each account's usage and limits separately and lets you switch between them.
+- **Multiple accounts.** Signed into more than one Claude account? Every token
+  and dollar is attributed to the account that earned it, and a toolbar menu
+  scopes the whole app — dashboard, history, projects, models, widgets, menu
+  bar — to one account or all of them. Rate limits always show the account
+  you're signed into, since that's what your next message is billed against.
+- **Works with [claude-swap](https://github.com/realiti4/claude-swap).** Switch
+  accounts with `cswap` — or `/logout`, or a `CLAUDE_CONFIG_DIR` profile — and
+  Pacer follows, because it watches Claude Code's own record of who is signed
+  in rather than any one tool. It also reads cswap's usage cache instead of
+  asking Anthropic the same question with the same token: that budget is
+  per-token, and two clients polling it independently rate-limit each other.
 - **At a glance, always.** A configurable menu-bar readout — an activity-ring
   icon, percent chips, and an explicit choice of which window drives the icon —
   plus home-screen-style widgets, each pickable to whichever window you care
