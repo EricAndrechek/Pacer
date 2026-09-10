@@ -953,5 +953,23 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="F9oZZnRMIFZvQ00RD0bsEtNLeCjL5X0+awWr83tePmZ7rstWnH7r1N9f7Rhy2j3AlMF9SmhyRLeLOjIOvevPBg==" />
     </item>
+            <item>
+        <title>Version 0.5.0</title>
+        <description><![CDATA[
+<h2>What's Changed</h2>
+<ul>
+<li>feat: native multi-account — attribution, scoping, and a poller that shares its tokens by <a class="user-mention notranslate" data-hovercard-type="user" data-hovercard-url="/users/EricAndrechek/hovercard" data-octo-click="hovercard-link-click" data-octo-dimensions="link_type:self" href="https://github.com/EricAndrechek">@EricAndrechek</a> in <a class="issue-link js-issue-link" data-error-text="Failed to load title" data-id="5400787627" data-permission-text="Title is private" data-url="https://github.com/EricAndrechek/Pacer/issues/126" data-hovercard-type="pull_request" data-hovercard-url="/EricAndrechek/Pacer/pull/126/hovercard" href="https://github.com/EricAndrechek/Pacer/pull/126">EricAndrechek/Pacer#126</a></li>
+</ul>
+<p><strong>Full Changelog</strong>: <a class="commit-link" href="https://github.com/EricAndrechek/Pacer/compare/v0.4.14...v0.5.0">EricAndrechek/Pacer@<tt>v0.4.14...v0.5.0</tt></a></p>]]></description>
+        <pubDate>Thu, 10 Sep 2026 15:46:35 +0000</pubDate>
+        <sparkle:version>1789054820</sparkle:version>
+        <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.5.0/Pacer-0.5.0.dmg"
+            length="21115530"
+            type="application/octet-stream"
+            sparkle:edSignature="bFwkFohxQO4L77Hd2CcNoCegkTTScZzj6vVT4nrRoZX8ugb4PybvsiOGBEhdm+zSkzVr2iwXZ58l0RMRGaLnDQ==" />
+    </item>
         </channel>
 </rss>
