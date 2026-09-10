@@ -1143,6 +1143,34 @@ public actor OAuthPoller: TokenPoolTesting {
                                            snapshot.sevenDay?.resetsAt]
                 .compactMap { $0 }.min()
             let org = snapshot.organizationId
+            // The live Claude Code credential outranks the config file.
+            //
+            // `ActiveAccountObserver` reads `oauthAccount` out of
+            // `~/.claude.json`, which is right whenever one Claude Code owns
+            // that file. Run several at once — all sharing `~/.claude`, which
+            // is the default — and a session that started under another account
+            // rewrites the object with *its* identity, undoing a switcher's
+            // work without the switcher knowing. Observed on the maintainer's
+            // machine: cswap logged three switches to the personal account and
+            // Pacer saw two reversions to the work account at times cswap
+            // logged nothing at all, because the credential said one thing and
+            // the config file said another.
+            //
+            // This lane holds the credential Claude Code actually bills, and
+            // the response just named its org. That is not a guess, and it
+            // costs nothing extra. It wins.
+            //
+            // No thrash: the observer only votes when the *file* changes, so
+            // adopting the credential here settles it until the next real
+            // switch.
+            if lanes[idx].source == .keychain, let org,
+               let key = Optional(Account.key(forOrg: org)), key != activeAccountKey,
+               activeAccountKey != nil, activeAccountKey != Account.defaultKey {
+                Log.write("OAuthPoller",
+                          "signed-in credential resolves to \(key.prefix(4)) but the config "
+                            + "said \(activeAccountKey?.prefix(4) ?? "-") — trusting the credential")
+                await setActiveAccount(id: key)
+            }
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)

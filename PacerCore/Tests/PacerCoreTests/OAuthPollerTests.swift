@@ -286,6 +286,56 @@ import Testing
         #expect(await poller.snapshot().activeAccountKey == "orgA")
     }
 
+    /// The config file can lie, and the credential cannot.
+    ///
+    /// `ActiveAccountObserver` reads `oauthAccount` from `~/.claude.json`,
+    /// which is correct while one Claude Code owns that file. Run several at
+    /// once — all sharing `~/.claude`, the default — and a session started
+    /// under another account rewrites the object with its own identity,
+    /// undoing a switcher's work silently. Seen on a real machine: cswap
+    /// logged three switches to one account, and Pacer saw two reversions to
+    /// the other at times cswap logged nothing.
+    ///
+    /// The Claude Code keychain lane holds the credential that actually bills,
+    /// and every successful poll names its org for free. It outranks the file.
+    @Test("a keychain credential's own org outranks a stale config file")
+    func keychainCredentialOutranksConfig() async throws {
+        let container = try Self.makeContainer()
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
+        ))
+        let counter = AtomicCounter()
+        let outcomes: [HTTPOutcome] = [
+            .success(jsonBody: #"{"five_hour":{"utilization":10}}"#,
+                     headers: ["anthropic-organization-id": "orgA"]),
+        ]
+        let transport: OAuthClient.Transport = { _ in
+            try outcomes[min(counter.next(), outcomes.count - 1)].materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport,
+                                 desktopEnabled: { false }, heldStore: held)
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()                       // keychain token is orgA
+        #expect(await poller.snapshot().activeAccountKey == "orgA")
+
+        // A concurrent session rewrites the config to say orgB, and the
+        // observer duly reports it.
+        await poller.setActiveAccount(id: "orgB")
+        #expect(await poller.snapshot().activeAccountKey == "orgB")
+
+        // Next poll of the Claude Code credential says orgA, as it always did.
+        // That is the account being billed, so it wins. (Polled explicitly:
+        // under the test clock the lane's interval has not elapsed, and a
+        // `.secondary` lane is swept on its own cadence anyway.)
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokA"))
+        let after = await poller.snapshot()
+        #expect(after.activeAccountKey == "orgA")
+        #expect(after.misclassifiedLaneCount == 0)
+    }
+
     /// The restart case, which is where this went wrong in the field.
     ///
     /// Lane classification is restored from persisted meta, and so is
