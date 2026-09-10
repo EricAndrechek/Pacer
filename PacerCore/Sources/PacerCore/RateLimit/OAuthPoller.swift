@@ -526,6 +526,25 @@ public actor OAuthPoller: TokenPoolTesting {
             let newOrg = await activateAccount(id)
             activeAccountKey = id
             primaryOrg = newOrg
+
+            // The login moved, so Claude Code has just written a *different*
+            // token to the keychain — the one thing that makes the lane set
+            // certainly out of date. Reclassifying the lanes we already hold
+            // is not enough: the account being switched to may have no lane at
+            // all, because its token was rotated in while Pacer was standing
+            // 30 minutes off its rediscover interval.
+            //
+            // Observed: after a switch, every poll for eight minutes belonged
+            // to the account the user had just left, while the one they moved
+            // to had no lane to poll. Its readings came only from the
+            // switcher's cache, and anything Pacer learns from a credential —
+            // the plan tier, most visibly — could not arrive at all.
+            //
+            // A keychain read is silent and this happens once per switch, so
+            // the cost is one subprocess at exactly the moment the answer is
+            // known to have changed.
+            lastDiscoveryAt = nil
+            ensureLanes()
         }
         var reclassified = 0
         for i in lanes.indices where lanes[i].state.account != .unknown {

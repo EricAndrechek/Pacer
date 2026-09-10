@@ -602,3 +602,78 @@ final class TestClock: PollerClock, @unchecked Sendable {
         try Task.checkCancellation()
     }
 }
+
+/// Switching accounts is the one moment the lane set is *known* to be wrong.
+///
+/// Claude Code writes a different token to the keychain on a switch, and the
+/// poller only re-read Claude's stores on a 30-minute rediscover interval — so
+/// for up to half an hour it kept polling the account the user had just left
+/// while the one they moved to had no lane at all. Its readings came only from
+/// the switcher's cache, and anything Pacer learns from a credential (the plan
+/// tier, most visibly) could not arrive.
+@Suite struct AccountSwitchRediscoveryTests {
+
+    private final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _token = "tok-before"
+        private var _seen: [String] = []
+        var token: String {
+            get { lock.lock(); defer { lock.unlock() }; return _token }
+            set { lock.lock(); _token = newValue; lock.unlock() }
+        }
+        var seen: [String] {
+            lock.lock(); defer { lock.unlock() }; return _seen
+        }
+        func note(_ value: String) { lock.lock(); _seen.append(value); lock.unlock() }
+    }
+
+    private static func makeContainer() throws -> ModelContainer {
+        try ModelContainer(
+            for: Heartbeat.self, TokenSample.self, DailyAggregate.self,
+            ProjectDailyAggregate.self, RateLimitSample.self, ExtraUsageSample.self,
+            UsageLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self,
+            TokenLaneMeta.self, Account.self, AccountUsageArchive.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+
+    private static func blob(token: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": [
+                "accessToken": token,
+                "expiresAt": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970) * 1000,
+                "rateLimitTier": "default_claude_max_20x",
+            ]
+        ])
+    }
+
+    @Test func aSwitchRediscoversImmediatelyInsteadOfWaitingOutTheInterval() async throws {
+        let container = try Self.makeContainer()
+        let box = Box()
+        let keychain = KeychainOAuth(rawReader: { .success(Self.blob(token: box.token)) })
+        let transport: OAuthClient.Transport = { request in
+            box.note(request.value(forHTTPHeaderField: "Authorization") ?? "none")
+            let body = Data(#"{"five_hour":{"utilization":5,"resets_at":null}}"#.utf8)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                           httpVersion: nil, headerFields: nil)!
+            return (body, response)
+        }
+        let client = OAuthClient(keychain: keychain, transport: transport,
+                                 desktopEnabled: { false })
+        // A rediscover interval long enough that only an explicit invalidation
+        // can cause a second read — the point being tested.
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(laneRediscoverInterval: 86_400),
+                                 clock: TestClock())
+
+        _ = await poller.runOnce()
+        #expect(box.seen.contains { $0.contains("tok-before") })
+
+        // The switch: Claude Code has written a different token.
+        box.token = "tok-after"
+        await poller.setActiveAccount(id: "some-other-account")
+        _ = await poller.runOnce()
+
+        #expect(box.seen.contains { $0.contains("tok-after") },
+                "a switch must re-read Claude's stores rather than wait out the interval")
+    }
+}
