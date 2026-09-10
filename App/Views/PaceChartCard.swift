@@ -77,13 +77,17 @@ struct PaceChartCard: View {
 
     /// For naming whose windows these are. Two rows, so the query is free.
     @Query private var accounts: [Account]
+    /// Turn counts and date spans per account — the other half of what the
+    /// separate Accounts card used to show, now folded into this card's
+    /// per-account header.
+    @State private var accountTotals = AccountTotalsStatus.shared
     @State private var scope = UsageScope.shared
 
     /// What actually decides the card's contents: the account the user picked
     /// (nil for "all"), the one that resolves to, and whether both are live.
     /// Any of the three changing means a different set of columns.
     private var scopeKey: String {
-        "\(scope.accountId ?? "all")|\(limitAccountId ?? "-")|\(isParallel)"
+        "\(scope.accountId ?? "all")|\(limitAccountId ?? "-")"
     }
 
     /// Rate limits belong to a *login*, so "all accounts" cannot combine them —
@@ -203,17 +207,15 @@ struct PaceChartCard: View {
     @State private var isLoading = false
     /// Whether this machine runs its accounts in parallel — recomputed with the
     /// series, since it decides how many there are.
-    @State private var isParallel = false
 
     /// The `scopeKey` the loaded (or in-flight) `series` belongs to.
     ///
-    /// Mount used to load the card twice. `.task(id:)` resolves `isParallel`
-    /// before its first `reload()`, and `isParallel` is part of `scopeKey` —
-    /// so on any machine that runs accounts in parallel, the key changed
-    /// during mount, the `.onChange` below fired, and it threw away the load
-    /// that was still in flight and started an identical one. Recording the
-    /// key at the top of `reload()` (synchronously, before the first
-    /// suspension) makes that second pass a no-op.
+    /// Mount used to load the card twice: a value resolved during mount was
+    /// part of `scopeKey`, so the key changed mid-mount, the `.onChange` below
+    /// fired, and it threw away the load that was still in flight to start an
+    /// identical one. Recording the key at the top of `reload()`
+    /// (synchronously, before the first suspension) makes that second pass a
+    /// no-op — and keeps doing so for whatever else joins the key later.
     @State private var loadedScopeKey: String?
 
     /// Load the two 8-day series **off the main actor**.
@@ -340,12 +342,20 @@ struct PaceChartCard: View {
 
     /// Which accounts this card should draw.
     ///
-    /// A picked scope draws that account alone. "All accounts" draws the active
-    /// login alone on a machine that runs its accounts one at a time — that
-    /// account's limits are the only ones binding — and every account when they
-    /// run in parallel, because then they all are. See `AccountParallelism`.
+    /// A picked scope draws that account alone. "All accounts" draws every
+    /// account — that is what the words say, and it is what someone asking the
+    /// question wants to know.
+    ///
+    /// It used to draw only the active login unless `AccountParallelism` judged
+    /// the accounts to be in use at the same time. The theory was that a
+    /// dormant account's limits are not binding, so showing them is noise. In
+    /// practice the opposite: the account you are *not* on is the one whose
+    /// numbers you cannot see anywhere else, its weekly window is still filling
+    /// and still resetting, and "all accounts" quietly showing one account is a
+    /// label that lies. Parallelism is a fine input to *wording*; it is not a
+    /// reason to withhold a chart.
     private func loadTargets() -> [(accountId: String?, label: String?)] {
-        guard UsageScope.shared.accountId == nil, accounts.count > 1, isParallel else {
+        guard UsageScope.shared.accountId == nil, accounts.count > 1 else {
             return [(limitAccountId, nil)]
         }
         return accounts
@@ -902,7 +912,6 @@ struct PaceChartCard: View {
         // machine that *becomes* parallel — the second account's first usage of
         // the day — flips `scopeKey` and pulls the other account's columns in.
         .task(id: reloadSignal) {
-            isParallel = AccountParallelism.isParallel(context: modelContext)
             await reload()
         }
         // A scope change invalidates everything loaded. The card is *not*
@@ -936,6 +945,15 @@ struct PaceChartCard: View {
     struct AccountGroup: Identifiable {
         let id: String
         let label: String?
+        /// The plan and the turn count that used to live in a separate
+        /// "Accounts" card above this one. That card listed each account's
+        /// name, plan, age and 5h/7d percentages — and the percentages were
+        /// the very numbers drawn underneath here, at a fraction of the
+        /// detail. Two cards, one subject, the same figures twice. Folding
+        /// the identity into the header this card already draws leaves one
+        /// place to look.
+        let plan: String?
+        let usageSummary: String?
         let isActiveAccount: Bool
         let readingAt: Date?
         let newestAnyAccountAt: Date?
@@ -953,6 +971,8 @@ struct PaceChartCard: View {
             } else {
                 out.append(AccountGroup(
                     id: key, label: accountLabel(col.accountId),
+                    plan: account(col.accountId)?.subscriptionType,
+                    usageSummary: usageSummary(col.accountId),
                     isActiveAccount: col.isActiveAccount,
                     readingAt: col.readingAt,
                     newestAnyAccountAt: col.newestAnyAccountAt,
@@ -960,6 +980,37 @@ struct PaceChartCard: View {
             }
         }
         return out
+    }
+
+    private func account(_ id: String?) -> Account? {
+        guard let id else { return nil }
+        return accounts.first { $0.id == id }
+    }
+
+    /// "12,431 turns · 3 Jun – 9 Sep" — the same line the Accounts card drew.
+    private func usageSummary(_ id: String?) -> String? {
+        guard let id,
+              let t = accountTotals.totals.first(where: { $0.accountId == id }),
+              t.turns > 0
+        else { return nil }
+        var parts = ["\(t.turns.formatted()) turns"]
+        if let first = t.firstTurnAt, let last = t.lastTurnAt {
+            parts.append(Calendar.current.isDate(first, inSameDayAs: last)
+                ? Self.dayMonth(last)
+                : "\(Self.dayMonth(first)) – \(Self.dayMonth(last))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static let dayMonthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .autoupdatingCurrent
+        f.setLocalizedDateFormatFromTemplate("d MMM")
+        return f
+    }()
+
+    private static func dayMonth(_ date: Date) -> String {
+        dayMonthFormatter.string(from: date)
     }
 
     private func accountLabel(_ id: String?) -> String? {
@@ -980,10 +1031,18 @@ struct PaceChartCard: View {
             Text(group.label ?? "Account")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
+            if let plan = group.plan {
+                Chip(text: plan, tint: .secondary, size: .compact)
+            }
             if group.isActiveAccount {
                 Chip(text: "signed in", tint: .green, size: .compact)
                     .help("Claude Code is using this account right now — these "
                           + "are the numbers your terminal reports.")
+            }
+            if let usage = group.usageSummary {
+                Text(usage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
             if let at = group.readingAt {
                 // Always, not only when stale. "How current is this?" is a

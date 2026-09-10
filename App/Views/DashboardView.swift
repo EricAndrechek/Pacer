@@ -62,7 +62,6 @@ struct DashboardView: View {
             // that chart raises the moment a second account exists: whose
             // numbers am I looking at? Renders nothing at all for a
             // single-account user, which is almost everyone.
-            AccountsCard()
             TodayDetailsCard(scopeAccountId: scope.accountId)
             TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scope.accountId)
             PerModelTodayCard(scopeAccountId: scope.accountId)

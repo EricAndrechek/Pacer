@@ -1033,6 +1033,8 @@ extension ScreenshotMode {
         seedRecentTokens(ctx, now: now)
         seedCollections(ctx, startOfToday: startOfToday, cal: cal)
         seedAccounts(ctx, now: now)
+        seedSecondAccountLimits(ctx, now: now)
+        publishAccountTotals(now: now)
 
         ctx.insert(ClaudeCodeMeta(
             key: ClaudeCodeMetaKey.lastIncrementalScanAt,
@@ -1273,7 +1275,8 @@ extension ScreenshotMode {
 
     /// Two accounts, because one is the case where the account UI is invisible.
     ///
-    /// `AccountsCard` and the toolbar's `AccountScopeControl` both render only
+    /// The pace card's per-account headers and the toolbar's
+    /// `AccountScopeControl` both render only
     /// when `accounts.count > 1` — correctly, since a single-account user
     /// should not be shown a switcher. But the fixture created no `Account`
     /// rows at all, so every committed screenshot showed the app as if
@@ -1292,11 +1295,70 @@ extension ScreenshotMode {
             for: accounts.first { $0.isActive } ?? accounts.first)
     }
 
+    /// Rate-limit history for the account that is *not* signed in.
+    ///
+    /// "All accounts" draws a pace column set per account, and without this the
+    /// second account renders "resets unknown / collecting…" — which is what a
+    /// never-polled account genuinely looks like, but not what a user with two
+    /// live accounts sees. Lower and flatter than the active account's, because
+    /// it is the one being used less.
+    private static func seedSecondAccountLimits(_ ctx: ModelContext, now: Date) {
+        let fiveHour = WindowSpec(
+            window: "five_hour",
+            resetsAt: now.addingTimeInterval(3 * 3_600),
+            duration: 5 * 3_600,
+            keyframes: [(0, 0), (0.15, 9), (0.30, 17), (0.45, 26),
+                        (0.55, 34), (0.62, 41), (0.66, 47)])
+        let sevenDay = WindowSpec(
+            window: "seven_day",
+            resetsAt: now.addingTimeInterval(4 * 86_400),
+            duration: 7 * 86_400,
+            keyframes: [(0, 0), (0.12, 6), (0.25, 12), (0.36, 17),
+                        (0.45, 21), (0.52, 26), (0.57, 30)])
+        let interval: TimeInterval = 5 * 60
+        var t = min(fiveHour.cycleStart, sevenDay.cycleStart)
+        var last: [String: Double] = [:]
+        while t <= now {
+            for spec in [fiveHour, sevenDay] where t >= spec.cycleStart {
+                let nowFrac = now.timeIntervalSince(spec.cycleStart) / spec.duration
+                let frac = min(nowFrac, max(0, t.timeIntervalSince(spec.cycleStart) / spec.duration))
+                var pct = interpolateKeyframes(spec.keyframes, at: frac)
+                pct = max(last[spec.window] ?? 0, min(99, pct))
+                last[spec.window] = pct
+                ctx.insert(RateLimitSample(
+                    sampledAt: t, window: spec.window, usedPercentage: pct,
+                    resetsAt: spec.resetsAt, source: "oauth",
+                    accountId: fixtureOtherAccountId))
+            }
+            t = t.addingTimeInterval(interval)
+        }
+    }
+
+    /// Turn counts and date spans, which the pace card's per-account header
+    /// shows beside the plan. Normally published by a background pass that the
+    /// renderer never runs.
+    @MainActor
+    private static func publishAccountTotals(now: Date) {
+        let cal = Calendar.current
+        AccountTotalsStatus.shared.publish([
+            AccountTotals(accountId: fixtureActiveAccountId, turns: 18_402,
+                          firstTurnAt: cal.date(byAdding: .day, value: -161, to: now),
+                          lastTurnAt: now),
+            AccountTotals(accountId: fixtureOtherAccountId, turns: 2_137,
+                          firstTurnAt: cal.date(byAdding: .day, value: -38, to: now),
+                          lastTurnAt: cal.date(byAdding: .minute, value: -25, to: now)),
+        ], at: now)
+    }
+
     private static func seedAccounts(_ ctx: ModelContext, now: Date) {
         let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
-            (fixtureActiveAccountId, "you@acme.example",
+            // Distinct local parts on purpose: `Account.shortLabel` is the
+            // email's local part, so "you@acme" and "you@globex" both render
+            // as "you" and the two accounts become indistinguishable in every
+            // header that uses it.
+            (fixtureActiveAccountId, "work@acme.example",
              "Acme's Organization", true, 32, 62),
-            (fixtureOtherAccountId, "you@globex.example",
+            (fixtureOtherAccountId, "personal@globex.example",
              "Globex's Organization", false, 47, 30),
         ]
         for a in accounts {
