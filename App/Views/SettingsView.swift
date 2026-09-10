@@ -2583,8 +2583,8 @@ private struct APIServerCard: View {
                 if enabled {
                     Divider().opacity(0.4)
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(["/v1/snapshot", "/v1/accounts", "/v1/limits/history",
-                                 "/metrics", "/v1/stream"], id: \.self) { path in
+                        ForEach(["/v1/snapshot", "/v1/accounts", "/v1/session",
+                                 "/v1/limits/history", "/metrics", "/v1/stream"], id: \.self) { path in
                             Text("http://\(savedHost):\(savedPort)\(path)")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)

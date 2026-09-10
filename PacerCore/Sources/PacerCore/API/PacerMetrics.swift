@@ -128,7 +128,12 @@ public struct PacerMetrics: Sendable {
             }
             if let burn = w.burnPercentPerHour {
                 m.append(PacerMetric("pacer_rate_limit_burn_percent_per_hour", burn,
-                                     help: "Recent burn in percentage points of the window per hour.",
+                                     help: "Modelled burn in percentage points of the window per hour (90 min lookback on a session window, 24 h on a weekly one).",
+                                     labels: labels))
+            }
+            if let recent = w.recentBurnPercentPerHour {
+                m.append(PacerMetric("pacer_rate_limit_recent_burn_percent_per_hour", recent,
+                                     help: "Measured burn over the last 30 minutes, in percentage points of the window per hour.",
                                      labels: labels))
             }
         }

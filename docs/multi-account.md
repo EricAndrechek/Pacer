@@ -325,6 +325,14 @@ Two consequences of that being *everything*:
   projections in it. Rate limited to once a minute per account, and the same
   idle grace reclaims it once the consumer stops polling.
 
+**A session can ask Pacer about itself.** `GET /v1/session?id=<uuid>` reports
+the model a session is running and the account its work was attributed to,
+keyed by the id Claude Code exports as `CLAUDE_CODE_SESSION_ID` — which is the
+same id that names the transcript Pacer parses. That closes two guesses at
+once: a per-model cap only gates work using that model, and a session's account
+is better read from its own recorded turns than inferred from a profile
+directory. A subagent has its own session id, so it resolves to the subagent.
+
 **A session pinned to its own profile can ask about itself.** Under concurrent
 use the honest answer to "how much headroom do I have" is not the active
 login's — it is whichever account this session is signed into, and a session

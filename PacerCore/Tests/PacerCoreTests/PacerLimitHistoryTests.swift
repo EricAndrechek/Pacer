@@ -187,3 +187,82 @@ struct PacerLimitHistoryTests {
             == PacerLimitHistoryBuilder.maxBucketSeconds)
     }
 }
+
+
+/// The measured short-horizon burn — the number you look at when deciding
+/// whether to launch a wave *now*, as opposed to the engine's smoothed slope.
+@Suite("Recent burn")
+struct RecentBurnTests {
+
+    private func reading(_ minutesAgo: Double, _ percent: Double,
+                         reset: Date? = nil, now: Date) -> RecentBurn.Reading {
+        RecentBurn.Reading(at: now.addingTimeInterval(-minutesAgo * 60),
+                           percent: percent, resetsAt: reset)
+    }
+
+    @Test func measuresFirstToLastAcrossTheLookback() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3600)
+        // 20 points over 30 minutes = 40 points per hour.
+        let readings = [reading(30, 20, reset: reset, now: now),
+                        reading(15, 30, reset: reset, now: now),
+                        reading(0, 40, reset: reset, now: now)]
+        let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+        #expect(burn != nil)
+        #expect(abs((burn ?? 0) - 40) < 0.001)
+    }
+
+    /// A rollover inside the lookback makes first-to-last a large negative
+    /// number describing nothing. Only the newest cycle counts.
+    @Test func aResetInsideTheLookbackIsNotANegativeSlope() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let oldCycle = now.addingTimeInterval(-600)
+        let newCycle = now.addingTimeInterval(5 * 3600 - 600)
+        let readings = [reading(28, 95, reset: oldCycle, now: now),
+                        reading(20, 98, reset: oldCycle, now: now),
+                        reading(10, 3, reset: newCycle, now: now),
+                        reading(0, 9, reset: newCycle, now: now)]
+        let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+        // 3% → 9% over ten minutes = 36 points per hour, not a plunge.
+        #expect(abs((burn ?? 0) - 36) < 0.001)
+    }
+
+    /// Sub-second drift in the server's reset time is not a rollover.
+    @Test func resetDriftDoesNotSplitTheCycle() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3600)
+        let readings = [reading(20, 10, reset: reset, now: now),
+                        reading(0, 20, reset: reset.addingTimeInterval(0.4), now: now)]
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) != nil)
+    }
+
+    /// An account with one token is polled every five minutes, so a lookback
+    /// can legitimately hold a single reading. There is no slope in one point
+    /// and a confident zero would be a lie.
+    @Test func oneReadingIsNoSlope() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        #expect(RecentBurn.percentPerHour(
+            readings: [reading(2, 40, reset: now.addingTimeInterval(3600), now: now)],
+            now: now, duration: 5 * 3600) == nil)
+        #expect(RecentBurn.percentPerHour(readings: [], now: now, duration: 5 * 3600) == nil)
+    }
+
+    /// Two poller lanes landing in the same instant are one reading.
+    @Test func twoSimultaneousReadingsAreNotAnInfiniteRate() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3600)
+        let readings = [reading(0, 40, reset: reset, now: now),
+                        reading(0, 41, reset: reset, now: now)]
+        #expect(RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600) == nil)
+    }
+
+    @Test func readingsOlderThanTheLookbackAreIgnored() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let reset = now.addingTimeInterval(3600)
+        let readings = [reading(600, 0, reset: reset, now: now),     // 10 h ago
+                        reading(20, 30, reset: reset, now: now),
+                        reading(0, 40, reset: reset, now: now)]
+        let burn = RecentBurn.percentPerHour(readings: readings, now: now, duration: 5 * 3600)
+        #expect(abs((burn ?? 0) - 30) < 0.001)   // 10 points in 20 minutes
+    }
+}

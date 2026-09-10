@@ -20,10 +20,17 @@ install: this skill ships inside Pacer.app and updates when Pacer does.
 
 ```
 $ ~/.claude/skills/pacer/pace.sh report
-5h           81% used · +22%/h · resets in 57m     (Thu 2:19 PM)
-7d           36% used · +1%/h · full in 16h 33m · resets in 5d 11h  (Wed 12:59 AM)
-Fable        53% used · +1%/h · resets in 5d 11h  (Wed 12:59 AM)
+5h           15% used · +33%/h now (+0 avg) · resets in 4h 48m  (Thu 6:39 PM)
+7d           81% used · +7%/h now (+2 avg) · resets in 3d 16h  (Mon 5:59 AM)
+Fable        99% used · +8%/h now (+2 avg) · full in 6h 24m · resets in 3d 16h
 ```
+
+**Two rates, and the difference is the point.** `now` is measured over the last
+half hour, straight from the readings. `avg` is the engine's fitted slope over
+a much longer lookback — 90 minutes on a session window, 24 hours on a weekly
+one. It only appears when the two disagree by more than five points, and when
+it does you are in a burst: the 5-hour row above is climbing at 33%/h while its
+smoothed average still reads zero.
 
 One row per window Pacer tracks for **your** login, with how fast it is
 climbing and — when a window is projected to fill before it resets — when.
@@ -88,7 +95,21 @@ pace: PAUSE — Fable at 95% >= cap 85%, resets in 3d 17h.
 
 $ pace.sh gate --cap 85 --model opus    # Fable is not this agent's problem
 pace: GO — 5h 40%, 7d 32% (cap 85%).
+
+$ pace.sh gate --cap 85 --model auto    # ask Pacer what this session runs
+pace: GO — 5h 40%, 7d 32% (cap 85%).
 ```
+
+**`--model auto` means you never have to say.** Claude Code exports
+`CLAUDE_CODE_SESSION_ID` into every command it runs, and that id names the
+transcript Pacer already parses — so Pacer can answer what model this session
+is running, and which account its work is billed to. A subagent gets its own
+session id, so it resolves to the *subagent's* model, not its parent's. Export
+`PACE_MODEL=auto` once and every call in that session is model-aware.
+
+It falls back to "every window binds" when Pacer has not yet seen a turn from
+the session — a brand-new subagent, most often — which is the safe reading of
+"cannot tell".
 
 Account-wide windows (5h, 7d) bind everything, always — those are never
 skipped. Only per-model caps are filtered, and only when you name a model. With
@@ -144,8 +165,20 @@ Invoke with a cap (default **85**). For a big fan-out:
    ~/.claude/skills/pacer/pace.sh wait --cap 85
    ```
 
-   It blocks *across turns* until the window resets, then **exits — which
-   re-invokes you**. On wake: read the manifest, re-dispatch the in-flight and
+   It blocks *across turns* until there is headroom again, then **exits —
+   which re-invokes you**. Two things can end the wait, and it says which:
+
+   ```
+   pace: reset — headroom restored (5h 4%, 7d 61%). Resume.
+   pace: account switched (427af130 → 74598a77) — headroom on the new login. Resume.
+   ```
+
+   The second is the common one under sequential accounts: switching logins
+   restores headroom immediately, and a waiter that called that "reset" would
+   be telling you something false about where your budget went. A waiting
+   process polls every 60 s rather than every 5 minutes for exactly this
+   reason — a reset cannot arrive faster than Pacer's readings, but a switch
+   can. On wake: read the manifest, re-dispatch the in-flight and
    pending items (in-flight ones resume from their checkpoint commits), and
    merge the finished worktrees as usual.
    - If `wait` exits **20**, the blocker resets further out than `--max-wait`
@@ -155,7 +188,7 @@ Invoke with a cap (default **85**). For a big fan-out:
 ## 6. The clause to paste into EVERY subagent prompt
 
 > **Usage gating:** before you start, and before any expensive step, run
-> `~/.claude/skills/pacer/pace.sh status --model <the model you are running>`
+> `~/.claude/skills/pacer/pace.sh status --model auto`
 > (with the same `PACE_RUN` the orchestrator used). If it prints `paused` (exit 10):
 > immediately commit your work-in-progress in this worktree
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
@@ -197,8 +230,8 @@ it and continue. Keep it current as items complete.
 ## 8. Parameters and policy
 
 - `--cap N` (default 85): pause when **any** watched window is at or over N%.
-- `--model NAME` (default: every window binds): only gate on windows that
-  constrain this model. Account-wide windows always bind; per-model caps bind
+- `--model NAME|auto` (default: every window binds): only gate on windows that
+  constrain this model. `auto` asks Pacer what this session is running. Account-wide windows always bind; per-model caps bind
   only when the name matches theirs, compared loosely so `opus`,
   `claude-opus-5` and `Opus 5` all mean the same window.
 - `--eta DURATION` (default off): also pause when a binding window is projected
@@ -240,6 +273,16 @@ drifts by milliseconds between polls. Fitting a line across a reset produces a
 number that means nothing.
 
 ## Caveats
+
+- **How fresh a percentage can be.** Pacer polls Anthropic no faster than once
+  per five minutes *per token*, which is what keeps it off the ~30-minute
+  throttle. An account with several tokens is read proportionally more often;
+  an account with one is read every 5 minutes while you are active and every
+  10 when you are not. So a half-hour `now` rate rests on six readings in the
+  first case and two in the second, and drops to `null` rather than guessing
+  when it has fewer than two. Nothing can make the *percentage* finer than the
+  poll — it is the server's number — but `/v1/limits/history?bucket=5m` gives
+  you every reading Pacer has, to fit whatever you like.
 
 - **Pacer's API is opt-in.** If `report` says the API is unreachable, turn it on
   in Pacer → Settings → Integrations → "Local API & metrics server". Everything

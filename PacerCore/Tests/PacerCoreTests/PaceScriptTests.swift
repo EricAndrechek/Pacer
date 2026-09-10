@@ -402,6 +402,78 @@ struct PaceScriptTests {
         #expect(result.out.contains("full in 45m"))
     }
 
+    // MARK: - Waiting
+
+    /// Under sequential accounts, headroom usually comes back because someone
+    /// switched logins, not because a window reset — and a waiter that says
+    /// "reset" either way is telling the operator something false about where
+    /// their budget went.
+    @Test func waitSaysWhenHeadroomCameFromAnAccountSwitch() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.97
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 900
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        """)
+        // First poll trips; then the "switch" lands before the next one.
+        let switched = """
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.04
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 3600
+        pacer_account_info{account="org-home",name="h",active="true"} 1
+        """
+        let flip = Process()
+        flip.executableURL = URL(fileURLWithPath: "/bin/bash")
+        flip.arguments = ["-c", "sleep 1; cat > '\(box.dir.path)/metrics'"]
+        let input = Pipe()
+        flip.standardInput = input
+        try flip.run()
+        input.fileHandleForWriting.write(Data(switched.utf8))
+        try input.fileHandleForWriting.close()
+
+        let result = try run(box, ["wait", "--cap", "85", "--interval", "5"])
+        flip.waitUntilExit()
+        #expect(result.status == 0)
+        #expect(result.out.contains("account switched"))
+        #expect(box.stateText.contains("account switched"))
+    }
+
+    // MARK: - Knowing what you are
+
+    /// `--model auto` asks Pacer what this session is running, using the
+    /// session id Claude Code exports into every command it runs.
+    @Test func modelAutoResolvesThroughTheSessionEndpoint() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let server = try StubServer(status: 200, body: """
+        {
+          "accountId" : "org-work",
+          "model" : "claude-opus-5",
+          "sessionId" : "abc-123"
+        }
+        """)
+        defer { server.stop() }
+
+        // Metrics come from the fixture; only the session lookup is stubbed,
+        // so this exercises the real resolve-then-gate path.
+        let result = try run(box, ["gate", "--cap", "85", "--model", "auto"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 0)          // Fable at 95% does not bind Opus
+        #expect(result.out.contains("GO"))
+    }
+
+    /// A session Pacer has not parsed a turn from yet answers 404, and the
+    /// safe reading of "cannot tell" is that every window binds.
+    @Test func anUnresolvableSessionFallsBackToEveryWindowBinding() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let server = try StubServer(status: 404, body: "No turns recorded\n")
+        defer { server.stop() }
+
+        let result = try run(box, ["gate", "--cap", "85", "--model", "auto"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "unknown",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+    }
+
     /// A single-account install emits no `pacer_account_info`, so the script
     /// has to fall back to "the only account there is".
     @Test func aSingleAccountNeedsNoActiveMarker() throws {

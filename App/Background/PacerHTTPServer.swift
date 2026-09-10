@@ -55,6 +55,10 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 /// - `/v1/accounts`  — the accounts Pacer tracks, and the ids `?account=` takes.
 /// - `/v1/limits/history` — every window's utilization over time, bucketed
 ///                    (`?hours=`, `?bucket=15m`).
+/// - `/v1/session`   — what Pacer knows about one session (`?id=`): the model
+///                    it is running and the account its work is billed to, so
+///                    a script inside a session can stop guessing about
+///                    itself.
 /// - `/metrics`     — Prometheus text exposition (0.0.4). Also takes
 ///                    `?account=` / `?config_dir=` so a *client* can ask for
 ///                    one login; a scrape sends neither and gets them all.
@@ -323,6 +327,21 @@ final class PacerHTTPServer: @unchecked Sendable {
             guard let usage = try? PacerUsageBuilder.models(account: account),
                   let json = try? usage.encodedJSON() else {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/session":
+            guard authorized(headers) else { return unauthorized(client) }
+            guard let id = query["id"], !id.isEmpty else {
+                return respond(client, status: 400, contentType: "text/plain",
+                               body: Data("Pass ?id=<session id> (Claude Code sets CLAUDE_CODE_SESSION_ID)\n".utf8))
+            }
+            guard let session = (try? PacerSessionLookupBuilder.lookup(sessionId: id)) ?? nil,
+                  let json = try? session.encodedJSON() else {
+                // Not an error: a session Pacer has not yet parsed a turn from
+                // is a real state, and one a caller falls back from rather than
+                // retries.
+                return respond(client, status: 404, contentType: "text/plain",
+                               body: Data("No turns recorded for that session yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/limits/history":
@@ -608,7 +627,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/session", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)

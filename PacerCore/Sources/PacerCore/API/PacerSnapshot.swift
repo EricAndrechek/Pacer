@@ -126,6 +126,17 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// arrive; this says how fast you are going right now, which is the
             /// one a consumer can sanity-check against its own behaviour.
             public let burnPercentPerHour: Double?
+            /// The same measurement over the last half hour, straight from the
+            /// samples — no fit, no weighting.
+            ///
+            /// `burnPercentPerHour` reads a 90-minute lookback on a session
+            /// window and 24 hours on a weekly one, which is right for a
+            /// forecast and wrong for a decision you are making now: it
+            /// smooths away the burst you are in. Compare the two and you can
+            /// tell a steady climb from an acceleration. `nil` when fewer than
+            /// two readings landed in the window, which is the honest answer
+            /// on an account with one token polled every five minutes.
+            public let recentBurnPercentPerHour: Double?
             /// The server's raw severity word for a scoped window (also an
             /// OPEN set; `nil` for the fixed blocks). Kept verbatim so a
             /// consumer can act on an urgency hint before the percentage is
@@ -140,6 +151,7 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                         willHitLimit: Bool = false,
                         limitEtaAt: Date? = nil, limitEtaInSeconds: Int? = nil,
                         burnPercentPerHour: Double? = nil,
+                        recentBurnPercentPerHour: Double? = nil,
                         isActive: Bool? = nil, severity: String? = nil) {
                 self.identity = identity
                 self.label = label
@@ -154,6 +166,7 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                 self.limitEtaAt = limitEtaAt
                 self.limitEtaInSeconds = limitEtaInSeconds
                 self.burnPercentPerHour = burnPercentPerHour
+                self.recentBurnPercentPerHour = recentBurnPercentPerHour
                 self.isActive = isActive
                 self.severity = severity
             }
@@ -441,13 +454,17 @@ public enum PacerSnapshotBuilder {
     nonisolated static func limits(context: ModelContext, limitAccount: String?,
                                    engineScope scope: EngineScope,
                                    now: Date) -> PacerSnapshotPayload.Limits {
+        // Deep enough to hold a half-hour lookback for both fixed windows even
+        // at the fastest cadence a multi-token account polls at. `first(where:)`
+        // still picks the newest of each.
         let rlRows = (try? context.fetch(
-            LimitScope.rateLimits(account: limitAccount, limit: 16))) ?? []
+            LimitScope.rateLimits(account: limitAccount, limit: 64))) ?? []
         let outlook = engineSnapshot(context: context, scope: scope)
 
-        let scopedRows = ((try? context.fetch(LimitScope.modelScopedLimits(
+        let scopedHistory = ((try? context.fetch(LimitScope.modelScopedLimits(
             account: limitAccount, limit: scopedFetchLimit))) ?? [])
             .map(\.scopedWindowRow)
+        let scopedRows = scopedHistory
             .latestBatch()
             .sorted { $0.identity < $1.identity }
         let scopedOutlooks = Dictionary(
@@ -459,18 +476,44 @@ public enum PacerSnapshotBuilder {
                              identity: fiveHourKey,
                              label: WindowSpec.fixed(.fiveHour).displayName,
                              group: fiveHourGroup,
-                             outlook: outlook?.fiveHour, now: now),
+                             outlook: outlook?.fiveHour,
+                             recentBurn: recentBurn(rlRows.filter { $0.window == fiveHourKey },
+                                                    duration: WindowSpec.fixed(.fiveHour).duration,
+                                                    now: now),
+                             now: now),
             sevenDay: window(rlRows.first { $0.window == sevenDayKey },
                              identity: sevenDayKey,
                              label: WindowSpec.fixed(.sevenDay).displayName,
                              group: sevenDayGroup,
-                             outlook: outlook?.sevenDay, now: now),
+                             outlook: outlook?.sevenDay,
+                             recentBurn: recentBurn(rlRows.filter { $0.window == sevenDayKey },
+                                                    duration: WindowSpec.fixed(.sevenDay).duration,
+                                                    now: now),
+                             now: now),
             scoped: scopedRows.map { row in
                 window(identity: row.identity, label: row.label, group: row.group,
                        usedPercent: row.percent, resetsAt: row.resetsAt,
                        isActive: row.isActive, severity: row.severity,
-                       outlook: scopedOutlooks[row.identity], now: now)
+                       outlook: scopedOutlooks[row.identity],
+                       recentBurn: RecentBurn.percentPerHour(
+                           readings: scopedHistory
+                               .filter { $0.identity == row.identity }
+                               .map { .init(at: $0.sampledAt, percent: $0.percent,
+                                            resetsAt: $0.resetsAt) },
+                           now: now,
+                           duration: WindowSpec.scopedDuration(group: row.group)),
+                       now: now)
             })
+    }
+
+    /// Measured burn over the last half hour for one fixed window.
+    private static func recentBurn(_ samples: [RateLimitSample],
+                                   duration: TimeInterval, now: Date) -> Double? {
+        RecentBurn.percentPerHour(
+            readings: samples.map {
+                .init(at: $0.sampledAt, percent: $0.usedPercentage, resetsAt: $0.resetsAt)
+            },
+            now: now, duration: duration)
     }
 
     /// One fixed window's live usage from the freshest sample, or nil when no
@@ -479,12 +522,13 @@ public enum PacerSnapshotBuilder {
         _ sample: RateLimitSample?,
         identity: String, label: String, group: String,
         outlook: EngineSnapshot.WindowOutlook?,
+        recentBurn: Double?,
         now: Date
     ) -> PacerSnapshotPayload.Limits.Window? {
         guard let sample else { return nil }
         return window(identity: identity, label: label, group: group,
                       usedPercent: sample.usedPercentage, resetsAt: sample.resetsAt,
-                      outlook: outlook, now: now)
+                      outlook: outlook, recentBurn: recentBurn, now: now)
     }
 
     /// Assemble one window's live usage plus the engine's projection — but only
@@ -496,6 +540,7 @@ public enum PacerSnapshotBuilder {
         usedPercent: Double, resetsAt: Date?,
         isActive: Bool? = nil, severity: String? = nil,
         outlook: EngineSnapshot.WindowOutlook?,
+        recentBurn: Double?,
         now: Date
     ) -> PacerSnapshotPayload.Limits.Window {
         let resetsInSeconds = resetsAt.map { max(0, Int($0.timeIntervalSince(now))) }
@@ -527,6 +572,7 @@ public enum PacerSnapshotBuilder {
             limitEtaAt: crossingAt,
             limitEtaInSeconds: crossingAt.map { max(0, Int($0.timeIntervalSince(now))) },
             burnPercentPerHour: burn,
+            recentBurnPercentPerHour: recentBurn,
             isActive: isActive,
             severity: severity)
     }

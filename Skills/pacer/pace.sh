@@ -29,6 +29,7 @@
 #   `status` calls it stale), --retries N (default 3), --state FILE
 #
 # Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
+#   PACE_SESSION_API (override just the session lookup's base URL),
 #   PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
 #   orchestrations on one machine do not overwrite each other's verdict)
 #
@@ -52,6 +53,7 @@ MAXWAIT=21600
 MAXAGE=900
 MODEL="${PACE_MODEL:-}"
 ETA=0
+INTERVAL_SET=0
 # How many times to re-ask before believing "nothing is listening". Pacer
 # restarts itself for updates, so one refused connection is not an answer.
 RETRIES="${PACE_RETRIES:-3}"
@@ -97,7 +99,7 @@ SUB="${1:-report}"; shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --cap)      CAP="$2"; shift 2;;
-    --interval) INTERVAL="$2"; shift 2;;
+    --interval) INTERVAL="$2"; INTERVAL_SET=1; shift 2;;
     --window)   WINDOW="$2"; shift 2;;
     --model)    MODEL="$2"; shift 2;;
     --eta)      ETA="$2"; shift 2;;
@@ -110,14 +112,16 @@ while [ $# -gt 0 ]; do
     *) die "unknown flag: $1";;
   esac
 done
-[ "$INTERVAL" -lt 300 ] 2>/dev/null && INTERVAL=300   # Pacer only updates every ~5 min
+# 300 is the right default because Pacer's own readings only refresh every
+# ~5 minutes (one token is polled no faster than that, which is what keeps it
+# off Anthropic's throttle). The floor is far lower than the default on
+# purpose, and is only a guard against a spin loop rather than a
+# recommendation: an *account switch* is visible the instant Pacer notices it,
+# so a process that is waiting has a reason to look more often than a reading
+# changes, and the endpoint it looks at is on this machine.
+[ "$INTERVAL" -lt 5 ] 2>/dev/null && INTERVAL=5
 ETA=$(duration "$ETA") || exit 1   # `die` inside $() exits the subshell, not us
 
-if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
-  SCOPE=(--data-urlencode "account=$ACCOUNT")
-elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
-fi
 
 # --- reading Pacer ---------------------------------------------------------
 
@@ -172,6 +176,7 @@ function slot(line,   a, w, key) {
 /^pacer_rate_limit_hit_eta_seconds\{/     { eta[slot($0)]  = $NF; next }
 /^pacer_rate_limit_will_hit\{/            { hit[slot($0)]  = $NF; next }
 /^pacer_rate_limit_burn_percent_per_hour\{/ { burn[slot($0)] = $NF; next }
+/^pacer_rate_limit_recent_burn_percent_per_hour\{/ { recent[slot($0)] = $NF; next }
 END {
   count = 0
   for (a in accounts) { count++; only = a }
@@ -182,15 +187,44 @@ END {
     key = order[i]
     if (want != "" && acct[key] != want) continue
     if (!(key in pct)) continue                       # a window with no reading
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
            acct[key], SEP, win[key], SEP, labelfor(win[key]), SEP, modelfor(win[key]), SEP,
            pct[key], SEP,
            (key in secs ? secs[key] : "null"), SEP,
            (key in eta  ? eta[key]  : "null"), SEP,
            (key in burn ? burn[key] : "null"), SEP,
-           (key in hit  ? hit[key]  : "0")
+           (key in hit  ? hit[key]  : "0"), SEP,
+           (key in recent ? recent[key] : "null")
   }
 }'
+
+# Ask Pacer what it knows about *this* session: the model it is running and the
+# account its work is billed to.
+#
+# Claude Code exports `CLAUDE_CODE_SESSION_ID` into every command it runs, and
+# that id names the transcript Pacer already parses — so the two facts a script
+# cannot determine about itself are one local request away. A subagent gets its
+# own id, so this answers for the subagent rather than its parent.
+#
+# Line-oriented extraction rather than a JSON parser: the response is six fields
+# from an encoder we control, which prints one key per line. There is a test
+# pinning that shape.
+SESSION_MODEL=""
+SESSION_ACCOUNT=""
+session_looked_up=false
+resolve_session() {
+  $session_looked_up && return 0
+  session_looked_up=true
+  [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 1
+  local body
+  body=$(curl -s -m 5 ${AUTH[@]+"${AUTH[@]}"} \
+         --get --data-urlencode "id=$CLAUDE_CODE_SESSION_ID" \
+         "${PACE_SESSION_API:-${API_BASE%/}}/v1/session") || return 1
+  case "$body" in *'"sessionId"'*) ;; *) return 1;; esac
+  SESSION_MODEL=$(printf '%s\n' "$body" | awk -F'"' '/"model"/ { print $4; exit }')
+  SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  [ -n "$SESSION_MODEL" ] || [ -n "$SESSION_ACCOUNT" ]
+}
 
 # Fills ROWS with the TSV above, and FETCH_REASON with why it could not.
 #
@@ -395,10 +429,21 @@ cmd_report() {
   require_selection
   local multi
   multi=$(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ a[$1] = 1 } END { print length(a) }')
-  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit; do
+  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent; do
     local prefix="" rate="" full="" mine=""
     [ "$multi" -gt 1 ] && prefix="$(printf '%-8s ' "${acct:0:8}")"
-    [ "$burn" != null ] && rate="$(printf ' · %+.0f%%/h' "$burn")"
+    # The measured half-hour rate answers "right now"; the engine's smoothed
+    # slope is shown beside it when they disagree enough to matter, which is
+    # what tells a burst from a steady climb.
+    if [ "$recent" != null ]; then
+      rate="$(printf ' · %+.0f%%/h now' "$recent")"
+      if [ "$burn" != null ] \
+         && [ "$(awk -v a="$recent" -v b="$burn" 'BEGIN { print (a - b > 5 || b - a > 5) ? 1 : 0 }')" = 1 ]; then
+        rate="$rate$(printf ' (%+.0f avg)' "$burn")"
+      fi
+    elif [ "$burn" != null ]; then
+      rate="$(printf ' · %+.0f%%/h' "$burn")"
+    fi
     [ "$hit" = 1 ] && [ "$eta" != null ] && full=" · full in $(human "$eta")"
     # Only worth saying when the caller named a model: otherwise everything
     # binds and the note is noise on every line.
@@ -426,9 +471,9 @@ cmd_json() {
       return (index(m, want) || index(want, m)) ? 1 : 0
     }
     BEGIN { want = norm(WANT) }
-    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"binds\": %s}",
+    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"recentBurnPercentPerHour\": %s, \"binds\": %s}",
              (NR > 1 ? ",\n" : ""), $1, $2, $3, $4, $5, $6,
-             ($9 + 0 == 1 ? "true" : "false"), $7, $8,
+             ($9 + 0 == 1 ? "true" : "false"), $7, $8, $10,
              (binds($4) ? "true" : "false") }
     END { if (NR > 0) printf "\n" }'
   printf '  ]\n}\n'
@@ -484,7 +529,12 @@ cmd_status() {
 }
 
 cmd_wait() {
-  local waiting=false everRead=false fails=0
+  local waiting=false everRead=false fails=0 startedOn="" nowOn=""
+  # A waiting process has a reason to look more often than a reading changes:
+  # under sequential accounts, switching logins restores headroom immediately
+  # and Pacer sees it as soon as it notices the switch. Waiting out a *reset*
+  # is still bounded by the ~5-minute poll either way.
+  [ "$INTERVAL_SET" = 0 ] && INTERVAL=60
   while :; do
     if ! fetch_rows; then
       # A blip is not a reset. Pacer ships silent auto-updates and restarts
@@ -508,11 +558,21 @@ cmd_wait() {
     fi
     everRead=true
     fails=0
+    nowOn=$(printf '%s\n' "$ROWS" | awk -F"$SEP" 'NR == 1 { print $1; exit }')
+    [ -z "$startedOn" ] && startedOn="$nowOn"
     require_selection
     evaluate
     if [ -z "$TRIP" ]; then
-      write_state go "" "" "" "headroom restored ($(summary))"
-      $waiting && echo "pace: reset — headroom restored ($(summary)). Resume."
+      # Why the headroom came back matters to whoever reads this: a reset is
+      # the window rolling over, a switch is a different login's window
+      # entirely — and under sequential accounts the second is the common one.
+      if [ -n "$startedOn" ] && [ "$nowOn" != "$startedOn" ]; then
+        write_state go "" "" "" "account switched — headroom on ${nowOn:0:8} ($(summary))"
+        echo "pace: account switched (${startedOn:0:8} → ${nowOn:0:8}) — headroom on the new login ($(summary)). Resume."
+      else
+        write_state go "" "" "" "headroom restored ($(summary))"
+        $waiting && echo "pace: reset — headroom restored ($(summary)). Resume."
+      fi
       exit 0
     fi
     if [ "${TSECS:-0}" != null ] && [ "${TSECS:-0}" -gt "$MAXWAIT" ] 2>/dev/null; then
@@ -527,6 +587,29 @@ cmd_wait() {
     sleep "$INTERVAL"
   done
 }
+
+# `--model auto` (or PACE_MODEL=auto) means "whatever this session is running".
+# It also settles which account to ask about, since the same lookup reports the
+# attribution Pacer recorded for these turns — more direct than resolving a
+# config directory, which only describes the profile.
+AUTO_NOTE=""
+if [ "$MODEL" = auto ]; then
+  if resolve_session && [ -n "$SESSION_MODEL" ]; then
+    MODEL="$SESSION_MODEL"
+    AUTO_NOTE="model $MODEL (detected)"
+  else
+    MODEL=""
+    AUTO_NOTE="model unknown — every window binds"
+  fi
+fi
+
+if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
+  SCOPE=(--data-urlencode "account=$ACCOUNT")
+elif [ -n "$SESSION_ACCOUNT" ]; then
+  SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
+elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
+fi
 
 case "$SUB" in
   report) cmd_report;;
