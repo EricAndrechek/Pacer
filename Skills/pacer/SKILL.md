@@ -46,14 +46,32 @@ each curling it. So it is **one poller, many cheap readers**:
 
 Exit codes:
 
-| command | 0 | 10 | 20 | 2 | 1 |
-|---|---|---|---|---|---|
-| `gate` / `status` | GO | PAUSE | — | API off | bad `--window` |
-| `wait` | headroom / resume | — | far-off reset → checkpoint & stop | API off | bad `--window` |
+| | 0 | 10 | 3 | 20 | 2 | 4 | 1 |
+|---|---|---|---|---|---|---|---|
+| `gate` | GO | PAUSE | — | — | API off | misconfigured | bad `--window` |
+| `status` | GO | PAUSE | unknown / stale | — | — | — | — |
+| `wait` | resume | — | — | far-off reset → checkpoint & stop | API off | misconfigured | bad `--window` |
 
-**"API off" never blocks work** — Pacer's server is opt-in; if it is not
-running, proceed ungated. A bad `--window` *does* stop you, because a selector
-that matches nothing would otherwise report GO forever.
+Three of those are "no signal" rather than "no budget", and they are not the
+same as each other:
+
+- **2, API off** — Pacer's server is opt-in and is not running. Proceed
+  ungated; this is the ordinary case on a machine without Pacer.
+- **4, misconfigured** — Pacer answered and rejected the request, almost always
+  a token set in Pacer but not in `PACE_TOKEN`. Proceed if you must, but **tell
+  the user**: the run is unpaced and one line of configuration would fix it.
+- **3, unknown or stale** — no gate has run, or the last verdict is older than
+  `--max-age` (default 15 min). A verdict has a shelf life: an orchestrator
+  that died an hour ago left its last word on disk, and obeying it is obeying a
+  window that has since moved. Re-gate.
+
+A bad `--window` (1) *does* stop you, because a selector that matches nothing
+would otherwise report GO forever.
+
+**Two runs at once need two state files.** The shared default is what makes
+`status` free; two orchestrations sharing it means last-writer-wins on a
+verdict the other is about to obey. Set `PACE_RUN=<name>` (or `--state`) per
+orchestration.
 
 ## 3. Orchestrator protocol
 
@@ -95,7 +113,9 @@ Invoke with a cap (default **85**). For a big fan-out:
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
 > `<MANIFEST_PATH>` saying exactly where you stopped and what is left, and
 > return `RESUME-NEEDED: <that line>`. Do not begin new expensive work. If it
-> prints `go`, proceed. It is a local file read — call it freely.
+> prints `go`, proceed. If it prints `unknown` or `stale`, proceed but say so
+> in your final message — nobody is pacing this. It is a local file read — call
+> it freely.
 
 **In a Workflow script** (the deterministic `Workflow` tool): gate *between
 stages* instead — before each `parallel()`/`pipeline()` wave, run an `agent()`
@@ -138,11 +158,14 @@ it and continue. Keep it current as items complete.
 - `--max-wait S` (default 21600 = 6h): auto-sleep only if the reset is within
   this. A further-out reset returns exit 20 so you checkpoint and stop instead
   of sleeping for days.
+- `--max-age S` (default 900 = 15 min): how old a state file may be before
+  `status` calls it stale. It is also how long `wait` holds a pause through an
+  unreadable API before giving up.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer
-  requires a bearer), `PACE_ACCOUNT`, `PACE_STATE` (default
-  `~/.claude/pace/state.json`).
+  requires a bearer), `PACE_ACCOUNT`, `PACE_RUN` (names a per-run state file),
+  `PACE_STATE` (default `~/.claude/pace/state.json`).
 
 ## 7. External supervisor (no agent involved)
 
@@ -160,6 +183,9 @@ unattended run from your own terminal.
   *background* process whose **exit** wakes you.
 - The background waiter dies if the machine sleeps (lid close). On wake, re-run
   the orchestrator — the manifest makes that safe.
+- **Pacer restarting does not end a pause.** It installs its own silent updates,
+  so any wait long enough to matter will meet a minute where nothing answers.
+  `wait` holds the pause through that rather than reading it as headroom.
 - **"API off" ≠ "no budget left."** Off means no signal; proceed ungated.
 - Window labels come from the window's identity, so a per-model cap reads as
   the model name ("Fable"). If the server ever reports an opaque model id, the

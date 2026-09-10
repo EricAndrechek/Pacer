@@ -15,18 +15,22 @@
 # Subcommands:
 #   report                 human table of every window (HTTP)
 #   json                   machine JSON of the same (HTTP)
-#   gate  --cap N          HTTP read + write state file; 0=go 10=paused 2=api-off
-#   status                 read state file only (no HTTP); 0=go 10=paused 3=unknown
+#   gate  --cap N          HTTP read + write state file; 0=go 10=paused
+#                          2=api-off 4=misconfigured
+#   status                 read state file only (no HTTP); 0=go 10=paused
+#                          3=unknown or stale
 #   wait  --cap N          block until the tripping window resets; 0=resume
 #                          20=beyond --max-wait (checkpoint & stop) 2=api-off
 #
 # Flags: --cap N (default 85), --interval S (default 300, floor 300 — Pacer
 #   only updates every ~5 min), --window SEL (default all; a label or identity
 #   substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
-#   21600 = 6h), --state FILE
+#   21600 = 6h), --max-age S (default 900; how old a state file may be before
+#   `status` calls it stale), --retries N (default 3), --state FILE
 #
 # Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
-#   PACE_ACCOUNT, PACE_STATE (default ~/.claude/pace/state.json)
+#   PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
+#   orchestrations on one machine do not overwrite each other's verdict)
 #
 # Dependencies: curl and awk. Deliberately not jq — macOS does not ship it, and
 # a skill that shipped with an app cannot assume Homebrew.
@@ -35,12 +39,20 @@ set -uo pipefail
 
 API_BASE="${PACER_API:-http://127.0.0.1:7223}"
 API="${API_BASE%/}/metrics"
-STATE="${PACE_STATE:-$HOME/.claude/pace/state.json}"
+# One state file per orchestration. The shared default is what makes the
+# many-readers design cheap, but two runs with different caps sharing it means
+# last-writer-wins on a verdict the other one is about to obey — so a run that
+# names itself gets its own.
+STATE="${PACE_STATE:-$HOME/.claude/pace/state${PACE_RUN:+-$PACE_RUN}.json}"
 ACCOUNT="${PACE_ACCOUNT:-}"
 CAP=85
 INTERVAL=300
 WINDOW=all
 MAXWAIT=21600
+MAXAGE=900
+# How many times to re-ask before believing "nothing is listening". Pacer
+# restarts itself for updates, so one refused connection is not an answer.
+RETRIES="${PACE_RETRIES:-3}"
 AUTH=()
 [ -n "${PACE_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer ${PACE_TOKEN}")
 
@@ -56,6 +68,8 @@ while [ $# -gt 0 ]; do
     --window)   WINDOW="$2"; shift 2;;
     --account)  ACCOUNT="$2"; shift 2;;
     --max-wait) MAXWAIT="$2"; shift 2;;
+    --max-age)  MAXAGE="$2"; shift 2;;
+    --retries)  RETRIES="$2"; shift 2;;
     --state)    STATE="$2"; shift 2;;
     -h|--help)  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) die "unknown flag: $1";;
@@ -126,14 +140,43 @@ END {
   }
 }'
 
-# Fills ROWS with the TSV above. Non-zero when Pacer is unreachable or silent.
+# Fills ROWS with the TSV above, and FETCH_REASON with why it could not.
+#
+#   off   — nothing answered. Pacer is opt-in; this is the ordinary case.
+#   auth  — it answered 401/403. A token is set on the server and not here, or
+#           it is wrong. This used to be indistinguishable from `off`, which
+#           meant one typo in a token silently disabled every gate in a run.
+#   http  — it answered something else unhappy.
+#   empty — it answered, but reported no windows at all.
+#
+# One read is retried a couple of times first: Pacer installs its own silent
+# updates and restarts, so a multi-hour `wait` is guaranteed to meet a moment
+# where the server is not listening, and treating that as "no limits to worry
+# about" is the worst possible reading of it.
 fetch_rows() {
-  local body
-  # `${AUTH[@]+...}` so an empty array does not trip `set -u` on bash 3.2.
-  body=$(curl -s -m 3 ${AUTH[@]+"${AUTH[@]}"} "$API") || return 1
-  [ -z "$body" ] && return 1
-  ROWS=$(printf '%s\n' "$body" | awk -v WANT="$ACCOUNT" "$PARSE_AWK")
-  [ -n "$ROWS" ] || return 1
+  local attempt=1 raw code body
+  FETCH_REASON=off
+  while [ "$attempt" -le "$RETRIES" ]; do
+    # `${AUTH[@]+...}` so an empty array does not trip `set -u` on bash 3.2.
+    if raw=$(curl -s -m 5 -w '\n%{http_code}' ${AUTH[@]+"${AUTH[@]}"} "$API"); then
+      code=${raw##*$'\n'}
+      body=${raw%$'\n'*}
+      case "$code" in
+        401|403) FETCH_REASON=auth; return 1;;
+        000|200) ;;                       # 000 = a non-HTTP URL, e.g. file://
+        *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
+      esac
+      if [ -n "$body" ]; then
+        ROWS=$(printf '%s\n' "$body" | awk -v WANT="$ACCOUNT" "$PARSE_AWK")
+        if [ -n "$ROWS" ]; then FETCH_REASON=""; return 0; fi
+        FETCH_REASON=empty
+        return 1
+      fi
+    fi
+    [ "$attempt" -lt "$RETRIES" ] && sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 # Rows the caller asked to watch. `--window` is a case-insensitive substring of
@@ -194,6 +237,18 @@ write_state() {  # status window pct secs note
   } > "$tmp" && mv "$tmp" "$STATE"
 }
 
+# Seconds since the state file was written, from its own `updatedAt` (the file
+# mtime would be wrong the moment anything copies it). Empty when it cannot be
+# parsed, which skips the staleness check rather than failing on it.
+state_age_seconds() {
+  local stamp epoch
+  stamp=$(awk -F'"' '/"updatedAt"/ { print $4; exit }' "$STATE" 2>/dev/null)
+  [ -n "$stamp" ] || return 0
+  epoch=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$stamp" +%s 2>/dev/null) || return 0
+  [ -n "$epoch" ] || return 0
+  echo $(( $(date +%s) - epoch ))
+}
+
 # --- evaluation ------------------------------------------------------------
 
 # Sets TRIP/TPCT/TSECS to the watched window that is at or over the cap and
@@ -217,12 +272,25 @@ summary() {
 
 # --- subcommands -----------------------------------------------------------
 
+# Says what actually went wrong, and how loudly. `off` is ordinary; `auth` and
+# `http` are misconfigurations that a run must not mistake for "no limits".
 api_off_note() {
-  echo "Pacer API unreachable at $API — it is opt-in and likely just off (Pacer → Settings → Integrations). Proceed normally."
+  case "${FETCH_REASON:-off}" in
+    auth) echo "pace: Pacer requires a token and this one was rejected. Set PACE_TOKEN to the token in Pacer → Settings → Integrations. NOT gating — fix this or the run is unpaced." >&2;;
+    http) echo "pace: Pacer answered HTTP ${HTTP_CODE:-?} at $API. NOT gating." >&2;;
+    empty) echo "pace: Pacer answered but reported no rate-limit windows yet — it may not have polled since launch. Proceeding ungated.";;
+    *)    echo "Pacer API unreachable at $API — it is opt-in and likely just off (Pacer → Settings → Integrations). Proceed normally.";;
+  esac
+}
+
+# 4 for a misconfiguration (a token that does not work is a bug to fix, not a
+# state to tolerate), 2 for the ordinary "Pacer is not running".
+off_exit_code() {
+  case "${FETCH_REASON:-off}" in auth|http) echo 4;; *) echo 2;; esac
 }
 
 cmd_report() {
-  fetch_rows || { api_off_note; exit 2; }
+  fetch_rows || { api_off_note; exit "$(off_exit_code)"; }
   require_selection
   local multi
   multi=$(printf '%s\n' "$ROWS" | awk -F'\t' '{ a[$1] = 1 } END { print length(a) }')
@@ -235,7 +303,10 @@ cmd_report() {
 }
 
 cmd_json() {
-  fetch_rows || { echo '{"ok":false,"reason":"api-unreachable"}'; exit 2; }
+  fetch_rows || {
+    printf '{"ok": false, "reason": "%s"}\n' "${FETCH_REASON:-off}"
+    exit "$(off_exit_code)"
+  }
   require_selection
   printf '{\n  "ok": true,\n  "at": "%s",\n  "windows": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   selected_rows | awk -F'\t' '
@@ -247,9 +318,10 @@ cmd_json() {
 
 cmd_gate() {
   if ! fetch_rows; then
-    write_state unknown "" "" "" "Pacer API unreachable — gating disabled"
-    echo "pace: API off — proceeding ungated."
-    exit 2
+    write_state unknown "" "" "" "not gating (${FETCH_REASON:-off})"
+    api_off_note
+    [ "${FETCH_REASON:-off}" = off ] && echo "pace: API off — proceeding ungated."
+    exit "$(off_exit_code)"
   fi
   require_selection
   evaluate
@@ -266,7 +338,15 @@ cmd_gate() {
 
 cmd_status() {
   [ -f "$STATE" ] || { echo "pace: no state file ($STATE) — run 'gate' first."; exit 3; }
-  local st note
+  local st note age
+  # A verdict has a shelf life. An orchestrator that crashed an hour ago leaves
+  # its last word on disk, and every reader after that is obeying a snapshot of
+  # a window that has since moved — in either direction.
+  age=$(state_age_seconds)
+  if [ -n "$age" ] && [ "$age" -gt "$MAXAGE" ]; then
+    echo "stale: last gated $((age / 60))m ago (max ${MAXAGE}s) — treat as unknown and re-gate."
+    exit 3
+  fi
   st=$(awk -F'"' '/"status"/ { print $4; exit }' "$STATE" 2>/dev/null)
   case "$st" in
     go)     echo "go"; exit 0;;
@@ -277,14 +357,30 @@ cmd_status() {
 }
 
 cmd_wait() {
-  local waiting=false
+  local waiting=false everRead=false fails=0
   while :; do
     if ! fetch_rows; then
-      # Cannot pace against an API that is off — never block a run forever.
-      write_state unknown "" "" "" "Pacer API unreachable while waiting"
-      echo "pace: API unreachable — cannot gate; proceeding ungated."
-      exit 2
+      # A blip is not a reset. Pacer ships silent auto-updates and restarts
+      # itself, so a wait long enough to matter *will* meet a minute where
+      # nothing answers — and "the server went away" arriving at 95% used must
+      # not read as "go ahead". Once a read has succeeded, keep waiting through
+      # failures for `staleAfter`; only a wait that could never reach Pacer at
+      # all gives up immediately.
+      if $everRead && [ "${FETCH_REASON:-off}" != auth ]; then
+        fails=$((fails + 1))
+        if [ $((fails * INTERVAL)) -lt "$MAXAGE" ]; then
+          [ "$fails" = 1 ] && echo "pace: Pacer stopped answering (${FETCH_REASON:-off}) — holding the pause, not resuming."
+          sleep "$INTERVAL"
+          continue
+        fi
+      fi
+      write_state unknown "" "" "" "Pacer unreadable while waiting (${FETCH_REASON:-off})"
+      api_off_note
+      [ "${FETCH_REASON:-off}" = off ] && echo "pace: cannot gate; proceeding ungated."
+      exit "$(off_exit_code)"
     fi
+    everRead=true
+    fails=0
     require_selection
     evaluate
     if [ -z "$TRIP" ]; then

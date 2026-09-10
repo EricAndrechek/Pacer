@@ -67,13 +67,50 @@ struct PaceScriptTests {
         var stateText: String { (try? String(contentsOf: stateURL, encoding: .utf8)) ?? "" }
     }
 
-    private func run(_ sandbox: Sandbox, _ args: [String]) throws -> Run {
+    /// Minimum HTTP server that answers one status to everything. Enough to
+    /// prove the script tells "rejected" apart from "nothing listening".
+    private final class StubServer {
+        private let task: Process
+        let base: String
+
+        init(status: Int, body: String) throws {
+            let port = Int.random(in: 49_200...49_900)
+            base = "http://127.0.0.1:\(port)"
+            let script = """
+            import sys
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(\(status))
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b\"\"\"\(body)\"\"\")
+                def log_message(self, *a): pass
+            HTTPServer(("127.0.0.1", \(port)), H).serve_forever()
+            """
+            task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            task.arguments = ["python3", "-c", script]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            try task.run()
+            // Give it a moment to bind before the script curls it.
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+
+        func stop() { task.terminate() }
+    }
+
+    private func run(_ sandbox: Sandbox, _ args: [String], api: String? = nil,
+                     unsetState: Bool = false, extra: [String: String] = [:]) throws -> Run {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [Self.scriptPath] + args
         var env = ProcessInfo.processInfo.environment
-        env["PACER_API"] = "file://\(sandbox.dir.path)"
-        env["PACE_STATE"] = sandbox.stateURL.path
+        env["PACER_API"] = api ?? "file://\(sandbox.dir.path)"
+        if unsetState { env.removeValue(forKey: "PACE_STATE") }
+        else { env["PACE_STATE"] = sandbox.stateURL.path }
+        for (key, value) in extra { env[key] = value }
         process.environment = env
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -177,12 +214,14 @@ struct PaceScriptTests {
     /// Pacer's API is opt-in. "Off" means no signal, never "no budget" — a
     /// skill that blocked here would break every machine without Pacer.
     @Test func anUnreachableAPINeverBlocksTheRun() throws {
+        // One attempt, not the usual three: the retries exist for a server
+        // that is restarting, and there is nothing here to come back.
         let box = try Sandbox(metrics: nil)
-        let gate = try run(box, ["gate"])
+        let gate = try run(box, ["gate", "--retries", "1"])
         #expect(gate.status == 2)
         #expect(gate.out.contains("proceeding ungated"))
 
-        let report = try run(box, ["report"])
+        let report = try run(box, ["report", "--retries", "1"])
         #expect(report.status == 2)
         #expect(report.out.contains("unreachable"))
     }
@@ -199,6 +238,63 @@ struct PaceScriptTests {
         #expect(result.status == 0)
         #expect(result.out.contains("0% used · resets in ?"))
         #expect(result.out.contains("40% used"))
+    }
+
+    /// A token set in Pacer but not in the environment answers 401, which for
+    /// a long time was indistinguishable from "Pacer is not running" — so one
+    /// typo silently unpaced an entire run. It has its own exit code now.
+    @Test func aRejectedTokenIsLoudRatherThanSilentlyUngated() throws {
+        let box = try Sandbox(metrics: nil)
+        let server = try StubServer(status: 401, body: "Unauthorized\n")
+        defer { server.stop() }
+
+        let result = try run(box, ["gate", "--retries", "1"], api: server.base)
+        #expect(result.status == 4)
+        #expect(result.out.contains("PACE_TOKEN"))
+        #expect(!result.out.contains("proceeding ungated"))
+    }
+
+    /// A verdict has a shelf life. An orchestrator that died an hour ago left
+    /// `go` on disk, and every reader after that is obeying a window that has
+    /// since moved.
+    @Test func aStaleVerdictReadsAsUnknownNotAsGo() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        _ = try run(box, ["gate", "--cap", "85", "--window", "5h"])
+        #expect(try run(box, ["status"]).status == 0)
+
+        // Backdate the verdict rather than sleeping: the age is read from the
+        // file's own `updatedAt`, so this is the same path a crashed
+        // orchestrator's leftovers take an hour later.
+        let old = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-7200))
+        let rewritten = box.stateText.replacingOccurrences(
+            of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(old)"#,
+            options: .regularExpression)
+        try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
+
+        let stale = try run(box, ["status"])
+        #expect(stale.status == 3)
+        #expect(stale.out.hasPrefix("stale:"))
+    }
+
+    /// Two orchestrations on one machine must not overwrite each other's
+    /// verdict — the shared default is a convenience, not a requirement.
+    @Test func namedRunsKeepSeparateState() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let home = box.dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        // No PACE_STATE: the run name alone has to separate them.
+        let paused = try run(box, ["gate", "--cap", "85"], unsetState: true,
+                             extra: ["HOME": home.path, "PACE_RUN": "alpha"])
+        #expect(paused.status == 10)
+        let go = try run(box, ["gate", "--cap", "85", "--window", "5h"], unsetState: true,
+                         extra: ["HOME": home.path, "PACE_RUN": "beta"])
+        #expect(go.status == 0)
+
+        // Alpha's pause survived beta's go.
+        let alpha = try run(box, ["status"], unsetState: true,
+                            extra: ["HOME": home.path, "PACE_RUN": "alpha"])
+        #expect(alpha.status == 10)
     }
 
     /// A single-account install emits no `pacer_account_info`, so the script
