@@ -174,6 +174,7 @@ final class AppBackgroundService {
         startHistoryPruneTask()
         installAPISettingsObserver()
         installAPIScopeObserver()
+        refreshClaudeSkillIfInstalled()
         applyAPIServerConfig()
     }
 
@@ -234,6 +235,26 @@ final class AppBackgroundService {
             forName: .pacerAPIServerSettingsChanged, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.applyAPIServerConfig() }
+        }
+    }
+
+    /// Keep the installed Claude Code skill in step with the app.
+    ///
+    /// This is the whole of "it updates when Pacer updates": a Sparkle update
+    /// replaces the copy inside the bundle, and the next launch copies it out
+    /// again. Deliberately does nothing unless the skill is already installed
+    /// and untouched — installing is a click the user makes once, and a file
+    /// they have edited is theirs (see `ClaudeSkillInstaller`).
+    private func refreshClaudeSkillIfInstalled() {
+        guard let installer = ClaudeSkillInstaller.bundled() else { return }
+        Task.detached(priority: .utility) {
+            do {
+                if try installer.refreshIfInstalled() {
+                    Log.write("Skill", "re-synced \(installer.destination.lastPathComponent) to \(installer.version)")
+                }
+            } catch {
+                Log.write("Skill", "skill refresh failed: \(error)")
+            }
         }
     }
 

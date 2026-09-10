@@ -126,6 +126,12 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
 - **Optional nudges.** Local notifications when you cross a rate-limit threshold
   (50 / 75 / 90%) — on any window, including a per-model cap — or blow past a
   daily spending limit you set. Off by default.
+- **Pace your agents, not just yourself.** Pacer ships a Claude Code skill.
+  Install it from Settings and Claude can read every window before it fans out
+  a hundred subagents — per-model caps and your other account included — pause
+  and checkpoint when one is nearly full, and wait out the reset rather than
+  losing the run. One shared read serves the whole fan-out, and the skill
+  updates when Pacer does.
 - **Export.** Send daily totals, daily-by-model, or per-project numbers to a
   CSV for your own spreadsheets.
 
@@ -222,6 +228,7 @@ see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 | `Pacer.app` | Main UI + menu-bar item. Data collection (FSEvents JSONL scan + OAuth poll) runs in-process inside this binary — there is no separate daemon. |
 | `PacerWidgets` | WidgetKit extension — reads the shared App Group store directly. |
 | `PacerCore` | Shared Swift package — parsers, models, scan coordinator, recomputers. |
+| `Skills/pacer` | The Claude Code skill, copied into `Pacer.app/Contents/Resources` and installed into `~/.claude/skills/` on request. `ClaudeSkillInstaller` re-syncs it after an app update. |
 
 ### Building from source
 

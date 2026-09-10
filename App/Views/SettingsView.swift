@@ -50,6 +50,7 @@ struct SettingsView: View {
                 }
                 SettingsSection("Integrations") {
                     APIServerCard()
+                    ClaudeSkillCard()
                 }
             }
             .padding(.horizontal, 24)
@@ -2629,6 +2630,153 @@ private struct APIServerCard: View {
     private static func randomToken() -> String {
         let chars = Array("abcdefghijklmnopqrstuvwxyz0123456789")
         return String((0..<32).map { _ in chars.randomElement()! })
+    }
+}
+
+
+// MARK: - Claude Code skill
+
+/// Install (and keep current) the `pacer` skill in `~/.claude/skills/`.
+///
+/// The skill ships inside the app bundle, so the only thing this card does is
+/// copy it out and report whether the copy is current — the update story is
+/// then Pacer's own: a Sparkle update replaces the bundled copy and the next
+/// launch re-syncs an unmodified installation.
+private struct ClaudeSkillCard: View {
+    @AppStorage(PacerSettings.Key.apiEnabled, store: PacerSettings.store)
+    private var apiEnabled: Bool = false
+
+    @State private var status: ClaudeSkillInstaller.Status?
+    @State private var failure: String?
+    @State private var busy = false
+
+    private var installer: ClaudeSkillInstaller? { ClaudeSkillInstaller.bundled() }
+
+    var body: some View {
+        PacerCard("Claude Code skill", content: {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    Circle().fill(dotColor).frame(width: 8, height: 8)
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let status, status.state != .unavailable {
+                    Text(status.destination.path.replacingOccurrences(
+                        of: NSHomeDirectory(), with: "~"))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                if let failure {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if isInstalled && !apiEnabled {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                        Text("The skill reads the local API, which is off. Turn it on above or the skill will report no data and tell the agent to proceed ungated.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    if isInstalled {
+                        Button("Reveal") { reveal() }
+                            .controlSize(.small)
+                        Button("Remove") { perform { try $0.uninstall() } }
+                            .controlSize(.small)
+                    }
+                    Button(primaryLabel) { perform { try $0.install() } }
+                        .controlSize(.small)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(busy || installer == nil || status?.state == .upToDate)
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Needs only curl and awk.")
+                Text("~/.claude/skills/pacer/pace.sh report")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                Text("Pacer keeps the installed copy in step with the app. A file you edit yourself is left alone until you press Overwrite.")
+                    .padding(.top, 2)
+            }
+        })
+        .onAppear(perform: refresh)
+    }
+
+    private var isInstalled: Bool { status?.isInstalled ?? false }
+
+    private var dotColor: Color {
+        switch status?.state {
+        case .upToDate:                 return apiEnabled ? .green : .yellow
+        case .outdated, .modified:      return .yellow
+        case .foreign:                  return .red
+        default:                        return .secondary
+        }
+    }
+
+    private var statusText: String {
+        guard let status else { return "Checking…" }
+        switch status.state {
+        case .unavailable:
+            return "Not available in this build."
+        case .notInstalled:
+            return "Not installed."
+        case .upToDate:
+            return "Installed · \(status.bundledVersion)"
+        case .outdated(let installed):
+            return "Update available · installed \(installed), bundled \(status.bundledVersion)"
+        case .modified(let installed):
+            return "Edited locally · installed \(installed). Pacer will not overwrite it."
+        case .foreign:
+            return "Something else is installed at this path. Move it aside first."
+        }
+    }
+
+    private var primaryLabel: String {
+        switch status?.state {
+        case .outdated:  return "Update"
+        case .modified:  return "Overwrite"
+        case .upToDate:  return "Installed"
+        case .foreign:   return "Replace"
+        default:         return "Install"
+        }
+    }
+
+    private func refresh() {
+        status = installer?.status()
+            ?? ClaudeSkillInstaller.Status(state: .unavailable, bundledVersion: "",
+                                           destination: URL(fileURLWithPath: "/"))
+    }
+
+    private func perform(_ action: (ClaudeSkillInstaller) throws -> Void) {
+        guard let installer else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            try action(installer)
+            failure = nil
+        } catch {
+            failure = "\(error)"
+        }
+        refresh()
+    }
+
+    private func reveal() {
+        guard let status else { return }
+        #if canImport(AppKit)
+        NSWorkspace.shared.activateFileViewerSelecting([status.destination])
+        #endif
     }
 }
 

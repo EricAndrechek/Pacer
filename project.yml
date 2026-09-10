@@ -85,6 +85,14 @@ targets:
           - "Info.plist"
           - "PacerWidgets.entitlements"
           - "PacerWidgetsBundle.swift"
+      # The Claude Code skill, shipped inside the app so it can be installed
+      # into ~/.claude/skills and re-synced whenever Pacer updates itself
+      # (`ClaudeSkillInstaller`). A folder reference, so the directory is
+      # copied verbatim into Resources/Skills/ rather than flattened — the
+      # installer resolves `Skills/pacer/SKILL.md` by that path.
+      - path: Skills
+        type: folder
+        buildPhase: resources
     # Hand-managed Info.plist (vs GENERATE_INFOPLIST_FILE) so we can
     # carry Sparkle's keys (SUFeedURL, SUPublicEDKey, SUEnableAutomaticChecks).
     # Xcode's auto-generation only knows about the INFOPLIST_KEY_* aliases
