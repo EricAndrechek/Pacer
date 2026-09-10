@@ -159,6 +159,21 @@ struct MenuBarLabel: View {
             account: UsageScope.limitAccountId(in: menuModelContext))
         rateSamples = loaded.fixed
         scopedSamples = loaded.scoped
+
+        // Chips pinned to a named account need that account's own windows, not
+        // the scoped one's. Loaded only for accounts a chip actually names, so
+        // a user who pins nothing pays nothing — the ordinary case.
+        var pinned: [String: [MenuBarWindowItem]] = [:]
+        for id in Set(chipItems.compactMap(\.pinnedAccountId)) {
+            let other = MenuBarWindowSource.load(menuModelContext, account: id)
+            pinned[id] = MenuBarWindowSource.items(
+                fiveHour: other.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+                sevenDay: other.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+                scoped: other.scoped)
+        }
+        pinnedWindows = pinned
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        accountLabels = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.shortLabel) })
     }
 
     init() {
@@ -221,6 +236,11 @@ struct MenuBarLabel: View {
     private var ringWindowsRaw: String = "five_hour,seven_day"
 
     // MARK: - Derived state
+
+    /// Live windows for each account a chip names, keyed by account id.
+    @State private var pinnedWindows: [String: [MenuBarWindowItem]] = [:]
+    /// Short names for those accounts, so a chip reads "personal 42%".
+    @State private var accountLabels: [String: String] = [:]
 
     private var chipItems: [PacerSettings.MenuBarChipItem] {
         // Re-parse from the @AppStorage CSV so SwiftUI body-eval picks
@@ -336,6 +356,7 @@ struct MenuBarLabel: View {
             switch item {
             case .fixed(.sevenDayPct): return true
             case .scoped:              return true
+            case .account:             return true
             default:                   return false
             }
         }
@@ -419,6 +440,14 @@ struct MenuBarLabel: View {
             return .text(pacerTokens(todayTokens))
         case .fixed(.activeModel):
             return .text(activeModel ?? "—")
+        case .account(let accountId, let key):
+            // The account's own windows, and its own name in front of the
+            // number — a chip that does not say whose percentage it is has no
+            // business existing on a surface with several accounts on it.
+            guard let window = pinnedWindows[accountId]?.first(where: { $0.key == key }),
+                  let pct = window.usedPercentage else { return nil }
+            let label = accountLabels[accountId] ?? window.displayName
+            return .percent(prefix: "\(label) ", pct: pct)
         case .scoped(let identity):
             // Read the scoped window's live % from the same dynamic window set
             // the dropdown / icon-driver use (active account's latest batch).

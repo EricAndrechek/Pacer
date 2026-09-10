@@ -83,10 +83,27 @@ public enum MenuBarChipItem: Equatable, Hashable, Identifiable, Sendable {
     /// reading the live scoped window; **dormant (skipped)** when that window
     /// isn't in the account's latest poll.
     case scoped(identity: String)
+    /// One named account's window — `five_hour`, `seven_day`, or a scoped
+    /// identity — regardless of which account is signed in.
+    ///
+    /// The menu bar is the tightest surface in the app, and with several
+    /// accounts live at once there is no honest combined number: two 5-hour
+    /// windows cannot be summed or averaged into a third. So rather than
+    /// guessing which account to show, this lets the user say. A chip that
+    /// names its account is the only version that stays true when both are
+    /// burning.
+    case account(accountId: String, window: String)
 
     /// CSV token prefix marking a scoped-window chip. See the type doc for why
     /// this exact shape keeps old clients forward-compatible.
     public static let scopedTokenPrefix = "scoped_pct:"
+
+    /// Same forward-compat trick for account-scoped chips: an older client's
+    /// parser recognizes neither prefix and skips the token rather than
+    /// choking. Encoded `account_pct:<accountId>|<window>` and split at the
+    /// **first** pipe only, because a scoped identity contains pipes of its
+    /// own (`weekly_scoped|Fable|`) and an account id never does.
+    public static let accountTokenPrefix = "account_pct:"
 
     /// Stable, collision-free identity (a fixed chip's rawValue can never
     /// collide with a `scoped_pct:`-prefixed token). Doubles as the CSV token.
@@ -98,11 +115,18 @@ public enum MenuBarChipItem: Equatable, Hashable, Identifiable, Sendable {
         return nil
     }
 
+    /// The account this chip is pinned to, or nil when it follows the scope.
+    public var pinnedAccountId: String? {
+        if case .account(let id, _) = self { return id }
+        return nil
+    }
+
     /// This entry's single CSV token. Round-trips through `parse(token:)`.
     public var serialized: String {
         switch self {
         case .fixed(let chip):        return chip.rawValue
         case .scoped(let identity):   return Self.scopedTokenPrefix + identity
+        case .account(let id, let w):  return "\(Self.accountTokenPrefix)\(id)|\(w)"
         }
     }
 
@@ -114,6 +138,13 @@ public enum MenuBarChipItem: Equatable, Hashable, Identifiable, Sendable {
     public static func parse(token raw: String) -> MenuBarChipItem? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix(accountTokenPrefix) {
+            let body = trimmed.dropFirst(accountTokenPrefix.count)
+            guard let pipe = body.firstIndex(of: "|") else { return nil }
+            let id = String(body[body.startIndex..<pipe])
+            let window = String(body[body.index(after: pipe)...])
+            return id.isEmpty || window.isEmpty ? nil : .account(accountId: id, window: window)
+        }
         if trimmed.hasPrefix(scopedTokenPrefix) {
             let identity = String(trimmed.dropFirst(scopedTokenPrefix.count))
             return identity.isEmpty ? nil : .scoped(identity: identity)

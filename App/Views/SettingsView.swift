@@ -209,6 +209,8 @@ struct MenuBarCard: View {
     @Environment(\.modelContext) private var modelContext
 
     /// The live window set the picker chooses from (ordered like the dashboard).
+    @Query private var menuBarAccounts: [Account]
+
     private var windows: [MenuBarWindowItem] {
         MenuBarWindowSource.items(
             fiveHour: rateSamples.first { $0.window == RateLimitWindowName.fiveHour },
@@ -285,9 +287,29 @@ struct MenuBarCard: View {
         }
     }
 
+    /// A chip per account per fixed window, minus what is already enabled.
+    ///
+    /// The menu bar is the tightest surface in the app, and with several
+    /// accounts there is no honest combined number — two 5-hour windows are two
+    /// caps on two clocks, not one figure. So rather than Pacer guessing which
+    /// account belongs up there, this lets the user say, one window at a time.
+    private var addableAccountChips: [PacerSettings.MenuBarChipItem] {
+        guard menuBarAccounts.count > 1 else { return [] }
+        let enabled = Set(enabledOrder)
+        return menuBarAccounts
+            .sorted(by: Account.listOrder)
+            .flatMap { account in
+                [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay].map {
+                    PacerSettings.MenuBarChipItem.account(accountId: account.id, window: $0)
+                }
+            }
+            .filter { !enabled.contains($0) }
+    }
+
     /// Whether the "Add" section has anything to show.
     private var hasAddableChips: Bool {
         !addableFixedChips.isEmpty || !addableScopedWindows.isEmpty
+            || !addableAccountChips.isEmpty
     }
 
     private var iconIsEnabled: Bool {
@@ -306,6 +328,15 @@ struct MenuBarCard: View {
         case .fixed(let chip):
             return ChipRowInfo(symbol: chip.symbolName, title: chip.label,
                                subtitle: chip.blurb, isDormant: false)
+        case .account(let accountId, let key):
+            let name = menuBarAccounts.first { $0.id == accountId }?.shortLabel ?? "Account"
+            let windowName = key == RateLimitWindowName.fiveHour ? "5-hour"
+                : key == RateLimitWindowName.sevenDay ? "7-day"
+                : PacerSettings.MenuBarChipItem.scopedDisplayName(fromIdentity: key)
+            return ChipRowInfo(
+                symbol: "person.2", title: "\(name) · \(windowName) %",
+                subtitle: "Always this account, whichever one is signed in",
+                isDormant: false)
         case .scoped(let identity):
             if let window = windows.first(where: { $0.key == identity }) {
                 let pct = window.usedPercentage.map { " · \(Int($0.rounded()))% used" } ?? ""
@@ -447,6 +478,12 @@ struct MenuBarCard: View {
             }
             ForEach(addableScopedWindows) { window in
                 let item = PacerSettings.MenuBarChipItem.scoped(identity: window.key)
+                AddChipRow(info: rowInfo(for: item)) { add(item) }
+            }
+            // Account-pinned chips, offered only when there is more than one
+            // account — with a single login they would say the same thing as
+            // the plain 5h/7d chips, at twice the width.
+            ForEach(addableAccountChips, id: \.id) { item in
                 AddChipRow(info: rowInfo(for: item)) { add(item) }
             }
         }

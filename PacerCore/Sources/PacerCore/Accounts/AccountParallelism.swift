@@ -22,17 +22,48 @@ import SwiftData
 /// back.
 public enum AccountParallelism {
 
-    /// True when more than one account is in play *right now*, by either test.
+    /// How the machine's accounts are actually used.
     ///
-    /// The trail's `hasConcurrentAccounts` catches genuine overlap — two logins
-    /// live at the same instant. The same-day test catches the case the trail
-    /// cannot see: two accounts used in sequence within one day, whose windows
-    /// are nonetheless both open and both constraining. Either is enough.
-    public static func isParallel(
-        context: ModelContext, now: Date = Date(), calendar: Calendar = .current
+    /// This used to be a `Bool`, and it answered the wrong question. Its first
+    /// test was "did more than one account have usage today", which is true for
+    /// someone who *switched* accounts twice — the commonest case there is, and
+    /// the opposite of parallel. Measured on the maintainer's machine: 37
+    /// activation spans, **zero** overlapping and **zero** pinned to a session
+    /// root, and the old test still returned "parallel".
+    ///
+    /// The distinction matters because it decides how much of a cramped surface
+    /// to spend. Sequential use has one binding account at a time; concurrent
+    /// use has several at once, and showing one of them is showing half.
+    public enum Mode: Sendable, Equatable {
+        /// One account has ever been seen. No question to answer.
+        case single
+        /// Several accounts, used one at a time — a switcher, or `/login`.
+        case sequential
+        /// Several accounts live at the same time.
+        case concurrent
+    }
+
+    public static func mode(
+        context: ModelContext,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Mode {
+        let accounts = (try? context.fetch(FetchDescriptor<Account>()))?.count ?? 0
+        guard accounts > 1 else { return .single }
+        // Two definitive signals, no heuristics.
+        //
+        // A session-mode profile is `cswap run N` handing a session its own
+        // `CLAUDE_CONFIG_DIR`, which exists precisely so two accounts can run
+        // at once — its presence *is* the declaration. And overlapping trail
+        // spans are two logins observed live at the same instant.
+        if usesSessionProfiles(homeDirectory: homeDirectory) { return .concurrent }
+        return trail(context: context).hasConcurrentAccounts ? .concurrent : .sequential
+    }
+
+    /// Whether any account switcher has handed a session its own config root.
+    public static func usesSessionProfiles(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Bool {
-        if accountsActiveToday(context: context, now: now) > 1 { return true }
-        return trail(context: context).hasConcurrentAccounts
+        !ExternalAccountDirectory.discoverProfileRoots(homeDirectory: homeDirectory).isEmpty
     }
 
     /// How many distinct accounts have usage on today's local date.
