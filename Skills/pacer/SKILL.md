@@ -36,7 +36,11 @@ One row per window Pacer tracks for **your** login, with how fast it is
 climbing and — when a window is projected to fill before it resets — when.
 `json` gives the machine form, including each window's full identity.
 
-**Whose windows?** The account this session is signed into. A session pinned to
+**Whose windows?** The account this session is signed into — resolved from
+`CLAUDE_CODE_SESSION_ID`, independent of `--model`. On a machine with more than
+one login, a gate that cannot identify the session says so in its output rather
+than quietly reporting the active login's numbers, because "GO at 0%" off an
+idle account is the most expensive thing this tool can say. A session pinned to
 its own profile (`CLAUDE_CONFIG_DIR`, which is how two accounts run at once)
 gets that account's windows: the script hands Pacer the directory and Pacer
 resolves it, because only Pacer knows which login is signed into it. Otherwise

@@ -71,6 +71,8 @@ AUTH=()
 # different account's entirely. `--data-urlencode` so a path with spaces in it
 # survives the trip.
 SCOPE=()
+# Accounts present in the last response, before any narrowing.
+ALL_ACCOUNTS=0
 # What the parser keeps. Empty means "whichever login is active", which is only
 # right when nothing more specific is known.
 AWK_WANT="${PACE_ACCOUNT:-}"
@@ -258,6 +260,10 @@ fetch_rows() {
         *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
       esac
       if [ -n "$body" ]; then
+        # Counted before filtering: `ROWS` is already narrowed to one login, so
+        # counting accounts in it would always say one and the caveat below
+        # would never fire on the machines that need it.
+        ALL_ACCOUNTS=$(printf '%s\n' "$body" | awk '/^pacer_account_info\{/ { n++ } END { print n+0 }')
         ROWS=$(printf '%s\n' "$body" | awk -v WANT="$AWK_WANT" -v SEP="$SEP" "$PARSE_AWK")
         if [ -n "$ROWS" ]; then FETCH_REASON=""; return 0; fi
         FETCH_REASON=empty
@@ -394,6 +400,18 @@ evaluate() {
     END { if (best != "") print best }')
   TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""
   [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA <<<"$line"
+}
+
+# Whose numbers these are, said out loud when it had to be inferred.
+#
+# On a machine with one account there is nothing to get wrong. With several,
+# falling back to "whichever login is active" is a guess, and a gate that
+# reports a percentage without saying whose it is invites exactly the mistake
+# this is here to prevent.
+scope_caveat() {
+  [ -n "$AWK_WANT" ] && [ "$AWK_WANT" != all ] && return 0
+  [ "${ALL_ACCOUNTS:-0}" -le 1 ] 2>/dev/null && return 0
+  printf ' (%s accounts signed in and this session could not be identified — these are the active login'"'"'s numbers, which may not be the ones billing you; pass --account, or run where CLAUDE_CODE_SESSION_ID is set)' "$ALL_ACCOUNTS"
 }
 
 # Why the gate tripped, in words.
@@ -599,7 +617,7 @@ cmd_gate() {
   evaluate
   if [ -z "$TRIP" ]; then
     write_state go "" "" "" "$(summary) (cap ${CAP}%)"
-    echo "pace: GO — $(summary) (cap ${CAP}%)."
+    echo "pace: GO — $(summary) (cap ${CAP}%).$(scope_caveat)"
     exit 0
   fi
   write_state paused "$TRIP" "$TPCT" "$TSECS" \
@@ -702,8 +720,25 @@ cmd_wait() {
 # attribution Pacer recorded for these turns — more direct than resolving a
 # config directory, which only describes the profile.
 AUTO_NOTE=""
+
+# Resolve *this session's* account whenever we can, and never mind what
+# `--model` says.
+#
+# These were one step, and coupling them was a real failure: an orchestrator
+# that passed `--model opus` got no session lookup, so the parser fell back to
+# "whichever login is active" — the idle account — and reported GO at 0% of a
+# 5-hour window while the account this session actually runs on sat at 65% with
+# five sessions drawing on it. Work was dispatched on that reading.
+#
+# Which account you are is not a function of which model you run. The lookup is
+# one local request and it settles the account; the model half of its answer is
+# only used when `--model auto` asked for it.
+if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = all ]; then
+  resolve_session || true
+fi
+
 if [ "$MODEL" = auto ]; then
-  if resolve_session && [ -n "$SESSION_MODEL" ]; then
+  if [ -n "$SESSION_MODEL" ]; then
     MODEL="$SESSION_MODEL"
     AUTO_NOTE="model $MODEL (detected)"
   else

@@ -482,6 +482,65 @@ struct PaceScriptTests {
         #expect(result.out.contains("GO"))
     }
 
+    /// Which account you are is not a function of which model you run.
+    ///
+    /// These were one step, and the coupling shipped a dangerous reading: an
+    /// orchestrator passing `--model opus` got no session lookup, so the
+    /// parser fell back to whichever login was *active* — the idle one — and
+    /// reported GO at 0% of a 5-hour window while the account the session
+    /// actually ran on sat at 65% with five sessions on it. Work was
+    /// dispatched on that.
+    @Test func theSessionsAccountIsResolvedEvenWithAnExplicitModel() throws {
+        // Two accounts. `pacer_account_info` says org-work is the active
+        // login, but this session belongs to org-home — the shape a switcher
+        // produces, and the one that made the fallback wrong.
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.0
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.65
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 4800
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        pacer_account_info{account="org-home",name="h",active="false"} 1
+        """)
+        let server = try StubServer(status: 200, body: """
+        {
+          "accountId" : "org-home",
+          "model" : "claude-opus-5",
+          "sessionId" : "abc-123"
+        }
+        """)
+        defer { server.stop() }
+
+        let result = try run(box, ["report", "--model", "opus"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 0)
+        #expect(result.out.contains("65% used"))
+        // Not the idle login's empty window.
+        #expect(!result.out.contains("0% used"))
+    }
+
+    /// When several accounts are signed in and the session cannot be
+    /// identified, a percentage without an owner is the thing that misleads.
+    @Test func anUnidentifiedSessionSaysWhoseNumbersTheseAre() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let result = try run(box, ["gate", "--cap", "99"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 0)
+        #expect(result.out.contains("could not be identified"))
+        #expect(result.out.contains("may not be the ones billing you"))
+    }
+
+    /// One account, nothing to get wrong, no caveat to add.
+    @Test func aSingleAccountNeedsNoCaveat() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="solo",window="five_hour"} 0.20
+        pacer_rate_limit_reset_seconds{account="solo",window="five_hour"} 3600
+        """)
+        let result = try run(box, ["gate", "--cap", "85"])
+        #expect(result.status == 0)
+        #expect(!result.out.contains("could not be identified"))
+    }
+
     /// A session Pacer has not parsed a turn from yet answers 404, and the
     /// safe reading of "cannot tell" is that every window binds.
     @Test func anUnresolvableSessionFallsBackToEveryWindowBinding() throws {
