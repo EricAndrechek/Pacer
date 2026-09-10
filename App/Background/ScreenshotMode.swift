@@ -242,8 +242,18 @@ enum ScreenshotMode {
     private static func captureShareCard(container: ModelContainer) {
         let ctx = ModelContext(container)
         let duration: TimeInterval = 7 * 86_400
+        // Scoped to one account, which it was not.
+        //
+        // The live share action builds its payload from the pace card's
+        // already-scoped per-account series, so it was never affected. This
+        // standalone fetch was not scoped, and the moment the fixture gained a
+        // second account it returned both — sorted by time, so the series
+        // alternated between one account's 62% and the other's 20% on every
+        // step. The card rendered as a red-and-green picket fence and the
+        // header quoted whichever account happened to sort last.
+        let account = fixtureActiveAccountId
         let descriptor = FetchDescriptor<RateLimitSample>(
-            predicate: #Predicate { $0.window == "seven_day" },
+            predicate: #Predicate { $0.window == "seven_day" && $0.accountId == account },
             sortBy: [SortDescriptor(\.sampledAt)]
         )
         guard let samples = try? ctx.fetch(descriptor),
@@ -1954,7 +1964,12 @@ private struct ScopedFirstClassWidgetGallery: View {
                 PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
                                     forcedFamily: .systemLarge)
             }
-            tile(w: 340, h: 384) {
+            // Shorter, because with one row of rings it has no use for the
+            // pace tile's height and a card two-thirds empty reads as one that
+            // failed to load. The widget itself is unchanged — a real
+            // `systemLarge` is whatever size the OS gives it; this is the
+            // mockup showing the card at the size its content wants.
+            tile(w: 340, h: 250) {
                 PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
                                      forcedFamily: .systemLarge)
             }
