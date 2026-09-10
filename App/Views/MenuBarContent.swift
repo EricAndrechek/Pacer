@@ -148,13 +148,15 @@ struct MenuBarLabel: View {
     var reloadKey: String {
         let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
         let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(a)):\(Int(b)):\(UsageScope.storedLimitAccountId ?? "all")"
+        return "\(Int(a)):\(Int(b)):"
+            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
     @MainActor
     func reloadWindows() {
         let loaded = MenuBarWindowSource.load(
-            menuModelContext, account: UsageScope.storedLimitAccountId)
+            menuModelContext,
+            account: UsageScope.limitAccountId(in: menuModelContext))
         rateSamples = loaded.fixed
         scopedSamples = loaded.scoped
     }
@@ -581,13 +583,15 @@ struct MenuStatusContent: View {
     var reloadKey: String {
         let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
         let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(a)):\(Int(b)):\(UsageScope.storedLimitAccountId ?? "all")"
+        return "\(Int(a)):\(Int(b)):"
+            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
     @MainActor
     func reloadWindows() {
         let loaded = MenuBarWindowSource.load(
-            menuModelContext, account: UsageScope.storedLimitAccountId)
+            menuModelContext,
+            account: UsageScope.limitAccountId(in: menuModelContext))
         rateLimits = loaded.fixed
         scopedSamples = loaded.scoped
     }
@@ -669,6 +673,22 @@ struct MenuStatusContent: View {
         MenuBarWindowSource.items(fiveHour: fiveHour, sevenDay: sevenDay, scoped: scopedSamples)
     }
 
+    /// The account whose limits are on screen, named only when more than one
+    /// exists — a single-account user has no question to answer.
+    private var limitAccountLabel: String? {
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        guard all.count > 1 else { return nil }
+        return all.first { $0.id == UsageScope.limitAccountId(in: menuModelContext) }?.shortLabel
+    }
+
+    /// Whether that account is the one Claude Code is actually signed into.
+    private var ownerIsSignedIn: Bool {
+        let all = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        guard let shown = UsageScope.limitAccountId(in: menuModelContext) else { return true }
+        return all.first { $0.isActive }?.id == shown
+    }
+
+
     private var todayCost: Double {
         todayAggregates.reduce(0) { $0 + $1.totalCostUSD }
     }
@@ -705,6 +725,34 @@ struct MenuStatusContent: View {
         // changes (a scoped window appears / disappears), not on every save.
         let windowKey = windows.map(\.key).joined(separator: ",")
         return VStack(alignment: .leading, spacing: 4) {
+            // Whose limits these are, when that is a question at all.
+            //
+            // The menu bar reads the picked account, or the signed-in one when
+            // the scope is "all accounts" — and said so nowhere. That is the
+            // worst surface to leave ambiguous: it is the one you read
+            // *without opening the app*, so there is no scope control on screen
+            // to check against, and a percentage with no owner is a number you
+            // cannot act on. Worse when the app is scoped to the account you
+            // are not signed into: real limits, belonging to a login your
+            // terminal is not billing.
+            if let owner = limitAccountLabel {
+                HStack(spacing: 4) {
+                    Text(owner)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    if !ownerIsSignedIn {
+                        Text("· not signed in")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 2)
+                .help(ownerIsSignedIn
+                      ? "These limits belong to the account Claude Code is using."
+                      : "Pacer is scoped to this account, but Claude Code is signed "
+                        + "into a different one — your next message is billed elsewhere.")
+            }
             // One pace row per window — 5h, 7d, then each scoped per-model
             // window. Fully dynamic: rows appear/vanish with the latest poll.
             ForEach(windows) { window in

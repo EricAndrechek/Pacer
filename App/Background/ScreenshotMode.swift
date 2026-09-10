@@ -2050,7 +2050,7 @@ private struct ScopedFirstClassWidgetGallery: View {
             // failed to load. The widget itself is unchanged — a real
             // `systemLarge` is whatever size the OS gives it; this is the
             // mockup showing the card at the size its content wants.
-            tile(w: 340, h: 250) {
+            tile(w: 340, h: 206) {
                 PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
                                      forcedFamily: .systemLarge)
             }

@@ -299,6 +299,24 @@ public final class UsageScope {
         storedAccountId ?? storedActiveAccountId
     }
 
+    /// The same answer, but never "all accounts" — with the store as the
+    /// fallback when the defaults mirror has nothing.
+    ///
+    /// Limits do not sum: two accounts' 5-hour windows cannot be added into a
+    /// third number, so an unscoped limit read does not mean "everything", it
+    /// means "whichever account happened to write the newest row" — *per
+    /// window*. The menu bar demonstrated it: 5-hour from one account and
+    /// 7-day from the other, in one readout, with nothing to say so.
+    ///
+    /// The mirror is empty more often than it looks — a fresh install before
+    /// the first poll, and any time the poller's idea of the active account
+    /// has not reached defaults yet. Falling back to `Account.isActive` in the
+    /// store closes that window; nil now means genuinely no accounts, which is
+    /// the single-account case where scoping is a no-op anyway.
+    public static func limitAccountId(in context: ModelContext) -> String? {
+        storedLimitAccountId ?? Account.activeId(in: context)
+    }
+
     /// The active login alone, ignoring what the window is showing.
     ///
     /// What a *decision* reads, as opposed to a display: the forecast engine
