@@ -76,10 +76,12 @@ recent  74598a77  core (main)             claude-fable-5-1  /Users/…/chtypes/c
 
 Three things that changes:
 
-- **The plan is the denominator.** A percentage per hour means something
-  different on `max` than on `pro` or `free`. Before there is any burn history
-  to read — right after a reset, or on a first run — the plan is the only prior
-  you have for how much a wave will cost.
+- **The plan is the denominator.** 20% of a Max 20× budget is four times 20% of
+  a Max 5× one, so a percentage per hour means little without it. Before there
+  is any burn history to read — right after a reset, or on a first run — the
+  plan is the only prior you have for what a wave will cost. It reads `Max 20×`
+  when Anthropic reports a tier and falls back to the coarse family (`Max`)
+  when it does not; Pacer never guesses a multiplier.
 - **Concurrency is already in the rate, not additive to it.** Four sessions
   producing 20%/h between them is 20%/h, not 80%. But they are also four claims
   on the same window, so your own headroom is a share of it.

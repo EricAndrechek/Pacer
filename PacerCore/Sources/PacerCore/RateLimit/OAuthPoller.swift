@@ -194,7 +194,11 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// One pollable token + its scheduling state.
     private struct Lane {
-        let credential: OAuthCredential
+        /// `var` because a lane outlives the credential it was built from: the
+        /// token stays the same while the *description* of it gains fields
+        /// across Pacer versions, and a lane that could never take the newer
+        /// copy carried the older one for the life of the token.
+        var credential: OAuthCredential
         let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
@@ -262,7 +266,13 @@ public actor OAuthPoller: TokenPoolTesting {
     /// stores; re-saved when the confirmed token set changes.
     private let poolStore: TokenPoolStoring
     private var seeded = false
+    /// What the pool on disk currently represents — token *and* stored shape,
+    /// so a description refresh is a change worth writing.
     private var lastSavedPoolTokens: Set<String> = []
+
+    private static func poolSignature(_ credentials: [OAuthCredential]) -> Set<String> {
+        Set(credentials.map { "\($0.accessToken)|\($0.storedVersion ?? 0)" })
+    }
 
     /// Persisted lane metadata (account / cooldown / last-poll / org),
     /// loaded once per launch so seeded + rediscovered lanes restore their
@@ -491,7 +501,7 @@ public actor OAuthPoller: TokenPoolTesting {
         // Force-persist the removal (bypass savePool's "don't wipe" guard) so
         // the removed token can't reappear from the pool on the next launch.
         let confirmed = lanes.filter { $0.state.account != .unknown }
-        lastSavedPoolTokens = Set(confirmed.map { $0.credential.accessToken })
+        lastSavedPoolTokens = Self.poolSignature(confirmed.map(\.credential))
         poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
         await saveAllLaneMeta()   // prune the removed lane's metadata
         await publishStatus()
@@ -1022,9 +1032,13 @@ public actor OAuthPoller: TokenPoolTesting {
     private func savePool() {
         let confirmed = lanes.filter { $0.state.account != .unknown }
         guard !confirmed.isEmpty else { return }   // don't wipe the pool pre-confirmation
-        let tokenSet = Set(confirmed.map { $0.credential.accessToken })
-        guard tokenSet != lastSavedPoolTokens else { return }
-        lastSavedPoolTokens = tokenSet
+        // Signature, not token set: refreshing a credential's description
+        // leaves the tokens identical, and comparing only those would keep the
+        // older shape on disk forever — which is how the pool came to be the
+        // thing hiding a field the keychain had all along.
+        let signature = Self.poolSignature(confirmed.map(\.credential))
+        guard signature != lastSavedPoolTokens else { return }
+        lastSavedPoolTokens = signature
         poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
     }
 
@@ -1032,9 +1046,33 @@ public actor OAuthPoller: TokenPoolTesting {
     /// of lanes we already hold (Desktop lanes persist between the gated
     /// keychain re-reads, so we don't lose them when discovery skips a
     /// re-read).
+    ///
+    /// **A known token still gets its description refreshed.** This used to
+    /// skip any candidate whose token it already had, which is right for lane
+    /// *state* and wrong for the credential itself: lanes are seeded from
+    /// Pacer's persisted pool at launch, so a credential serialised by an older
+    /// build stayed in place even as live sources returned a richer copy of the
+    /// same token. `rateLimitTier` was invisible for exactly this reason — the
+    /// keychain had it, `KeychainOAuth` parsed it, and the lane it should have
+    /// reached was already occupied by a pooled credential that predated the
+    /// field.
+    ///
+    /// Only a strictly newer stored shape replaces one, so this converges after
+    /// a single discovery rather than rewriting a lane every cycle, and lane
+    /// state is carried across untouched.
     private func mergeCandidates(_ candidates: [CredentialCandidate]) {
         var known = Set(lanes.map { $0.credential.accessToken })
-        for candidate in candidates where !known.contains(candidate.credential.accessToken) {
+        for candidate in candidates {
+            guard !known.contains(candidate.credential.accessToken) else {
+                guard candidate.credential.isCurrentStoredShape,
+                      let idx = lanes.firstIndex(where: {
+                          $0.credential.accessToken == candidate.credential.accessToken
+                      }),
+                      !lanes[idx].credential.isCurrentStoredShape
+                else { continue }
+                lanes[idx].credential = candidate.credential
+                continue
+            }
             var lane = Lane(
                 credential: candidate.credential,
                 source: candidate.source,

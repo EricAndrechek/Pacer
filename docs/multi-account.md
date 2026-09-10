@@ -325,8 +325,10 @@ Two consequences of that being *everything*:
   projections in it. Rate limited to once a minute per account, and the same
   idle grace reclaims it once the consumer stops polling.
 
-**How many accounts, on what plan, with how many sessions.** `/v1/accounts`
-carries `subscriptionType` and, per account, `activeSessions` / `recentSessions`
+**How many accounts, on what plan, with how many sessions.** The plan is the
+tier (`rateLimitTier`, rendered as `Max 20×`) rather than the family, because
+`subscriptionType` calls both Max tiers `max` and 20% of a 20× budget is four
+times 20% of a 5× one. `/v1/accounts` carries both `subscriptionType` and, per account, `activeSessions` / `recentSessions`
 — because a rate-limit window is account-wide and a burn rate therefore already
 includes every session drawing on it. `/v1/sessions` lists those sessions with
 their project, path, model and git remote. It deliberately does not carry a
