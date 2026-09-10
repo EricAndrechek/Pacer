@@ -609,6 +609,15 @@ struct MenuStatusContent: View {
     @Query private var newestScopedSignal: [UsageLimitSample]
     @Environment(\.modelContext) private var menuModelContext
 
+    /// One account's windows, for the concurrent case. Empty otherwise.
+    struct AccountWindows: Identifiable {
+        let id: String
+        let label: String
+        let isActive: Bool
+        let windows: [MenuBarWindowItem]
+    }
+    @State private var perAccount: [AccountWindows] = []
+
     var reloadKey: String {
         let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
         let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
@@ -623,6 +632,29 @@ struct MenuStatusContent: View {
             account: UsageScope.limitAccountId(in: menuModelContext))
         rateLimits = loaded.fixed
         scopedSamples = loaded.scoped
+
+        // Concurrent accounts get a group each; sequential ones do not.
+        //
+        // When two accounts run at the same time both caps bind at once, and
+        // showing one is showing half. Used one at a time — the ordinary
+        // switcher case — only one binds, and a second group is noise in a menu
+        // that has to stay glanceable. The mode is decided from facts, not a
+        // heuristic: a session-mode config root, or activation spans that
+        // genuinely overlap.
+        guard AccountParallelism.mode(context: menuModelContext) == .concurrent else {
+            perAccount = []
+            return
+        }
+        let accounts = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
+        perAccount = accounts.sorted(by: Account.listOrder).map { account in
+            let its = MenuBarWindowSource.load(menuModelContext, account: account.id)
+            return AccountWindows(
+                id: account.id, label: account.shortLabel, isActive: account.isActive,
+                windows: MenuBarWindowSource.items(
+                    fiveHour: its.fixed.first { $0.window == RateLimitWindowName.fiveHour },
+                    sevenDay: its.fixed.first { $0.window == RateLimitWindowName.sevenDay },
+                    scoped: its.scoped))
+        }
     }
 
     /// Engine answers for the outlook touches: per-window crossing (the
@@ -764,7 +796,7 @@ struct MenuStatusContent: View {
             // cannot act on. Worse when the app is scoped to the account you
             // are not signed into: real limits, belonging to a login your
             // terminal is not billing.
-            if let owner = limitAccountLabel {
+            if perAccount.isEmpty, let owner = limitAccountLabel {
                 HStack(spacing: 4) {
                     Text(owner)
                         .font(.system(size: 10, weight: .semibold))
@@ -782,10 +814,30 @@ struct MenuStatusContent: View {
                       : "Pacer is scoped to this account, but Claude Code is signed "
                         + "into a different one — your next message is billed elsewhere.")
             }
-            // One pace row per window — 5h, 7d, then each scoped per-model
-            // window. Fully dynamic: rows appear/vanish with the latest poll.
-            ForEach(windows) { window in
-                paceRow(window: window, outlook: outlooks[window.key])
+            if perAccount.isEmpty {
+                // One pace row per window — 5h, 7d, then each scoped per-model
+                // window. Fully dynamic: rows appear/vanish with the latest poll.
+                ForEach(windows) { window in
+                    paceRow(window: window, outlook: outlooks[window.key])
+                }
+            } else {
+                ForEach(perAccount) { group in
+                    HStack(spacing: 4) {
+                        Text(group.label)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        if group.isActive {
+                            Text("· signed in")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.green)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.top, group.id == perAccount.first?.id ? 0 : 6)
+                    ForEach(group.windows) { window in
+                        paceRow(window: window, outlook: outlooks[window.key])
+                    }
+                }
             }
             // Native NSMenu items don't have inset separators; ours
             // here is a SwiftUI Divider that runs the content width —

@@ -1044,12 +1044,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // than bouncing the user via Mission Control to wherever
             // the window was last left.
             Self.applyMenuBarAppBehavior(window)
-            // Follow the user to the screen they opened us from (no-op
-            // if it's already there). Done before ordering front so
-            // there's no visible jump across displays.
-            if let target { Self.reposition(window, onto: target) }
+            // Where the user *parked* it wins over where their cursor is.
+            //
+            // Two systems owned this and they fought. `MainWindowPlacement`
+            // exists precisely so a dashboard kept on a second monitor stays
+            // there across relaunches; `reposition(_:onto:)` predates it and
+            // drags the window to whichever screen the menu bar was clicked
+            // on. Opening from the menu bar ran the second, so the window
+            // arrived on the wrong display *and* in the wrong spot — and the
+            // `didBecomeKey` observer then recorded that as the new home, so
+            // it stuck.
+            //
+            // Following the cursor is still right for someone who has never
+            // placed the window, which is exactly when there is no stored
+            // frame. So: stored placement first, cursor only as the fallback.
+            if let stored = MainWindowPlacement.storedFrame,
+               MainWindowPlacement.isUsable(stored) {
+                MainWindowPlacement.apply(to: window)
+            } else if let target {
+                Self.reposition(window, onto: target)
+            }
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
+            // Re-assert after ordering front: AppKit can nudge a window as it
+            // comes forward, and this is the gesture where being a few points
+            // off is most visible.
+            MainWindowPlacement.apply(to: window)
             // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
             Self.releaseMenuBarAppBehavior(window)
             return true

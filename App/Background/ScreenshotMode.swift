@@ -130,6 +130,17 @@ enum ScreenshotMode {
         // dormant one) and the live scoped windows offered in the Add list.
         // Writes only the `menubar-chips-*` shots (run with PACER_SCREENSHOT_DIR
         // → docs/mockups).
+        // Proof run for the multi-account menu bar: the popover grouped by
+        // account (concurrent mode), a status label carrying an account-pinned
+        // chip, and the Menu-bar settings card offering those chips in its Add
+        // list. Needs a fixture that is genuinely concurrent, which the README
+        // seed is not — see `seedConcurrentAccounts`.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_ACCOUNTS_ONLY"] == "1" {
+            await captureAccountMenuBarScenes(container: container)
+            log("account menu-bar screenshots complete")
+            return
+        }
+
         if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_CHIPS_ONLY"] == "1" {
             await captureMenuBarChips(container: container)
             log("menubar-chips screenshots complete")
@@ -231,6 +242,43 @@ enum ScreenshotMode {
         captureShareCard(container: container)
 
         log("screenshots complete")
+    }
+
+    /// The multi-account menu bar, in the mode that actually needs it.
+    ///
+    /// `AccountParallelism` reports `.concurrent` only for a session-mode
+    /// config root or genuinely overlapping activation spans, so this seeds an
+    /// overlap — two logins live at the same instant, which is what a user
+    /// running `cswap run` in two terminals has. Without it the popover
+    /// correctly shows one account and there is nothing to photograph.
+    @MainActor
+    private static func captureAccountMenuBarScenes(container: ModelContainer) async {
+        let ctx = ModelContext(container)
+        let now = Date()
+        // Overlapping spans: work live for two hours, personal starting an hour
+        // in and still open. That is the definition of concurrent.
+        ctx.insert(AccountActivation(
+            accountId: fixtureActiveAccountId, startedAt: now.addingTimeInterval(-7_200),
+            endedAt: nil, rootPath: nil, source: "screenshot"))
+        ctx.insert(AccountActivation(
+            accountId: fixtureOtherAccountId, startedAt: now.addingTimeInterval(-3_600),
+            endedAt: nil, rootPath: nil, source: "screenshot"))
+        try? ctx.save()
+
+        // A chip pinned to the account that is *not* signed in — the case the
+        // feature exists for, and the one a screenshot has to show.
+        let store = PacerPreferences.store
+        let previousChips = store.string(forKey: PacerSettings.Key.menuBarChips)
+        store.set("icon,five_hour_pct,account_pct:\(fixtureOtherAccountId)|five_hour",
+                  forKey: PacerSettings.Key.menuBarChips)
+        defer { store.set(previousChips, forKey: PacerSettings.Key.menuBarChips) }
+
+        await capture("accounts-menubar", width: nil, height: nil, scheme: .light,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("accounts-menubar-dark", width: nil, height: nil, scheme: .dark,
+                      card: false, container: container) { MenuBarExperience() }
+        await capture("accounts-menubar-settings", width: 620, height: nil, scheme: .light,
+                      card: true, container: container) { MenuBarSettingsMock() }
     }
 
     /// Fail the render when the fixture violates something the app relies on.
