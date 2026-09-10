@@ -811,15 +811,14 @@ public actor OAuthPoller: TokenPoolTesting {
                 })
             // No credential here, and therefore no plan: this is a *usage
             // reading* lifted from the switcher's cache, which carries
-            // percentages and nothing about the account behind them. Pacer
-            // reads it precisely so it does not poll another client's token
-            // and rate-limit them both.
+            // percentages and nothing about the account behind them.
             //
-            // So an account Pacer only ever sees through this path keeps
-            // whatever plan it was last polled with, and none at all if it
-            // never was. `recordPoll` never overwrites a known plan with nil,
-            // so the detail arrives — and stays — the first time that account
-            // is the live login.
+            // This is a supplement, not a substitute. Pacer still polls any
+            // account it holds a usable token for — the secondary sweep runs
+            // every `perTokenMinInterval` — so an account being read from the
+            // cache here is not thereby unpolled. `recordPoll` never
+            // overwrites a known plan with nil, so a plan learned from a real
+            // poll survives every cache ingest after it.
             await recordPoll(snapshot, accountKey: key,
                              organizationId: reading.organizationId,
                              subscriptionType: nil,
@@ -1005,6 +1004,17 @@ public actor OAuthPoller: TokenPoolTesting {
         // comes back on restart without touching Claude's stores.
         if !seeded {
             seeded = true
+            // A seeded credential can be older than the code reading it, and
+            // for a token no live source still offers there is nothing to
+            // replace it with: `mergeCandidates` refreshes a lane's credential
+            // only when a *current* copy of the same token turns up.
+            //
+            // That is the state a rotated-away account lands in. Its token
+            // still polls fine — usage keeps flowing — but the description of
+            // it stays whatever the pool holds, so a field added since is
+            // absent until that account is the live login again and the
+            // keychain offers the token afresh. Usage is never affected; only
+            // the metadata is.
             for stored in poolStore.loadAll() {
                 if let exp = stored.credential.expiresAt, exp < now { continue }
                 if lanes.contains(where: { $0.credential.accessToken == stored.credential.accessToken }) { continue }
