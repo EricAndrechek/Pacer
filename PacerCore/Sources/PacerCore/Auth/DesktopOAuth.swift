@@ -185,7 +185,8 @@ public struct DesktopOAuth: Sendable {
                 accessToken: token,
                 expiresAt: expiresAt,
                 refreshToken: entry["refreshToken"] as? String,
-                subscriptionType: entry["subscriptionType"] as? String
+                subscriptionType: entry["subscriptionType"] as? String,
+                rateLimitTier: entry["rateLimitTier"] as? String
             )
             // A missing expiry sorts as "never expires" so it leads.
             rows.append((key, expiresAt ?? .distantFuture, cred))

@@ -311,3 +311,43 @@ struct PacerConfigDirResolutionTests {
         #expect(try PacerAccountsBuilder.resolve(configDir: "", container: container) == nil)
     }
 }
+
+/// Turning Anthropic's tier string into a plan a human — or an agent sizing a
+/// fan-out — can act on.
+@Suite("Plan labels")
+struct PlanLabelTests {
+
+    private func credential(subscription: String?, tier: String?) -> OAuthCredential {
+        OAuthCredential(accessToken: "x", expiresAt: nil,
+                        subscriptionType: subscription, rateLimitTier: tier)
+    }
+
+    /// The reason this exists: `subscriptionType` calls both Max tiers "max",
+    /// and 20% of a Max 20× budget is four times 20% of a Max 5× one.
+    @Test func theTierDistinguishesWhatTheSubscriptionTypeCannot() {
+        #expect(credential(subscription: "max", tier: "default_claude_max_20x").planLabel == "Max 20×")
+        #expect(credential(subscription: "max", tier: "default_claude_max_5x").planLabel == "Max 5×")
+        // Both report the same coarse family.
+        #expect(credential(subscription: "max", tier: nil).planLabel == "Max")
+    }
+
+    @Test func tiersWithoutAMultiplierReadAsTheirFamily() {
+        #expect(credential(subscription: "pro", tier: "default_claude_pro").planLabel == "Pro")
+        #expect(credential(subscription: "free", tier: "default_claude_free").planLabel == "Free")
+    }
+
+    /// Parsed rather than enumerated, so a tier that ships next month renders
+    /// as itself instead of being mapped to something wrong — the same rule
+    /// the rest of Pacer applies to Anthropic's open vocabularies.
+    @Test func anUnfamiliarTierIsReportedRatherThanGuessedAt() {
+        #expect(credential(subscription: "max", tier: "default_claude_ultra_50x").planLabel == "Ultra 50×")
+        #expect(credential(subscription: nil, tier: "something_else_entirely").planLabel
+            == "Something")
+        #expect(credential(subscription: nil, tier: nil).planLabel == nil)
+    }
+
+    @Test func aBlankTierFallsBackToTheSubscription() {
+        #expect(credential(subscription: "max", tier: "   ").planLabel == "Max")
+        #expect(credential(subscription: "pro", tier: "").planLabel == "Pro")
+    }
+}

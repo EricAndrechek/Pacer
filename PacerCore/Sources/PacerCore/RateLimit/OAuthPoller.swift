@@ -423,7 +423,8 @@ public actor OAuthPoller: TokenPoolTesting {
             if isActive {
                 let key = activeAccountKey ?? Account.key(forOrg: org)
                 await recordPoll(snap, accountKey: key, organizationId: org,
-                                 subscriptionType: cred.subscriptionType, isActive: true,
+                                 subscriptionType: cred.subscriptionType,
+                                 rateLimitTier: cred.rateLimitTier, isActive: true,
                                  laneSource: .override)
                 return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
             }
@@ -1175,10 +1176,11 @@ public actor OAuthPoller: TokenPoolTesting {
             lanes[idx].resolvedOrg = org ?? primaryOrg
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
             let sub = lanes[idx].credential.subscriptionType
+            let tier = lanes[idx].credential.rateLimitTier
             if isActive {
                 lanes[idx].state.account = .primary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
-                                 subscriptionType: sub, isActive: true,
+                                 subscriptionType: sub, rateLimitTier: tier, isActive: true,
                                  laneSource: lanes[idx].source)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
@@ -1190,7 +1192,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 // timeline so two accounts never mix.
                 lanes[idx].state.account = .secondary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
-                                 subscriptionType: sub, isActive: false,
+                                 subscriptionType: sub, rateLimitTier: tier, isActive: false,
                                  laneSource: lanes[idx].source)
                 return .secondaryAccount(org: org)
             }
@@ -1508,6 +1510,7 @@ public actor OAuthPoller: TokenPoolTesting {
         accountKey: String,
         organizationId: String?,
         subscriptionType: String?,
+        rateLimitTier: String? = nil,
         isActive: Bool,
         laneSource: CredentialCandidate.Source,
         /// Which mechanism produced this observation. Defaults to a live poll;
@@ -1536,13 +1539,15 @@ public actor OAuthPoller: TokenPoolTesting {
                     isActive: isActive,
                     firstSeenAt: captured.sampledAt,
                     lastSeenAt: captured.sampledAt,
-                    subscriptionType: subscriptionType
+                    subscriptionType: subscriptionType,
+                    rateLimitTier: rateLimitTier
                 )
                 context.insert(account)
             }
             account.lastSeenAt = captured.sampledAt
             if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
             if let subscriptionType { account.subscriptionType = subscriptionType }
+            if let rateLimitTier { account.rateLimitTier = rateLimitTier }
             if isActive { account.isActive = true }
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage

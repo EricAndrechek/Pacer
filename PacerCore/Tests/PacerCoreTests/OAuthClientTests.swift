@@ -441,3 +441,47 @@ final class Box<Value: Sendable>: @unchecked Sendable {
     }
 }
 
+
+/// The cached credential is served without touching Claude's stores, so a
+/// field added to it would decode as nil out of an old blob and stay nil for
+/// the life of the token. `rateLimitTier` was exactly that.
+@Suite("Held credential keeps up with its own shape")
+struct HeldCredentialShapeTests {
+
+    private func credential(token: String, tier: String?, version: Int?,
+                            expiresIn: TimeInterval = 86_400) -> OAuthCredential {
+        OAuthCredential(accessToken: token, expiresAt: Date().addingTimeInterval(expiresIn),
+                        subscriptionType: "max", rateLimitTier: tier, storedVersion: version)
+    }
+
+    @Test func aBlobFromAnOlderShapeIsNotServedFromTheFastPath() {
+        let old = credential(token: "t", tier: nil, version: nil)
+        #expect(!old.isCurrentStoredShape)
+        // Freshly parsed credentials are current by construction.
+        #expect(credential(token: "t", tier: "default_claude_max_20x",
+                           version: OAuthCredential.currentStoredVersion).isCurrentStoredShape)
+    }
+
+    /// One re-read, not one per poll: the rewrite stamps the current version
+    /// even when the sources had nothing new to add.
+    @Test func stampingMakesTheRefreshHappenExactlyOnce() {
+        let old = credential(token: "t", tier: nil, version: nil)
+        let stamped = old.stampedAsCurrent
+        #expect(stamped.isCurrentStoredShape)
+        #expect(stamped.accessToken == old.accessToken)
+        #expect(stamped.expiresAt == old.expiresAt)
+        #expect(stamped.subscriptionType == old.subscriptionType)
+    }
+
+    /// Decoding an old persisted blob — no `storedVersion`, no
+    /// `rateLimitTier` — must still work, and must read as outdated.
+    @Test func anOldBlobStillDecodesAndReadsAsOutdated() throws {
+        let json = """
+        {"accessToken":"abc","expiresAt":\(Date().addingTimeInterval(86_400).timeIntervalSinceReferenceDate),"subscriptionType":"max"}
+        """
+        let decoded = try JSONDecoder().decode(OAuthCredential.self, from: Data(json.utf8))
+        #expect(decoded.accessToken == "abc")
+        #expect(decoded.rateLimitTier == nil)
+        #expect(!decoded.isCurrentStoredShape)
+    }
+}

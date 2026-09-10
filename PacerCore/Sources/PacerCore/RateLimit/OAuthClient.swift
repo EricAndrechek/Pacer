@@ -416,7 +416,12 @@ public struct OAuthClient: Sendable {
 
         // Fast path: a comfortably-valid held token is served directly,
         // without touching Claude's stores.
-        if let held, !rejected.isRejected(held.accessToken),
+        // `isCurrentStoredShape` is part of the condition, not an
+        // afterthought: a blob written before a field existed serves a valid
+        // token forever and would never learn the field. Failing it drops to
+        // the slow path exactly once, because the rewrite below stamps the
+        // current version whether or not the sources had anything to add.
+        if let held, !rejected.isRejected(held.accessToken), held.isCurrentStoredShape,
            let expiresAt = held.expiresAt,
            expiresAt >= referenceNow.addingTimeInterval(Self.refreshLeadTime) {
             return .success((held, true))
@@ -473,7 +478,12 @@ public struct OAuthClient: Sendable {
         }.first
 
         if let best {
-            if best.accessToken != held?.accessToken { heldStore.save(best) }
+            // Rewrite on a changed token *or* an outdated stored shape — the
+            // second is how a newly-read field actually reaches the cache,
+            // since re-reading the same token would otherwise change nothing.
+            if best.accessToken != held?.accessToken || held?.isCurrentStoredShape != true {
+                heldStore.save(best.stampedAsCurrent)
+            }
             return .success((best, best.accessToken == held?.accessToken))
         }
         if let newestExpiry = candidates.compactMap({ $0.expiresAt }).max() {

@@ -490,6 +490,7 @@ cmd_accounts() {
       a = tagval($0, "account")
       if (!(a in seen)) { seen[a] = 1; order[++n] = a }
       name[a] = tagval($0, "name"); plan[a] = tagval($0, "plan")
+      tier[a] = tagval($0, "tier")
       act[a] = tagval($0, "active"); next
     }
     /^pacer_account_active_sessions\{/ { live[tagval($0, "account")] = $NF; next }

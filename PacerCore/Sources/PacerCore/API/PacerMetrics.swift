@@ -228,7 +228,8 @@ public struct PacerMetrics: Sendable {
                                      help: "Account identity; value is always 1. `active` marks the login whose rate limits pacer_rate_limit_* describe; `plan` is the subscription Anthropic reports for it.",
                                      labels: [("account", entry.account.id),
                                               ("name", entry.account.metricsName),
-                                              ("plan", entry.account.subscriptionType ?? "unknown"),
+                                              ("plan", entry.account.plan ?? entry.account.subscriptionType ?? "unknown"),
+                                              ("tier", entry.account.rateLimitTier ?? "unknown"),
                                               ("active", entry.account.isActive ? "true" : "false")]))
             }
             // How many ways each account's window is being split. The rate

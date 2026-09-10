@@ -16,20 +16,86 @@ public struct OAuthCredential: Sendable, Equatable, Codable {
     /// token. Optional because some legacy blob shapes omitted it; if
     /// it's nil, refresh isn't possible and the user has to re-login.
     public let refreshToken: String?
-    /// Surfaced for diagnostics (`pro`, `max5x`, `max20x`, etc.). No
-    /// behavior keys off it.
+    /// The plan family (`free`, `pro`, `max`, …). Coarse: Claude Code reports
+    /// `max` for both Max tiers, so this does not say how big the budget is.
     public let subscriptionType: String?
+    /// The rate-limit tier, which *does* — `default_claude_max_20x` and the
+    /// like. Raw, and an OPEN set: it is Anthropic's vocabulary, so a value
+    /// Pacer has never seen is stored verbatim and rendered as itself rather
+    /// than being mapped to something wrong.
+    ///
+    /// It matters because a percentage per hour means nothing without the size
+    /// of the window behind it: 20% of a Max 20× budget is four times 20% of a
+    /// Max 5× one, and `subscriptionType` calls both "max".
+    public let rateLimitTier: String?
+
+    /// Version of the *persisted* shape, for the copy Pacer caches in its own
+    /// keychain item.
+    ///
+    /// Load-bearing because of how that cache is served: a comfortably-valid
+    /// held token is returned without touching Claude's stores at all, and the
+    /// cache is only rewritten when the token *string* changes. So a field
+    /// added to this struct would decode as nil out of an old blob and stay
+    /// nil for the life of the token — months — with nothing to notice.
+    /// `rateLimitTier` was exactly that: present in Claude's credentials,
+    /// invisible to Pacer.
+    ///
+    /// A blob written before this existed decodes as nil, which forces one
+    /// re-read and one rewrite. Freshly parsed credentials carry the current
+    /// version, so it is one extra read per install, not per poll.
+    public static let currentStoredVersion = 2
+    public let storedVersion: Int?
 
     public init(
         accessToken: String,
         expiresAt: Date?,
         refreshToken: String? = nil,
-        subscriptionType: String?
+        subscriptionType: String?,
+        rateLimitTier: String? = nil,
+        storedVersion: Int? = OAuthCredential.currentStoredVersion
     ) {
         self.accessToken = accessToken
         self.expiresAt = expiresAt
         self.refreshToken = refreshToken
         self.subscriptionType = subscriptionType
+        self.rateLimitTier = rateLimitTier
+        self.storedVersion = storedVersion
+    }
+
+    /// Whether this came out of the cache written by a build that knew about
+    /// every field now read from it.
+    public var isCurrentStoredShape: Bool {
+        storedVersion == OAuthCredential.currentStoredVersion
+    }
+
+    /// The same credential, stamped as current. Written on the way into the
+    /// cache so one re-read is enough even when the sources turn out to have
+    /// nothing new to say.
+    public var stampedAsCurrent: OAuthCredential {
+        OAuthCredential(accessToken: accessToken, expiresAt: expiresAt,
+                        refreshToken: refreshToken, subscriptionType: subscriptionType,
+                        rateLimitTier: rateLimitTier,
+                        storedVersion: OAuthCredential.currentStoredVersion)
+    }
+
+    /// A readable plan name from whichever of the two fields says most.
+    ///
+    /// Parsed, not enumerated: the tier strings observed so far are
+    /// `default_claude_<plan>[_<multiplier>]`, so the multiplier is read off
+    /// the end rather than matched against a list that would go stale the day
+    /// a new tier ships. Anything unparseable falls back to the raw string,
+    /// which is still more informative than dropping it.
+    public var planLabel: String? {
+        guard let tier = rateLimitTier?.trimmingCharacters(in: .whitespaces), !tier.isEmpty else {
+            return subscriptionType?.capitalized
+        }
+        var parts = tier.lowercased().split(separator: "_").map(String.init)
+        if parts.first == "default" { parts.removeFirst() }
+        if parts.first == "claude" { parts.removeFirst() }
+        guard let family = parts.first else { return tier }
+        let multiplier = parts.dropFirst().first { $0.hasSuffix("x") }
+        guard let multiplier else { return family.capitalized }
+        return "\(family.capitalized) \(multiplier.dropLast())×"
     }
 }
 
@@ -334,8 +400,36 @@ public struct KeychainOAuth: Sendable {
         case .failure(let error):
             return .failure(error)
         case .success(let data):
-            return decode(data)
+            return decode(data).map(enrichedWithFileMetadata)
         }
+    }
+
+    /// Fill in metadata the keychain payload omitted from
+    /// `.credentials.json`, when that file describes the *same* token.
+    ///
+    /// The file is otherwise only a fallback for when the keychain cannot be
+    /// read at all — which is right for the token itself, and wrong for the
+    /// descriptive fields, because the two copies do not always carry the same
+    /// keys. `rateLimitTier` is the one that matters: it is the only field
+    /// that distinguishes a Max 5× budget from a Max 20× one, and without it a
+    /// percentage per hour has no denominator.
+    ///
+    /// Guarded on the access token matching, so a stale or second account's
+    /// file can never graft its plan onto this credential, and skipped
+    /// entirely once the keychain has the field — which costs a small file
+    /// read only while it does not.
+    private func enrichedWithFileMetadata(_ credential: OAuthCredential) -> OAuthCredential {
+        guard credential.rateLimitTier == nil,
+              let data = Self.readCredentialsFileData(urls: Self.credentialsFileURLs()),
+              case .success(let fromFile) = decode(data),
+              fromFile.accessToken == credential.accessToken,
+              let tier = fromFile.rateLimitTier
+        else { return credential }
+        return OAuthCredential(
+            accessToken: credential.accessToken, expiresAt: credential.expiresAt,
+            refreshToken: credential.refreshToken,
+            subscriptionType: credential.subscriptionType ?? fromFile.subscriptionType,
+            rateLimitTier: tier)
     }
 
     /// Throwing convenience for callers that prefer `try`. Equivalent
@@ -350,7 +444,8 @@ public struct KeychainOAuth: Sendable {
     //     { "claudeAiOauth": {
     //         "accessToken": "...",
     //         "expiresAt": 1759200000000,        // Unix ms, optional
-    //         "subscriptionType": "max20x",      // optional
+    //         "subscriptionType": "max",         // optional, coarse
+    //         "rateLimitTier": "default_claude_max_20x",  // optional, exact
     //         "refreshToken": "...",             // ignored
     //         "scopes": [...]                    // ignored
     //     } }
@@ -398,12 +493,14 @@ public struct KeychainOAuth: Sendable {
             $0.isEmpty ? nil : $0
         }
         let subscriptionType = oauth["subscriptionType"] as? String
+        let rateLimitTier = oauth["rateLimitTier"] as? String
 
         return .success(OAuthCredential(
             accessToken: accessToken,
             expiresAt: expiresAt,
             refreshToken: refreshToken,
-            subscriptionType: subscriptionType
+            subscriptionType: subscriptionType,
+            rateLimitTier: rateLimitTier
         ))
     }
 }

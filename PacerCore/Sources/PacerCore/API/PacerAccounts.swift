@@ -60,7 +60,16 @@ public struct PacerAccountList: Codable, Sendable {
         /// Prometheus exporter, for one) has something to fall back to.
         public let displayName: String
         public let organizationName: String?
+        /// The plan family Claude Code reports (`pro`, `max`, …). Coarse —
+        /// both Max tiers say `max`.
         public let subscriptionType: String?
+        /// The rate-limit tier (`default_claude_max_20x`, …), raw. This is the
+        /// one that says how big the budget is, which is what makes a
+        /// percentage per hour mean anything.
+        public let rateLimitTier: String?
+        /// Those two rendered readably — "Max 20×" — falling back to whatever
+        /// was reported when the shape is unfamiliar.
+        public let plan: String?
         public let isActive: Bool
         /// True only for the synthetic pre-trail bucket.
         public let unattributed: Bool
@@ -94,6 +103,7 @@ public struct PacerAccountList: Codable, Sendable {
 
         public init(id: String, label: String, displayName: String,
                     organizationName: String?, subscriptionType: String?,
+                    rateLimitTier: String? = nil, plan: String? = nil,
                     isActive: Bool, unattributed: Bool,
                     firstSeenAt: Date?, lastSeenAt: Date?,
                     usage: Usage?, limits: Limits?, configRoots: [String] = [],
@@ -103,6 +113,8 @@ public struct PacerAccountList: Codable, Sendable {
             self.displayName = displayName
             self.organizationName = organizationName
             self.subscriptionType = subscriptionType
+            self.rateLimitTier = rateLimitTier
+            self.plan = plan
             self.isActive = isActive
             self.unattributed = unattributed
             self.firstSeenAt = firstSeenAt
@@ -279,6 +291,10 @@ public enum PacerAccountsBuilder {
                     displayName: account.displayName,
                     organizationName: account.organizationName,
                     subscriptionType: account.subscriptionType,
+                    rateLimitTier: account.rateLimitTier,
+                    plan: OAuthCredential(accessToken: "", expiresAt: nil,
+                                          subscriptionType: account.subscriptionType,
+                                          rateLimitTier: account.rateLimitTier).planLabel,
                     isActive: account.isActive,
                     unattributed: false,
                     firstSeenAt: account.firstSeenAt,
