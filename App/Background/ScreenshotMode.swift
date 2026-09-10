@@ -1251,8 +1251,25 @@ extension ScreenshotMode {
     /// The real store obeys this invariant too; `make verify-data` asserts it
     /// ("every rate-limit row carries an account").
     private static var fixtureLimitAccount: String? {
-        UsageScope.storedLimitAccountId
+        // The fixture's own active account, not whatever the renderer's
+        // defaults happen to hold.
+        //
+        // This used to read `UsageScope.storedLimitAccountId`, which is nil in
+        // the screenshot process — fine while the fixture had no `Account`
+        // rows, because an engine with no active account reads unscoped. The
+        // moment two accounts were seeded it stopped being fine: the engine
+        // scopes to `Account.activeId`, found the Acme row, and matched none
+        // of these nil-attributed samples. Every forecast vanished from the
+        // screenshots — no "≈52% at reset", no "limit in 2 days", no dashed
+        // projection lines — while the raw percentages carried on looking
+        // perfectly correct. Exactly the silent half of scoping the handoff
+        // doc warns about.
+        fixtureActiveAccountId
     }
+
+    /// The account the fixture is signed into. Fictional, and obviously so.
+    static let fixtureActiveAccountId = "acct-acme-0000-0000-000000000001"
+    static let fixtureOtherAccountId = "acct-globex-0000-0000-00000000002"
 
     /// Two accounts, because one is the case where the account UI is invisible.
     ///
@@ -1277,9 +1294,9 @@ extension ScreenshotMode {
 
     private static func seedAccounts(_ ctx: ModelContext, now: Date) {
         let accounts: [(id: String, email: String, org: String, active: Bool, five: Double, seven: Double)] = [
-            ("acct-acme-0000-0000-000000000001", "you@acme.example",
+            (fixtureActiveAccountId, "you@acme.example",
              "Acme's Organization", true, 32, 62),
-            ("acct-globex-0000-0000-00000000002", "you@globex.example",
+            (fixtureOtherAccountId, "you@globex.example",
              "Globex's Organization", false, 47, 30),
         ]
         for a in accounts {
@@ -1326,8 +1343,18 @@ extension ScreenshotMode {
             window: "seven_day",
             resetsAt: now.addingTimeInterval(3 * 86_400),
             duration: 7 * 86_400,
+            // The last few keyframes are deliberately steep. The forecast is
+            // fitted from the recent slope, and this window is the one that
+            // demonstrates the *escalated* caption — "limit in 2 days" with a
+            // red projection crossing 100% — which is the single most useful
+            // thing the pace card says and the reason anyone opens it.
+            //
+            // It used to land there by luck: the projection came out at ~101%
+            // and tipped over, until a re-render put it at 97% and the whole
+            // state quietly disappeared from every screenshot. A demonstration
+            // that depends on rounding is not a demonstration.
             keyframes: [(0, 0), (0.08, 14), (0.18, 29), (0.26, 34),
-                        (0.36, 36), (0.46, 39), (0.52, 50), (0.55, 57), (0.57, 62)]
+                        (0.36, 36), (0.46, 39), (0.52, 50), (0.55, 58), (0.57, 65)]
         )
 
         // Walk a single 5-minute grid (the real OAuth poll cadence, which

@@ -212,15 +212,29 @@ struct PaceGaugesWidgetView: View {
     @ViewBuilder
     private var large: some View {
         let cells = largeCells
+        // Anthropic reports a handful of windows, not a dozen: the common
+        // shape is 5h + 7d, sometimes with one per-model cap. At three or
+        // fewer the grid is a single row, and sizing every ring for the
+        // crowded case left that row hugging the top of the widget with two
+        // thirds of it empty — a card that looks like it failed to load.
+        //
+        // So the rings take the room they are given. Same layout, same grid,
+        // one number that follows the window count.
+        // 92 is the largest ring that still lets three sit across a large
+        // widget (3 × 92 + 2 × 12 of spacing clears the content width). Going
+        // bigger reflowed them to 2 + 1 and looked worse than the problem.
+        let singleRow = cells.count <= 3
+        let ring: CGFloat = singleRow ? 92 : 74
         VStack(alignment: .leading, spacing: 10) {
             WidgetTitleBar(title: "RATE LIMITS")
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 92, maximum: .infinity), spacing: 12)],
                 alignment: .leading, spacing: 14
             ) {
-                ForEach(cells) { gaugeCell($0) }
+                ForEach(cells) { gaugeCell($0, ring: ring) }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity,
+                   alignment: singleRow ? .center : .top)
         }
         .padding(WidgetStyle.largePad)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -228,7 +242,7 @@ struct PaceGaugesWidgetView: View {
     }
 
     @ViewBuilder
-    private func gaugeCell(_ cell: GaugeCell) -> some View {
+    private func gaugeCell(_ cell: GaugeCell, ring: CGFloat = 74) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 4) {
                 // Accent dot marks the scoped window currently in effect; fixed
@@ -243,8 +257,8 @@ struct PaceGaugesWidgetView: View {
                     .lineLimit(1)
             }
             ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
-                      lineWidth: 8, labelSize: 20)
-                .frame(width: 74, height: 74)
+                      lineWidth: ring > 80 ? 10 : 8, labelSize: ring > 80 ? 24 : 20)
+                .frame(width: ring, height: ring)
             resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds)
         }
         .frame(maxWidth: .infinity)
