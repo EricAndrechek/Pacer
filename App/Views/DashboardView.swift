@@ -103,6 +103,14 @@ struct RateLimitSourceChip: View {
     /// account's freshness for as long as the view lives. One row is cheap
     /// enough to just re-read on the two events that can change it.
     @State private var latest: Sample?
+    /// Whose reading this is, shown only when there is more than one account.
+    ///
+    /// Without it the chip is ambiguous exactly when it matters: the pace card
+    /// lists two accounts with two different ages — "3 min ago" and "1 min
+    /// ago" — and a bare "via oauth · just now" beside them names neither. The
+    /// reader cannot tell which number the header is describing, or whether it
+    /// is describing a third thing.
+    @State private var owner: String?
     @Environment(\.modelContext) private var modelContext
 
     struct Sample: Equatable {
@@ -132,6 +140,11 @@ struct RateLimitSourceChip: View {
         latest = (try? modelContext.fetch(
             LimitScope.rateLimits(account: limitAccountId, limit: 1)))?
             .first.map { Sample(sampledAt: $0.sampledAt, source: $0.source) }
+
+        let accounts = (try? modelContext.fetch(FetchDescriptor<Account>())) ?? []
+        owner = accounts.count > 1
+            ? accounts.first { $0.id == limitAccountId }?.shortLabel
+            : nil
     }
 
     @ViewBuilder private var content: some View {
@@ -146,7 +159,8 @@ struct RateLimitSourceChip: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                 }
-                Text("via \(latest.source) · \(pacerRelative(latest.sampledAt))")
+                Text(owner.map { "\($0) · via \(latest.source) · \(pacerRelative(latest.sampledAt))" }
+                     ?? "via \(latest.source) · \(pacerRelative(latest.sampledAt))")
                     .font(.system(size: 11))
             }
             .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)

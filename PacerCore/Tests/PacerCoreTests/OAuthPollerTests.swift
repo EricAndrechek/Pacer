@@ -286,6 +286,74 @@ import Testing
         #expect(await poller.snapshot().activeAccountKey == "orgA")
     }
 
+    /// The restart case, which is where this went wrong in the field.
+    ///
+    /// Lane classification is restored from persisted meta, and so is
+    /// `activeAccountKey`. The two can disagree — restart while signed into a
+    /// different account than the one last saved and the signed-in account's
+    /// lane comes back marked `.secondary`. `setActiveAccount` used to return
+    /// early whenever the id already matched, so nothing ever repaired it: the
+    /// account the user was actually on stayed on the slow secondary sweep,
+    /// and only a *change* of account could fix it.
+    ///
+    /// Measured 2026-09-09 before the fix: 18 minutes with no reading at all
+    /// while the signed-in account climbed 82% → 97%, and 19 of the 21 polls
+    /// in that window spent on the account the user was not using.
+    @Test("re-asserting the same active account repairs stale lane classification")
+    func reassertingActiveAccountRepairsLanes() async throws {
+        let container = try Self.makeContainer()
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
+        ))
+        let counter = AtomicCounter()
+        let outcomes: [HTTPOutcome] = [
+            .success(jsonBody: #"{"five_hour":{"utilization":10}}"#,
+                     headers: ["anthropic-organization-id": "orgA"]),
+            .success(jsonBody: #"{"five_hour":{"utilization":99}}"#,
+                     headers: ["anthropic-organization-id": "orgB"]),
+        ]
+        let transport: OAuthClient.Transport = { _ in
+            try outcomes[min(counter.next(), outcomes.count - 1)].materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport,
+                                 desktopEnabled: { false }, heldStore: held)
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+
+        _ = await poller.runOnce()   // orgA becomes active, its lane primary
+        _ = await poller.runOnce()   // orgB polled, classified secondary
+        #expect(await poller.snapshot().activeAccountKey == "orgA")
+
+        // The login moves to orgB while this poller is not the one watching —
+        // exactly what a restart looks like. `Account.isActive` is the store's
+        // record and is what a fresh poller restores `activeAccountKey` from;
+        // `TokenLaneMeta` still says orgA's lane is the primary one.
+        try await MainActor.run {
+            let ctx = ModelContext(container)
+            for account in try ctx.fetch(FetchDescriptor<Account>()) {
+                account.isActive = (account.id == "orgB")
+            }
+            try ctx.save()
+        }
+
+        // A second poller over the same store: active key from `Account`
+        // (orgB), lane classification from `TokenLaneMeta` (orgA primary).
+        // The two disagree, and nothing has changed to make them agree.
+        let restarted = OAuthPoller(client: client, container: container,
+                                    configuration: .init(), clock: TestClock())
+        await restarted.setActiveAccount(id: "orgB")
+
+        let after = await restarted.snapshot()
+        #expect(after.activeAccountKey == "orgB")
+        // orgB is signed in, so orgB's lane must be the primary one. Counting
+        // primaries is not enough — before the fix there was still exactly one,
+        // it was just the wrong lane: `setActiveAccount` returned early on a
+        // matching id, leaving orgA primary and orgB on the slow sweep.
+        #expect(after.misclassifiedLaneCount == 0)
+        #expect(after.primaryLaneCount == 1)
+    }
+
     /// Scoped `limits[]` history is per-account too, and this is the sharpest
     /// version of the mixing hazard: both accounts have a "Fable" weekly with
     /// the *same* identity string. Nothing but `accountId` tells the two rows

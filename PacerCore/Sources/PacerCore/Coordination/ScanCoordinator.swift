@@ -949,10 +949,30 @@ public final class ScanCoordinator {
             // otherwise respect what the user asked to look at.
             //
             // `previous == nil` is the first observation of this process, not
-            // a switch: acting on it would override a deliberate choice made
-            // before the last restart.
-            if previous != nil, let oauthPoller {
+            // a switch. That used to mean "do nothing", to avoid overriding a
+            // deliberate choice made before the last restart — and it left the
+            // poller pointed at whatever account it had persisted, forever.
+            //
+            // Which is a much worse failure. Restart Pacer while signed into a
+            // different account than the one it last saved (any `make install`
+            // does this) and the poller keeps treating the *other* account as
+            // primary: the signed-in account's token drops to the slow
+            // secondary sweep, its readings are recorded as a non-active
+            // account's, and nothing ever corrects it, because a transition
+            // never happens again. Measured on 2026-09-09: the signed-in
+            // account went 18 minutes without a reading while it climbed from
+            // 82% to 97%, and Pacer spent 19 of the 21 polls in that window on
+            // the account the user was not using.
+            //
+            // So reconcile on the first observation too. Claude Code's own
+            // record of who is signed in outranks a pick made before a
+            // restart, and `setActiveAccount` no-ops when it already agrees.
+            if let oauthPoller {
                 Task { await oauthPoller.setActiveAccount(id: observedAccount) }
+                if previous == nil {
+                    Log.write("ScanCoordinator",
+                              "reconciling active account with the observed login")
+                }
             }
         }
 

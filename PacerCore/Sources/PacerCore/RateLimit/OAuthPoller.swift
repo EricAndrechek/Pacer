@@ -178,6 +178,16 @@ public actor OAuthPoller: TokenPoolTesting {
         public let primaryOrg: String?
         /// The active account's id (org key), if one has been established.
         public let activeAccountKey: String?
+        /// Lanes whose `.primary`/`.secondary` classification disagrees with
+        /// whether their token actually belongs to the active account.
+        ///
+        /// Should always be zero. It is not a derived nicety: the two facts are
+        /// persisted separately — `activeAccountKey` from `Account.isActive`,
+        /// the classification from `TokenLaneMeta` — so a restart can restore a
+        /// pair that disagrees, and the symptom is silent (the signed-in
+        /// account's token drops to the slow secondary sweep and its readings
+        /// are filed as some other account's).
+        public let misclassifiedLaneCount: Int
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -358,7 +368,12 @@ public actor OAuthPoller: TokenPoolTesting {
             nextPollAt: nextPollAt,
             lastPollAt: lastPollAt,
             primaryOrg: primaryOrg,
-            activeAccountKey: activeAccountKey
+            activeAccountKey: activeAccountKey,
+            misclassifiedLaneCount: lanes.filter { lane in
+                guard lane.state.account != .unknown, let active = activeAccountKey else { return false }
+                let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
+                return belongs != (lane.state.account == .primary)
+            }.count
         )
     }
 
@@ -487,14 +502,31 @@ public actor OAuthPoller: TokenPoolTesting {
     public func setActiveAccount(id: String) async {
         await loadPersistedMetaIfNeeded()
         ensureLanes()
-        guard id != activeAccountKey else { return }
-        let newOrg = await activateAccount(id)
-        activeAccountKey = id
-        primaryOrg = newOrg
-        // Reclassify every confirmed lane against the new active account.
+
+        // Reclassify even when the id already matches, rather than returning
+        // early. Lane classification is restored from persisted meta and can
+        // disagree with the restored `activeAccountKey` — a lane saved
+        // `.secondary` under a previous active account stays `.secondary`
+        // forever if the only thing that repairs it is a *change* of account.
+        // That is a silent, self-perpetuating wrong answer, and the repair is
+        // three comparisons.
+        let unchanged = (id == activeAccountKey)
+        if !unchanged {
+            let newOrg = await activateAccount(id)
+            activeAccountKey = id
+            primaryOrg = newOrg
+        }
+        var reclassified = 0
         for i in lanes.indices where lanes[i].state.account != .unknown {
             let belongsToActive = (lanes[i].resolvedOrg == nil) || (Account.key(forOrg: lanes[i].resolvedOrg) == id)
-            lanes[i].state.account = belongsToActive ? .primary : .secondary
+            let want: OAuthPollScheduler.AccountStatus = belongsToActive ? .primary : .secondary
+            if lanes[i].state.account != want { reclassified += 1 }
+            lanes[i].state.account = want
+        }
+        if unchanged {
+            guard reclassified > 0 else { return }
+            Log.write("OAuthPoller",
+                      "repaired \(reclassified) lane(s) whose account no longer matched the active one")
         }
         await saveAllLaneMeta()
         await publishStatus()
