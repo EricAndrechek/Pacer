@@ -194,20 +194,21 @@ struct GetFiveHourResetIntent: AppIntent {
 struct GetWillHitLimitIntent: AppIntent {
     static let title: LocalizedStringResource = "Will I Hit My Limit"
     static let description = IntentDescription(
-        "Returns true if Pacer projects you'll reach 100% of either the 5-hour or 7-day limit before it resets."
+        "Returns true if Pacer projects you'll reach 100% of any of your rate-limit windows before it resets."
     )
     static let openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Bool> {
         let limits = try PacerSnapshotBuilder.build().limits
-        // Report the window that crosses soonest, if any.
-        let windows: [(name: String, window: PacerSnapshotPayload.Limits.Window?)] =
-            [("5-hour", limits.fiveHour), ("7-day", limits.sevenDay)]
-        let crossing = windows
-            .compactMap { entry -> (name: String, at: Date)? in
-                guard let w = entry.window, w.willHitLimit, let at = w.limitEtaAt else { return nil }
-                return (entry.name, at)
+        // Every window, named by its own label — the 5-hour and 7-day blocks
+        // and any scoped per-model cap. This asked about exactly two until the
+        // payload could carry the rest, so a Shortcut could answer "no" while a
+        // "Fable · weekly" window was the one about to run out.
+        let crossing = limits.all
+            .compactMap { w -> (name: String, at: Date)? in
+                guard w.willHitLimit, let at = w.limitEtaAt else { return nil }
+                return (w.label, at)
             }
             .min { $0.at < $1.at }
         if let crossing {

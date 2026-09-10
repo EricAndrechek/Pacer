@@ -102,6 +102,7 @@ final class AppBackgroundService {
     /// Observer for `.pacerAPIServerSettingsChanged` — re-applies the server
     /// config when the Settings UI toggles it or edits port/host/token.
     private var apiSettingsObserver: NSObjectProtocol?
+    private var apiScopeObserver: NSObjectProtocol?
 
     /// One engine per scope. `engine` stays as the all-accounts instance for
     /// everything that must not follow the window (alerts, the menu bar's
@@ -172,6 +173,7 @@ final class AppBackgroundService {
         startPricingRefreshTask()
         startHistoryPruneTask()
         installAPISettingsObserver()
+        installAPIScopeObserver()
         applyAPIServerConfig()
     }
 
@@ -207,6 +209,10 @@ final class AppBackgroundService {
             NotificationCenter.default.removeObserver(observer)
             apiSettingsObserver = nil
         }
+        if let observer = apiScopeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            apiScopeObserver = nil
+        }
     }
 
     // MARK: - Local API server
@@ -228,6 +234,28 @@ final class AppBackgroundService {
             forName: .pacerAPIServerSettingsChanged, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.applyAPIServerConfig() }
+        }
+    }
+
+    /// Keep an account's engine scope warm while the API is being asked about
+    /// it, so `/v1/snapshot?account=` carries projections and not just live
+    /// percentages.
+    ///
+    /// `engine(for:)` is the same call the dashboard's scope switcher makes: it
+    /// creates the scope's engine if it is new and stamps it as asked-for, which
+    /// is what puts it back in `EngineHost.live`. The cost is one refit per
+    /// cycle for as long as something keeps asking, and the fifteen-minute idle
+    /// grace reclaims it after the consumer stops — the same bargain a human
+    /// scoping the window makes.
+    private func installAPIScopeObserver() {
+        apiScopeObserver = NotificationCenter.default.addObserver(
+            forName: .pacerAPIDidRequestAccountScope, object: nil, queue: nil
+        ) { [weak self] note in
+            guard let accountId = note.userInfo?["accountId"] as? String else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = self.engines.engine(forAccount: accountId)
+            }
         }
     }
 

@@ -220,7 +220,7 @@ Which account a surface reads depends on what it is for:
 | | resolves to | why |
 |---|---|---|
 | Displays — pace chart, menu bar, widgets, subtitle, freshness | `UsageScope.limitAccountId`: the picked scope, else the active login | "All accounts" is not a number. Two 5-hour windows do not sum into a third, so unscoped falls back to the active login — exactly what every gauge showed before accounts existed. |
-| Decisions — forecast engine, alerts, global-reset detector, `/v1/snapshot` | the active login alone | An alarm a display filter can silence is a footgun, and a scripted consumer must not get different numbers because a human clicked something in an app it cannot see. |
+| Decisions — forecast engine, alerts, global-reset detector, `/v1/snapshot` | the active login alone, unless the caller passes `?account=` | An alarm a display filter can silence is a footgun, and a scripted consumer must not get different numbers because a human clicked something in an app it cannot see. Saying which account you mean is different from inheriting one. |
 
 **The forecast overlay is honest rather than silently wrong.** The engine fits
 one login's history — its parameters, snapshot trail and golden fixtures are
@@ -299,10 +299,31 @@ metrics endpoint.
 
 `GET /v1/accounts` lists what Pacer tracks — id, label, lifetime usage, each
 account's latest window readings, and `activeAccountId` (the login whose limits
-`/v1/snapshot` describes). Those ids are what `/v1/usage/daily` and
-`/v1/usage/models` accept as `?account=`; both default to every account, so an
-existing consumer sees no change. The payloads echo the scope back, so a saved
-response says which question it answered.
+an unscoped `/v1/snapshot` describes). Those ids are what `/v1/usage/daily`,
+`/v1/usage/models` and `/v1/snapshot` accept as `?account=`; all three default
+to unscoped, so an existing consumer sees no change. The payloads echo the
+scope back, so a saved response says which question it answered.
+
+**`/v1/snapshot?account=` scopes the whole payload.** Limits, cost, tokens,
+pace, session and overage all become that account's. Half-scoping it — swapping
+the limits and leaving cost global — was considered and rejected: a response
+where some fields obey the parameter and some do not is one a consumer reads
+wrong once and never notices.
+
+Two consequences of that being *everything*:
+
+- **Forecast fields come from that account's engine scope**, not the global
+  one. The all-accounts engine's *cost* projection blends both logins, so a
+  per-account request must not borrow it; its *rate-limit* half is already the
+  active login's by construction, so a request for the active account does read
+  that. When the scope is cold — nothing has asked for it in fifteen minutes —
+  the projections are absent and `forecastFresh` is false, which beats a number
+  describing someone else's habits.
+- **Asking warms the scope.** Serving `?account=` posts
+  `pacerAPIDidRequestAccountScope`, which asks `EngineHost` for that engine
+  exactly as the dashboard's scope switcher does, so the next request has
+  projections in it. Rate limited to once a minute per account, and the same
+  idle grace reclaims it once the consumer stops polling.
 
 Two details worth knowing:
 
@@ -313,6 +334,15 @@ Two details worth knowing:
   nobody could type it.
 - **An unknown id is a `400` naming the legal values**, not an empty `200` —
   which would be indistinguishable from an account that had a quiet month.
+
+`pacer_rate_limit_*` carries an `account` label, so a scrape can see every
+login's headroom rather than only the active one's. **This changes an existing
+family**: a bare `pacer_rate_limit_used_ratio{window="five_hour"}` still matches
+— label matching is a subset test — but on a multi-account install it returns
+one series per account, so a single-stat panel or an alert rule that assumed a
+scalar needs an `account="…"` matcher or an aggregation. The alternative was a
+parallel `pacer_account_rate_limit_*` family, and two names for one measurement
+is what makes a metrics endpoint hard to learn.
 
 `/metrics` gains `pacer_account_cost_usd` and `pacer_account_tokens`, labelled
 by account **id**, plus a `pacer_account_info` join series. The id rather than

@@ -6,6 +6,18 @@ extension Notification.Name {
     /// Posted by the Settings UI when any API-server preference changes, so
     /// `AppBackgroundService` can re-apply the config (stop/start the listener).
     static let pacerAPIServerSettingsChanged = Notification.Name("PacerAPIServerSettingsChanged")
+
+    /// Posted when a request asks for one account's snapshot, with that
+    /// account's id in `userInfo["accountId"]`.
+    ///
+    /// A per-account payload's forecast fields come from that account's engine
+    /// scope, and a scope nothing has asked for in fifteen minutes stops being
+    /// refitted (`EngineHost.live`) — so without this a scripted consumer would
+    /// get live percentages and permanently empty projections unless a human
+    /// happened to have the dashboard scoped to the same account. Asking is the
+    /// same thing the dashboard's scope switcher does, and the idle grace
+    /// applies identically: stop polling and the scope goes cold on its own.
+    static let pacerAPIDidRequestAccountScope = Notification.Name("PacerAPIDidRequestAccountScope")
 }
 
 /// Observable status for the Settings card. The server calls `set` from its
@@ -36,7 +48,10 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 /// plugin, a Prometheus scraper like Grafana Alloy, a shell `curl`, etc.
 ///
 /// Endpoints (all `GET`):
-/// - `/v1/snapshot` — the full `PacerSnapshotPayload` as JSON.
+/// - `/v1/snapshot` — the full `PacerSnapshotPayload` as JSON. `?account=`
+///                    scopes every number in it to one login; without it,
+///                    cost and tokens cover every account and the limits
+///                    are the active login's.
 /// - `/v1/accounts`  — the accounts Pacer tracks, and the ids `?account=` takes.
 /// - `/metrics`     — Prometheus text exposition (0.0.4).
 /// - `/v1/stream`   — Server-Sent Events; a `snapshot` event on connect and on
@@ -73,10 +88,17 @@ final class PacerHTTPServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.ericandrechek.pacer.http")
     private var listener: NWListener?
     private var sseClients: [ObjectIdentifier: ClientConnection] = [:]
-    private var cached: (payload: PacerSnapshotPayload, at: Date)?
+    /// Request-driven payload cache, keyed by `?account=` (`""` for the
+    /// unscoped one). Bounded by the number of accounts, since every key
+    /// has already been validated against the `Account` table.
+    private var cached: [String: (payload: PacerSnapshotPayload, at: Date)] = [:]
     private var keepalive: DispatchSourceTimer?
     private var recomputeObserver: NSObjectProtocol?
     private var config: Config?
+    /// Last time each account scope was announced, so a tight scrape loop
+    /// posts once a minute rather than once a request. `EngineHost`'s grace
+    /// period is fifteen minutes, so this is far more often than it needs.
+    private var scopeAnnouncedAt: [String: Date] = [:]
 
     private let appVersion: String
     private let appBuild: String
@@ -146,7 +168,8 @@ final class PacerHTTPServer: @unchecked Sendable {
             NotificationCenter.default.removeObserver(obs)
             recomputeObserver = nil
         }
-        cached = nil
+        cached.removeAll()
+        scopeAnnouncedAt.removeAll()
         if let status { publish(status, isError: isError) }
     }
 
@@ -249,7 +272,17 @@ final class PacerHTTPServer: @unchecked Sendable {
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: infoJSON())
         case "/v1/snapshot":
             guard authorized(headers) else { return unauthorized(client) }
-            guard let payload = currentPayload(), let json = try? payload.encodedJSON() else {
+            let snapshotAccount: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: snapshotAccount = nil
+            case .scoped(let key):
+                snapshotAccount = key
+                announceAccountScope(key)
+            }
+            guard let payload = currentPayload(account: snapshotAccount),
+                  let json = try? payload.encodedJSON() else {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
@@ -310,7 +343,21 @@ final class PacerHTTPServer: @unchecked Sendable {
                 else { return nil }
                 return PacerMetrics.AccountToday(account: account, models: rows)
             }
-            let text = PacerMetrics(snapshot: payload, todayModels: todayModels,
+            // Rate limits for every login, not just the active one. The
+            // unattributed bucket is skipped: it is a rollup key for turns that
+            // predate the activation trail, not an account with windows.
+            //
+            // Windows only, deliberately — a full snapshot build per account
+            // would scan the daily rollups again for numbers `todayAccounts`
+            // already has.
+            let accountLimits = accounts.compactMap { account -> PacerMetrics.AccountLimits? in
+                guard !account.unattributed,
+                      let limits = try? PacerSnapshotBuilder.limits(account: account.id)
+                else { return nil }
+                return PacerMetrics.AccountLimits(accountId: account.id, limits: limits)
+            }
+            let text = PacerMetrics(snapshot: payload, limits: accountLimits,
+                                    todayModels: todayModels,
                                     todayAccounts: todayAccounts,
                                     version: appVersion, build: appBuild).prometheusText()
             respond(client, status: 200, contentType: "text/plain; version=0.0.4; charset=utf-8", body: Data(text.utf8))
@@ -324,10 +371,13 @@ final class PacerHTTPServer: @unchecked Sendable {
 
     /// Resolve an optional `?account=` into a rollup key.
     ///
-    /// Absent means every account — the default, because a consumer that did
-    /// not ask to be scoped must not be. An id that does not exist is a 400
-    /// naming the legal values rather than an empty 200, which would look
-    /// exactly like an account that simply had a quiet month.
+    /// Absent means unscoped — the default, because a consumer that did not
+    /// ask to be scoped must not be. For the usage endpoints that is every
+    /// account; for `/v1/snapshot` it is every account's cost and tokens with
+    /// the active login's limits, which is what that payload has always meant.
+    /// An id that does not exist is a 400 naming the legal values rather than
+    /// an empty 200, which would look exactly like an account that simply had
+    /// a quiet month.
     enum AccountQuery {
         case all
         case scoped(String)
@@ -343,6 +393,22 @@ final class PacerHTTPServer: @unchecked Sendable {
         } catch {
             return .rejected("Could not read accounts\n")
         }
+    }
+
+    /// Tell the app an account's numbers are being read, so its engine scope
+    /// keeps getting refitted and the next request has projections in it. Rate
+    /// limited per account; see `pacerAPIDidRequestAccountScope`.
+    private func announceAccountScope(_ accountId: String) {
+        // The unattributed bucket is a rollup key for turns that predate the
+        // activation trail, not a login: it has no windows and no history to
+        // fit, so warming an engine for it would buy a refit per cycle for
+        // nothing.
+        guard accountId != AccountDailyAggregate.unattributedKey else { return }
+        let now = Date()
+        if let last = scopeAnnouncedAt[accountId], now.timeIntervalSince(last) < 60 { return }
+        scopeAnnouncedAt[accountId] = now
+        NotificationCenter.default.post(name: .pacerAPIDidRequestAccountScope, object: nil,
+                                        userInfo: ["accountId": accountId])
     }
 
     /// Parse a URL query string (`a=1&b=2`) into a dict, percent-decoding values.
@@ -385,10 +451,19 @@ final class PacerHTTPServer: @unchecked Sendable {
 
     // MARK: - Payload
 
-    private func currentPayload() -> PacerSnapshotPayload? {
-        if let cached, Date().timeIntervalSince(cached.at) < Self.cacheTTL { return cached.payload }
-        guard let payload = try? PacerSnapshotBuilder.build() else { return cached?.payload }
-        cached = (payload, Date())
+    /// `account` is a resolved rollup key, or nil for the unscoped payload.
+    /// A build failure falls back to the last good payload *for that same
+    /// scope* — never another account's, which is the one substitution that
+    /// would be worse than an error.
+    private func currentPayload(account: String? = nil) -> PacerSnapshotPayload? {
+        let key = account ?? ""
+        if let hit = cached[key], Date().timeIntervalSince(hit.at) < Self.cacheTTL {
+            return hit.payload
+        }
+        guard let payload = try? PacerSnapshotBuilder.build(account: account) else {
+            return cached[key]?.payload
+        }
+        cached[key] = (payload, Date())
         return payload
     }
 
@@ -414,8 +489,8 @@ final class PacerHTTPServer: @unchecked Sendable {
     }
 
     private func broadcast() {
-        guard !sseClients.isEmpty else { cached = nil; return }
-        cached = nil // freshest projection for subscribers
+        guard !sseClients.isEmpty else { cached.removeAll(); return }
+        cached.removeAll() // freshest projection for subscribers
         guard let payload = currentPayload(), let json = try? payload.encodedJSON() else { return }
         for client in sseClients.values { writeEvent(client, event: "snapshot", json: json) }
     }

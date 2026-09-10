@@ -44,6 +44,33 @@ public struct PacerMetric: Sendable, Equatable {
 public struct PacerMetrics: Sendable {
     public let points: [PacerMetric]
 
+    /// One account's rate-limit windows, ready to render as a labelled series.
+    ///
+    /// `/metrics` passes one of these per account, so `pacer_rate_limit_*`
+    /// describes every login rather than only the active one — the gap that
+    /// made a second account's headroom unreadable from a scrape. A nil
+    /// `accountId` renders the family with no `account` label at all, which is
+    /// what an install with no account rows yet (a fresh one, before the first
+    /// poll) falls back to.
+    ///
+    /// **This adds a label to an existing family.** A bare
+    /// `pacer_rate_limit_used_ratio{window="five_hour"}` still matches — label
+    /// matching is a subset test — but on a multi-account install it now
+    /// returns one series per account, so a single-stat panel or an alert rule
+    /// that assumed a scalar needs an `account="..."` matcher or an
+    /// aggregation. Deliberate: the alternative was a parallel
+    /// `pacer_account_rate_limit_*` family, and two names for one measurement
+    /// is the thing that makes a metrics endpoint hard to learn.
+    public struct AccountLimits: Sendable {
+        public let accountId: String?
+        public let limits: PacerSnapshotPayload.Limits
+
+        public init(accountId: String?, limits: PacerSnapshotPayload.Limits) {
+            self.accountId = accountId
+            self.limits = limits
+        }
+    }
+
     /// One account's slice of today, ready to render as a series.
     ///
     /// Carries the API row rather than an `Account` so `PacerCore`'s metric
@@ -65,37 +92,55 @@ public struct PacerMetrics: Sendable {
     }
 
     public init(snapshot s: PacerSnapshotPayload,
+                limits accountLimits: [AccountLimits] = [],
                 todayModels: [PacerDailyUsage.Row] = [],
                 todayAccounts: [AccountToday] = [],
                 version: String, build: String) {
         var m: [PacerMetric] = []
 
-        func windowMetrics(_ key: String, _ w: PacerSnapshotPayload.Limits.Window?) {
-            guard let w else { return }
+        func windowMetrics(_ w: PacerSnapshotPayload.Limits.Window, account: String?) {
+            // `account` first, then `window` — the order a series reads in when
+            // it is grouped by login. Prometheus itself is order-agnostic.
+            var labels: [(String, String)] = []
+            if let account { labels.append(("account", account)) }
+            labels.append(("window", w.identity))
+
             m.append(PacerMetric("pacer_rate_limit_used_ratio", w.usedPercent / 100,
                                  help: "Current rate-limit utilization (0–1).",
-                                 labels: [("window", key)]))
+                                 labels: labels))
             if let s = w.resetsInSeconds {
                 m.append(PacerMetric("pacer_rate_limit_reset_seconds", Double(s),
                                      help: "Seconds until the rate-limit window resets.",
-                                     labels: [("window", key)]))
+                                     labels: labels))
             }
             if let end = w.projectedEndPercent {
                 m.append(PacerMetric("pacer_rate_limit_projected_end_ratio", end / 100,
                                      help: "Projected utilization at window reset (0–1).",
-                                     labels: [("window", key)]))
+                                     labels: labels))
             }
             m.append(PacerMetric("pacer_rate_limit_will_hit", w.willHitLimit ? 1 : 0,
                                  help: "1 if projected to reach 100% before reset, else 0.",
-                                 labels: [("window", key)]))
+                                 labels: labels))
             if let eta = w.limitEtaInSeconds {
                 m.append(PacerMetric("pacer_rate_limit_hit_eta_seconds", Double(eta),
                                      help: "Seconds until the projected 100% crossing.",
-                                     labels: [("window", key)]))
+                                     labels: labels))
             }
         }
-        windowMetrics("five_hour", s.limits.fiveHour)
-        windowMetrics("seven_day", s.limits.sevenDay)
+        // Every window of every account passed in — the fixed 5h/7d blocks and
+        // each scoped per-model cap, keyed by its own identity. `window=` used
+        // to be one of two hard-coded words, so a "Fable · weekly" cap the
+        // dashboard charted was unreadable from a scrape.
+        //
+        // With nothing passed, the snapshot's own limits render unlabelled,
+        // which keeps a caller that knows nothing about accounts on the exact
+        // series it had.
+        let windowSets = accountLimits.isEmpty
+            ? [AccountLimits(accountId: nil, limits: s.limits)]
+            : accountLimits
+        for set in windowSets {
+            for window in set.limits.all { windowMetrics(window, account: set.accountId) }
+        }
 
         let costHelp = "Claude Code spend in USD by period."
         m.append(PacerMetric("pacer_cost_usd", s.cost.todayUSD, help: costHelp, labels: [("period", "today")]))

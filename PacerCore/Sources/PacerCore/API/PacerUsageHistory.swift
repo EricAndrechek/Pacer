@@ -120,8 +120,12 @@ public enum PacerUsageBuilder {
     /// reads the global table rather than summing the per-account one, so the
     /// unscoped answer stays byte-identical to what it was before accounts
     /// existed.
-    private nonisolated static func dailyRows(_ context: ModelContext,
-                                              account: String?) -> [DailyRow] {
+    /// Internal rather than private: `PacerSnapshotBuilder` needs the exact
+    /// same "one account's rows or the global table" decision for its cost and
+    /// token totals, and a second copy of it would be a second place for the
+    /// unscoped answer to stop being byte-identical.
+    nonisolated static func dailyRows(_ context: ModelContext,
+                                      account: String?) -> [DailyRow] {
         guard let account else {
             return ((try? context.fetch(FetchDescriptor<DailyAggregate>())) ?? []).map(\.dailyRow)
         }
@@ -132,7 +136,7 @@ public enum PacerUsageBuilder {
 
     /// The rollup key as a caller would have typed it — the U+0000 sentinel
     /// echoed back verbatim would be unreadable and un-resendable.
-    private nonisolated static func publicKey(_ key: String) -> String {
+    nonisolated static func publicKey(_ key: String) -> String {
         key == AccountDailyAggregate.unattributedKey
             ? PacerAccountsBuilder.unattributedAlias : key
     }
