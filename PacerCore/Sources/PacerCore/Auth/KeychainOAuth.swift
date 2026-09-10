@@ -78,24 +78,10 @@ public struct OAuthCredential: Sendable, Equatable, Codable {
                         storedVersion: OAuthCredential.currentStoredVersion)
     }
 
-    /// A readable plan name from whichever of the two fields says most.
-    ///
-    /// Parsed, not enumerated: the tier strings observed so far are
-    /// `default_claude_<plan>[_<multiplier>]`, so the multiplier is read off
-    /// the end rather than matched against a list that would go stale the day
-    /// a new tier ships. Anything unparseable falls back to the raw string,
-    /// which is still more informative than dropping it.
+    /// A readable plan name — see `PlanLabel`, which owns the parsing because
+    /// the API, Settings and the dashboard all need the same answer.
     public var planLabel: String? {
-        guard let tier = rateLimitTier?.trimmingCharacters(in: .whitespaces), !tier.isEmpty else {
-            return subscriptionType?.capitalized
-        }
-        var parts = tier.lowercased().split(separator: "_").map(String.init)
-        if parts.first == "default" { parts.removeFirst() }
-        if parts.first == "claude" { parts.removeFirst() }
-        guard let family = parts.first else { return tier }
-        let multiplier = parts.dropFirst().first { $0.hasSuffix("x") }
-        guard let multiplier else { return family.capitalized }
-        return "\(family.capitalized) \(multiplier.dropLast())×"
+        PlanLabel.describe(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier)
     }
 }
 

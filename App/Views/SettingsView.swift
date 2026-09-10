@@ -2143,7 +2143,7 @@ private struct AccountSwitchRow: View {
     var body: some View {
         PacerAccountRow(model: .init(
             name: account.displayName,
-            plan: account.subscriptionType,
+            plan: account.planLabel,
             subtitle: subtitle,
             fiveHourPercent: account.fiveHourPct,
             sevenDayPercent: account.sevenDayPct,

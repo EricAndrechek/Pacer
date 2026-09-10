@@ -633,6 +633,7 @@ public actor OAuthPoller: TokenPoolTesting {
                         displayName: a.label,
                         isActive: a.isActive || a.id == activeKey,
                         subscriptionType: a.subscriptionType,
+                        rateLimitTier: a.rateLimitTier,
                         fiveHourPct: a.latestFiveHourPct,
                         sevenDayPct: a.latestSevenDayPct,
                         extraUsageCents: a.latestExtraUsageCents,
@@ -808,6 +809,17 @@ public actor OAuthPoller: TokenPoolTesting {
                             surface: nil),
                         isActive: false)
                 })
+            // No credential here, and therefore no plan: this is a *usage
+            // reading* lifted from the switcher's cache, which carries
+            // percentages and nothing about the account behind them. Pacer
+            // reads it precisely so it does not poll another client's token
+            // and rate-limit them both.
+            //
+            // So an account Pacer only ever sees through this path keeps
+            // whatever plan it was last polled with, and none at all if it
+            // never was. `recordPoll` never overwrites a known plan with nil,
+            // so the detail arrives — and stays — the first time that account
+            // is the live login.
             await recordPoll(snapshot, accountKey: key,
                              organizationId: reading.organizationId,
                              subscriptionType: nil,

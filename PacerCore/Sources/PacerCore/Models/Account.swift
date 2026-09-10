@@ -57,6 +57,12 @@ public final class Account {
     /// lightweight migration.
     public var rateLimitTier: String?
 
+    /// The plan as a person reads it — "Max 20×" — from whichever of the two
+    /// reported fields says most. Nil when neither was reported.
+    public var planLabel: String? {
+        PlanLabel.describe(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier)
+    }
+
     // MARK: - Human identity
     //
     // The org id is stable but unreadable, and two accounts on the same plan
