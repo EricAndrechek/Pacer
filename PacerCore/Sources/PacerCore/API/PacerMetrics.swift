@@ -126,6 +126,11 @@ public struct PacerMetrics: Sendable {
                                      help: "Seconds until the projected 100% crossing.",
                                      labels: labels))
             }
+            if let burn = w.burnPercentPerHour {
+                m.append(PacerMetric("pacer_rate_limit_burn_percent_per_hour", burn,
+                                     help: "Recent burn in percentage points of the window per hour.",
+                                     labels: labels))
+            }
         }
         // Every window of every account passed in — the fixed 5h/7d blocks and
         // each scoped per-model cap, keyed by its own identity. `window=` used

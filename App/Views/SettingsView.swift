@@ -2583,7 +2583,8 @@ private struct APIServerCard: View {
                 if enabled {
                     Divider().opacity(0.4)
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(["/v1/snapshot", "/v1/accounts", "/metrics", "/v1/stream"], id: \.self) { path in
+                        ForEach(["/v1/snapshot", "/v1/accounts", "/v1/limits/history",
+                                 "/metrics", "/v1/stream"], id: \.self) { path in
                             Text("http://\(savedHost):\(savedPort)\(path)")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
@@ -2598,6 +2599,7 @@ private struct APIServerCard: View {
                 Text("`GET /v1/snapshot` full JSON · `GET /metrics` Prometheus (point Grafana Alloy here) · `GET /v1/stream` Server-Sent Events · `GET /healthz` liveness")
                     .padding(.top, 2)
                 Text("`GET /v1/accounts` lists accounts. `/v1/usage/daily` and `/v1/usage/models` report every account unless you pass `?account=<id>`; the dashboard's scope switcher does not affect them.")
+                Text("`GET /v1/limits/history?hours=24&bucket=15m` is every window's utilization over time, with a cycle index so a reset is never read as a slope.")
                 Text("curl -s http://127.0.0.1:\(savedPort)/v1/snapshot\(savedToken.isEmpty ? "" : " -H 'Authorization: Bearer \(savedToken)'")")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)

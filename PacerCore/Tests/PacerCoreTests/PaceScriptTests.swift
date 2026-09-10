@@ -30,6 +30,9 @@ struct PaceScriptTests {
     pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 300
     # HELP pacer_account_info Account identity; value is always 1.
     # TYPE pacer_account_info gauge
+    pacer_rate_limit_will_hit{account="org-work",window="five_hour"} 1
+    pacer_rate_limit_hit_eta_seconds{account="org-work",window="five_hour"} 2700
+    pacer_rate_limit_burn_percent_per_hour{account="org-work",window="five_hour"} 24
     pacer_account_info{account="org-work",name="Account work",active="true"} 1
     pacer_account_info{account="org-home",name="Account home",active="false"} 1
     pacer_up 1
@@ -295,6 +298,108 @@ struct PaceScriptTests {
         let alpha = try run(box, ["status"], unsetState: true,
                             extra: ["HOME": home.path, "PACE_RUN": "alpha"])
         #expect(alpha.status == 10)
+    }
+
+    // MARK: - Which windows bind whom
+
+    /// The point of per-model caps: a Fable window at 95% is not an Opus
+    /// agent's problem, and stopping it for one is a pause nobody needed.
+    @Test func aPerModelCapDoesNotGateAnotherModelsWork() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+
+        // Unqualified, everything binds — the safe reading of "did not say".
+        #expect(try run(box, ["gate", "--cap", "85"]).status == 10)
+
+        let opus = try run(box, ["gate", "--cap", "85", "--model", "opus"])
+        #expect(opus.status == 0)
+        #expect(opus.out.contains("GO"))
+
+        let fable = try run(box, ["gate", "--cap", "85", "--model", "fable"])
+        #expect(fable.status == 10)
+        #expect(fable.out.contains("Fable"))
+    }
+
+    /// Account-wide windows constrain every model, so naming one can never
+    /// make the 5h or 7d block stop counting.
+    @Test func accountWideWindowsBindEveryModel() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.91
+        pacer_rate_limit_used_ratio{account="org-work",window="weekly_scoped|Fable|"} 0.10
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 600
+        """)
+        let result = try run(box, ["gate", "--cap", "85", "--model", "opus"])
+        #expect(result.status == 10)
+        #expect(result.out.contains("5h"))
+    }
+
+    /// Loose matching, because the same window is called "Fable" by the server
+    /// and `claude-fable-5-1` by a caller reading its own model id.
+    @Test func modelNamesMatchLoosely() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        for name in ["Fable", "fable", "claude-fable-5-1", "Fable 5.1"] {
+            #expect(try run(box, ["gate", "--cap", "85", "--model", name]).status == 10,
+                    "\(name) should bind the Fable cap")
+        }
+        for name in ["opus", "claude-opus-5", "Sonnet"] {
+            #expect(try run(box, ["gate", "--cap", "85", "--model", name]).status == 0,
+                    "\(name) should not bind the Fable cap")
+        }
+    }
+
+    /// The state file is all a subagent reads, so a verdict gated for one model
+    /// must not silently answer for another.
+    @Test func aVerdictGatedForAnotherModelIsRefused() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        _ = try run(box, ["gate", "--cap", "85", "--model", "opus"])
+        #expect(try run(box, ["status", "--model", "opus"]).status == 0)
+
+        let mismatched = try run(box, ["status", "--model", "fable"])
+        #expect(mismatched.status == 3)
+        #expect(mismatched.out.contains("re-gate"))
+    }
+
+    // MARK: - Gating on the forecast
+
+    /// 40% is nowhere near any cap, but it is climbing fast enough to run out
+    /// inside the hour the wave will take.
+    @Test func etaGatingTripsBeforeTheCapDoes() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        #expect(try run(box, ["gate", "--cap", "85", "--model", "opus"]).status == 0)
+
+        let horizon = try run(box, ["gate", "--cap", "85", "--model", "opus", "--eta", "90m"])
+        #expect(horizon.status == 10)
+        #expect(horizon.out.contains("projected to fill"))
+
+        // A horizon shorter than the crossing is headroom again.
+        #expect(try run(box, ["gate", "--cap", "85", "--model", "opus", "--eta", "10m"]).status == 0)
+    }
+
+    @Test func anUnreadableDurationIsAnErrorNotAZero() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let result = try run(box, ["gate", "--eta", "soon"])
+        #expect(result.status == 1)
+        #expect(result.out.contains("cannot read duration"))
+    }
+
+    /// Regression: the row format used tabs, and bash collapses runs of IFS
+    /// *whitespace* — so every account-wide window (empty model column) shifted
+    /// each later field left by one and 5h reported its reset time as its
+    /// percentage: "3501% used".
+    @Test func anEmptyColumnDoesNotShiftEveryLaterField() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.35
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 3501
+        """)
+        let result = try run(box, ["report"])
+        #expect(result.out.contains("35% used"))
+        #expect(!result.out.contains("3501%"))
+    }
+
+    @Test func reportShowsTheBurnRateAndProjectedFill() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let result = try run(box, ["report"])
+        #expect(result.out.contains("+24%/h"))
+        #expect(result.out.contains("full in 45m"))
     }
 
     /// A single-account install emits no `pacer_account_info`, so the script

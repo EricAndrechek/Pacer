@@ -50,13 +50,46 @@ INTERVAL=300
 WINDOW=all
 MAXWAIT=21600
 MAXAGE=900
+MODEL="${PACE_MODEL:-}"
+ETA=0
 # How many times to re-ask before believing "nothing is listening". Pacer
 # restarts itself for updates, so one refused connection is not an answer.
 RETRIES="${PACE_RETRIES:-3}"
 AUTH=()
 [ -n "${PACE_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer ${PACE_TOKEN}")
 
+# Which login to ask about, resolved by Pacer rather than here.
+#
+# A session running beside another account has its own `CLAUDE_CONFIG_DIR` and
+# knows nothing else about it; Pacer knows which login is signed into that
+# directory, because it recorded the activation. Handing the path over is what
+# stops a pinned session pacing against the *default* login's windows — a
+# different account's entirely. `--data-urlencode` so a path with spaces in it
+# survives the trip.
+SCOPE=()
+
+# Field separator for the internal row format. **Not a tab**: bash treats
+# runs of IFS *whitespace* as one delimiter, so a row whose model column is
+# empty — every account-wide window — collapsed and shifted every later field
+# left by one. A window's reset time was read as its percentage, and 5h
+# reported "3501% used". \037 is the ASCII unit separator: not whitespace, so
+# an empty field stays an empty field.
+SEP=$'\037'
+
 die() { echo "pace: $*" >&2; exit 1; }
+
+# "90m" / "2h" / "5400" -> seconds. Anything unparseable is a typo worth
+# stopping for, not a zero to silently ignore.
+duration() {
+  case "$1" in
+    ''|0) echo 0;;
+    *[0-9]s) echo "${1%s}";;
+    *[0-9]m) echo $(( ${1%m} * 60 ));;
+    *[0-9]h) echo $(( ${1%h} * 3600 ));;
+    *[0-9]) echo "$1";;
+    *) die "cannot read duration '$1' (try 90m, 2h, or plain seconds)";;
+  esac
+}
 command -v curl >/dev/null || die "need curl"
 command -v awk  >/dev/null || die "need awk"
 
@@ -66,6 +99,8 @@ while [ $# -gt 0 ]; do
     --cap)      CAP="$2"; shift 2;;
     --interval) INTERVAL="$2"; shift 2;;
     --window)   WINDOW="$2"; shift 2;;
+    --model)    MODEL="$2"; shift 2;;
+    --eta)      ETA="$2"; shift 2;;
     --account)  ACCOUNT="$2"; shift 2;;
     --max-wait) MAXWAIT="$2"; shift 2;;
     --max-age)  MAXAGE="$2"; shift 2;;
@@ -76,6 +111,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$INTERVAL" -lt 300 ] 2>/dev/null && INTERVAL=300   # Pacer only updates every ~5 min
+ETA=$(duration "$ETA") || exit 1   # `die` inside $() exits the subshell, not us
+
+if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
+  SCOPE=(--data-urlencode "account=$ACCOUNT")
+elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
+fi
 
 # --- reading Pacer ---------------------------------------------------------
 
@@ -100,32 +142,36 @@ function tagval(line, key,   s, p, q) {
   if (q == 0) return ""
   return substr(s, 1, q - 1)
 }
-function labelfor(id,   n, parts) {
+function modelfor(id,   n, parts) {
+  if (id == "five_hour" || id == "seven_day") return ""
+  n = split(id, parts, "|")
+  return (n >= 2 ? parts[2] : "")
+}
+function labelfor(id,   n, parts, m) {
   if (id == "five_hour") return "5h"
   if (id == "seven_day") return "7d"
+  m = modelfor(id)
+  if (m != "") return m
   n = split(id, parts, "|")
-  if (n >= 2 && parts[2] != "") return parts[2]     # model
   if (n >= 3 && parts[3] != "") return parts[3]     # surface
   return parts[1]                                   # kind
 }
+function slot(line,   a, w, key) {
+  a = tagval(line, "account"); w = tagval(line, "window")
+  key = a SUBSEP w
+  if (!(key in seen)) { seen[key] = 1; order[++n] = key; acct[key] = a; win[key] = w }
+  accounts[a] = 1
+  return key
+}
 /^pacer_account_info\{/ {
   if (tagval($0, "active") == "true") active = tagval($0, "account")
-}
-/^pacer_rate_limit_used_ratio\{/ {
-  a = tagval($0, "account"); w = tagval($0, "window")
-  key = a SUBSEP w
-  if (!(key in seen)) { seen[key] = 1; order[++n] = key; acct[key] = a; win[key] = w }
-  pct[key] = $NF * 100
-  accounts[a] = 1
   next
 }
-/^pacer_rate_limit_reset_seconds\{/ {
-  a = tagval($0, "account"); w = tagval($0, "window")
-  key = a SUBSEP w
-  if (!(key in seen)) { seen[key] = 1; order[++n] = key; acct[key] = a; win[key] = w }
-  secs[key] = $NF
-  next
-}
+/^pacer_rate_limit_used_ratio\{/          { pct[slot($0)]  = $NF * 100; next }
+/^pacer_rate_limit_reset_seconds\{/       { secs[slot($0)] = $NF; next }
+/^pacer_rate_limit_hit_eta_seconds\{/     { eta[slot($0)]  = $NF; next }
+/^pacer_rate_limit_will_hit\{/            { hit[slot($0)]  = $NF; next }
+/^pacer_rate_limit_burn_percent_per_hour\{/ { burn[slot($0)] = $NF; next }
 END {
   count = 0
   for (a in accounts) { count++; only = a }
@@ -135,8 +181,14 @@ END {
   for (i = 1; i <= n; i++) {
     key = order[i]
     if (want != "" && acct[key] != want) continue
-    printf "%s\t%s\t%s\t%s\t%s\n", acct[key], win[key], labelfor(win[key]),
-           (key in pct ? pct[key] : "null"), (key in secs ? secs[key] : "null")
+    if (!(key in pct)) continue                       # a window with no reading
+    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+           acct[key], SEP, win[key], SEP, labelfor(win[key]), SEP, modelfor(win[key]), SEP,
+           pct[key], SEP,
+           (key in secs ? secs[key] : "null"), SEP,
+           (key in eta  ? eta[key]  : "null"), SEP,
+           (key in burn ? burn[key] : "null"), SEP,
+           (key in hit  ? hit[key]  : "0")
   }
 }'
 
@@ -158,7 +210,7 @@ fetch_rows() {
   FETCH_REASON=off
   while [ "$attempt" -le "$RETRIES" ]; do
     # `${AUTH[@]+...}` so an empty array does not trip `set -u` on bash 3.2.
-    if raw=$(curl -s -m 5 -w '\n%{http_code}' ${AUTH[@]+"${AUTH[@]}"} "$API"); then
+    if raw=$(curl -s -m 5 -w '\n%{http_code}' --get ${SCOPE[@]+"${SCOPE[@]}"} ${AUTH[@]+"${AUTH[@]}"} "$API"); then
       code=${raw##*$'\n'}
       body=${raw%$'\n'*}
       case "$code" in
@@ -167,7 +219,7 @@ fetch_rows() {
         *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
       esac
       if [ -n "$body" ]; then
-        ROWS=$(printf '%s\n' "$body" | awk -v WANT="$ACCOUNT" "$PARSE_AWK")
+        ROWS=$(printf '%s\n' "$body" | awk -v WANT="$ACCOUNT" -v SEP="$SEP" "$PARSE_AWK")
         if [ -n "$ROWS" ]; then FETCH_REASON=""; return 0; fi
         FETCH_REASON=empty
         return 1
@@ -183,10 +235,40 @@ fetch_rows() {
 # either the label or the identity, so `5h`, `fable` and `weekly_scoped|Fable|`
 # all select something sensible.
 selected_rows() {
-  printf '%s\n' "$ROWS" | awk -F'\t' -v SEL="$WINDOW" '
+  printf '%s\n' "$ROWS" | awk -F"$SEP" -v SEL="$WINDOW" '
     BEGIN { sel = tolower(SEL) }
     sel == "" || sel == "all" { print; next }
     { if (index(tolower($3), sel) || index(tolower($2), sel)) print }'
+}
+
+# The rows that actually constrain *this* caller.
+#
+# A per-model cap binds only work using that model: a Fable weekly window at
+# 95% has nothing to say to an Opus agent, and stopping it would be a pause
+# nobody needed. Account-wide windows (an empty model component) bind
+# everything, always. With no --model given every window binds, which is the
+# safe reading of "the caller did not say".
+# Whether one window's model constrains `--model`. The shell half of the same
+# rule `binding_rows` applies, so the report's marker can never disagree with
+# what the gate actually did.
+model_binds() {
+  awk -v MODEL="$1" -v WANT="$MODEL" '
+    function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
+    BEGIN {
+      want = norm(WANT); m = norm(MODEL)
+      if (want == "" || want == "all" || m == "") exit 0
+      exit (index(m, want) || index(want, m)) ? 0 : 1
+    }'
+}
+
+binding_rows() {
+  selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
+    function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
+    BEGIN { want = norm(WANT) }
+    want == "" || want == "all" { print; next }
+    $4 == "" { print; next }
+    { m = norm($4)
+      if (index(m, want) || index(want, m)) print }'
 }
 
 # A `--window` that matches nothing is a typo, not "no limits to worry about".
@@ -195,7 +277,7 @@ selected_rows() {
 require_selection() {
   case "$WINDOW" in ''|all) return 0;; esac
   [ -n "$(selected_rows)" ] && return 0
-  echo "pace: --window '$WINDOW' matches no window. Available: $(printf '%s\n' "$ROWS" | awk -F'\t' '{ printf "%s%s", (NR>1 ? ", " : ""), $3 }')" >&2
+  echo "pace: --window '$WINDOW' matches no window. Available: $(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ printf "%s%s", (NR>1 ? ", " : ""), $3 }')" >&2
   exit 1
 }
 
@@ -228,6 +310,7 @@ write_state() {  # status window pct secs note
     printf '{\n'
     printf '  "status": "%s",\n' "$1"
     printf '  "tripWindow": "%s",\n' "$2"
+    printf '  "model": "%s",\n' "$MODEL"
     printf '  "cap": %s,\n' "$CAP"
     printf '  "usedPercent": %s,\n' "${3:-null}"
     printf '  "resetsInSeconds": %s,\n' "${4:-null}"
@@ -255,19 +338,37 @@ state_age_seconds() {
 # resets soonest — the one worth waiting out. Empty TRIP means headroom.
 evaluate() {
   local line
-  line=$(selected_rows | awk -F'\t' -v cap="$CAP" '
-    $4 != "null" && $4 + 0 >= cap + 0 {
-      s = ($5 == "null" ? 9999999 : $5 + 0)
-      if (best == "" || s < bests) { best = $3 "\t" $4 "\t" $5; bests = s }
+  # Two ways to trip, and the second is the one that reads the future: a
+  # window at 40% climbing fast enough to hit the cap inside the horizon is a
+  # worse place to launch a wave from than one sitting still at 80%. Whichever
+  # binding window resets soonest wins, since that is the one worth waiting out.
+  line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" '
+    {
+      pct = $5; secs = $6; eta = $7; hit = $9
+      why = ""
+      if (pct != "null" && pct + 0 >= cap + 0) why = "cap"
+      else if (horizon + 0 > 0 && hit + 0 == 1 && eta != "null" && eta + 0 <= horizon + 0) why = "eta"
+      if (why == "") next
+      s = (secs == "null" ? 9999999 : secs + 0)
+      if (best == "" || s < bests) { best = $3 SEP pct SEP secs SEP why SEP eta; bests = s }
     }
     END { if (best != "") print best }')
-  TRIP=""; TPCT=""; TSECS=""
-  [ -n "$line" ] && IFS=$'\t' read -r TRIP TPCT TSECS <<<"$line"
+  TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""
+  [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA <<<"$line"
+}
+
+# Why the gate tripped, in words.
+trip_reason() {
+  if [ "${TWHY:-cap}" = eta ]; then
+    echo "${TRIP} at $(pct_fmt "$TPCT")% is projected to fill in $(human "$TETA") (horizon $(human "$ETA"))"
+  else
+    echo "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%"
+  fi
 }
 
 # One-line summary of every watched window, for a human note.
 summary() {
-  selected_rows | awk -F'\t' '{ printf "%s%s %s%%", (NR>1 ? ", " : ""), $3, sprintf("%.0f", $4) }'
+  binding_rows | awk -F"$SEP" '{ printf "%s%s %s%%", (NR>1 ? ", " : ""), $3, sprintf("%.0f", $5) }'
 }
 
 # --- subcommands -----------------------------------------------------------
@@ -293,12 +394,20 @@ cmd_report() {
   fetch_rows || { api_off_note; exit "$(off_exit_code)"; }
   require_selection
   local multi
-  multi=$(printf '%s\n' "$ROWS" | awk -F'\t' '{ a[$1] = 1 } END { print length(a) }')
-  selected_rows | while IFS=$'\t' read -r acct id label pct secs; do
-    local prefix=""
+  multi=$(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ a[$1] = 1 } END { print length(a) }')
+  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit; do
+    local prefix="" rate="" full="" mine=""
     [ "$multi" -gt 1 ] && prefix="$(printf '%-8s ' "${acct:0:8}")"
-    printf '%s%-10s %4s%% used · resets in %-7s (%s)\n' \
-      "$prefix" "$label" "$(pct_fmt "$pct")" "$(human "$secs")" "$(clock "$secs")"
+    [ "$burn" != null ] && rate="$(printf ' · %+.0f%%/h' "$burn")"
+    [ "$hit" = 1 ] && [ "$eta" != null ] && full=" · full in $(human "$eta")"
+    # Only worth saying when the caller named a model: otherwise everything
+    # binds and the note is noise on every line.
+    if [ -n "$MODEL" ] && [ "$MODEL" != all ] && [ -n "$model" ] && ! model_binds "$model"; then
+      mine="  — binds $model only"
+    fi
+    printf '%s%-10s %4s%% used%s%s · resets in %-7s (%s)%s\n' \
+      "$prefix" "$label" "$(pct_fmt "$pct")" "$rate" "$full" \
+      "$(human "$secs")" "$(clock "$secs")" "$mine"
   done
 }
 
@@ -309,9 +418,18 @@ cmd_json() {
   }
   require_selection
   printf '{\n  "ok": true,\n  "at": "%s",\n  "windows": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  selected_rows | awk -F'\t' '
-    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s}",
-             (NR > 1 ? ",\n" : ""), $1, $2, $3, $4, $5 }
+  selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
+    function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
+    function binds(model,   m) {
+      if (want == "" || want == "all" || model == "") return 1
+      m = norm(model)
+      return (index(m, want) || index(want, m)) ? 1 : 0
+    }
+    BEGIN { want = norm(WANT) }
+    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"binds\": %s}",
+             (NR > 1 ? ",\n" : ""), $1, $2, $3, $4, $5, $6,
+             ($9 + 0 == 1 ? "true" : "false"), $7, $8,
+             (binds($4) ? "true" : "false") }
     END { if (NR > 0) printf "\n" }'
   printf '  ]\n}\n'
 }
@@ -331,8 +449,8 @@ cmd_gate() {
     exit 0
   fi
   write_state paused "$TRIP" "$TPCT" "$TSECS" \
-    "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%; resets in $(human "$TSECS")"
-  echo "pace: PAUSE — ${TRIP} at $(pct_fmt "$TPCT")% (cap ${CAP}%), resets in $(human "$TSECS") ($(clock "$TSECS"))."
+    "$(trip_reason); resets in $(human "$TSECS")"
+  echo "pace: PAUSE — $(trip_reason), resets in $(human "$TSECS") ($(clock "$TSECS"))."
   exit 10
 }
 
@@ -345,6 +463,15 @@ cmd_status() {
   age=$(state_age_seconds)
   if [ -n "$age" ] && [ "$age" -gt "$MAXAGE" ]; then
     echo "stale: last gated $((age / 60))m ago (max ${MAXAGE}s) — treat as unknown and re-gate."
+    exit 3
+  fi
+  # A verdict is only about the model it was gated for. An Opus wave must not
+  # inherit a pause a Fable cap caused, and the state file is the only thing a
+  # subagent reads — so the mismatch has to be caught here.
+  local gatedModel
+  gatedModel=$(awk -F'"' '/"model"/ { print $4; exit }' "$STATE" 2>/dev/null)
+  if [ -n "$MODEL" ] && [ "$MODEL" != all ] && [ "$gatedModel" != "$MODEL" ]; then
+    echo "unknown: last gate was for '${gatedModel:-every model}', not '$MODEL' — re-gate."
     exit 3
   fi
   st=$(awk -F'"' '/"status"/ { print $4; exit }' "$STATE" 2>/dev/null)
@@ -391,11 +518,11 @@ cmd_wait() {
     if [ "${TSECS:-0}" != null ] && [ "${TSECS:-0}" -gt "$MAXWAIT" ] 2>/dev/null; then
       write_state paused "$TRIP" "$TPCT" "$TSECS" \
         "manual: ${TRIP} resets in $(human "$TSECS") (> max-wait $(human "$MAXWAIT")) — checkpoint & stop"
-      echo "pace: ${TRIP} at $(pct_fmt "$TPCT")% resets in $(human "$TSECS") — beyond max-wait. Checkpoint and stop; resume after $(clock "$TSECS")."
+      echo "pace: $(trip_reason) and resets in $(human "$TSECS") — beyond max-wait. Checkpoint and stop; resume after $(clock "$TSECS")."
       exit 20
     fi
     write_state paused "$TRIP" "$TPCT" "$TSECS" "waiting for ${TRIP} reset (~$(human "$TSECS"))"
-    $waiting || echo "pace: ${TRIP} at $(pct_fmt "$TPCT")% — waiting ~$(human "$TSECS") for reset ($(clock "$TSECS"))…"
+    $waiting || echo "pace: $(trip_reason) — waiting ~$(human "$TSECS") for reset ($(clock "$TSECS"))…"
     waiting=true
     sleep "$INTERVAL"
   done

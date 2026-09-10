@@ -20,18 +20,21 @@ install: this skill ships inside Pacer.app and updates when Pacer does.
 
 ```
 $ ~/.claude/skills/pacer/pace.sh report
-5h           62% used · resets in 1h 43m  (Thu 2:19 PM)
-7d           32% used · resets in 5d 12h  (Wed 12:59 AM)
-Fable        47% used · resets in 5d 12h  (Wed 12:59 AM)
+5h           81% used · +22%/h · resets in 57m     (Thu 2:19 PM)
+7d           36% used · +1%/h · full in 16h 33m · resets in 5d 11h  (Wed 12:59 AM)
+Fable        53% used · +1%/h · resets in 5d 11h  (Wed 12:59 AM)
 ```
 
-One row per window Pacer is tracking for the **active login**. `json` gives the
-machine form. That is the whole reporting story — percent through each window
-and when each resets. **No forecasts.**
+One row per window Pacer tracks for **your** login, with how fast it is
+climbing and — when a window is projected to fill before it resets — when.
+`json` gives the machine form, including each window's full identity.
 
-Two accounts on the machine? `--account all` shows both, prefixed by account
-id; `--account <id>` picks one. Ids come from `pace json` or Pacer's
-`/v1/accounts`.
+**Whose windows?** The account this session is signed into. A session pinned to
+its own profile (`CLAUDE_CONFIG_DIR`, which is how two accounts run at once)
+gets that account's windows: the script hands Pacer the directory and Pacer
+resolves it, because only Pacer knows which login is signed into it. Otherwise
+the active login. `--account all` shows every account, prefixed by id;
+`--account <id>` picks one.
 
 ## 2. The gating model (why it scales to hundreds of agents)
 
@@ -73,14 +76,58 @@ would otherwise report GO forever.
 verdict the other is about to obey. Set `PACE_RUN=<name>` (or `--state`) per
 orchestration.
 
-## 3. Orchestrator protocol
+## 3. Say which model you are
+
+**A per-model cap only gates work that uses that model.** A Fable weekly window
+at 95% has nothing to say to an Opus agent, and pausing one for it is a pause
+nobody needed. So pass the model your work will actually use:
+
+```
+$ pace.sh gate --cap 85                 # every window binds — the safe reading
+pace: PAUSE — Fable at 95% >= cap 85%, resets in 3d 17h.
+
+$ pace.sh gate --cap 85 --model opus    # Fable is not this agent's problem
+pace: GO — 5h 40%, 7d 32% (cap 85%).
+```
+
+Account-wide windows (5h, 7d) bind everything, always — those are never
+skipped. Only per-model caps are filtered, and only when you name a model. With
+no `--model` every window binds, because a caller that did not say is a caller
+that might be using anything.
+
+**A verdict belongs to the model it was gated for.** The state file records it,
+and `status --model opus` refuses a verdict gated for something else (exit 3,
+re-gate) rather than letting an Opus wave inherit a Fable pause. So gate once
+per model your fan-out uses, and give each group its own run name:
+
+```
+PACE_RUN=opus-wave  pace.sh gate --cap 85 --model opus
+PACE_RUN=fable-wave pace.sh gate --cap 85 --model fable
+```
+
+## 4. Gate on the forecast, not just the level
+
+`--cap` asks "am I nearly out". `--eta` asks the better question — **"will this
+wave finish before I run out"**:
+
+```
+$ pace.sh gate --cap 85 --eta 90m
+pace: PAUSE — 5h at 40% is projected to fill in 45m (horizon 1h 30m).
+```
+
+40% is nowhere near any cap, but it is climbing at 24%/h and the wave you are
+about to launch takes an hour. Pacer already forecasts every window with a
+calibrated band; this is the one line that uses it. Set the horizon to roughly
+how long your wave runs.
+
+## 5. Orchestrator protocol
 
 Invoke with a cap (default **85**). For a big fan-out:
 
 1. **Pre-flight:** `pace.sh report` so you and the user see the starting
    headroom.
-2. **Before each wave:** `pace.sh gate --cap 85`.
-   - exit 0 → spawn the wave; give every subagent the clause in §4.
+2. **Before each wave:** `pace.sh gate --cap 85 --model <yours> --eta <wave length>`.
+   - exit 0 → spawn the wave; give every subagent the clause in §6.
    - exit 10 → do **not** spawn; go to step 4.
 3. Keep waves small enough to finish in a few minutes, so a mid-wave trip is
    caught at the next gate.
@@ -88,7 +135,7 @@ Invoke with a cap (default **85**). For a big fan-out:
    - If the work is in worktrees, the default branch stays clean. In each
      active worktree: `git add -A && git commit -m "pace-checkpoint"` (or
      `git stash push -u`).
-   - Write or refresh the **resume manifest** (§5): done / in-flight / pending.
+   - Write or refresh the **resume manifest** (§7): done / in-flight / pending.
    - Tell the user which window tripped, at what %, and its reset time.
 5. **Sleep until reset without burning turns** — launch the waiter in the
    background (`run_in_background: true`):
@@ -105,10 +152,11 @@ Invoke with a cap (default **85**). For a big fan-out:
      (a weekly cap, usually). Do not sleep: leave the manifest, tell the user
      the reset time, and stop. They resume by re-running you after reset.
 
-## 4. The clause to paste into EVERY subagent prompt
+## 6. The clause to paste into EVERY subagent prompt
 
 > **Usage gating:** before you start, and before any expensive step, run
-> `~/.claude/skills/pacer/pace.sh status`. If it prints `paused` (exit 10):
+> `~/.claude/skills/pacer/pace.sh status --model <the model you are running>`
+> (with the same `PACE_RUN` the orchestrator used). If it prints `paused` (exit 10):
 > immediately commit your work-in-progress in this worktree
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
 > `<MANIFEST_PATH>` saying exactly where you stopped and what is left, and
@@ -124,7 +172,7 @@ return the partial results plus the manifest, and **end the workflow cleanly**
 so it can be resumed with `resumeFromRunId` after the reset. Do not hold a
 workflow open for hours.
 
-## 5. Resume manifest
+## 7. Resume manifest
 
 A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 `~/.claude/pace/resume-<run>.json`. Minimum shape:
@@ -146,12 +194,19 @@ A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
 
-## 6. Parameters and policy
+## 8. Parameters and policy
 
 - `--cap N` (default 85): pause when **any** watched window is at or over N%.
+- `--model NAME` (default: every window binds): only gate on windows that
+  constrain this model. Account-wide windows always bind; per-model caps bind
+  only when the name matches theirs, compared loosely so `opus`,
+  `claude-opus-5` and `Opus 5` all mean the same window.
+- `--eta DURATION` (default off): also pause when a binding window is projected
+  to fill within that horizon — `90m`, `2h`, or plain seconds.
 - `--window SEL` (default all): case-insensitive substring of a window's label
   or identity — `5h`, `7d`, `fable`. Use it to ignore a window you do not care
-  about; a selector matching nothing is an error, not a free pass.
+  about; a selector matching nothing is an error, not a free pass. `--window`
+  is about what you *watch*; `--model` is about what *binds you*.
 - `--account ID|all` (default: the active login): whose windows to read.
 - `--interval S` (default 300, floored to 300): poll cadence while waiting.
   Pacer updates about every 5 minutes; polling faster is wasted.
@@ -164,14 +219,25 @@ it and continue. Keep it current as items complete.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer
-  requires a bearer), `PACE_ACCOUNT`, `PACE_RUN` (names a per-run state file),
-  `PACE_STATE` (default `~/.claude/pace/state.json`).
+  requires a bearer), `PACE_MODEL`, `PACE_ACCOUNT`, `PACE_RUN` (names a per-run
+  state file), `PACE_STATE` (default `~/.claude/pace/state.json`).
+  `CLAUDE_CONFIG_DIR` is read if the session has one, to pick the right
+  account.
 
-## 7. External supervisor (no agent involved)
+## 9. External supervisor (no agent involved)
 
 `pace-guard.sh [claude args…]` blocks until there is headroom, then execs
 `claude`. `PACE_THRESHOLD` (default 85) sets the cap. Good for wrapping an
 unattended run from your own terminal.
+
+## 10. The shape of a window over time
+
+`GET /v1/limits/history?hours=24&bucket=15m` gives every window's utilization
+as a series, so a consumer can see whether the last hour was a steady climb or
+one enormous step, and fit its own slope. Each point carries a `cycle` index
+that increments on a rollover — segment on that, never on `resetsAt`, which
+drifts by milliseconds between polls. Fitting a line across a reset produces a
+number that means nothing.
 
 ## Caveats
 

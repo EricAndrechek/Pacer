@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import PacerCore
 
@@ -215,5 +216,90 @@ struct PacerAccountsAPITests {
             dataSource: .init(source: nil, lastSampleAt: nil, ageSeconds: nil, forecastFresh: false))
         return PacerMetrics(snapshot: snapshot, todayAccounts: accounts,
                             version: "1.0", build: "1").prometheusText()
+    }
+}
+
+/// Resolving a session's own config directory to the account signed into it.
+///
+/// The half of the join a client cannot do: a Claude Code session pinned to its
+/// own profile knows the directory it was handed and nothing else, and only
+/// Pacer knows whose login is inside it. Without this a script running in a
+/// pinned session paces against whichever account holds the *default* login —
+/// under concurrent use, a different account's windows entirely.
+@Suite("Config directory resolves to an account")
+struct PacerConfigDirResolutionTests {
+
+    private static func makeContainer() throws -> ModelContainer {
+        try ModelContainer(
+            for: Account.self, AccountActivation.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+
+    @MainActor
+    private static func seed(_ context: ModelContext) {
+        // The default login: no root pinned to it.
+        context.insert(AccountActivation(
+            accountId: "org-work", startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: nil, rootPath: nil, source: AccountActivation.sourceObserved))
+        // A second account running beside it in its own profile.
+        context.insert(AccountActivation(
+            accountId: "org-home", startedAt: Date(timeIntervalSince1970: 2_000),
+            endedAt: nil, rootPath: "/tmp/profiles/2", source: AccountActivation.sourceObserved))
+        // A profile that has since been handed back.
+        context.insert(AccountActivation(
+            accountId: "org-old", startedAt: Date(timeIntervalSince1970: 500),
+            endedAt: Date(timeIntervalSince1970: 900), rootPath: "/tmp/profiles/9",
+            source: AccountActivation.sourceObserved))
+        try? context.save()
+    }
+
+    @MainActor
+    @Test func aPinnedRootResolvesToItsOwnAccount() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/2",
+                                                 container: container) == "org-home")
+    }
+
+    /// `CLAUDE_CONFIG_DIR` is comma-separated; the first root an activation
+    /// claims is the login the session is writing under.
+    @MainActor
+    @Test func aCommaSeparatedListPicksTheClaimedRoot() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(
+            configDir: "/tmp/nowhere,/tmp/profiles/2", container: container) == "org-home")
+    }
+
+    @MainActor
+    @Test func trailingSlashesAndDotsAreTheSameDirectory() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/2/",
+                                                 container: container) == "org-home")
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/./2",
+                                                 container: container) == "org-home")
+    }
+
+    /// A closed activation is not a live login: that profile is not currently
+    /// anyone's, so the caller falls back to the active account rather than
+    /// being told a stale answer.
+    @MainActor
+    @Test func aReleasedProfileResolvesToNothing() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/9",
+                                                 container: container) == nil)
+    }
+
+    /// A brand-new profile Pacer has never seen a login in is a real state, and
+    /// "cannot say" beats inventing an account.
+    @MainActor
+    @Test func anUnknownRootIsNilRatherThanAGuess() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/77",
+                                                 container: container) == nil)
+        #expect(try PacerAccountsBuilder.resolve(configDir: "", container: container) == nil)
     }
 }

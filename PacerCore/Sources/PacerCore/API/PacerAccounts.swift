@@ -24,7 +24,26 @@ public struct PacerAccountList: Codable, Sendable {
     /// preference, so they are always this account's — the API reports the id
     /// so a consumer can say which account `/v1/snapshot`'s limits describe.
     public let activeAccountId: String?
+    /// How this machine actually uses its accounts: `single`, `sequential`
+    /// (a switcher — one login binds at a time), or `concurrent` (two live at
+    /// once, so both sets of limits bind and reporting one is reporting half).
+    ///
+    /// Observed, never configured — a session-mode config root exists, or
+    /// activation spans genuinely overlap. A consumer needs it for the same
+    /// reason the menu bar does: under `concurrent`, "the active login" is not
+    /// the whole answer.
+    public let parallelism: String
     public let accounts: [Row]
+
+    public init(schemaVersion: Int, generatedAt: Date, activeAccountId: String?,
+                parallelism: String = AccountParallelism.Mode.single.rawValue,
+                accounts: [Row]) {
+        self.schemaVersion = schemaVersion
+        self.generatedAt = generatedAt
+        self.activeAccountId = activeAccountId
+        self.parallelism = parallelism
+        self.accounts = accounts
+    }
 
     public struct Row: Codable, Sendable {
         /// The value to pass as `?account=`. A real account's org id, or
@@ -54,6 +73,34 @@ public struct PacerAccountList: Codable, Sendable {
         /// still polled, so this is populated for them too — but it is a
         /// cached *latest* reading, not a history.
         public let limits: Limits?
+        /// Config roots currently pinned to this account — the directories a
+        /// switcher hands a session through `CLAUDE_CONFIG_DIR` so it can run
+        /// beside the default login.
+        ///
+        /// Present so a caller inside such a session can answer "which account
+        /// am I?" It knows its own `CLAUDE_CONFIG_DIR`; only Pacer knows whose
+        /// login is in it. Empty for the default login and for any account not
+        /// currently pinned anywhere.
+        public let configRoots: [String]
+
+        public init(id: String, label: String, displayName: String,
+                    organizationName: String?, subscriptionType: String?,
+                    isActive: Bool, unattributed: Bool,
+                    firstSeenAt: Date?, lastSeenAt: Date?,
+                    usage: Usage?, limits: Limits?, configRoots: [String] = []) {
+            self.id = id
+            self.label = label
+            self.displayName = displayName
+            self.organizationName = organizationName
+            self.subscriptionType = subscriptionType
+            self.isActive = isActive
+            self.unattributed = unattributed
+            self.firstSeenAt = firstSeenAt
+            self.lastSeenAt = lastSeenAt
+            self.usage = usage
+            self.limits = limits
+            self.configRoots = configRoots
+        }
     }
 
     public struct Usage: Codable, Sendable {
@@ -135,6 +182,40 @@ public enum PacerAccountsBuilder {
         return wanted
     }
 
+    /// Which account a `CLAUDE_CONFIG_DIR` is signed into, or nil when no
+    /// activation claims that root.
+    ///
+    /// The half of the join a client cannot do: a session pinned to its own
+    /// profile knows the directory it was handed, and only Pacer knows whose
+    /// login is inside it. Without this a script running in a pinned session
+    /// paces against whichever account holds the *default* login, which under
+    /// concurrent use is a different account's windows entirely.
+    ///
+    /// An unknown root returns nil rather than throwing: a session pinned to a
+    /// directory Pacer has never seen a login in is a real state (a brand new
+    /// profile), and the honest answer is "cannot say", which the caller turns
+    /// back into the active login.
+    public nonisolated static func resolve(configDir raw: String) throws -> String? {
+        try resolve(configDir: raw, container: PacerStore.sharedModelContainer())
+    }
+
+    nonisolated static func resolve(configDir raw: String,
+                                    container: ModelContainer) throws -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        let context = ModelContext(container)
+        let roots = AccountParallelism.trail(context: context).openPinnedRoots
+        // `CLAUDE_CONFIG_DIR` is comma-separated, and a session that lists
+        // several is reading all of them — the first one an activation claims
+        // is the one whose login it is writing under.
+        for candidate in trimmed.split(separator: ",") {
+            let path = URL(fileURLWithPath: String(candidate).trimmingCharacters(in: .whitespaces))
+                .standardizedFileURL.path
+            if let account = roots[path] { return account }
+        }
+        return nil
+    }
+
     /// Every id `?account=` accepts, excluding the unattributed alias.
     public nonisolated static func knownAccountIds() throws -> [String] {
         let context = ModelContext(try PacerStore.sharedModelContainer())
@@ -146,6 +227,8 @@ public enum PacerAccountsBuilder {
         let context = ModelContext(try PacerStore.sharedModelContainer())
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let rollups = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>())) ?? []
+        let pinnedRoots = AccountParallelism.trail(context: context).openPinnedRoots
+        let rootsByAccount = Dictionary(grouping: pinnedRoots.keys) { pinnedRoots[$0] ?? "" }
 
         var usage: [String: PacerAccountList.Usage] = [:]
         var acc: [String: Accumulator] = [:]
@@ -176,7 +259,8 @@ public enum PacerAccountsBuilder {
                         sevenDayPercent: account.latestSevenDayPct,
                         sevenDayResetsAt: account.latestSevenDayResetsAt,
                         overageUSD: account.latestExtraUsageCents.map { Double($0) / 100 },
-                        polledAt: account.latestPolledAt))
+                        polledAt: account.latestPolledAt),
+                    configRoots: (rootsByAccount[account.id] ?? []).sorted())
             }
 
         // Only when there is something in it: an install that has never seen
@@ -200,6 +284,7 @@ public enum PacerAccountsBuilder {
             schemaVersion: 1,
             generatedAt: now,
             activeAccountId: accounts.first(where: \.isActive)?.id,
+            parallelism: AccountParallelism.mode(context: context).rawValue,
             accounts: rows)
     }
 

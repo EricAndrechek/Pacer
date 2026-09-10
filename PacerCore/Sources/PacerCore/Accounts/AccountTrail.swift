@@ -79,6 +79,24 @@ public struct AccountTrail: Sendable {
         return Self.lookup(instant, in: defaultLogin)
     }
 
+    /// The pinned config roots that are live right now, mapped to the account
+    /// each one belongs to.
+    ///
+    /// This is the join a *client* needs: a Claude Code session pinned to its
+    /// own `CLAUDE_CONFIG_DIR` can read its own environment, but only Pacer
+    /// knows which login that directory is signed into. Without it a script
+    /// running inside a pinned session paces against whichever account happens
+    /// to hold the default login — someone else's windows entirely.
+    public var openPinnedRoots: [String: String] {
+        var out: [String: String] = [:]
+        for (root, spans) in pinned {
+            if let open = spans.last(where: { $0.endedAt == nil }) {
+                out[root] = open.accountId
+            }
+        }
+        return out
+    }
+
     /// The most recent span for the default login, if any is still open.
     public var currentDefaultLogin: Span? {
         defaultLogin.last { $0.endedAt == nil }

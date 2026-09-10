@@ -325,6 +325,22 @@ Two consequences of that being *everything*:
   projections in it. Rate limited to once a minute per account, and the same
   idle grace reclaims it once the consumer stops polling.
 
+**A session pinned to its own profile can ask about itself.** Under concurrent
+use the honest answer to "how much headroom do I have" is not the active
+login's — it is whichever account this session is signed into, and a session
+knows only the `CLAUDE_CONFIG_DIR` it was handed. So `/v1/snapshot`,
+`/v1/limits/history` and `/metrics` take `?config_dir=<path>` and resolve it
+through the activation trail, whose `rootPath` is exactly this join;
+`/v1/accounts` reports each account's live `configRoots` and the machine's
+`parallelism` (`single` / `sequential` / `concurrent`) so a client can tell
+whether the question even has a second answer. An unclaimed root falls through
+to unscoped rather than erroring — a brand-new profile is a real state.
+
+`/metrics` taking a scope parameter looks odd until you notice who sends it: a
+Prometheus scrape sends neither and gets every account, which is what a
+time-series database wants, while a *client* sends one and gets its own login
+without having to know that account's id.
+
 Two details worth knowing:
 
 - **`unattributed` is a row, not a remainder.** Turns recorded before the

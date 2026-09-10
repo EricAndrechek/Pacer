@@ -53,7 +53,11 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 ///                    cost and tokens cover every account and the limits
 ///                    are the active login's.
 /// - `/v1/accounts`  — the accounts Pacer tracks, and the ids `?account=` takes.
-/// - `/metrics`     — Prometheus text exposition (0.0.4).
+/// - `/v1/limits/history` — every window's utilization over time, bucketed
+///                    (`?hours=`, `?bucket=15m`).
+/// - `/metrics`     — Prometheus text exposition (0.0.4). Also takes
+///                    `?account=` / `?config_dir=` so a *client* can ask for
+///                    one login; a scrape sends neither and gets them all.
 /// - `/v1/stream`   — Server-Sent Events; a `snapshot` event on connect and on
 ///                    every engine recompute, plus `:keepalive` comments.
 /// - `/healthz`     — liveness (unauthenticated).
@@ -321,6 +325,24 @@ final class PacerHTTPServer: @unchecked Sendable {
                 return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+        case "/v1/limits/history":
+            guard authorized(headers) else { return unauthorized(client) }
+            let hours = query["hours"].flatMap { Int($0) } ?? 24
+            let historyAccount: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: historyAccount = nil
+            case .scoped(let key): historyAccount = key
+            }
+            guard let history = try? PacerLimitHistoryBuilder.history(
+                    hours: hours,
+                    bucketSeconds: PacerLimitHistoryBuilder.parseBucket(query["bucket"]),
+                    account: historyAccount),
+                  let json = try? history.encodedJSON() else {
+                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
+            }
+            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/predictions/history":
             guard authorized(headers) else { return unauthorized(client) }
             let days = query["days"].flatMap { Int($0) } ?? 7
@@ -350,8 +372,21 @@ final class PacerHTTPServer: @unchecked Sendable {
             // Windows only, deliberately — a full snapshot build per account
             // would scan the daily rollups again for numbers `todayAccounts`
             // already has.
+            //
+            // A scrape passes neither parameter and gets every account, which
+            // is what a time-series database wants. A *client* — the pacing
+            // skill, in a session pinned to one profile — passes one and gets
+            // only its own login, without having to know that account's id.
+            var wanted: String?
+            switch resolveAccount(query) {
+            case .rejected(let message):
+                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
+            case .all: wanted = nil
+            case .scoped(let key): wanted = key
+            }
             let accountLimits = accounts.compactMap { account -> PacerMetrics.AccountLimits? in
                 guard !account.unattributed,
+                      wanted == nil || account.id == wanted,
                       let limits = try? PacerSnapshotBuilder.limits(account: account.id)
                 else { return nil }
                 return PacerMetrics.AccountLimits(accountId: account.id, limits: limits)
@@ -385,6 +420,21 @@ final class PacerHTTPServer: @unchecked Sendable {
     }
 
     private func resolveAccount(_ query: [String: String]) -> AccountQuery {
+        // `?config_dir=` is the parallel-accounts case: a Claude Code session
+        // pinned to its own profile knows the directory it was handed and
+        // nothing else, and only Pacer knows whose login is in it. Resolving it
+        // here is what stops such a session pacing against the *default*
+        // login's windows, which are a different account's entirely.
+        //
+        // A root Pacer has never seen a login in falls through to unscoped
+        // rather than erroring: a brand-new profile is a real state, and the
+        // active login is the right answer until something is observed in it.
+        if let dir = query["config_dir"], !dir.isEmpty {
+            if let resolved = (try? PacerAccountsBuilder.resolve(configDir: dir)) ?? nil {
+                return .scoped(resolved)
+            }
+            if query["account"] == nil { return .all }
+        }
         guard let raw = query["account"], !raw.isEmpty else { return .all }
         do {
             return .scoped(try PacerAccountsBuilder.resolve(raw))
@@ -558,7 +608,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             "version": appVersion,
             "build": appBuild,
             "schemaVersion": 1,
-            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
+            "endpoints": ["/v1/snapshot", "/v1/accounts", "/v1/limits/history", "/v1/usage/daily", "/v1/usage/models", "/v1/predictions/history", "/v1/stream", "/metrics", "/healthz"],
         ]
         return (try? JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)

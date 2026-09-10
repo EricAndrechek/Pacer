@@ -116,6 +116,16 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// that carries no such flag, so `nil` there means "not reported",
             /// not "false".
             public let isActive: Bool?
+            /// Recent burn in percentage points per hour, from the engine's
+            /// descriptive slope over a per-window lookback (90 min for a
+            /// session-scale window, 24 h for a weekly one). `nil` when no
+            /// fresh projection backs this window.
+            ///
+            /// This is what turns headroom into time. `usedPercent` says where
+            /// you are and `limitEtaInSeconds` says when the model thinks you
+            /// arrive; this says how fast you are going right now, which is the
+            /// one a consumer can sanity-check against its own behaviour.
+            public let burnPercentPerHour: Double?
             /// The server's raw severity word for a scoped window (also an
             /// OPEN set; `nil` for the fixed blocks). Kept verbatim so a
             /// consumer can act on an urgency hint before the percentage is
@@ -129,6 +139,7 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                         projectedEndHighPercent: Double? = nil,
                         willHitLimit: Bool = false,
                         limitEtaAt: Date? = nil, limitEtaInSeconds: Int? = nil,
+                        burnPercentPerHour: Double? = nil,
                         isActive: Bool? = nil, severity: String? = nil) {
                 self.identity = identity
                 self.label = label
@@ -142,6 +153,7 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                 self.willHitLimit = willHitLimit
                 self.limitEtaAt = limitEtaAt
                 self.limitEtaInSeconds = limitEtaInSeconds
+                self.burnPercentPerHour = burnPercentPerHour
                 self.isActive = isActive
                 self.severity = severity
             }
@@ -492,11 +504,13 @@ public enum PacerSnapshotBuilder {
         var endLo: Double?
         var endHi: Double?
         var crossingAt: Date?
+        var burn: Double?
         if let outlook, let resetsAt,
            abs(outlook.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
             endPct = outlook.endPct
             endLo = outlook.endLoPct
             endHi = outlook.endHiPct
+            burn = outlook.burnPctPerHour
             if let c = outlook.crossingDate, c > now { crossingAt = c }
         }
         return PacerSnapshotPayload.Limits.Window(
@@ -512,6 +526,7 @@ public enum PacerSnapshotBuilder {
             willHitLimit: crossingAt != nil,
             limitEtaAt: crossingAt,
             limitEtaInSeconds: crossingAt.map { max(0, Int($0.timeIntervalSince(now))) },
+            burnPercentPerHour: burn,
             isActive: isActive,
             severity: severity)
     }
