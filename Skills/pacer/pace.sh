@@ -69,6 +69,9 @@ AUTH=()
 # different account's entirely. `--data-urlencode` so a path with spaces in it
 # survives the trip.
 SCOPE=()
+# What the parser keeps. Empty means "whichever login is active", which is only
+# right when nothing more specific is known.
+AWK_WANT="${PACE_ACCOUNT:-}"
 
 # Field separator for the internal row format. **Not a tab**: bash treats
 # runs of IFS *whitespace* as one delimiter, so a row whose model column is
@@ -253,7 +256,7 @@ fetch_rows() {
         *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
       esac
       if [ -n "$body" ]; then
-        ROWS=$(printf '%s\n' "$body" | awk -v WANT="$ACCOUNT" -v SEP="$SEP" "$PARSE_AWK")
+        ROWS=$(printf '%s\n' "$body" | awk -v WANT="$AWK_WANT" -v SEP="$SEP" "$PARSE_AWK")
         if [ -n "$ROWS" ]; then FETCH_REASON=""; return 0; fi
         FETCH_REASON=empty
         return 1
@@ -603,12 +606,26 @@ if [ "$MODEL" = auto ]; then
   fi
 fi
 
+# Which login to ask about, and — separately — which login to keep when the
+# answer arrives. They have to agree.
+#
+# They did not, and it took an account switch to show it: the request named
+# this session's account while the parser fell back to whichever login was
+# *active*, so after a switch every row was filtered out and the skill reported
+# "no rate-limit windows yet" while staring at a full set of them. The rule is
+# now that whenever the id is known it is used for both, and the client-side
+# "whichever is active" fallback applies only when nothing else has said.
 if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
   SCOPE=(--data-urlencode "account=$ACCOUNT")
+  AWK_WANT="$ACCOUNT"
 elif [ -n "$SESSION_ACCOUNT" ]; then
   SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
+  AWK_WANT="$SESSION_ACCOUNT"
 elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  # Only Pacer can turn a config directory into an id, so here — and only
+  # here — the response is taken as already narrowed.
   SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
+  AWK_WANT=all
 fi
 
 case "$SUB" in

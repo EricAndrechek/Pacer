@@ -402,6 +402,28 @@ struct PaceScriptTests {
         #expect(result.out.contains("full in 45m"))
     }
 
+    /// Regression: when Pacer has already narrowed the response to one login,
+    /// the parser must not narrow it again.
+    ///
+    /// It did, and the two disagreed the moment they could — the server was
+    /// asked for this session's account while the parser fell back to the
+    /// *active* one, which after an account switch is a different account.
+    /// Every row was filtered out and the skill reported "no rate-limit
+    /// windows yet" while staring at a full set of them.
+    @Test func anAlreadyScopedResponseIsNotFilteredAgain() throws {
+        // What `/metrics?account=org-home` returns: only that account's
+        // windows, but the account directory still names the *active* login.
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.29
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 16200
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        pacer_account_info{account="org-home",name="h",active="false"} 1
+        """)
+        let result = try run(box, ["report", "--account", "org-home"])
+        #expect(result.status == 0)
+        #expect(result.out.contains("29% used"))
+    }
+
     // MARK: - Waiting
 
     /// Under sequential accounts, headroom usually comes back because someone
