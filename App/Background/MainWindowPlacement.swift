@@ -83,6 +83,12 @@ enum MainWindowPlacement {
 
     static func noteLaunch() {
         isEnabled = true
+        // The scene mounts before this runs — `register(_:)` is logged ahead
+        // of the launch path on every observed launch — so the adopt it
+        // attempted was gated off. Place the window the instant the gate
+        // opens rather than waiting for the sweep a runloop turn later,
+        // which is a turn with the window on screen at SwiftUI's frame.
+        if let window = dashboardWindow { adopt(window) }
     }
 
     // MARK: - Which window is the dashboard
