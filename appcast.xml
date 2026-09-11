@@ -971,5 +971,71 @@ below.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="bFwkFohxQO4L77Hd2CcNoCegkTTScZzj6vVT4nrRoZX8ugb4PybvsiOGBEhdm+zSkzVr2iwXZ58l0RMRGaLnDQ==" />
     </item>
+            <item>
+        <title>Version 0.5.1</title>
+        <description><![CDATA[<p>Pacer can now tell an AI agent how much budget it has left — and the agent can act on it.</p>
+<h2>Heads up if you scrape <code class="notranslate">/metrics</code></h2>
+<p><code class="notranslate">pacer_rate_limit_*</code> now carries an <code class="notranslate">account</code> label. On a machine with one<br>
+account nothing changes. With two signed in, a query like<br>
+<code class="notranslate">pacer_rate_limit_used_ratio{window="five_hour"}</code> returns <strong>one series per<br>
+account</strong> instead of one — so a single-stat panel or an alert rule that assumed<br>
+a single value needs an <code class="notranslate">account="…"</code> matcher or an aggregation like <code class="notranslate">max()</code>.</p>
+<p>That's the only breaking change here, and it's deliberate: the alternative was a<br>
+second metric family meaning the same thing.</p>
+<h2>A pacing skill, shipped in the app</h2>
+<p>Pacer includes a Claude Code skill. Install it from <strong>Settings → Integrations</strong><br>
+and Claude can read your usage before it starts a long run or fans out a pile of<br>
+subagents, pause and checkpoint when a window is nearly full, and wait out the<br>
+reset instead of losing the work. One shared read serves a whole fan-out, so a<br>
+hundred subagents cost Pacer nothing.</p>
+<p>It needs no dependencies beyond what macOS already has, and it updates when<br>
+Pacer updates — there's nothing to re-download.</p>
+<p>Three things it does that matter in practice:</p>
+<ul>
+<li><strong>A per-model cap only stops work that uses that model.</strong> A full Fable weekly<br>
+window has nothing to say to an agent running Opus, and won't stop it.</li>
+<li><strong>It knows which account you're on.</strong> With two logins signed in, it reads the<br>
+one this session is actually billing — not whichever was picked last.</li>
+<li><strong>It can gate on the forecast, not just the level.</strong> "Will this finish before<br>
+I run out" is a better question than "am I nearly out", and it asks that one.</li>
+</ul>
+<p>One optional line in your <code class="notranslate">CLAUDE.md</code> makes pacing the default for long runs.<br>
+Because that line points at a file Pacer owns, it never needs re-pasting.</p>
+<h2>Every window, every account, over HTTP</h2>
+<p>The local API used to report exactly two rate-limit windows for one account.<br>
+Pacer has tracked more than that for a while — per-model caps, and every account<br>
+you're signed into — and now the API does too:</p>
+<ul>
+<li><code class="notranslate">/v1/snapshot</code> reports every window, including per-model caps, and <code class="notranslate">?account=</code><br>
+scopes the whole payload to one login.</li>
+<li><code class="notranslate">/v1/limits/history</code> gives each window's utilisation over time, so you can<br>
+chart or fit it yourself.</li>
+<li><code class="notranslate">/v1/session</code> and <code class="notranslate">/v1/sessions</code> report what a session is running and where<br>
+your other live sessions are.</li>
+<li>Each window now carries how fast it's climbing — measured over the last half<br>
+hour as well as the engine's smoothed average. When those two disagree,<br>
+you're in a burst.</li>
+</ul>
+<h2>Your plan, precisely</h2>
+<p>Pacer now shows <strong>Max 20×</strong> rather than just "Max", on the dashboard, in<br>
+Settings, and over the API. It's the number that gives a percentage meaning: 20%<br>
+of a Max 20× budget is four times 20% of a Max 5× one.</p>
+<h2>Fixes</h2>
+<ul>
+<li>Switching accounts now takes effect immediately. Pacer could spend up to half<br>
+an hour still polling the account you'd just left.</li>
+<li>An account's details no longer get stuck at whatever was first recorded for<br>
+it, which is why plan information could never appear.</li>
+</ul>]]></description>
+        <pubDate>Fri, 11 Sep 2026 12:12:00 +0000</pubDate>
+        <sparkle:version>1789128278</sparkle:version>
+        <sparkle:shortVersionString>0.5.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.5.1/Pacer-0.5.1.dmg"
+            length="21387179"
+            type="application/octet-stream"
+            sparkle:edSignature="eBQI4FrYFPYNOkD3mmJ9IsEBOVePyFsRD07oJp90o8FRRcPCY/BzF/FJMBEhN9QS95ESWHFUnB72IMTWxU/1Bg==" />
+    </item>
         </channel>
 </rss>
