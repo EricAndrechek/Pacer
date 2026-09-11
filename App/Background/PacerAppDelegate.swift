@@ -426,11 +426,16 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // installed — the ordering is not guaranteed, and a missed window
         // keeps SwiftUI's per-instance autosave name for the whole session.
         Task { @MainActor in
-            for window in NSApp.windows where window.canBecomeMain && !(window is NSPanel) {
-                Self.ensureWindowAutosaves(window)
-                Self.ensureWindowOnScreen(window)
+            for window in NSApp.windows where MainWindowPlacement.isDashboard(window) {
+                Self.placeDashboardWindow(window)
             }
         }
+
+        // A display waking after the Mac did, or a dock being unplugged,
+        // makes AppKit shove every window onto whatever screens exist right
+        // now. Those moves are not the user's, and recording one as the
+        // dashboard's home is permanent — every later launch restores it.
+        Self.observeDisplayChanges()
 
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
@@ -544,9 +549,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // `.accessory` mid-creation and the dashboard never
                 // appeared at all. Policy stays owned by the key/close
                 // observers, which fire once the window's state is settled.
-                Self.ensureWindowAutosaves(window)
-                Self.ensureWindowOnScreen(window)
-                if window.canBecomeMain, !(window is NSPanel), window.isVisible {
+                Self.placeDashboardWindow(window)
+                if MainWindowPlacement.isDashboard(window), window.isVisible {
                     MainWindowPlacement.wasOpen = true
                 }
             }
@@ -566,13 +570,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard let self else { return }
                 self.applyActivationPolicyForCurrentWindows()
                 if let window {
-                    Self.ensureWindowAutosaves(window)
-                    Self.ensureWindowOnScreen(window)
+                    Self.placeDashboardWindow(window)
                     // Cold-open reseat: a window we asked AppKit to
                     // materialize (closed dashboard → reopened from the
                     // menu bar) just became key. Move it onto the screen
                     // the user opened us from, then clear the one-shot
                     // hint so ordinary refocus events never relocate it.
+                    //
+                    // Only ever a fallback. `ensureMainWindowVisible` leaves
+                    // this hint unset when there is a frame the user parked,
+                    // because following the cursor across displays would drag
+                    // the window off the monitor they keep it on — and the
+                    // move observer then records that as the new home, which
+                    // is how a parked position gets lost for good.
                     if let screen = self.pendingActiveScreen {
                         self.pendingActiveScreen = nil
                         Self.reposition(window, onto: screen)
@@ -603,7 +613,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.applyActivationPolicyForCurrentWindows()
                 // A dashboard the user closed should stay closed across a
                 // relaunch — only one they left open comes back.
-                if let window, window.canBecomeMain, !(window is NSPanel) {
+                if let window, MainWindowPlacement.isDashboard(window) {
                     MainWindowPlacement.wasOpen = false
                 }
             }
@@ -614,30 +624,42 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowObservers.append(contentsOf: [didBecomeKey, willClose])
     }
 
-    /// Fallback AppKit autosave name we install when SwiftUI didn't
-    /// already give the main window one. Most builds will use whatever
-    /// `Window("Pacer", id: "main")` produces; this is just the safety
-    /// net for the dev-build case where SwiftUI sometimes leaves the
-    /// property empty.
-    private static let mainWindowAutosaveName = "PacerMainWindow"
-
-    /// SwiftUI's `Window` scene typically auto-sets a non-empty
-    /// `frameAutosaveName` from the scene id — but the exact behavior
-    /// has shifted across macOS releases and at least one Sequoia
-    /// point release left it empty in dev builds. Install a fallback
-    /// name when that happens so frame size + position reliably
-    /// persist across launches.
+    /// Put the dashboard where the user left it, and keep it there while
+    /// SwiftUI finishes placing it.
     ///
-    /// Also pins the menu-bar-app collection behavior. Both `Window`
-    /// scene's `.defaultPosition(.center)` and `.defaultSize(...)`
-    /// modifiers handle first-launch placement on the SwiftUI side,
-    /// so this function doesn't touch the frame.
-    private static func ensureWindowAutosaves(_ window: NSWindow) {
-        // Placement is owned by `MainWindowPlacement`, not AppKit autosave —
-        // see that type for why sharing the mechanism with SwiftUI could not
-        // be made to work.
+    /// Placement is owned by `MainWindowPlacement`, not AppKit autosave —
+    /// see that type for why sharing the mechanism with SwiftUI could not
+    /// be made to work, and why the hold is bounded.
+    ///
+    /// Safe to call for any window: everything below is a no-op unless the
+    /// window is actually the dashboard.
+    private static func placeDashboardWindow(_ window: NSWindow) {
         MainWindowPlacement.adopt(window)
         MainWindowPlacement.holdPlacement(for: window)
+        MainWindowPlacement.rescueIfOffscreen(window)
+    }
+
+    /// Watch for displays coming and going.
+    ///
+    /// Two things go wrong without this. AppKit relocates windows onto the
+    /// screens that exist at that instant, and the move observer recorded
+    /// the result as the user's parked frame. And a dashboard parked on a
+    /// monitor that is asleep at launch has nowhere to be restored to — it
+    /// needs putting back once that monitor returns.
+    private static func observeDisplayChanges() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // `Task { @MainActor }` rather than `assumeIsolated`, matching the
+            // other observers here: the two toolchains in play disagree about
+            // the isolation of a notification-observer closure, and this shape
+            // compiles the same under both.
+            Task { @MainActor in
+                MainWindowPlacement.noteDisplayConfigurationChanged()
+            }
+        }
     }
 
     /// Make the main window behave like a tool window for a menu-bar
@@ -693,17 +715,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// post-display-disconnect setups it lands on whatever screen
     /// macOS has elected as primary, which is exactly where the user
     /// is working from after their secondary went away.
-    private static func ensureWindowOnScreen(_ window: NSWindow) {
-        // Skip auxiliary windows (panels, menu-bar popover host) — only
-        // the main "Pacer" window needs reseating.
-        guard window.canBecomeMain, !(window is NSPanel) else { return }
-        let onSomeScreen = NSScreen.screens.contains { screen in
-            screen.visibleFrame.intersects(window.frame)
-        }
-        guard !onSomeScreen else { return }
-        window.center()
-        window.saveFrame(usingName: window.frameAutosaveName)
-    }
+
 
     /// The screen the user is currently working on — the one whose menu
     /// bar they just clicked, or where the cursor sits when the global
@@ -1037,7 +1049,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // async runs — the cursor may drift afterward.
         let target = Self.activeScreen()
         NSApp.activate()
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
+        if let window = NSApp.windows.first(where: { MainWindowPlacement.isDashboard($0) }) {
             // Pin the menu-bar-app collection behavior BEFORE
             // `makeKeyAndOrderFront` so the very first activation
             // already pulls the window to the current Space rather
@@ -1060,7 +1072,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // frame. So: stored placement first, cursor only as the fallback.
             if let stored = MainWindowPlacement.storedFrame,
                MainWindowPlacement.isUsable(stored) {
-                MainWindowPlacement.apply(to: window)
+                MainWindowPlacement.apply(to: window, reason: "menu-bar open")
             } else if let target {
                 Self.reposition(window, onto: target)
             }
@@ -1069,7 +1081,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Re-assert after ordering front: AppKit can nudge a window as it
             // comes forward, and this is the gesture where being a few points
             // off is most visible.
-            MainWindowPlacement.apply(to: window)
+            MainWindowPlacement.apply(to: window, reason: "menu-bar open")
             // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
             Self.releaseMenuBarAppBehavior(window)
             return true
@@ -1077,7 +1089,18 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Cold open: the window doesn't exist yet and will materialize
         // asynchronously via the reopen flow below. Stash the target
         // screen so `didBecomeKey` reseats the new window onto it once.
-        pendingActiveScreen = target
+        //
+        // Unless the user has parked the window somewhere, in which case
+        // there is nothing to decide and following the cursor is actively
+        // wrong: it drags the dashboard off the monitor it lives on, and
+        // the move observer then records the arrival as the new home. That
+        // is not hypothetical — it is how a window parked on the bottom of
+        // a portrait display ends up pinned to a corner of another one,
+        // permanently, because the clamp that fits it onto the new screen
+        // lands on the screen's own origin.
+        let hasParkedFrame = MainWindowPlacement.storedFrame
+            .map(MainWindowPlacement.isUsable) ?? false
+        pendingActiveScreen = hasParkedFrame ? nil : target
         // No window exists. With `LSUIElement=true` and a SwiftUI
         // `Window("Pacer", id: "main")` scene, closing the dashboard
         // tears the window down — the scene is still in memory but no
@@ -1118,7 +1141,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// expectation for menu-bar app shortcuts (1Password, Raycast,
     /// Bartender all do this).
     private func toggleMainWindow() {
-        let mainWindow = NSApp.windows.first { $0.canBecomeMain && !($0 is NSPanel) }
+        let mainWindow = NSApp.windows.first { MainWindowPlacement.isDashboard($0) }
         if let window = mainWindow,
            window.isKeyWindow,
            window.isVisible,
