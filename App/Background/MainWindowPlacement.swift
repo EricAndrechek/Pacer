@@ -70,6 +70,16 @@ enum MainWindowPlacement {
     /// Reset whenever a different window becomes the dashboard.
     private static var hasPlacedDashboard = false
 
+    /// The window closed at launch because the user had closed the dashboard
+    /// before quitting.
+    ///
+    /// The launch sweep runs afterwards and would otherwise adopt it — which
+    /// moves a window nobody can see, and worse, marks the dashboard as
+    /// already placed for the rest of the launch. Weak, so that when the user
+    /// does ask for the dashboard the new window is a different object and
+    /// gets placed normally.
+    private static weak var closedAtLaunch: NSWindow?
+
     /// False until the app reaches its normal launch path.
     ///
     /// The screenshot renderer, cold-start probe, archive round-trip and
@@ -85,10 +95,36 @@ enum MainWindowPlacement {
         isEnabled = true
         // The scene mounts before this runs — `register(_:)` is logged ahead
         // of the launch path on every observed launch — so the adopt it
-        // attempted was gated off. Place the window the instant the gate
-        // opens rather than waiting for the sweep a runloop turn later,
-        // which is a turn with the window on screen at SwiftUI's frame.
-        if let window = dashboardWindow { adopt(window) }
+        // attempted was gated off. Act the instant the gate opens rather
+        // than waiting for the sweep a runloop turn later, which is a turn
+        // with the window on screen at SwiftUI's frame.
+        guard let window = dashboardWindow else { return }
+        guard wasOpenWhenQuit else {
+            // SwiftUI's `Window` scene materializes its window on every
+            // launch, unconditionally — verified here: the scene registers
+            // its NSWindow before `applicationDidFinishLaunching` finishes,
+            // with no saved-application-state directory involved. For a
+            // menu-bar agent that is the wrong default. Logging in at the
+            // start of the day should not put a dashboard on screen that
+            // you closed before you shut down.
+            //
+            // So the open/closed half of the window's state is restored by
+            // hand, the same way its frame is. `reopenIfPreviouslyOpen` is
+            // the other half and never fires in practice, because SwiftUI
+            // always beats it to the window; it stays as the safety net for
+            // a macOS release where the scene does not.
+            //
+            // Closed here rather than anywhere later on purpose: this runs
+            // once, at launch, before the window observers exist, so it
+            // cannot close a window the user has asked for. If a future
+            // macOS creates the window after this point we simply miss it
+            // and the dashboard shows — the harmless direction to fail.
+            Log.write("Placement", "dashboard was closed when we were quit — closing SwiftUI's")
+            closedAtLaunch = window
+            window.close()
+            return
+        }
+        adopt(window)
     }
 
     // MARK: - Which window is the dashboard
@@ -151,17 +187,37 @@ enum MainWindowPlacement {
 
     static var wasOpen: Bool {
         get { UserDefaults.standard.bool(forKey: wasOpenKey) }
-        set { UserDefaults.standard.set(newValue, forKey: wasOpenKey) }
+        set {
+            if wasOpenAtStart == nil {
+                wasOpenAtStart = UserDefaults.standard.bool(forKey: wasOpenKey)
+            }
+            UserDefaults.standard.set(newValue, forKey: wasOpenKey)
+        }
     }
+
+    /// The value this process started with, snapshotted by the first write.
+    private static var wasOpenAtStart: Bool?
+
+    /// Was the dashboard open when we were last quit?
+    ///
+    /// Deliberately not just a read of `wasOpen`: the window observers set
+    /// that true the moment the window becomes visible, which happens on
+    /// this same launch. Today `noteLaunch()` runs before those observers
+    /// are installed, so a plain read would be correct — but that is an
+    /// accident of one function's layout, and if it ever flips the failure
+    /// is silent and the dashboard decides it was open when it was not.
+    /// Snapshotting on first write is order-independent.
+    static var wasOpenWhenQuit: Bool { wasOpenAtStart ?? wasOpen }
 
     // MARK: - Applying
 
-    /// A frame worth restoring: on a connected screen, and not collapsed to
-    /// a sliver. Both failures end with the user staring at nothing, so
-    /// neither is worth obeying.
+    /// A frame worth restoring: enough of it lands on one connected screen
+    /// to be worth looking at, and it is not collapsed to a sliver. Both
+    /// failures end with the user staring at nothing, so neither is worth
+    /// obeying. See `WindowPlacementFit` for why "touches a screen" is not
+    /// the same question.
     static func isUsable(_ frame: NSRect) -> Bool {
-        guard frame.width >= 480, frame.height >= 320 else { return false }
-        return NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        WindowPlacementFit.isRestorable(frame, onAnyOf: NSScreen.screens.map(\.visibleFrame))
     }
 
     /// Take the dashboard off AppKit's autosave and put it where the user
@@ -171,7 +227,7 @@ enum MainWindowPlacement {
     /// AppKit writing a frame we did not choose, which is what corrupted
     /// every previous attempt.
     static func adopt(_ window: NSWindow) {
-        guard isEnabled, isDashboard(window) else { return }
+        guard isEnabled, isDashboard(window), window !== closedAtLaunch else { return }
         if dashboardWindow !== window {
             dashboardWindow = window
             hasPlacedDashboard = false
@@ -316,7 +372,7 @@ enum MainWindowPlacement {
     /// triggers `applicationShouldHandleReopen` — but with `activates = false`
     /// so it does not pull the user out of whatever they are in.
     static func reopenIfPreviouslyOpen() {
-        guard wasOpen else { return }
+        guard wasOpenWhenQuit else { return }
         // Deferred: asking AppKit to reopen us *during* our own launch is a
         // no-op — the reopen path only fires for an app it considers already
         // running. Waiting for launch to finish is what makes it take.
