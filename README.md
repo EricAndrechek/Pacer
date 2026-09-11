@@ -123,6 +123,11 @@ ships, it offers to install it for you — no re-downloading, no reinstalling.
   icon, percent chips, and an explicit choice of which window drives the icon —
   plus home-screen-style widgets, each pickable to whichever window you care
   about (5-hour, weekly, or a per-model cap) for cost and pacing.
+- **The window stays where you put it.** Park the dashboard on whichever
+  display and Space suits you and it comes back there — across relaunches,
+  updates and a monitor that was asleep at login. Summoning it from the menu
+  bar takes you to it rather than dragging it to you, and a dashboard you
+  closed stays closed.
 - **Optional nudges.** Local notifications when you cross a rate-limit threshold
   (50 / 75 / 90%) — on any window, including a per-model cap — or blow past a
   daily spending limit you set. Off by default.
