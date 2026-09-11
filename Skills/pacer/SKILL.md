@@ -147,16 +147,37 @@ $ pace.sh gate --cap 85 --model auto    # ask Pacer what this session runs
 pace: GO — 5h 40%, 7d 32% (cap 85%).
 ```
 
-**`--model auto` means you never have to say.** Claude Code exports
+**`--model auto` asks Pacer what this session runs.** Claude Code exports
 `CLAUDE_CODE_SESSION_ID` into every command it runs, and that id names the
-transcript Pacer already parses — so Pacer can answer what model this session
-is running, and which account its work is billed to. A subagent gets its own
-session id, so it resolves to the *subagent's* model, not its parent's. Export
-`PACE_MODEL=auto` once and every call in that session is model-aware.
+transcript Pacer already parses — so Pacer can answer what model the session is
+running, and which account its work is billed to. Export `PACE_MODEL=auto` once
+and every call in that session is model-aware.
+
+**Inside a fan-out, `auto` cannot tell you apart — so name your model.** A
+subagent does *not* get its own session id; its turns are written under the
+parent's, and nothing in the environment names a per-agent model. So when a
+session has more than one model in flight, `auto` will not guess: it binds only
+the account-wide windows and says so.
+
+```
+$ pace.sh gate --cap 85 --model auto     # Fable orchestrator, Sonnet builders
+pace: GO — 5h 12%, 7d 32% (cap 85%). [model ambiguous (claude-fable-5-1,
+claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
+```
+
+That is deliberate, and it is the lesser of two wrong answers. Guessing used to
+mean a Sonnet builder gated on its orchestrator's Fable cap — a window at 95%
+that does not bind it and does not reset for three days, stalling the whole
+fan-out. Binding only what certainly applies never does that. The cost is the
+other direction: an orchestrator running `auto` mid-fan-out is no longer
+stopped by its own per-model cap.
+
+**So an orchestrator should pass `--model` explicitly and tell each subagent
+its own** — it chose the model, so it is the one thing in the system that knows.
+`auto` is the fallback for a session running one model, where it is exact.
 
 It falls back to "every window binds" when Pacer has not yet seen a turn from
-the session — a brand-new subagent, most often — which is the safe reading of
-"cannot tell".
+the session at all, which is the safe reading of "cannot tell".
 
 Account-wide windows (5h, 7d) bind everything, always — those are never
 skipped. Only per-model caps are filtered, and only when you name a model. With
@@ -235,7 +256,7 @@ Invoke with a cap (default **85**). For a big fan-out:
 ## 7. The clause to paste into EVERY subagent prompt
 
 > **Usage gating:** before you start, and before any expensive step, run
-> `~/.claude/skills/pacer/pace.sh status --model auto`
+> `~/.claude/skills/pacer/pace.sh status --model <MODEL>`
 > (with the same `PACE_RUN` the orchestrator used). If it prints `paused` (exit 10):
 > immediately commit your work-in-progress in this worktree
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
@@ -244,6 +265,12 @@ Invoke with a cap (default **85**). For a big fan-out:
 > prints `go`, proceed. If it prints `unknown` or `stale`, proceed but say so
 > in your final message — nobody is pacing this. It is a local file read — call
 > it freely.
+
+**Substitute `<MODEL>` with the model you gave that subagent** — `sonnet`,
+`opus`, `haiku`, `fable`. Do not leave `--model auto` here: a subagent's turns
+are recorded under the parent's session id, so `auto` inside a fan-out cannot
+tell the builder from the orchestrator, and will bind only the account-wide
+windows rather than the builder's own cap. You chose the model; say it.
 
 **In a Workflow script** (the deterministic `Workflow` tool): gate *between
 stages* instead — before each `parallel()`/`pipeline()` wave, run an `agent()`

@@ -54,6 +54,10 @@ WINDOW=all
 MAXWAIT=21600
 MAXAGE=900
 MODEL="${PACE_MODEL:-}"
+# Stands for "which model I am is not knowable here". Deliberately not the
+# empty string: empty already means "every window binds", which is the
+# opposite instruction. Only windows that name no model bind this.
+AMBIGUOUS_MODEL="__ambiguous__"
 ETA=0
 INTERVAL_SET=0
 # How many times to re-ask before believing "nothing is listening". Pacer
@@ -217,6 +221,7 @@ END {
 # from an encoder we control, which prints one key per line. There is a test
 # pinning that shape.
 SESSION_MODEL=""
+SESSION_MODELS=""
 SESSION_ACCOUNT=""
 session_looked_up=false
 resolve_session() {
@@ -230,6 +235,15 @@ resolve_session() {
   case "$body" in *'"sessionId"'*) ;; *) return 1;; esac
   SESSION_MODEL=$(printf '%s\n' "$body" | awk -F'"' '/"model"/ { print $4; exit }')
   SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  # Every model this session is running, not just the newest turn's. A
+  # subagent shares its parent's session id, so this is how we find out that
+  # "the session's model" is not a single answer.
+  SESSION_MODELS=$(printf '%s\n' "$body" \
+    | tr ',' '\n' \
+    | awk '/"models"/,/\]/' \
+    | grep -o '"[^"]*"' \
+    | grep -v '"models"' \
+    | tr -d '"')
   [ -n "$SESSION_MODEL" ] || [ -n "$SESSION_ACCOUNT" ]
 }
 
@@ -297,19 +311,22 @@ selected_rows() {
 # rule `binding_rows` applies, so the report's marker can never disagree with
 # what the gate actually did.
 model_binds() {
-  awk -v MODEL="$1" -v WANT="$MODEL" '
+  awk -v MODEL="$1" -v WANT="$MODEL" -v AMBIG="$AMBIGUOUS_MODEL" '
     function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
     BEGIN {
       want = norm(WANT); m = norm(MODEL)
+      # Identity unknown: only a window that binds every model binds us.
+      if (WANT == AMBIG) exit (m == "") ? 0 : 1
       if (want == "" || want == "all" || m == "") exit 0
       exit (index(m, want) || index(want, m)) ? 0 : 1
     }'
 }
 
 binding_rows() {
-  selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
+  selected_rows | awk -F"$SEP" -v WANT="$MODEL" -v AMBIG="$AMBIGUOUS_MODEL" '
     function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
-    BEGIN { want = norm(WANT) }
+    BEGIN { want = norm(WANT); ambiguous = (WANT == AMBIG) }
+    ambiguous { if ($4 == "") print; next }
     want == "" || want == "all" { print; next }
     $4 == "" { print; next }
     { m = norm($4)
@@ -408,6 +425,14 @@ evaluate() {
 # falling back to "whichever login is active" is a guess, and a gate that
 # reports a percentage without saying whose it is invites exactly the mistake
 # this is here to prevent.
+# What `--model auto` decided. Says it out loud on the lines a caller reads,
+# because this was computed and never printed: a subagent gated against its
+# orchestrator's model for as long as that was true and nothing said so.
+auto_note() {
+  [ -n "$AUTO_NOTE" ] || return 0
+  printf ' [%s]' "$AUTO_NOTE"
+}
+
 scope_caveat() {
   [ -n "$AWK_WANT" ] && [ "$AWK_WANT" != all ] && return 0
   [ "${ALL_ACCOUNTS:-0}" -le 1 ] 2>/dev/null && return 0
@@ -450,6 +475,7 @@ off_exit_code() {
 cmd_report() {
   fetch_rows || { api_off_note; exit "$(off_exit_code)"; }
   require_selection
+  [ -n "$AUTO_NOTE" ] && printf 'pace:%s\n' "$(auto_note)"
   local multi
   multi=$(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ a[$1] = 1 } END { print length(a) }')
   selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent; do
@@ -617,12 +643,12 @@ cmd_gate() {
   evaluate
   if [ -z "$TRIP" ]; then
     write_state go "" "" "" "$(summary) (cap ${CAP}%)"
-    echo "pace: GO — $(summary) (cap ${CAP}%).$(scope_caveat)"
+    echo "pace: GO — $(summary) (cap ${CAP}%).$(auto_note)$(scope_caveat)"
     exit 0
   fi
   write_state paused "$TRIP" "$TPCT" "$TSECS" \
     "$(trip_reason); resets in $(human "$TSECS")"
-  echo "pace: PAUSE — $(trip_reason), resets in $(human "$TSECS") ($(clock "$TSECS"))."
+  echo "pace: PAUSE — $(trip_reason), resets in $(human "$TSECS") ($(clock "$TSECS")).$(auto_note)"
   exit 10
 }
 
@@ -738,7 +764,24 @@ if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = all ]; then
 fi
 
 if [ "$MODEL" = auto ]; then
-  if [ -n "$SESSION_MODEL" ]; then
+  model_count=$(printf '%s\n' "$SESSION_MODELS" | grep -c . || true)
+  if [ "${model_count:-0}" -gt 1 ]; then
+    # More than one model on recent turns means this session is a parent and
+    # its subagents at once, and *nothing available here says which one is
+    # asking* — the session id is shared and no environment variable names a
+    # per-agent model.
+    #
+    # The old code answered with the newest turn's model anyway. That is how a
+    # Sonnet builder came to gate on its Fable orchestrator's window: a cap
+    # that does not bind it, reported as if it did.
+    #
+    # So bind what certainly applies and nothing else. Account-wide windows
+    # (5h, 7d) bind every model including ours; a per-model cap might be
+    # somebody else's, and being paused by another model's cap is the same
+    # wrong answer in the other direction.
+    MODEL="$AMBIGUOUS_MODEL"
+    AUTO_NOTE="model ambiguous ($(printf '%s\n' "$SESSION_MODELS" | paste -sd, - )) — account-wide windows only; pass --model to gate on yours"
+  elif [ -n "$SESSION_MODEL" ]; then
     MODEL="$SESSION_MODEL"
     AUTO_NOTE="model $MODEL (detected)"
   else
