@@ -458,6 +458,36 @@ struct PaceScriptTests {
         #expect(box.stateText.contains("account switched"))
     }
 
+    /// Pacer installs its own updates and restarts, so any wait long enough to
+    /// matter will meet a minute where nothing answers — most likely while a
+    /// window is full, which is when the wait exists. One failed read used to
+    /// return "cannot gate; proceeding ungated" and the run charged into the
+    /// cap it was waiting out.
+    @Test func waitHoldsThePauseWhilePacerIsRestarting() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.97
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 600
+        """)
+        let metrics = box.dir.appendingPathComponent("metrics")
+
+        // Away for a while, then back with headroom — a restart, not a reset.
+        let restart = Process()
+        restart.executableURL = URL(fileURLWithPath: "/bin/bash")
+        restart.arguments = ["-c", """
+        sleep 1; rm -f '\(metrics.path)'; sleep 8
+        printf 'pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.04\\n' > '\(metrics.path)'
+        """]
+        try restart.run()
+
+        let result = try run(box, ["wait", "--cap", "85", "--interval", "5", "--retries", "1"])
+        restart.waitUntilExit()
+
+        // Resumed because headroom came back, not because the server blinked.
+        #expect(result.status == 0)
+        #expect(result.out.contains("holding the pause"))
+        #expect(!result.out.contains("proceeding ungated"))
+    }
+
     // MARK: - Knowing what you are
 
     /// `--model auto` asks Pacer what this session is running, using the
