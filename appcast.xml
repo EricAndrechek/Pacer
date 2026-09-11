@@ -1037,5 +1037,74 @@ it, which is why plan information could never appear.</li>
             type="application/octet-stream"
             sparkle:edSignature="eBQI4FrYFPYNOkD3mmJ9IsEBOVePyFsRD07oJp90o8FRRcPCY/BzF/FJMBEhN9QS95ESWHFUnB72IMTWxU/1Bg==" />
     </item>
+            <item>
+        <title>Version 0.6.0</title>
+        <description><![CDATA[<p>The dashboard comes back where you left it, and an agent in a fan-out stops gating on somebody else's rate limit.</p>
+<h2>Heads up if your agents use the pacing skill</h2>
+<p><code class="notranslate">--model auto</code> has changed what it does when a session is running <strong>more than<br>
+one model at once</strong> — an orchestrator with a fan-out of subagents under it.</p>
+<p>It used to answer with the model on the session's newest turn. That turns out<br>
+to be unsound: a subagent does not get its own session id. Claude Code records<br>
+its turns under the <em>parent's</em>, and nothing in the environment names a<br>
+per-agent model, so "which model am I?" is genuinely unanswerable from inside a<br>
+subagent. In practice a Sonnet builder was told it was running Fable and gated<br>
+itself on a weekly cap at 95% that did not bind it and would not reset for<br>
+three days — stalling the whole run on somebody else's limit.</p>
+<p>So it no longer guesses. With one model in flight, nothing changes: <code class="notranslate">auto</code> is<br>
+exact, as before. With several, it binds only the account-wide windows (5-hour,<br>
+weekly) and says so:</p>
+<pre class="notranslate"><code class="notranslate">pace: GO — 5h 12%, 7d 32% (cap 85%). [model ambiguous (claude-fable-5-1,
+claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
+</code></pre>
+<p><strong>If you orchestrate subagents, pass <code class="notranslate">--model</code> explicitly</strong> — the orchestrator<br>
+picked the model, so it is the one part of the system that knows. The skill's<br>
+paste-into-every-subagent clause has been updated to say so. The trade is<br>
+deliberate but it is a trade: an orchestrator running <code class="notranslate">auto</code> mid-fan-out is no<br>
+longer stopped by its own per-model cap.</p>
+<p><code class="notranslate">--model auto</code> also <em>says</em> what it resolved now, on the <code class="notranslate">GO</code>, <code class="notranslate">PAUSE</code> and<br>
+<code class="notranslate">report</code> lines. It always decided something; it just never told you, which is<br>
+why the wrong answer went unnoticed.</p>
+<p>Scraping the API? <code class="notranslate">/v1/session</code> gained a <code class="notranslate">models</code> array — every model the<br>
+session has run recently, newest first. Additive; <code class="notranslate">model</code> still means what it<br>
+did.</p>
+<h2>The window stays where you put it</h2>
+<p>Park the dashboard on whichever display and Space suits you and it comes back<br>
+there — across relaunches, across updates, and across a monitor that was still<br>
+asleep when you logged in.</p>
+<p>That was the bug that started this release: installing an update put the window<br>
+back on the wrong display at the wrong size. Four separate things were<br>
+overwriting the position you had chosen, including the app's own restore<br>
+recording its own moves as if you had made them.</p>
+<p>Three behaviours changed with it:</p>
+<ul>
+<li><strong>Summoning the dashboard takes you to it.</strong> Clicking the menu bar used to<br>
+drag the window onto whichever display your cursor was on, and onto whichever<br>
+Space you happened to be looking at. Now the window stays where it lives and<br>
+macOS switches you to it. If your Mission Control settings won't follow it,<br>
+Pacer brings the window over instead, so a menu-bar click never does nothing.</li>
+<li><strong>A dashboard you closed stays closed.</strong> Pacer meant to do this and never<br>
+did — a closed window came back on the next launch regardless. Logging in<br>
+should not put a window on screen you deliberately shut.</li>
+<li><strong>A monitor that is asleep at login no longer costs you the position.</strong> The<br>
+window waits rather than being dumped somewhere arbitrary, and returns home<br>
+when that display does.</li>
+</ul>
+<h2>Why this is 0.6.0 and not 0.5.2</h2>
+<p>Pacer's convention is that a minor bump means a SwiftData reset. <strong>This release<br>
+does not reset anything</strong> — your history is untouched and no migration runs.</p>
+<p>It is a minor because the behaviour contracts changed: <code class="notranslate">--model auto</code> answers a<br>
+different question in a fan-out, and the dashboard's window handling is<br>
+meaningfully different from what you are used to. That seemed worth a number<br>
+people would notice.</p>]]></description>
+        <pubDate>Fri, 11 Sep 2026 17:04:35 +0000</pubDate>
+        <sparkle:version>1789145834</sparkle:version>
+        <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.6.0/Pacer-0.6.0.dmg"
+            length="21405690"
+            type="application/octet-stream"
+            sparkle:edSignature="+QY8vDc7uoD9exWrDs+tqT1CXt/9ZlA5RGJFiPgdwHwUAYSzGA9uKfsxNm46bI+cw5GOyAm7GNmvLqOCOZqABA==" />
+    </item>
         </channel>
 </rss>
