@@ -34,7 +34,7 @@ public enum AccountParallelism {
     /// The distinction matters because it decides how much of a cramped surface
     /// to spend. Sequential use has one binding account at a time; concurrent
     /// use has several at once, and showing one of them is showing half.
-    public enum Mode: Sendable, Equatable {
+    public enum Mode: String, Sendable, Equatable {
         /// One account has ever been seen. No question to answer.
         case single
         /// Several accounts, used one at a time — a switcher, or `/login`.

@@ -71,6 +71,15 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
     public let displayName: String
     public let isActive: Bool
     public let subscriptionType: String?
+    /// The rate-limit tier, which is what distinguishes a Max 5× budget from a
+    /// Max 20× one; `subscriptionType` calls both `max`. Optional and defaulted
+    /// so nothing that builds a summary has to know about it.
+    public let rateLimitTier: String?
+
+    /// What Settings and the dashboard show — see `PlanLabel`.
+    public var planLabel: String? {
+        PlanLabel.describe(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier)
+    }
     public let fiveHourPct: Double?
     public let sevenDayPct: Double?
     public let extraUsageCents: Int?
@@ -86,6 +95,7 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         displayName: String,
         isActive: Bool,
         subscriptionType: String?,
+        rateLimitTier: String? = nil,
         fiveHourPct: Double?,
         sevenDayPct: Double?,
         extraUsageCents: Int?,
@@ -98,6 +108,7 @@ public struct AccountStatusSummary: Sendable, Identifiable, Equatable {
         self.displayName = displayName
         self.isActive = isActive
         self.subscriptionType = subscriptionType
+        self.rateLimitTier = rateLimitTier
         self.fiveHourPct = fiveHourPct
         self.sevenDayPct = sevenDayPct
         self.extraUsageCents = extraUsageCents

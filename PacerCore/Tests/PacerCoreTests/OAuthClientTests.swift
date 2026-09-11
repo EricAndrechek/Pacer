@@ -441,3 +441,102 @@ final class Box<Value: Sendable>: @unchecked Sendable {
     }
 }
 
+
+/// The cached credential is served without touching Claude's stores, so a
+/// field added to it would decode as nil out of an old blob and stay nil for
+/// the life of the token. `rateLimitTier` was exactly that.
+@Suite("Held credential keeps up with its own shape")
+struct HeldCredentialShapeTests {
+
+    private func credential(token: String, tier: String?, version: Int?,
+                            expiresIn: TimeInterval = 86_400) -> OAuthCredential {
+        OAuthCredential(accessToken: token, expiresAt: Date().addingTimeInterval(expiresIn),
+                        subscriptionType: "max", rateLimitTier: tier, storedVersion: version)
+    }
+
+    @Test func aBlobFromAnOlderShapeIsNotServedFromTheFastPath() {
+        let old = credential(token: "t", tier: nil, version: nil)
+        #expect(!old.isCurrentStoredShape)
+        // Freshly parsed credentials are current by construction.
+        #expect(credential(token: "t", tier: "default_claude_max_20x",
+                           version: OAuthCredential.currentStoredVersion).isCurrentStoredShape)
+    }
+
+    /// One re-read, not one per poll: the rewrite stamps the current version
+    /// even when the sources had nothing new to add.
+    @Test func stampingMakesTheRefreshHappenExactlyOnce() {
+        let old = credential(token: "t", tier: nil, version: nil)
+        let stamped = old.stampedAsCurrent
+        #expect(stamped.isCurrentStoredShape)
+        #expect(stamped.accessToken == old.accessToken)
+        #expect(stamped.expiresAt == old.expiresAt)
+        #expect(stamped.subscriptionType == old.subscriptionType)
+    }
+
+    /// Decoding an old persisted blob — no `storedVersion`, no
+    /// `rateLimitTier` — must still work, and must read as outdated.
+    @Test func anOldBlobStillDecodesAndReadsAsOutdated() throws {
+        let json = """
+        {"accessToken":"abc","expiresAt":\(Date().addingTimeInterval(86_400).timeIntervalSinceReferenceDate),"subscriptionType":"max"}
+        """
+        let decoded = try JSONDecoder().decode(OAuthCredential.self, from: Data(json.utf8))
+        #expect(decoded.accessToken == "abc")
+        #expect(decoded.rateLimitTier == nil)
+        #expect(!decoded.isCurrentStoredShape)
+    }
+}
+
+/// A lane outlives the credential it was built from.
+///
+/// Lanes are seeded at launch from Pacer's persisted token pool, and discovery
+/// used to skip any candidate whose token it already held. That is right for
+/// lane *state* and wrong for the credential: a copy serialised by an older
+/// build stayed in place while live sources returned a richer one for the same
+/// token, so a field added to `OAuthCredential` was invisible for the token's
+/// whole life. `rateLimitTier` was hidden this way — the keychain had it and
+/// the parser read it, but the lane it should have reached was occupied.
+@Suite("A known token still gets its description refreshed")
+struct CredentialShapeRefreshTests {
+
+    private func old(_ token: String) -> OAuthCredential {
+        OAuthCredential(accessToken: token, expiresAt: Date().addingTimeInterval(86_400),
+                        subscriptionType: "max", rateLimitTier: nil, storedVersion: nil)
+    }
+
+    private func fresh(_ token: String) -> OAuthCredential {
+        OAuthCredential(accessToken: token, expiresAt: Date().addingTimeInterval(86_400),
+                        subscriptionType: "max", rateLimitTier: "default_claude_max_20x")
+    }
+
+    @Test func aStaleShapeIsReplacedByACurrentOneForTheSameToken() {
+        let pooled = old("same-token")
+        let live = fresh("same-token")
+        #expect(pooled.accessToken == live.accessToken)
+        #expect(!pooled.isCurrentStoredShape)
+        #expect(live.isCurrentStoredShape)
+        // The condition the merge applies: current replaces not-current.
+        #expect(live.isCurrentStoredShape && !pooled.isCurrentStoredShape)
+        #expect(live.rateLimitTier == "default_claude_max_20x")
+    }
+
+    /// Converges after one discovery instead of rewriting every cycle.
+    @Test func aCurrentShapeIsNotReplacedAgain() {
+        let held = fresh("same-token")
+        let candidate = fresh("same-token")
+        #expect(held.isCurrentStoredShape)
+        #expect(!(candidate.isCurrentStoredShape && !held.isCurrentStoredShape))
+    }
+
+    /// The pool's write guard compared token sets, so refreshing a
+    /// description left the tokens identical and the older shape on disk.
+    @Test func thePoolSignatureChangesWhenOnlyTheShapeDid() {
+        func signature(_ creds: [OAuthCredential]) -> Set<String> {
+            Set(creds.map { "\($0.accessToken)|\($0.storedVersion ?? 0)" })
+        }
+        let before = signature([old("t")])
+        let after = signature([fresh("t")])
+        #expect(before != after)
+        // A token set alone would have said nothing changed.
+        #expect(Set([old("t").accessToken]) == Set([fresh("t").accessToken]))
+    }
+}

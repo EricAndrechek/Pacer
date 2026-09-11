@@ -971,7 +971,7 @@ struct PaceChartCard: View {
             } else {
                 out.append(AccountGroup(
                     id: key, label: accountLabel(col.accountId),
-                    plan: account(col.accountId)?.subscriptionType,
+                    plan: account(col.accountId)?.planLabel,
                     usageSummary: usageSummary(col.accountId),
                     isActiveAccount: col.isActiveAccount,
                     readingAt: col.readingAt,

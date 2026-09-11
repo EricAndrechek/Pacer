@@ -194,7 +194,11 @@ public actor OAuthPoller: TokenPoolTesting {
 
     /// One pollable token + its scheduling state.
     private struct Lane {
-        let credential: OAuthCredential
+        /// `var` because a lane outlives the credential it was built from: the
+        /// token stays the same while the *description* of it gains fields
+        /// across Pacer versions, and a lane that could never take the newer
+        /// copy carried the older one for the life of the token.
+        var credential: OAuthCredential
         let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
@@ -262,7 +266,13 @@ public actor OAuthPoller: TokenPoolTesting {
     /// stores; re-saved when the confirmed token set changes.
     private let poolStore: TokenPoolStoring
     private var seeded = false
+    /// What the pool on disk currently represents — token *and* stored shape,
+    /// so a description refresh is a change worth writing.
     private var lastSavedPoolTokens: Set<String> = []
+
+    private static func poolSignature(_ credentials: [OAuthCredential]) -> Set<String> {
+        Set(credentials.map { "\($0.accessToken)|\($0.storedVersion ?? 0)" })
+    }
 
     /// Persisted lane metadata (account / cooldown / last-poll / org),
     /// loaded once per launch so seeded + rediscovered lanes restore their
@@ -423,7 +433,8 @@ public actor OAuthPoller: TokenPoolTesting {
             if isActive {
                 let key = activeAccountKey ?? Account.key(forOrg: org)
                 await recordPoll(snap, accountKey: key, organizationId: org,
-                                 subscriptionType: cred.subscriptionType, isActive: true,
+                                 subscriptionType: cred.subscriptionType,
+                                 rateLimitTier: cred.rateLimitTier, isActive: true,
                                  laneSource: .override)
                 return .success(fiveHour: snap.fiveHour?.usedPercentage, sevenDay: snap.sevenDay?.usedPercentage)
             }
@@ -490,7 +501,7 @@ public actor OAuthPoller: TokenPoolTesting {
         // Force-persist the removal (bypass savePool's "don't wipe" guard) so
         // the removed token can't reappear from the pool on the next launch.
         let confirmed = lanes.filter { $0.state.account != .unknown }
-        lastSavedPoolTokens = Set(confirmed.map { $0.credential.accessToken })
+        lastSavedPoolTokens = Self.poolSignature(confirmed.map(\.credential))
         poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
         await saveAllLaneMeta()   // prune the removed lane's metadata
         await publishStatus()
@@ -515,6 +526,25 @@ public actor OAuthPoller: TokenPoolTesting {
             let newOrg = await activateAccount(id)
             activeAccountKey = id
             primaryOrg = newOrg
+
+            // The login moved, so Claude Code has just written a *different*
+            // token to the keychain — the one thing that makes the lane set
+            // certainly out of date. Reclassifying the lanes we already hold
+            // is not enough: the account being switched to may have no lane at
+            // all, because its token was rotated in while Pacer was standing
+            // 30 minutes off its rediscover interval.
+            //
+            // Observed: after a switch, every poll for eight minutes belonged
+            // to the account the user had just left, while the one they moved
+            // to had no lane to poll. Its readings came only from the
+            // switcher's cache, and anything Pacer learns from a credential —
+            // the plan tier, most visibly — could not arrive at all.
+            //
+            // A keychain read is silent and this happens once per switch, so
+            // the cost is one subprocess at exactly the moment the answer is
+            // known to have changed.
+            lastDiscoveryAt = nil
+            ensureLanes()
         }
         var reclassified = 0
         for i in lanes.indices where lanes[i].state.account != .unknown {
@@ -622,6 +652,7 @@ public actor OAuthPoller: TokenPoolTesting {
                         displayName: a.label,
                         isActive: a.isActive || a.id == activeKey,
                         subscriptionType: a.subscriptionType,
+                        rateLimitTier: a.rateLimitTier,
                         fiveHourPct: a.latestFiveHourPct,
                         sevenDayPct: a.latestSevenDayPct,
                         extraUsageCents: a.latestExtraUsageCents,
@@ -797,6 +828,16 @@ public actor OAuthPoller: TokenPoolTesting {
                             surface: nil),
                         isActive: false)
                 })
+            // No credential here, and therefore no plan: this is a *usage
+            // reading* lifted from the switcher's cache, which carries
+            // percentages and nothing about the account behind them.
+            //
+            // This is a supplement, not a substitute. Pacer still polls any
+            // account it holds a usable token for — the secondary sweep runs
+            // every `perTokenMinInterval` — so an account being read from the
+            // cache here is not thereby unpolled. `recordPoll` never
+            // overwrites a known plan with nil, so a plan learned from a real
+            // poll survives every cache ingest after it.
             await recordPoll(snapshot, accountKey: key,
                              organizationId: reading.organizationId,
                              subscriptionType: nil,
@@ -982,6 +1023,17 @@ public actor OAuthPoller: TokenPoolTesting {
         // comes back on restart without touching Claude's stores.
         if !seeded {
             seeded = true
+            // A seeded credential can be older than the code reading it, and
+            // for a token no live source still offers there is nothing to
+            // replace it with: `mergeCandidates` refreshes a lane's credential
+            // only when a *current* copy of the same token turns up.
+            //
+            // That is the state a rotated-away account lands in. Its token
+            // still polls fine — usage keeps flowing — but the description of
+            // it stays whatever the pool holds, so a field added since is
+            // absent until that account is the live login again and the
+            // keychain offers the token afresh. Usage is never affected; only
+            // the metadata is.
             for stored in poolStore.loadAll() {
                 if let exp = stored.credential.expiresAt, exp < now { continue }
                 if lanes.contains(where: { $0.credential.accessToken == stored.credential.accessToken }) { continue }
@@ -1021,9 +1073,13 @@ public actor OAuthPoller: TokenPoolTesting {
     private func savePool() {
         let confirmed = lanes.filter { $0.state.account != .unknown }
         guard !confirmed.isEmpty else { return }   // don't wipe the pool pre-confirmation
-        let tokenSet = Set(confirmed.map { $0.credential.accessToken })
-        guard tokenSet != lastSavedPoolTokens else { return }
-        lastSavedPoolTokens = tokenSet
+        // Signature, not token set: refreshing a credential's description
+        // leaves the tokens identical, and comparing only those would keep the
+        // older shape on disk forever — which is how the pool came to be the
+        // thing hiding a field the keychain had all along.
+        let signature = Self.poolSignature(confirmed.map(\.credential))
+        guard signature != lastSavedPoolTokens else { return }
+        lastSavedPoolTokens = signature
         poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
     }
 
@@ -1031,9 +1087,33 @@ public actor OAuthPoller: TokenPoolTesting {
     /// of lanes we already hold (Desktop lanes persist between the gated
     /// keychain re-reads, so we don't lose them when discovery skips a
     /// re-read).
+    ///
+    /// **A known token still gets its description refreshed.** This used to
+    /// skip any candidate whose token it already had, which is right for lane
+    /// *state* and wrong for the credential itself: lanes are seeded from
+    /// Pacer's persisted pool at launch, so a credential serialised by an older
+    /// build stayed in place even as live sources returned a richer copy of the
+    /// same token. `rateLimitTier` was invisible for exactly this reason — the
+    /// keychain had it, `KeychainOAuth` parsed it, and the lane it should have
+    /// reached was already occupied by a pooled credential that predated the
+    /// field.
+    ///
+    /// Only a strictly newer stored shape replaces one, so this converges after
+    /// a single discovery rather than rewriting a lane every cycle, and lane
+    /// state is carried across untouched.
     private func mergeCandidates(_ candidates: [CredentialCandidate]) {
         var known = Set(lanes.map { $0.credential.accessToken })
-        for candidate in candidates where !known.contains(candidate.credential.accessToken) {
+        for candidate in candidates {
+            guard !known.contains(candidate.credential.accessToken) else {
+                guard candidate.credential.isCurrentStoredShape,
+                      let idx = lanes.firstIndex(where: {
+                          $0.credential.accessToken == candidate.credential.accessToken
+                      }),
+                      !lanes[idx].credential.isCurrentStoredShape
+                else { continue }
+                lanes[idx].credential = candidate.credential
+                continue
+            }
             var lane = Lane(
                 credential: candidate.credential,
                 source: candidate.source,
@@ -1175,10 +1255,11 @@ public actor OAuthPoller: TokenPoolTesting {
             lanes[idx].resolvedOrg = org ?? primaryOrg
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
             let sub = lanes[idx].credential.subscriptionType
+            let tier = lanes[idx].credential.rateLimitTier
             if isActive {
                 lanes[idx].state.account = .primary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
-                                 subscriptionType: sub, isActive: true,
+                                 subscriptionType: sub, rateLimitTier: tier, isActive: true,
                                  laneSource: lanes[idx].source)
                 return .success(
                     fiveHourPct: snapshot.fiveHour?.usedPercentage,
@@ -1190,7 +1271,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 // timeline so two accounts never mix.
                 lanes[idx].state.account = .secondary
                 await recordPoll(snapshot, accountKey: accountKey, organizationId: org,
-                                 subscriptionType: sub, isActive: false,
+                                 subscriptionType: sub, rateLimitTier: tier, isActive: false,
                                  laneSource: lanes[idx].source)
                 return .secondaryAccount(org: org)
             }
@@ -1508,6 +1589,7 @@ public actor OAuthPoller: TokenPoolTesting {
         accountKey: String,
         organizationId: String?,
         subscriptionType: String?,
+        rateLimitTier: String? = nil,
         isActive: Bool,
         laneSource: CredentialCandidate.Source,
         /// Which mechanism produced this observation. Defaults to a live poll;
@@ -1536,13 +1618,15 @@ public actor OAuthPoller: TokenPoolTesting {
                     isActive: isActive,
                     firstSeenAt: captured.sampledAt,
                     lastSeenAt: captured.sampledAt,
-                    subscriptionType: subscriptionType
+                    subscriptionType: subscriptionType,
+                    rateLimitTier: rateLimitTier
                 )
                 context.insert(account)
             }
             account.lastSeenAt = captured.sampledAt
             if account.organizationId == nil, let organizationId { account.organizationId = organizationId }
             if let subscriptionType { account.subscriptionType = subscriptionType }
+            if let rateLimitTier { account.rateLimitTier = rateLimitTier }
             if isActive { account.isActive = true }
             if let w = captured.fiveHour {
                 account.latestFiveHourPct = w.usedPercentage

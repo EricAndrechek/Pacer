@@ -1509,6 +1509,10 @@ extension ScreenshotMode {
                 firstSeenAt: now.addingTimeInterval(-90 * 86_400),
                 lastSeenAt: a.active ? now : now.addingTimeInterval(-25 * 60),
                 subscriptionType: "max",
+                // The tier, not just the family: the fixture should show what
+                // a real install shows, and "Max 20×" is the number a pacing
+                // decision is read against.
+                rateLimitTier: "default_claude_max_20x",
                 emailAddress: a.email,
                 organizationName: a.org,
                 latestFiveHourPct: a.five,

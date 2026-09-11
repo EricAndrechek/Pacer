@@ -30,9 +30,19 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
         /// The selected model's forward trajectory, downsampled and truncated
         /// at the crossing — ready for `PaceChartView`'s projection overlay.
         public let trajectory: [TrajectoryPoint]
+        /// Descriptive recent burn, in percentage points per hour — "what just
+        /// happened" over a per-window lookback (90 min for a session-scale
+        /// window, 24 h for a weekly one).
+        ///
+        /// Exported because it is the number that turns headroom into time: a
+        /// consumer holding 38 points at 12 pp/h has about three hours, which
+        /// is a decision it can make without re-deriving the engine's fit.
+        /// Optional so snapshots written before this field existed still decode.
+        public let burnPctPerHour: Double?
 
         public init(usedPct: Double, endPct: Double?, endLoPct: Double?, endHiPct: Double?,
-                    crossingUnix: Double?, resetsUnix: Double, trajectory: [TrajectoryPoint]) {
+                    crossingUnix: Double?, resetsUnix: Double, trajectory: [TrajectoryPoint],
+                    burnPctPerHour: Double? = nil) {
             self.usedPct = usedPct
             self.endPct = endPct
             self.endLoPct = endLoPct
@@ -40,6 +50,7 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
             self.crossingUnix = crossingUnix
             self.resetsUnix = resetsUnix
             self.trajectory = trajectory
+            self.burnPctPerHour = burnPctPerHour
         }
 
         public var crossingDate: Date? { crossingUnix.map { Date(timeIntervalSince1970: $0) } }

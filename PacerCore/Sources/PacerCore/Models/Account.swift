@@ -47,9 +47,21 @@ public final class Account {
     public var isActive: Bool
     public var firstSeenAt: Date
     public var lastSeenAt: Date
-    /// From the token's `subscriptionType` (e.g. `max20x`), when known —
-    /// lets the switcher hint the plan.
+    /// From the token's `subscriptionType` (`pro`, `max`, …), when known —
+    /// lets the switcher hint the plan. Coarse: Claude Code reports `max` for
+    /// both Max tiers.
     public var subscriptionType: String?
+    /// The token's `rateLimitTier` (`default_claude_max_20x`, …), which is the
+    /// field that actually says how big the budget is. Raw and OPEN — see
+    /// `OAuthCredential.rateLimitTier`. Optional, so this stays an additive
+    /// lightweight migration.
+    public var rateLimitTier: String?
+
+    /// The plan as a person reads it — "Max 20×" — from whichever of the two
+    /// reported fields says most. Nil when neither was reported.
+    public var planLabel: String? {
+        PlanLabel.describe(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier)
+    }
 
     // MARK: - Human identity
     //
@@ -168,6 +180,7 @@ public final class Account {
         firstSeenAt: Date,
         lastSeenAt: Date,
         subscriptionType: String? = nil,
+        rateLimitTier: String? = nil,
         emailAddress: String? = nil,
         organizationName: String? = nil,
         latestFiveHourPct: Double? = nil,
@@ -184,6 +197,7 @@ public final class Account {
         self.firstSeenAt = firstSeenAt
         self.lastSeenAt = lastSeenAt
         self.subscriptionType = subscriptionType
+        self.rateLimitTier = rateLimitTier
         self.emailAddress = emailAddress
         self.organizationName = organizationName
         self.latestFiveHourPct = latestFiveHourPct

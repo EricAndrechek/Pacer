@@ -102,6 +102,7 @@ final class AppBackgroundService {
     /// Observer for `.pacerAPIServerSettingsChanged` — re-applies the server
     /// config when the Settings UI toggles it or edits port/host/token.
     private var apiSettingsObserver: NSObjectProtocol?
+    private var apiScopeObserver: NSObjectProtocol?
 
     /// One engine per scope. `engine` stays as the all-accounts instance for
     /// everything that must not follow the window (alerts, the menu bar's
@@ -172,6 +173,8 @@ final class AppBackgroundService {
         startPricingRefreshTask()
         startHistoryPruneTask()
         installAPISettingsObserver()
+        installAPIScopeObserver()
+        refreshClaudeSkillIfInstalled()
         applyAPIServerConfig()
     }
 
@@ -207,6 +210,10 @@ final class AppBackgroundService {
             NotificationCenter.default.removeObserver(observer)
             apiSettingsObserver = nil
         }
+        if let observer = apiScopeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            apiScopeObserver = nil
+        }
     }
 
     // MARK: - Local API server
@@ -228,6 +235,48 @@ final class AppBackgroundService {
             forName: .pacerAPIServerSettingsChanged, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.applyAPIServerConfig() }
+        }
+    }
+
+    /// Keep the installed Claude Code skill in step with the app.
+    ///
+    /// This is the whole of "it updates when Pacer updates": a Sparkle update
+    /// replaces the copy inside the bundle, and the next launch copies it out
+    /// again. Deliberately does nothing unless the skill is already installed
+    /// and untouched — installing is a click the user makes once, and a file
+    /// they have edited is theirs (see `ClaudeSkillInstaller`).
+    private func refreshClaudeSkillIfInstalled() {
+        guard let installer = ClaudeSkillInstaller.bundled() else { return }
+        Task.detached(priority: .utility) {
+            do {
+                if try installer.refreshIfInstalled() {
+                    Log.write("Skill", "re-synced \(installer.destination.lastPathComponent) to \(installer.version)")
+                }
+            } catch {
+                Log.write("Skill", "skill refresh failed: \(error)")
+            }
+        }
+    }
+
+    /// Keep an account's engine scope warm while the API is being asked about
+    /// it, so `/v1/snapshot?account=` carries projections and not just live
+    /// percentages.
+    ///
+    /// `engine(for:)` is the same call the dashboard's scope switcher makes: it
+    /// creates the scope's engine if it is new and stamps it as asked-for, which
+    /// is what puts it back in `EngineHost.live`. The cost is one refit per
+    /// cycle for as long as something keeps asking, and the fifteen-minute idle
+    /// grace reclaims it after the consumer stops — the same bargain a human
+    /// scoping the window makes.
+    private func installAPIScopeObserver() {
+        apiScopeObserver = NotificationCenter.default.addObserver(
+            forName: .pacerAPIDidRequestAccountScope, object: nil, queue: nil
+        ) { [weak self] note in
+            guard let accountId = note.userInfo?["accountId"] as? String else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                _ = self.engines.engine(forAccount: accountId)
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import PacerCore
 
@@ -100,7 +101,7 @@ struct PacerAccountsAPITests {
 
     // MARK: - Prometheus
 
-    @Test func perAccountSeriesUseTheIdAndNeverTheEmailLabel() {
+    @Test func perAccountSeriesUseTheIdAndNeverTheEmailLabel() throws {
         let text = metrics(accounts: [
             PacerMetrics.AccountToday(
                 account: row(id: "org-work", label: "eng@example.com",
@@ -114,7 +115,15 @@ struct PacerAccountsAPITests {
         ])
         #expect(text.contains("pacer_account_cost_usd{account=\"org-work\"} 2.5"))
         #expect(text.contains("pacer_account_tokens{account=\"org-home\",kind=\"output\"} 200"))
-        #expect(text.contains("account=\"org-work\",name=\"Globex\",active=\"true\""))
+        // Checked as individual labels rather than one exact sequence: the
+        // order is incidental to what this is protecting, and pinning it made
+        // adding `plan` look like a regression.
+        let info = text.split(separator: "\n").first { $0.hasPrefix("pacer_account_info{account=\"org-work\"") }
+        let line = try #require(info.map(String.init))
+        #expect(line.contains("name=\"Globex\""))
+        #expect(line.contains("active=\"true\""))
+        // The plan is the denominator a percentage per hour is read against.
+        #expect(line.contains("plan=\"max20x\""))
         // The display label may be an email; a scraped endpoint must not carry one.
         #expect(!text.contains("@example.com"))
     }
@@ -215,5 +224,130 @@ struct PacerAccountsAPITests {
             dataSource: .init(source: nil, lastSampleAt: nil, ageSeconds: nil, forecastFresh: false))
         return PacerMetrics(snapshot: snapshot, todayAccounts: accounts,
                             version: "1.0", build: "1").prometheusText()
+    }
+}
+
+/// Resolving a session's own config directory to the account signed into it.
+///
+/// The half of the join a client cannot do: a Claude Code session pinned to its
+/// own profile knows the directory it was handed and nothing else, and only
+/// Pacer knows whose login is inside it. Without this a script running in a
+/// pinned session paces against whichever account holds the *default* login —
+/// under concurrent use, a different account's windows entirely.
+@Suite("Config directory resolves to an account")
+struct PacerConfigDirResolutionTests {
+
+    private static func makeContainer() throws -> ModelContainer {
+        try ModelContainer(
+            for: Account.self, AccountActivation.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+
+    @MainActor
+    private static func seed(_ context: ModelContext) {
+        // The default login: no root pinned to it.
+        context.insert(AccountActivation(
+            accountId: "org-work", startedAt: Date(timeIntervalSince1970: 1_000),
+            endedAt: nil, rootPath: nil, source: AccountActivation.sourceObserved))
+        // A second account running beside it in its own profile.
+        context.insert(AccountActivation(
+            accountId: "org-home", startedAt: Date(timeIntervalSince1970: 2_000),
+            endedAt: nil, rootPath: "/tmp/profiles/2", source: AccountActivation.sourceObserved))
+        // A profile that has since been handed back.
+        context.insert(AccountActivation(
+            accountId: "org-old", startedAt: Date(timeIntervalSince1970: 500),
+            endedAt: Date(timeIntervalSince1970: 900), rootPath: "/tmp/profiles/9",
+            source: AccountActivation.sourceObserved))
+        try? context.save()
+    }
+
+    @MainActor
+    @Test func aPinnedRootResolvesToItsOwnAccount() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/2",
+                                                 container: container) == "org-home")
+    }
+
+    /// `CLAUDE_CONFIG_DIR` is comma-separated; the first root an activation
+    /// claims is the login the session is writing under.
+    @MainActor
+    @Test func aCommaSeparatedListPicksTheClaimedRoot() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(
+            configDir: "/tmp/nowhere,/tmp/profiles/2", container: container) == "org-home")
+    }
+
+    @MainActor
+    @Test func trailingSlashesAndDotsAreTheSameDirectory() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/2/",
+                                                 container: container) == "org-home")
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/./2",
+                                                 container: container) == "org-home")
+    }
+
+    /// A closed activation is not a live login: that profile is not currently
+    /// anyone's, so the caller falls back to the active account rather than
+    /// being told a stale answer.
+    @MainActor
+    @Test func aReleasedProfileResolvesToNothing() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/9",
+                                                 container: container) == nil)
+    }
+
+    /// A brand-new profile Pacer has never seen a login in is a real state, and
+    /// "cannot say" beats inventing an account.
+    @MainActor
+    @Test func anUnknownRootIsNilRatherThanAGuess() throws {
+        let container = try Self.makeContainer()
+        Self.seed(ModelContext(container))
+        #expect(try PacerAccountsBuilder.resolve(configDir: "/tmp/profiles/77",
+                                                 container: container) == nil)
+        #expect(try PacerAccountsBuilder.resolve(configDir: "", container: container) == nil)
+    }
+}
+
+/// Turning Anthropic's tier string into a plan a human — or an agent sizing a
+/// fan-out — can act on.
+@Suite("Plan labels")
+struct PlanLabelTests {
+
+    private func credential(subscription: String?, tier: String?) -> OAuthCredential {
+        OAuthCredential(accessToken: "x", expiresAt: nil,
+                        subscriptionType: subscription, rateLimitTier: tier)
+    }
+
+    /// The reason this exists: `subscriptionType` calls both Max tiers "max",
+    /// and 20% of a Max 20× budget is four times 20% of a Max 5× one.
+    @Test func theTierDistinguishesWhatTheSubscriptionTypeCannot() {
+        #expect(credential(subscription: "max", tier: "default_claude_max_20x").planLabel == "Max 20×")
+        #expect(credential(subscription: "max", tier: "default_claude_max_5x").planLabel == "Max 5×")
+        // Both report the same coarse family.
+        #expect(credential(subscription: "max", tier: nil).planLabel == "Max")
+    }
+
+    @Test func tiersWithoutAMultiplierReadAsTheirFamily() {
+        #expect(credential(subscription: "pro", tier: "default_claude_pro").planLabel == "Pro")
+        #expect(credential(subscription: "free", tier: "default_claude_free").planLabel == "Free")
+    }
+
+    /// Parsed rather than enumerated, so a tier that ships next month renders
+    /// as itself instead of being mapped to something wrong — the same rule
+    /// the rest of Pacer applies to Anthropic's open vocabularies.
+    @Test func anUnfamiliarTierIsReportedRatherThanGuessedAt() {
+        #expect(credential(subscription: "max", tier: "default_claude_ultra_50x").planLabel == "Ultra 50×")
+        #expect(credential(subscription: nil, tier: "something_else_entirely").planLabel
+            == "Something")
+        #expect(credential(subscription: nil, tier: nil).planLabel == nil)
+    }
+
+    @Test func aBlankTierFallsBackToTheSubscription() {
+        #expect(credential(subscription: "max", tier: "   ").planLabel == "Max")
+        #expect(credential(subscription: "pro", tier: "").planLabel == "Pro")
     }
 }
