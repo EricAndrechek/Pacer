@@ -7,38 +7,33 @@ import Testing
 /// implicitly via the M3.5 ScanCoordinator integration test against
 /// the user's real ~/.claude/projects/ tree.
 
-@Test func manualTriggerEmitsOnStream() async throws {
+/// The trigger is yielded *before* anything iterates, on purpose.
+///
+/// `triggers()` builds its stream with `.bufferingNewest(1)`, so a yield with
+/// no reader waiting is held rather than dropped — which means this test needs
+/// no second task, no delay, and no timeout. It is a plain sequence of awaits.
+///
+/// It used to race the trigger against a five-second `Task.sleep` and assert
+/// that the trigger won. That is a wall clock, and a wall clock measures the
+/// CI runner rather than the watcher: the sleeping task needs no thread until
+/// it fires, while the task consuming the stream needs one immediately, so
+/// under a loaded pool the timeout wins a race the watcher never lost. It
+/// failed twice in a row on `main` that way, each run taking 46 seconds to
+/// decide, while passing locally in 53 ms — a red build that said nothing
+/// about the code under test.
+///
+/// The time limit is only so a genuine regression fails instead of hanging
+/// forever on an iterator nobody will ever feed.
+@Test(.timeLimit(.minutes(1)))
+func manualTriggerEmitsOnStream() async throws {
     let watcher = JSONLWatcher(mode: .manual)
     let stream = await watcher.triggers()
     await watcher.start(roots: [])
 
-    Task {
-        // Small delay to make sure the iterator is parked before we yield.
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        await watcher.manualTrigger()
-    }
+    await watcher.manualTrigger()
 
-    // Race the trigger against a safety timeout so a miss fails loudly
-    // rather than hanging the suite. 5s, not 1s: the trigger fires after
-    // ~50ms, but on a loaded/slow CI runner (where the whole suite's tests
-    // run in parallel) scheduling that task within 1s isn't guaranteed — a
-    // too-tight timeout turns a scheduling delay into a spurious failure.
-    let received = await withTaskGroup(of: Date?.self) { group in
-        group.addTask {
-            for await date in stream {
-                return date
-            }
-            return nil
-        }
-        group.addTask {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            return nil
-        }
-        let first = await group.next() ?? nil
-        group.cancelAll()
-        return first
-    }
-    #expect(received != nil)
+    var iterator = stream.makeAsyncIterator()
+    #expect(await iterator.next() != nil)
     await watcher.stop()
 }
 

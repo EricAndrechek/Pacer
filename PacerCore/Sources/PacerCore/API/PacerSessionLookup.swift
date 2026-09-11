@@ -17,14 +17,36 @@ import SwiftData
 ///   these turns, not an inference about a profile.
 ///
 /// Both come from the newest recorded turn, so a session Pacer has not seen a
-/// turn from yet is "not found" rather than a guess. A subagent gets its own
-/// session id, so this answers for the subagent rather than its parent.
+/// turn from yet is "not found" rather than a guess.
+///
+/// **A session is not one model.** This used to claim a subagent gets its own
+/// session id and so gets an answer about itself. It does not. Claude Code
+/// writes a subagent's turns to `<session>/subagents/agent-*.jsonl` under the
+/// *parent's* session id — checked across every subagent transcript on this
+/// machine, 2,156 of them, and all carrying the parent's id. So "the newest
+/// turn" is whichever agent wrote last, and a Sonnet builder asking what it
+/// runs was told "Fable", its orchestrator's model, and gated on a window
+/// that does not bind it.
+///
+/// Nothing can be inferred to fix that: there is no per-agent model variable
+/// in the environment a tool call inherits, and the session id is shared. So
+/// `models` reports the set instead, and a caller that finds more than one
+/// member knows its own identity is not knowable from here.
 public struct PacerSessionLookup: Codable, Sendable {
     public let schemaVersion: Int
     public let generatedAt: Date
     public let sessionId: String
-    /// The model on the most recent real turn — what a per-model cap gates.
+    /// The model on the most recent real turn.
+    ///
+    /// Only as meaningful as `models` is short — with a fan-out running, this
+    /// is whichever agent happened to write last. Prefer `models`.
     public let model: String?
+    /// Every model this session has run recently, newest first.
+    ///
+    /// One member means the answer is unambiguous. More than one means the
+    /// session is a parent and its subagents running different models at the
+    /// same time, and no caller inside it can tell which one it is.
+    public let models: [String]
     /// The account that turn was attributed to.
     public let accountId: String?
     public let projectPath: String?
@@ -73,6 +95,12 @@ public struct PacerSessionList: Codable, Sendable {
 }
 
 public enum PacerSessionLookupBuilder {
+
+    /// How far back a turn still counts as "this session is running that
+    /// model right now". Long enough to span a subagent that is thinking,
+    /// short enough that a model used once an hour ago stops muddying the
+    /// answer.
+    static let concurrencyWindow: TimeInterval = 15 * 60
 
     public nonisolated static func lookup(sessionId: String,
                                           now: Date = Date()) throws -> PacerSessionLookup? {
@@ -149,19 +177,32 @@ public enum PacerSessionLookupBuilder {
         var descriptor = FetchDescriptor<TokenSample>(
             predicate: #Predicate { $0.sessionId == trimmed },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        descriptor.fetchLimit = 16
+        // Enough rows to see a fan-out, not so many that an on-demand API
+        // call walks a long session. A parent and its subagents interleave
+        // within seconds of each other, so the models in flight show up in
+        // the newest handful either way.
+        descriptor.fetchLimit = 200
         let rows = (try? context.fetch(descriptor)) ?? []
         guard let newest = rows.first else { return nil }
 
-        let model = rows.first {
-            $0.model != JSONLLineParser.syntheticModelSentinel && !$0.model.isEmpty
-        }?.model
+        // Distinct models on recent turns, newest first. `<synthetic>` is
+        // Claude Code's sentinel for non-billable internal traffic, which
+        // names no real model and is skipped everywhere else in Pacer.
+        let cutoff = newest.sampledAt.addingTimeInterval(-concurrencyWindow)
+        var seen = Set<String>()
+        var models: [String] = []
+        for row in rows where row.sampledAt >= cutoff {
+            guard row.model != JSONLLineParser.syntheticModelSentinel,
+                  !row.model.isEmpty else { continue }
+            if seen.insert(row.model).inserted { models.append(row.model) }
+        }
         let path = newest.projectPath
         return PacerSessionLookup(
             schemaVersion: 1,
             generatedAt: now,
             sessionId: trimmed,
-            model: model,
+            model: models.first,
+            models: models,
             accountId: newest.accountId,
             projectPath: path,
             project: path.map { URL(fileURLWithPath: $0).lastPathComponent },

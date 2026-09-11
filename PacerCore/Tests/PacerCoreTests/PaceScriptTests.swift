@@ -528,6 +528,85 @@ struct PaceScriptTests {
 
     // MARK: - Knowing what you are
 
+    private func sessionStub(_ models: [String]) throws -> StubServer {
+        let list = models.map { "\"\($0)\"" }.joined(separator: ", ")
+        return try StubServer(status: 200, body: """
+        {
+          "accountId" : "org-work",
+          "model" : "\(models.first ?? "")",
+          "models" : [\(list)],
+          "sessionId" : "abc-123"
+        }
+        """)
+    }
+
+    /// Reported from a real run: "a subagent running `pace.sh status --model
+    /// auto` resolves the session's model (Fable), not its own (Sonnet), so
+    /// builders are gating on the Fable window rather than theirs."
+    ///
+    /// A subagent shares its parent's session id — every subagent transcript
+    /// on the machine this was found on carries the parent's, all 2,156 — so
+    /// the session endpoint answers about whichever agent wrote last. Here
+    /// that is the orchestrator, whose weekly cap sits at 95% and does not
+    /// reset for three days. Stalling a fan-out of builders on a window that
+    /// does not bind them costs the whole run.
+    @Test func aFanOutDoesNotGateBuildersOnTheOrchestratorsCap() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-fable-5-1", "claude-sonnet-5"])
+        defer { server.stop() }
+        let result = try run(box, ["gate", "--cap", "85", "--model", "auto"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 0)
+        #expect(result.out.contains("GO"))
+        #expect(result.out.contains("ambiguous"))
+        // Account-wide windows still bind: 12% and 32%, both under the cap.
+        #expect(!box.stateText.contains("\"tripWindow\": \"Fable\""))
+    }
+
+    /// The other half of that trade. One model in flight is not ambiguous, and
+    /// a per-model cap must still stop the work — otherwise the fix for the
+    /// fan-out would have quietly ungated everybody.
+    @Test func oneModelInFlightStillGatesOnItsOwnCap() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-fable-5-1"])
+        defer { server.stop() }
+        let result = try run(box, ["gate", "--cap", "85", "--model", "auto"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("PAUSE"))
+        #expect(result.out.contains("Fable"))
+    }
+
+    /// `--model auto` decided something on every run and printed it nowhere,
+    /// so an agent could gate against the wrong model indefinitely with
+    /// nothing on screen to say which one it had picked.
+    @Test func autoSaysWhichModelItResolved() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-fable-5-1"])
+        defer { server.stop() }
+        let result = try run(box, ["report", "--model", "auto"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 0)
+        #expect(result.out.contains("detected"))
+        #expect(result.out.contains("claude-fable-5-1"))
+    }
+
+    /// "I cannot tell which model I am" is a third state, distinct from naming
+    /// one and from asking for all of them. Only a window that names no model
+    /// binds it.
+    @Test func anUnknownIdentityBindsOnlyAccountWideWindows() throws {
+        let box = try Sandbox(metrics: Self.metrics)
+        let result = try run(box, ["gate", "--cap", "85"],
+                             extra: ["PACE_MODEL": "__ambiguous__"])
+        #expect(result.status == 0)
+        #expect(result.out.contains("GO"))
+        let listing = try run(box, ["report"], extra: ["PACE_MODEL": "__ambiguous__"])
+        #expect(listing.out.contains("binds Fable only"))
+    }
+
     /// `--model auto` asks Pacer what this session is running, using the
     /// session id Claude Code exports into every command it runs.
     @Test func modelAutoResolvesThroughTheSessionEndpoint() throws {

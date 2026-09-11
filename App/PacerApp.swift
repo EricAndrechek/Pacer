@@ -57,6 +57,9 @@ struct PacerApp: App {
                 // alongside ContentView keeps it scoped to the app's
                 // foreground lifetime.
                 .background(NotificationsHost())
+                // Hands the placement code this scene's real NSWindow, so
+                // it stops having to guess which window is the dashboard.
+                .background(DashboardWindowRegistrar())
                 // Hand the shared intelligence engine to the view tree so
                 // cards can ask it typed questions. Created in the background
                 // service's init, so it's non-nil here.

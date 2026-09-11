@@ -25,6 +25,11 @@ proceed ungated.**
   same percentage.
 - **Pass `--model auto`** so a per-model cap only gates work that actually uses
   that model, and so the right account is read when several are signed in.
+- **In a fan-out, name the model instead.** A subagent's turns are recorded
+  under its parent's session id and nothing names a per-agent model, so `auto`
+  cannot tell a builder from its orchestrator. With more than one model in
+  flight it binds only the account-wide windows and says so; pass
+  `--model <yours>` to gate on your own cap.
 
 The skill is the current word on flags and protocol. Don't restate its usage in
 CLAUDE.md — point at this file instead.
