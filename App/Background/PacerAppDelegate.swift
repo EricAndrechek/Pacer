@@ -83,17 +83,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // is main-actor isolated, matching the inner Task.
     private var menuBarLastChipsEmpty: Bool = false
 
-    /// One-shot screen hint for the cold-open path. When the user opens
-    /// Pacer from the menu bar / hotkey but the window scene was torn
-    /// down (closed dashboard → SwiftUI `Window` destroys its NSWindow),
-    /// we can't reposition the window synchronously — it doesn't exist
-    /// yet. We capture the screen the gesture happened on here and let
-    /// the `didBecomeKey` observer reseat the freshly-materialized
-    /// window onto it exactly once. Captured at gesture time (not read
-    /// in the observer) because the cursor may drift between the click
-    /// and the async window creation.
-    private var pendingActiveScreen: NSScreen?
-
     override init() {
         // Screenshot/demo mode: never touch the user's real store, logs,
         // or the single-instance gate (we may be running alongside a live
@@ -571,22 +560,6 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.applyActivationPolicyForCurrentWindows()
                 if let window {
                     Self.placeDashboardWindow(window)
-                    // Cold-open reseat: a window we asked AppKit to
-                    // materialize (closed dashboard → reopened from the
-                    // menu bar) just became key. Move it onto the screen
-                    // the user opened us from, then clear the one-shot
-                    // hint so ordinary refocus events never relocate it.
-                    //
-                    // Only ever a fallback. `ensureMainWindowVisible` leaves
-                    // this hint unset when there is a frame the user parked,
-                    // because following the cursor across displays would drag
-                    // the window off the monitor they keep it on — and the
-                    // move observer then records that as the new home, which
-                    // is how a parked position gets lost for good.
-                    if let screen = self.pendingActiveScreen {
-                        self.pendingActiveScreen = nil
-                        Self.reposition(window, onto: screen)
-                    }
                 }
             }
         }
@@ -662,113 +635,59 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Make the main window behave like a tool window for a menu-bar
-    /// agent app: when the user activates Pacer (clicks the status
-    /// item, hits the global shortcut, ⌘-Tabs to it), the window
-    /// follows them to the active Space rather than yanking them via
-    /// Mission Control to whichever Space it was last left on.
+    /// Summoning the dashboard takes you to it. It does not come to you.
     ///
-    /// `.moveToActiveSpace` is exactly the right knob for this — it
-    /// only fires on app activation, doesn't make the window appear
-    /// on every Space at once, and doesn't fight Spaces assignment
-    /// for users who pin windows to specific Spaces. It matches what
-    /// 1Password / Things / Raycast / Bartender / etc. all do.
+    /// The window belongs where the user put it — on a display, on a Space.
+    /// Both mechanisms that used to override that are gone:
+    /// `reposition(_:onto:)` moved it to whichever display the cursor was
+    /// on, and `.moveToActiveSpace` moved it to whichever Space you were
+    /// looking at. Each was a deliberate choice (#37 and the menu-bar
+    /// rework) made before Pacer remembered a parked frame at all;
+    /// together they meant a window kept on a second monitor could not
+    /// stay there.
     ///
-    /// We `.insert` rather than assign so we preserve whatever defaults
-    /// AppKit/SwiftUI already set (most importantly `.managed`, which
-    /// is what lets the window participate in Mission Control / Stage
-    /// Manager normally).
-    private static func applyMenuBarAppBehavior(_ window: NSWindow) {
-        window.collectionBehavior.insert(.moveToActiveSpace)
-    }
-
-    /// Undo `applyMenuBarAppBehavior` once the window has been brought
-    /// across.
+    /// Without `.moveToActiveSpace`, AppKit's documented default is the
+    /// behaviour we now want — ordering the window front switches you to
+    /// the Space it is on — so the primary path asks for nothing special.
     ///
-    /// `.moveToActiveSpace` is not a property of the *gesture*, it is a
-    /// property of the *window* — so leaving it applied means the window
-    /// follows onto the active Space every time it is shown, including on
-    /// the relaunch after a dev install, which is nobody's intent. Pairing
-    /// each apply with a removal keeps the behavior scoped to the moment
-    /// the user asked for the window, and lets it otherwise belong to the
-    /// Space and display they left it on.
+    /// **The safety net.** That switch is also subject to a system
+    /// preference: Desktop & Dock → Mission Control → "When switching to
+    /// an application, switch to a Space with open windows for the
+    /// application" (`AppleSpacesSwitchOnActivate`, off on at least one
+    /// machine that runs this). With it off macOS may decline to follow
+    /// the window, and the failure mode is the worst one available — you
+    /// click the menu bar and nothing appears to happen. So check, and if
+    /// the window is still somewhere you cannot see, bring it over rather
+    /// than leave you staring at nothing.
     ///
-    /// Removal is deferred one runloop turn so it lands after AppKit has
-    /// finished ordering the window front; clearing it synchronously can
-    /// race the move it was meant to cause. Once the window is on a Space,
-    /// dropping the behavior does not move it back.
-    private static func releaseMenuBarAppBehavior(_ window: NSWindow) {
-        DispatchQueue.main.async {
-            window.collectionBehavior.remove(.moveToActiveSpace)
+    /// A window on a display with only one Space is always on the active
+    /// Space, so none of this fires for that case.
+    private static func revealAcrossSpaces(_ window: NSWindow) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            MainActor.assumeIsolated {
+                guard window.isVisible, !window.isOnActiveSpace else { return }
+                Log.write(
+                    "Placement",
+                    "summon: macOS did not follow the window to its Space — bringing it over")
+                // `.insert` rather than assign, preserving the defaults
+                // AppKit/SwiftUI already set — most importantly `.managed`,
+                // which is what lets the window take part in Mission Control
+                // and Stage Manager normally.
+                window.collectionBehavior.insert(.moveToActiveSpace)
+                window.makeKeyAndOrderFront(nil)
+                // Scoped to this gesture. `.moveToActiveSpace` is a property
+                // of the *window*, not of the gesture, so leaving it on means
+                // the window follows you every time it is shown — including
+                // on the relaunch after an install, which is nobody's intent.
+                // Deferred a turn so removal lands after AppKit has finished
+                // the move it was meant to cause.
+                DispatchQueue.main.async {
+                    window.collectionBehavior.remove(.moveToActiveSpace)
+                }
+            }
         }
     }
 
-    /// macOS persists the main window's frame across launches via the
-    /// `frameAutosaveName`. If the user moved the window onto a
-    /// secondary display and then disconnected it, the restored frame
-    /// can sit entirely off-screen — the user opens "Pacer" from the
-    /// menu bar, sees nothing, and has no obvious way back. Recenter
-    /// on the primary screen (the one with the menu bar) and save so
-    /// the next launch doesn't repeat the dance.
-    ///
-    /// `NSWindow.center()` is AppKit's blessed centering API; on
-    /// post-display-disconnect setups it lands on whatever screen
-    /// macOS has elected as primary, which is exactly where the user
-    /// is working from after their secondary went away.
-
-
-    /// The screen the user is currently working on — the one whose menu
-    /// bar they just clicked, or where the cursor sits when the global
-    /// hotkey fires. `NSEvent.mouseLocation` and `NSScreen.frame` share
-    /// the same bottom-left-origin global coordinate space, so a simple
-    /// containment test resolves it. Falls back to `NSScreen.main` (the
-    /// screen with the key window / active menu bar) when the cursor is
-    /// in a gap between displays.
-    private static func activeScreen() -> NSScreen? {
-        let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
-    }
-
-    /// Move the main window onto `target` when — and only when — it's
-    /// currently on a *different* display. A user who keeps Pacer on one
-    /// screen and positions it deliberately is never disturbed; a
-    /// multi-monitor user gets the window to follow them to whichever
-    /// display they opened it from. We preserve the window's relative
-    /// position within the screen (top-left stays top-left, etc.) rather
-    /// than always centering, so the layout stays familiar across the
-    /// jump, then clamp so the whole frame lands inside the visible area.
-    private static func reposition(_ window: NSWindow, onto target: NSScreen) {
-        guard window.canBecomeMain, !(window is NSPanel) else { return }
-        let frame = window.frame
-        let center = NSPoint(x: frame.midX, y: frame.midY)
-        // Already on the target display? Leave the in-screen position
-        // exactly as the user left it — we only ever relocate across
-        // displays, never nudge within one.
-        if target.frame.contains(center) { return }
-
-        let targetVF = target.visibleFrame
-        let source = NSScreen.screens.first { $0.frame.contains(center) }
-        var origin: NSPoint
-        if let sourceVF = source?.visibleFrame, sourceVF.width > 0, sourceVF.height > 0 {
-            let relX = (frame.minX - sourceVF.minX) / sourceVF.width
-            let relY = (frame.minY - sourceVF.minY) / sourceVF.height
-            origin = NSPoint(x: targetVF.minX + relX * targetVF.width,
-                             y: targetVF.minY + relY * targetVF.height)
-        } else {
-            // Window wasn't on any screen (e.g. a stale off-screen
-            // autosaved frame) — center it on the target instead.
-            origin = NSPoint(x: targetVF.midX - frame.width / 2,
-                             y: targetVF.midY - frame.height / 2)
-        }
-        // Clamp fully on-screen. `max(targetVF.minX, maxX)` keeps the
-        // lower bound sane when the window is wider/taller than the
-        // target's visible area (pins to top-left instead of inverting).
-        let maxX = targetVF.maxX - frame.width
-        let maxY = targetVF.maxY - frame.height
-        origin.x = min(max(origin.x, targetVF.minX), max(targetVF.minX, maxX))
-        origin.y = min(max(origin.y, targetVF.minY), max(targetVF.minY, maxY))
-        window.setFrameOrigin(origin)
-    }
 
     /// `.regular` when at least one user-visible window is open
     /// (Dock icon shows so user can Cmd+Q, Cmd+Tab back, etc.);
@@ -1045,62 +964,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // brings us forward when called from one of those gestures.
         // The deprecated form would silently leave the window behind
         // whatever app was previously frontmost.
-        // Resolve the display the user opened us from BEFORE anything
-        // async runs — the cursor may drift afterward.
-        let target = Self.activeScreen()
         NSApp.activate()
         if let window = NSApp.windows.first(where: { MainWindowPlacement.isDashboard($0) }) {
-            // Pin the menu-bar-app collection behavior BEFORE
-            // `makeKeyAndOrderFront` so the very first activation
-            // already pulls the window to the current Space rather
-            // than bouncing the user via Mission Control to wherever
-            // the window was last left.
-            Self.applyMenuBarAppBehavior(window)
-            // Where the user *parked* it wins over where their cursor is.
-            //
-            // Two systems owned this and they fought. `MainWindowPlacement`
-            // exists precisely so a dashboard kept on a second monitor stays
-            // there across relaunches; `reposition(_:onto:)` predates it and
-            // drags the window to whichever screen the menu bar was clicked
-            // on. Opening from the menu bar ran the second, so the window
-            // arrived on the wrong display *and* in the wrong spot — and the
-            // `didBecomeKey` observer then recorded that as the new home, so
-            // it stuck.
-            //
-            // Following the cursor is still right for someone who has never
-            // placed the window, which is exactly when there is no stored
-            // frame. So: stored placement first, cursor only as the fallback.
-            if let stored = MainWindowPlacement.storedFrame,
-               MainWindowPlacement.isUsable(stored) {
-                MainWindowPlacement.apply(to: window, reason: "menu-bar open")
-            } else if let target {
-                Self.reposition(window, onto: target)
-            }
+            // The window keeps the display and the Space the user left it
+            // on. All this gesture does is put it in front of them — which,
+            // for a window on another Space, means taking them to it. See
+            // `revealAcrossSpaces`.
+            MainWindowPlacement.apply(to: window, reason: "menu-bar open")
             window.deminiaturize(nil)
             window.makeKeyAndOrderFront(nil)
             // Re-assert after ordering front: AppKit can nudge a window as it
             // comes forward, and this is the gesture where being a few points
             // off is most visible.
             MainWindowPlacement.apply(to: window, reason: "menu-bar open")
-            // Scoped to this gesture only — see `releaseMenuBarAppBehavior`.
-            Self.releaseMenuBarAppBehavior(window)
+            Self.revealAcrossSpaces(window)
             return true
         }
-        // Cold open: the window doesn't exist yet and will materialize
-        // asynchronously via the reopen flow below. Stash the target
-        // screen so `didBecomeKey` reseats the new window onto it once.
+        // Cold open: the window doesn't exist yet and materializes
+        // asynchronously via the reopen flow below.
         //
-        // Unless the user has parked the window somewhere, in which case
-        // there is nothing to decide and following the cursor is actively
-        // wrong: it drags the dashboard off the monitor it lives on, and
-        // the move observer then records the arrival as the new home. That
-        // is not hypothetical — it is how a window parked on the bottom of
-        // a portrait display ends up pinned to a corner of another one,
-        // permanently, because the clamp that fits it onto the new screen
-        // lands on the screen's own origin.
-        let hasParkedFrame = MainWindowPlacement.storedFrame
-            .map(MainWindowPlacement.isUsable) ?? false
-        pendingActiveScreen = hasParkedFrame ? nil : target
+        // There is no Space to switch to — a window that does not exist has
+        // not been anywhere. macOS creates it on the Space you are on, and
+        // `MainWindowPlacement` puts it at the frame you parked, so it opens
+        // where you keep it, on the Space you asked from. With no parked
+        // frame (a first ever open) the scene's `.defaultPosition(.center)`
+        // centres it on the main display, and the first time you move it
+        // that becomes home.
         // No window exists. With `LSUIElement=true` and a SwiftUI
         // `Window("Pacer", id: "main")` scene, closing the dashboard
         // tears the window down — the scene is still in memory but no
