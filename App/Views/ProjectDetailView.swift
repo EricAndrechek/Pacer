@@ -784,7 +784,8 @@ struct ProjectDetailView: View {
                 // strides ≈ 9 labels; reads well at the card's width.
                 AxisMarks(values: stridedDailySeriesDates(every: max(dailySeries.count / 9, 1))) { value in
                     AxisValueLabel {
-                        if let date = value.as(String.self) {
+                        if let date = value.as(String.self),
+                           dailyAxisMarks.contains(date) {
                             Text(shortDailyDate(date))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.secondary)
@@ -819,6 +820,17 @@ struct ProjectDetailView: View {
     private func stridedDailySeriesDates(every n: Int) -> [String] {
         guard !dailySeries.isEmpty, n > 0 else { return [] }
         return stride(from: 0, to: dailySeries.count, by: n).map { dailySeries[$0].date }
+    }
+
+    /// The same dates as a set, for deciding label-by-label whether to draw.
+    ///
+    /// `AxisMarks(values:)` is not honoured on a band axis from macOS 26 on —
+    /// every date gets a mark — so the stride has to be enforced in the label
+    /// content too or a long range renders every date overlapping. Same
+    /// reasoning as `PacerDateAxis.labelIfMarked`, which the charts built on
+    /// the shared helper use.
+    private var dailyAxisMarks: Set<String> {
+        Set(stridedDailySeriesDates(every: max(dailySeries.count / 9, 1)))
     }
 
     /// `2026-04-30` → `04-30`. Year omitted at this density; user

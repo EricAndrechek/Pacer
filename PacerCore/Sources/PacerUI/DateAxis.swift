@@ -22,18 +22,36 @@ import Foundation
 /// ```
 /// let axis = pacerDateAxis(dates)
 /// .chartXAxis { AxisMarks(values: axis.values) { v in
-///     AxisValueLabel { Text(axis.label(v.as(String.self) ?? "")) } } }
+///     AxisValueLabel {
+///         if let d = v.as(String.self), let text = axis.labelIfMarked(d) { Text(text) }
+///     } } }
 /// ```
 public struct PacerDateAxis {
     /// The `YYYY-MM-DD` x-values to place a mark at (a subset of the input).
     public let values: [String]
+    private let marked: Set<String>
     private let monthly: Bool
     private let straddlesYear: Bool
 
     init(values: [String], monthly: Bool, straddlesYear: Bool) {
         self.values = values
+        self.marked = Set(values)
         self.monthly = monthly
         self.straddlesYear = straddlesYear
+    }
+
+    /// Display text for `value` when it is one of `values`, `nil` otherwise —
+    /// the form every caller should use.
+    ///
+    /// `AxisMarks(values:)` is a request, not a guarantee. macOS 26+ stopped
+    /// honouring it on a categorical (band) axis and marks every band
+    /// instead, so the Models trend's 90-day axis drew all 90 dates on top of
+    /// each other as an unreadable smear where macOS 15 drew six. Deciding
+    /// here, in the label content, is the same answer on every OS: where
+    /// `values:` is honoured this never rejects anything, and where it is
+    /// ignored this does the thinning the axis asked for.
+    public func labelIfMarked(_ value: String) -> String? {
+        marked.contains(value) ? label(value) : nil
     }
 
     /// Display text for a marked value: `MM-DD` at day granularity, month

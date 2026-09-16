@@ -88,4 +88,26 @@ struct ShortRangeAxisTests {
         #expect(!axis.values.contains(days.last!))
         #expect(!axis.values.isEmpty)
     }
+
+    /// The axis has to thin itself in the label content, not just by asking
+    /// `AxisMarks(values:)` — macOS 26+ ignores that request on a band axis
+    /// and marks every date, which rendered a 90-day trend as an unreadable
+    /// smear of overlapping labels.
+    @Test func labelIfMarkedRejectsUnmarkedDates() {
+        let days = (1...30).map { String(format: "2026-09-%02d", $0) }
+        let axis = pacerDateAxis(days)
+
+        // Every marked date still labels exactly as `label` would.
+        for marked in axis.values {
+            #expect(axis.labelIfMarked(marked) == axis.label(marked))
+        }
+        // Everything else is refused, so a chart handed every band draws only
+        // the chosen few.
+        let unmarked = days.filter { !axis.values.contains($0) }
+        #expect(!unmarked.isEmpty)
+        for date in unmarked {
+            #expect(axis.labelIfMarked(date) == nil)
+        }
+        #expect(axis.labelIfMarked("not-a-date") == nil)
+    }
 }

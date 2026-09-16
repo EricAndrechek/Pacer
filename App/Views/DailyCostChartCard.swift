@@ -197,8 +197,11 @@ struct DailyCostChartCard: View {
         .chartXAxis {
             AxisMarks(values: dateAxis.values) { value in
                 AxisValueLabel {
-                    if let date = value.as(String.self) {
-                        Text(dateAxis.label(date))
+                    // See `PacerDateAxis.labelIfMarked` — the `values:` above
+                    // is not honoured on a band axis from macOS 26 on.
+                    if let date = value.as(String.self),
+                       let text = dateAxis.labelIfMarked(date) {
+                        Text(text)
                             .font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }

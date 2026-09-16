@@ -744,8 +744,13 @@ private struct ModelsContent: View {
                 .chartXAxis {
                     AxisMarks(values: trendAxis.values) { value in
                         AxisValueLabel {
-                            if let date = value.as(String.self) {
-                                Text(trendAxis.label(date))
+                            // `labelIfMarked`, not `label`: macOS 26+ ignores
+                            // the `values:` above on a band axis and marks
+                            // every date, which drew all 90 on top of each
+                            // other. See `PacerDateAxis.labelIfMarked`.
+                            if let date = value.as(String.self),
+                               let text = trendAxis.labelIfMarked(date) {
+                                Text(text)
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
                             }
