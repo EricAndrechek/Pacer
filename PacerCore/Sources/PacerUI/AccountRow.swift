@@ -77,10 +77,25 @@ public struct PacerAccountRow<Trailing: View>: View {
     @FocusState private var nameFocused: Bool
 
     public init(model: Model, onRename: PacerRenameAction? = nil,
-                @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+                @ViewBuilder trailing: @escaping () -> Trailing) {
         self.model = model
         self.onRename = onRename
         self.trailing = trailing
+    }
+
+    /// The no-trailing-content form, as a separate initializer rather than a
+    /// `= { EmptyView() }` default.
+    ///
+    /// Swift 6.4 warns on the default-expression spelling — `Trailing` is
+    /// already inferrable from the other parameters, so a default that also
+    /// tries to pin it is ambiguous, and the warning says it becomes an error
+    /// in a future language mode. Constraining `Trailing == EmptyView` on a
+    /// second initializer says the same thing unambiguously, and leaves both
+    /// call shapes — `PacerAccountRow(model:)` and
+    /// `PacerAccountRow(model:) { badge }` — exactly as they were.
+    public init(model: Model, onRename: PacerRenameAction? = nil)
+    where Trailing == EmptyView {
+        self.init(model: model, onRename: onRename) { EmptyView() }
     }
 
     public var body: some View {

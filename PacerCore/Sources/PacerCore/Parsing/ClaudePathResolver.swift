@@ -74,7 +74,7 @@ public struct ClaudePathResolver: @unchecked Sendable {
         var seen = Set<URL>()
         var results: [ResolvedRoot] = []
         for url in roots {
-            let standardized = url.standardizedFileURL
+            let standardized = url.canonicalPathURL
             guard seen.insert(standardized).inserted else { continue }
             if let resolved = try? validate(root: standardized) {
                 results.append(resolved)
@@ -89,7 +89,7 @@ public struct ClaudePathResolver: @unchecked Sendable {
         for piece in raw.split(separator: ",", omittingEmptySubsequences: true) {
             let trimmed = piece.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
-            let url = URL(fileURLWithPath: trimmed).standardizedFileURL
+            let url = URL(fileURLWithPath: trimmed).canonicalPathURL
             guard !seen.contains(url) else { continue }
             seen.insert(url)
             if let resolved = try? validate(root: url) {
@@ -115,7 +115,7 @@ public struct ClaudePathResolver: @unchecked Sendable {
         ]
 
         for candidate in candidates {
-            let standardized = candidate.standardizedFileURL
+            let standardized = candidate.canonicalPathURL
             guard !seen.contains(standardized) else { continue }
             seen.insert(standardized)
             if let resolved = try? validate(root: standardized) {
@@ -136,7 +136,8 @@ public struct ClaudePathResolver: @unchecked Sendable {
         guard isDirectory(projects) else {
             throw NSError(domain: "PacerCore", code: 2)
         }
-        return ResolvedRoot(root: root, projectsDirectory: projects)
+        return ResolvedRoot(root: root.canonicalPathURL,
+                            projectsDirectory: projects.canonicalPathURL)
     }
 
     private func isDirectory(_ url: URL) -> Bool {

@@ -186,7 +186,7 @@ private final class Collector: @unchecked Sendable {
     let scanner = JSONLScanner()
     let firstCollector = Collector()
     let first = try await scanner.scan(roots: try resolved(root: root)) { entry in
-        await firstCollector.add(entry)
+        firstCollector.add(entry)
     }
     var cursors = first.updatedCursors
     // Only the complete line was emitted.
@@ -202,7 +202,7 @@ private final class Collector: @unchecked Sendable {
 
     let secondCollector = Collector()
     let second = try await scanner.scan(roots: try resolved(root: root), cursors: cursors) { entry in
-        await secondCollector.add(entry)
+        secondCollector.add(entry)
     }
     // Resumed from cursor1, picked up the now-complete line 2 only.
     #expect(await secondCollector.count() == 1)
