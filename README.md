@@ -89,10 +89,9 @@ That's all. **Pacer keeps itself up to date automatically:** when a new version
 ships, it offers to install it for you — no re-downloading, no reinstalling.
 
 **You'll need** macOS 15 (Sequoia) or newer, on either Apple Silicon or Intel.
-Tested on macOS 15, 26 (Tahoe) and 27. On macOS 26 and newer Pacer keeps the
-older, pre-Liquid-Glass appearance — released builds are compiled against the
-macOS 15 SDK, and macOS renders an app in the design its SDK was built for.
-Everything works; it just hasn't adopted the new look yet.
+Tested on macOS 15, 26 (Tahoe) and 27. One build serves all of them: on macOS 26
+and newer Pacer adopts the system's Liquid Glass design, and on macOS 15 it looks
+exactly as it always has.
 
 ## What you get
 
@@ -246,16 +245,19 @@ see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 For everyday use, the [released DMG](https://github.com/EricAndrechek/Pacer/releases/latest)
 is what you want — this section is only for hacking on Pacer.
 
-**Requirements:** Xcode 16 or newer and `xcodegen` (`brew install xcodegen`).
-Xcode 16.4 and 27 are both exercised — 16.4 on CI, 27 locally.
+**Requirements:** Xcode 26 or newer and `xcodegen` (`brew install xcodegen`).
+CI and releases build on `macos-26` runners; this is developed against Xcode 27.
 
 The deployment target is macOS 15.0 whichever SDK you build against, so one
-binary runs everywhere from Sequoia up. The SDK does, however, decide
-*appearance*: build with the macOS 26+ SDK (Xcode 26 or 27) and the app adopts
-Liquid Glass when run on macOS 26+, with no way to opt back out —
-`UIDesignRequiresCompatibility` is ignored from the 27 SDK on. CI and releases
-build on `macos-15` runners, which is what keeps shipped binaries on the
-macOS 15 SDK and the older appearance.
+binary runs everywhere from Sequoia up — the SDK never decides compatibility.
+It does decide *appearance*: built against the macOS 26+ SDK the app adopts
+Liquid Glass on macOS 26+, and there is no opting back out
+(`UIDesignRequiresCompatibility` is ignored from the 27 SDK on). macOS 15 users
+are unaffected, because their AppKit has no new design to draw.
+
+Older Xcodes still compile the project — the PacerCore tests run on macOS 15
+with Xcode 16 in CI — but an app built that way renders in the old appearance
+and will not match a release.
 The Xcode project is generated from `project.yml` — never edit the `.xcodeproj`
 directly.
 

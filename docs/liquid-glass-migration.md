@@ -1,8 +1,9 @@
 # Moving releases to the macOS 26+ SDK (Liquid Glass)
 
-**Status: not decided, not started.** This is the plan to argue with later, written
-while the facts were fresh (2026-09-16, on macOS 27 / Xcode 27). Nothing here is
-scheduled.
+**Status: done.** Decided and executed 2026-09-17, in the same PR that fixed the
+macOS 26+ regressions. Kept as the record of what was weighed, what it cost, and
+which options were rejected — the reasoning is the part worth having later, not
+the diff.
 
 ## What this is actually about
 
@@ -17,7 +18,7 @@ So "migrating" is one runner change plus the fallout it exposes. There is no
 adoption work in the sense of rewriting views — the system restyles native
 controls on its own.
 
-## The mechanical change
+## The mechanical change (done)
 
 ```diff
 # .github/workflows/release.yml
@@ -29,9 +30,16 @@ controls on its own.
 +    runs-on: macos-26
 ```
 
-`macos-26` is GA and ships Xcode 26.x. Note that is **SDK 26, not 27** — what CI
-produces would not be byte-identical in appearance to a local Xcode 27 build,
-though both are Liquid Glass. There is no `macos-27` image yet.
+`macos-26` is GA and ships Xcode 26.x. Note that is **SDK 26, not 27** — CI's
+output is not byte-identical in appearance to a local Xcode 27 build, though
+both are Liquid Glass. There is no `macos-27` image yet, so the screenshots in
+`docs/screenshots/` (rendered locally against SDK 27) run marginally ahead of
+what CI produces. Re-render them from a CI-matching toolchain if that ever
+visibly matters; it did not at the time of writing.
+
+Both are pinned, deliberately **not** `macos-latest`: that label moves on
+GitHub's schedule, and the runner is the one setting that silently restyles the
+whole app.
 
 The PacerCore test job already runs on both images and should stay that way: it
 is the OS-divergence canary, not a build-appearance choice.
@@ -160,7 +168,7 @@ Recommendation: **minor**, with release notes that lead on the appearance change
 so nobody on Tahoe thinks their install broke. Say plainly that macOS 15 users
 see no change.
 
-## Checklist, when it is decided
+## Checklist — completed 2026-09-17
 
 1. Confirm the menu-bar item and widgets look right on an SDK-26+ build — the
    two unautomatable checks above.
