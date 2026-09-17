@@ -755,12 +755,17 @@ struct ToolbarFreshness: View {
                     .lineLimit(1)
                     .monospacedDigit()
             }
-            // No background of our own. From macOS 26 the toolbar draws the
-            // capsule behind a `ToolbarItem` itself, so a hand-rolled one
-            // renders a pill inside a pill — and it made a read-only status
-            // badge look like the interactive account menu beside it. Let the
-            // toolbar own its chrome; that is what the platform now expects.
-            .padding(.horizontal, 2)
+            // No background of our own — from macOS 26 the toolbar draws the
+            // capsule behind a `ToolbarItem` itself, and a hand-rolled one
+            // rendered a pill inside a pill.
+            //
+            // The padding still matters, and for a reason that is easy to get
+            // wrong: the system capsule wraps *this* content, so these values
+            // are the pill's internal padding. Dropping them to nothing when
+            // the background went away left the dot and label hard against the
+            // capsule's edge.
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
             // Without this the NSToolbar host compresses the pill below its
             // ideal height when the window mounts from the menu-bar "Open
             // Pacer" path, clipping the Capsule's top edge (issue #1). Pin
