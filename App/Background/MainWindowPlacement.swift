@@ -125,6 +125,32 @@ enum MainWindowPlacement {
             return
         }
         adopt(window)
+        centerIfHomeDisplayIsGone(window)
+    }
+
+    /// Home is on a display that is not connected: put the window somewhere
+    /// predictable instead of wherever SwiftUI happened to drop it.
+    ///
+    /// `apply(to:reason:)` deliberately declines to move a window whose stored
+    /// frame is on no connected display — the frame is right again the moment
+    /// that monitor comes back, and dragging the window to another screen in
+    /// the meantime would be a move nobody asked for. But declining leaves the
+    /// window at SwiftUI's own default, which on 2026-09-17 put a restored
+    /// dashboard at `-88,1089`: clipped off the left edge of a display the user
+    /// was working on, rather than the vertical monitor they keep it on.
+    ///
+    /// Centering is not a guess about where they want it — it is the
+    /// consolation prize `rescueIfOffscreen` already uses when there is no home
+    /// to go to. The stored frame is untouched (the gate disowns our own
+    /// moves), so `noteDisplayConfigurationChanged` still takes the window home
+    /// the moment that display returns.
+    static func centerIfHomeDisplayIsGone(_ window: NSWindow) {
+        guard isEnabled, isDashboard(window) else { return }
+        // A usable home needs no consolation.
+        if let frame = storedFrame, isUsable(frame) { return }
+        gate.noteProgrammaticMove()
+        window.center()
+        Log.write("Placement", "home display is not connected — centered at \(fmt(window.frame))")
     }
 
     // MARK: - Which window is the dashboard

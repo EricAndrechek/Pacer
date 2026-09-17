@@ -710,7 +710,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let target: NSApplication.ActivationPolicy =
             hasVisibleMain ? .regular : .accessory
         if NSApp.activationPolicy() != target {
+            // Promoting `.accessory` → `.regular` **activates us**: AppKit
+            // brings an app that has just become regular to the front. That is
+            // right when the user asked for a window, and wrong at launch,
+            // where the only thing that happened is that we restored the
+            // dashboard they had left open. Pacer is a background agent; it
+            // must never take the front from what someone is working in.
+            //
+            // `NSApp.isActive` is the discriminator, and it is reliable because
+            // every legitimate path activates *first*: the status-item click
+            // and the menu commands call `NSApp.activate()` before a window
+            // becomes visible, so by the time this runs we are already
+            // frontmost and there is nothing to give back. At launch we are not
+            // frontmost — `dev-install.sh` and the reopen path both open us
+            // with activation off — so we hand the front back to whoever had
+            // it. Captured before the promotion, which changes the answer.
+            let weWereActive = NSApp.isActive
+            let previousFront = weWereActive
+                ? nil : NSWorkspace.shared.frontmostApplication
             NSApp.setActivationPolicy(target)
+            if target == .regular, !weWereActive, let previousFront,
+               previousFront.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                previousFront.activate()
+                Log.write("Placement",
+                          "promoted to .regular without taking the front from "
+                          + (previousFront.localizedName ?? "the frontmost app"))
+            }
         }
         // Publish to the shared visibility monitor too. ScanCoordinator
         // widens its watcher cadence when hidden, and `FreshnessPulse`
