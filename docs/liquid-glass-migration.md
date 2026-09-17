@@ -32,7 +32,9 @@ controls on its own.
 
 `macos-26` is GA and ships Xcode 26.x. Note that is **SDK 26, not 27** — CI's
 output is not byte-identical in appearance to a local Xcode 27 build, though
-both are Liquid Glass. There is no `macos-27` image yet, so the screenshots in
+both are Liquid Glass. There is no `macos-27` label — GitHub ships macOS 27 as
+`xcode-27` / `xcode-27-xlarge` (arm64 only), and as of 2026-09-17 that is public
+preview with no announced GA date. So the screenshots in
 `docs/screenshots/` (rendered locally against SDK 27) run marginally ahead of
 what CI produces. Re-render them from a CI-matching toolchain if that ever
 visibly matters; it did not at the time of writing.
@@ -182,8 +184,14 @@ see no change.
 
 ## Open questions
 
-- Wait for a `macos-27` runner image so CI and local builds agree on SDK, or
-  accept SDK 26 from CI while developing against 27?
+- ~~Wait for a `macos-27` runner image so CI and local builds agree on SDK, or
+  accept SDK 26 from CI while developing against 27?~~ **Settled 2026-09-17:
+  accept SDK 26 from CI.** The `xcode-27` image exists but is public preview,
+  and a preview image can be rebuilt or withdrawn under us — not something to
+  put on a path that signs, notarizes and publishes an auto-update. Revisit if
+  and when it reaches GA. Since Liquid Glass landed in 26, SDK 27 buys no
+  appearance difference in the meantime; the only gap it would close is that
+  local screenshots render marginally ahead of CI.
 - Is there any appetite for *actively* adopting glass (`.glassEffect`,
   `GlassEffectContainer`) on Pacer's own cards, or is passive restyling of native
   controls the whole intent? This plan assumes passive only.
