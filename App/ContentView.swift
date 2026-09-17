@@ -107,6 +107,26 @@ struct ContentView: View {
         return accounts.first { $0.isActive } ?? accounts.first
     }
 
+    /// The freshness readout, wearing the toolbar's own capsule and no other.
+    ///
+    /// It used to draw a `Capsule` of its own *inside* the one macOS 26 puts
+    /// behind a toolbar item — a pill in a pill. Removing ours was the fix.
+    /// Hiding the system's as well was tried and reverted: with no background
+    /// at all the readout looked stripped rather than deliberate. The toolbar
+    /// owns this chrome; we neither add to it nor take it away.
+    @ToolbarContentBuilder
+    private var freshnessSpacer: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+    }
+
+    private var freshnessToolbarItem: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            ToolbarFreshness()
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -127,9 +147,20 @@ struct ContentView: View {
                     ToolbarItem(placement: .primaryAction) {
                         AccountScopeControl()
                     }
-                    ToolbarItem(placement: .primaryAction) {
-                        ToolbarFreshness()
-                    }
+                    // Separates the account menu from the readout. With the
+                    // readout's shared background hidden it sat right against
+                    // the menu's capsule and read as a stripped-down control
+                    // rather than a separate status line. `ToolbarSpacer` is
+                    // the platform's own grouping tool.
+                    freshnessSpacer
+                    // The freshness readout is not a control, so it should
+                    // not wear the capsule macOS 26 draws behind toolbar
+                    // items. `sharedBackgroundVisibility(.hidden)` is the
+                    // platform's own way to say that — and it also removes the
+                    // capsule that was crowding the window's rounded corner.
+                    // macOS 26+ only; on 15 there is no shared background to
+                    // hide and the item renders bare already.
+                    freshnessToolbarItem
                 }
         }
         .navigationSplitViewStyle(.balanced)
@@ -724,11 +755,17 @@ struct ToolbarFreshness: View {
                     .lineLimit(1)
                     .monospacedDigit()
             }
-            .padding(.horizontal, 8)
+            // No background of our own — from macOS 26 the toolbar draws the
+            // capsule behind a `ToolbarItem` itself, and a hand-rolled one
+            // rendered a pill inside a pill.
+            //
+            // The padding still matters, and for a reason that is easy to get
+            // wrong: the system capsule wraps *this* content, so these values
+            // are the pill's internal padding. Dropping them to nothing when
+            // the background went away left the dot and label hard against the
+            // capsule's edge.
+            .padding(.horizontal, 10)
             .padding(.vertical, 3)
-            .background(
-                Capsule().fill(Color.primary.opacity(0.06))
-            )
             // Without this the NSToolbar host compresses the pill below its
             // ideal height when the window mounts from the menu-bar "Open
             // Pacer" path, clipping the Capsule's top edge (issue #1). Pin

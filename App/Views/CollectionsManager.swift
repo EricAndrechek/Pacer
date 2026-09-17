@@ -106,7 +106,7 @@ struct CollectionsManager: View {
                     Label("New collection", systemImage: "plus.circle.fill")
                         .labelStyle(.titleAndIcon)
                 }
-                .controlSize(.small)
+                .pacerDenseControl()
             }
 
             if collections.isEmpty {
@@ -215,7 +215,7 @@ private struct CollectionManagerRow: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Button("Edit", action: onEdit)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .opacity(hovering ? 1 : 0)
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)

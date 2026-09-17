@@ -142,7 +142,7 @@ private struct StartupCard: View {
                         Button("Open System Settings") {
                             LoginItemController.openSystemSettingsApproval()
                         }
-                        .controlSize(.small)
+                        .pacerDenseControl()
                     }
                 }
                 if let err = actionError {
@@ -956,7 +956,7 @@ struct RateLimitAlertsCard: View {
                     Button("Open System Settings → Notifications") {
                         openNotificationsSettings()
                     }
-                    .controlSize(.small)
+                    .pacerDenseControl()
                 }
                 Text("Pacer's banner style is set there — choose **Banners** or **Alerts** rather than **None**.")
             }
@@ -996,7 +996,7 @@ private struct ThresholdSubsection: View {
                     Label("Add threshold", systemImage: "plus.circle.fill")
                         .labelStyle(.titleAndIcon)
                 }
-                .controlSize(.small)
+                .pacerDenseControl()
                 .disabled(!enabled)
             }
             if thresholds.isEmpty {
@@ -1085,7 +1085,7 @@ private struct ThresholdRow: View {
                 ),
                 in: 1...99
             )
-            .controlSize(.small)
+            .pacerDenseControl()
             .disabled(!enabled)
             Text("\(value)%")
                 .font(.callout)
@@ -1150,7 +1150,7 @@ private struct ScopedThresholdSubsection: View {
                     Label("Add threshold", systemImage: "plus.circle.fill")
                         .labelStyle(.titleAndIcon)
                 }
-                .controlSize(.small)
+                .pacerDenseControl()
                 .disabled(!enabled)
             }
             if myRules.isEmpty {
@@ -1211,7 +1211,7 @@ private struct ScopedThresholdRow: View {
                 ),
                 in: 1...99
             )
-            .controlSize(.small)
+            .pacerDenseControl()
             .disabled(!enabled)
             Text("\(Int(rule.thresholdValue))%")
                 .font(.callout)
@@ -1607,7 +1607,7 @@ private struct ProjectAliasesPointerCard: View {
                         object: ContentView.Destination.projects
                     )
                 }
-                .controlSize(.small)
+                .pacerDenseControl()
             }
         }, footer: {
             Text("Managed from the Projects tab now — pick a time range and open **Aliases…** in the page header.")
@@ -1649,7 +1649,7 @@ private struct DesktopCredentialsCard: View {
                     statusLabel
                     Spacer(minLength: 8)
                     Button("Test") { runTest() }
-                        .controlSize(.small)
+                        .pacerDenseControl()
                         .disabled(testInProgress || !enabled)
                 }
             }
@@ -1665,7 +1665,7 @@ private struct DesktopCredentialsCard: View {
     @ViewBuilder
     private var statusLabel: some View {
         if testInProgress {
-            ProgressView().controlSize(.small)
+            ProgressView().pacerDenseControl()
             Text("Reading Claude Desktop…")
                 .font(.caption).foregroundStyle(.secondary)
         } else if let result = testResult {
@@ -1881,7 +1881,7 @@ private struct TokensCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 if !pool.hasLoaded {
                     HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
+                        ProgressView().pacerDenseControl()
                         Text("Loading tokens…")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -2058,10 +2058,10 @@ private struct TokensCard: View {
                     .onSubmit(add)
                     .onChange(of: draft) { _, _ in addResult = nil }
                 if adding {
-                    ProgressView().controlSize(.small)
+                    ProgressView().pacerDenseControl()
                 } else {
                     Button("Add", action: add)
-                        .controlSize(.small)
+                        .pacerDenseControl()
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
@@ -2157,10 +2157,10 @@ private struct AccountSwitchRow: View {
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color.green.opacity(0.16)))
             } else if switching {
-                ProgressView().controlSize(.small).frame(width: 60)
+                ProgressView().pacerDenseControl().frame(width: 60)
             } else {
                 Button("Switch", action: onSwitch)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .frame(width: 60)
             }
         }
@@ -2350,7 +2350,7 @@ private struct StorageCard: View {
                     .foregroundStyle(.secondary)
             } else {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
+                    ProgressView().pacerDenseControl()
                     Text("Measuring…").foregroundStyle(.secondary)
                 }
             }
@@ -2554,7 +2554,7 @@ private struct APIServerCard: View {
                             .font(.system(size: 11, design: .monospaced))
                             .frame(width: 200)
                         Button("Generate") { draftToken = Self.randomToken() }
-                            .controlSize(.small)
+                            .pacerDenseControl()
                     }
                 }
 
@@ -2575,7 +2575,7 @@ private struct APIServerCard: View {
                         Text("Unsaved changes").font(.caption).foregroundStyle(.secondary)
                     }
                     Button("Save & restart") { saveAndApply() }
-                        .controlSize(.small)
+                        .pacerDenseControl()
                         .keyboardShortcut(.defaultAction)
                         .disabled(!isDirty || !portIsValid)
                 }
@@ -2701,7 +2701,7 @@ private struct ClaudeSkillCard: View {
                                 .font(.system(size: 11, design: .monospaced))
                                 .textSelection(.enabled)
                             Button(copiedImport ? "Copied" : "Copy") { copyImportLine() }
-                                .controlSize(.small)
+                                .pacerDenseControl()
                         }
                         Text("It points at a file Pacer keeps current, so it never needs re-pasting.")
                             .font(.caption)
@@ -2713,12 +2713,12 @@ private struct ClaudeSkillCard: View {
                     Spacer(minLength: 8)
                     if isInstalled {
                         Button("Reveal") { reveal() }
-                            .controlSize(.small)
+                            .pacerDenseControl()
                         Button("Remove") { perform { try $0.uninstall() } }
-                            .controlSize(.small)
+                            .pacerDenseControl()
                     }
                     Button(primaryLabel) { perform { try $0.install() } }
-                        .controlSize(.small)
+                        .pacerDenseControl()
                         .keyboardShortcut(.defaultAction)
                         .disabled(busy || installer == nil || status?.state == .upToDate)
                 }

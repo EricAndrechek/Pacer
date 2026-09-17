@@ -154,7 +154,7 @@ struct ProjectsView: View {
             } label: {
                 Label("Aliases…", systemImage: "arrow.triangle.merge")
             }
-            .controlSize(.small)
+            .pacerDenseControl()
             .help("Manage project aliases — fold renamed folders, sibling worktrees, and cross-machine paths into one project.")
             Picker("Time range", selection: rangeBinding) {
                 ForEach(TimeRange.allCases) { r in
@@ -162,8 +162,7 @@ struct ProjectsView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 260)
-            .controlSize(.small)
+            .pacerDenseControl()
             .labelsHidden()
         }
     }
@@ -870,8 +869,7 @@ private struct ProjectsContent: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 240)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .labelsHidden()
             }
         }) {
@@ -1084,7 +1082,7 @@ private struct ProjectsContent: View {
                     Button(action: onNewCollection) {
                         Label("Group projects…", systemImage: "plus.circle")
                     }
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .buttonStyle(.borderless)
                     .help("Roll up related projects into a collection you can filter by, right here.")
                 } else {
@@ -1101,9 +1099,9 @@ private struct ProjectsContent: View {
                     Button(action: onNewCollection) {
                         Image(systemName: "plus")
                     }
-                    .controlSize(.small).buttonStyle(.borderless).help("New collection")
+                    .pacerDenseControl().buttonStyle(.borderless).help("New collection")
                     Button("Manage", action: onManageCollections)
-                        .controlSize(.small).buttonStyle(.borderless)
+                        .pacerDenseControl().buttonStyle(.borderless)
                 }
             }
             .padding(.vertical, 2)
@@ -1152,11 +1150,11 @@ private struct ProjectsContent: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Edit collection") { onEditCollection(r.id) }
-                    .controlSize(.small)
+                    .pacerDenseControl()
                 Button {
                     collectionFilterBinding.wrappedValue = ""
                 } label: { Label("All projects", systemImage: "xmark.circle.fill") }
-                    .controlSize(.small).buttonStyle(.borderless)
+                    .pacerDenseControl().buttonStyle(.borderless)
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(

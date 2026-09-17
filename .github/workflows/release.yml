@@ -49,7 +49,14 @@ permissions:
 jobs:
   release:
     name: Build, sign, notarize, publish
-    runs-on: macos-15
+    # The runner decides the SDK, and from macOS 26 the SDK decides the app's
+    # appearance. Pinned to `macos-26` so releases adopt the current design;
+    # pinned rather than `macos-latest` because that label moves on GitHub's
+    # schedule and this is the one setting that silently restyles the app.
+    #
+    # `MACOSX_DEPLOYMENT_TARGET` stays 15.0, so this is still a single binary
+    # that runs on macOS 15 and up. See docs/liquid-glass-migration.md.
+    runs-on: macos-26
     # Normally restores the DuckDB cache that CI populated on main. Budgeted
     # for the case where it doesn't and the engine compiles from source.
     timeout-minutes: 75

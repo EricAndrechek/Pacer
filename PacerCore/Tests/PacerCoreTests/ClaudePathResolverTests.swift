@@ -23,7 +23,7 @@ struct ClaudePathResolverTests {
                 withIntermediateDirectories: true
             )
         }
-        return root
+        return root.canonicalPathURL
     }
 
     // MARK: - Tests
@@ -52,9 +52,9 @@ struct ClaudePathResolverTests {
         )
         let resolved = try resolver.resolve()
 
-        let roots = resolved.map { $0.root.standardizedFileURL }
-        #expect(roots.contains(xdgClaude.standardizedFileURL))
-        #expect(roots.contains(legacy.standardizedFileURL))
+        let roots = resolved.map(\.root)
+        #expect(roots.contains(xdgClaude))
+        #expect(roots.contains(legacy))
         #expect(resolved.count == 2)
     }
 
@@ -83,7 +83,7 @@ struct ClaudePathResolverTests {
         )
         let resolved = try resolver.resolve()
         #expect(resolved.count == 1)
-        #expect(resolved.first?.root.standardizedFileURL == override.standardizedFileURL)
+        #expect(resolved.first?.root == override)
     }
 
     @Test func configDirOverrideThrowsWhenAllPathsInvalid() throws {

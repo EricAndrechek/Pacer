@@ -44,8 +44,7 @@ struct HistoryView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 280)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .labelsHidden()
             }
         ) {

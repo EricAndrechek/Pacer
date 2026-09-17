@@ -378,6 +378,50 @@ App/
 `PacerWidgetsBundle.swift`. Each widget has its own `TimelineProvider` that reads the
 shared SwiftData container directly — no IPC.
 
+## macOS versions, SDKs, and appearance
+
+Pacer supports **macOS 15.0 and up**. That is the deployment target in
+`project.yml`, it does not move, and one binary serves every supported
+release — the macOS 27 SDK's own floor is 13.1, so building against a new SDK
+never drops an old OS.
+
+**The SDK you build with decides the app's appearance; the OS it runs on does
+not.** macOS applies Liquid Glass only to binaries linked against the macOS 26
+SDK or later, so a build made with Xcode 16 keeps the older look even on
+macOS 27. This is the usual linked-on-or-after gate, and it is why Pacer still
+renders the pre-Liquid-Glass design: CI and `release.yml` both run on
+`macos-15` runners.
+
+Consequences worth knowing before you touch a build setting:
+
+- **Local `make install` on a Mac with only Xcode 26/27 produces a Liquid
+  Glass build**, which will not match the released DMG. "Looks right on my
+  machine" stops implying "looks right for users" — check which SDK you built
+  with (`defaults read /Applications/Pacer.app/Contents/Info.plist DTSDKName`)
+  before trusting a visual review.
+- **There is no opt-out once you build with the 27 SDK.**
+  `UIDesignRequiresCompatibility` is ignored from that SDK on. Staying on the
+  older appearance means building with an older Xcode, not setting a key.
+- **`docs/screenshots/` ships in the README**, so regenerate it from a build
+  whose SDK matches what releases use, or the README shows chrome users do not
+  have.
+
+### macOS 26+ behaviour changes already hit
+
+Both were invisible to review and to CI, and both were found by rendering the
+same scenes on each SDK and diffing:
+
+- **`URL` directory-ness is now decided by the filesystem.**
+  `contentsOfDirectory(at:)` and even `standardizedFileURL` may return a
+  directory URL *with* a trailing slash where macOS 15 returned it without.
+  `path` is unchanged, but `URL ==` compares `absoluteString`, so the same
+  directory can compare unequal depending only on how the URL was built. Never
+  compare or key on a bare directory `URL` — use `URL.canonicalPathURL`.
+- **`AxisMarks(values:)` is not honoured on a categorical (band) axis.** Every
+  band gets a mark, so a 90-day trend renders 90 overlapping labels. Decide in
+  the label content instead — `PacerDateAxis.labelIfMarked(_:)`. Continuous
+  (e.g. `Int` hour) axes still honour `values:`.
+
 ## Project layout & build
 
 - `project.yml` is the source of truth — `Pacer.xcodeproj` is generated

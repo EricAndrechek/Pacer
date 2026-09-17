@@ -1080,7 +1080,7 @@ struct PaceChartCard: View {
     /// straight-up lie about an account with four months of history.
     private var loadingState: some View {
         HStack(spacing: 10) {
-            ProgressView().controlSize(.small)
+            ProgressView().pacerDenseControl()
             Text("Loading history…")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

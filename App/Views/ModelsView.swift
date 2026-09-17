@@ -60,8 +60,7 @@ struct ModelsView: View {
                         ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 132)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .labelsHidden()
                     Picker("Time range", selection: rangeBinding) {
                         ForEach(TimeRange.allCases) { r in
@@ -69,8 +68,7 @@ struct ModelsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 260)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .labelsHidden()
                 }
             }
@@ -607,8 +605,7 @@ private struct ModelsContent: View {
                     ForEach(ModelMetric.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 132)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .labelsHidden()
             }
         }) {
@@ -744,8 +741,13 @@ private struct ModelsContent: View {
                 .chartXAxis {
                     AxisMarks(values: trendAxis.values) { value in
                         AxisValueLabel {
-                            if let date = value.as(String.self) {
-                                Text(trendAxis.label(date))
+                            // `labelIfMarked`, not `label`: macOS 26+ ignores
+                            // the `values:` above on a band axis and marks
+                            // every date, which drew all 90 on top of each
+                            // other. See `PacerDateAxis.labelIfMarked`.
+                            if let date = value.as(String.self),
+                               let text = trendAxis.labelIfMarked(date) {
+                                Text(text)
                                     .font(.system(size: 9))
                                     .foregroundStyle(.secondary)
                             }

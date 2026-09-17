@@ -262,8 +262,16 @@ enum MenuBarTooltipSelfTest {
         let item = NSStatusBar.system.statusItem(withLength: 30)
         guard let button = item.button else { return nil }
 
+        // Mirrors the real item's tooltip wiring too, so "the same status item
+        // the real app builds" stays true — the app sets the button's AppKit
+        // tooltip from the label rather than relying on SwiftUI `.help()`.
+        let applyToolTip: (String) -> Void = { [weak item] text in
+            item?.button?.toolTip = text
+        }
         let host = NSHostingView(
-            rootView: AnyView(MenuBarLabel().modelContainer(container))
+            rootView: AnyView(
+                MenuBarLabel(onTooltipChange: applyToolTip).modelContainer(container)
+            )
         )
         host.translatesAutoresizingMaskIntoConstraints = false
         button.addSubview(host)

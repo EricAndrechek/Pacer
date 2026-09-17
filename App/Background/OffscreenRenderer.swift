@@ -31,7 +31,10 @@ enum OffscreenRenderer {
             .environment(\.usageEngines, engines)
             .frame(width: width)
             .padding(28)
-            .background(Color(nsColor: .windowBackgroundColor))
+            // See ScreenshotMode's canvas note: `windowBackgroundColor` is the
+            // card fill itself on macOS 26+, so a card rendered on it has no
+            // visible edge.
+            .background(Color(nsColor: .underPageBackgroundColor))
             .preferredColorScheme(scheme)
 
         let hosting = NSHostingView(rootView: AnyView(inner))

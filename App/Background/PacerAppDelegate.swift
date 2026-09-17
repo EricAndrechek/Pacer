@@ -710,7 +710,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let target: NSApplication.ActivationPolicy =
             hasVisibleMain ? .regular : .accessory
         if NSApp.activationPolicy() != target {
+            // Promoting `.accessory` → `.regular` **activates us**: AppKit
+            // brings an app that has just become regular to the front. That is
+            // right when the user asked for a window, and wrong at launch,
+            // where the only thing that happened is that we restored the
+            // dashboard they had left open. Pacer is a background agent; it
+            // must never take the front from what someone is working in.
+            //
+            // `NSApp.isActive` is the discriminator, and it is reliable because
+            // every legitimate path activates *first*: the status-item click
+            // and the menu commands call `NSApp.activate()` before a window
+            // becomes visible, so by the time this runs we are already
+            // frontmost and there is nothing to give back. At launch we are not
+            // frontmost — `dev-install.sh` and the reopen path both open us
+            // with activation off — so we hand the front back to whoever had
+            // it. Captured before the promotion, which changes the answer.
+            let weWereActive = NSApp.isActive
+            let previousFront = weWereActive
+                ? nil : NSWorkspace.shared.frontmostApplication
             NSApp.setActivationPolicy(target)
+            if target == .regular, !weWereActive, let previousFront,
+               previousFront.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                previousFront.activate()
+                Log.write("Placement",
+                          "promoted to .regular without taking the front from "
+                          + (previousFront.localizedName ?? "the frontmost app"))
+            }
         }
         // Publish to the shared visibility monitor too. ScanCoordinator
         // widens its watcher cadence when hidden, and `FreshnessPulse`
@@ -783,10 +808,29 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // free. The host is a `SizingHostingView` — a tiny subclass
         // that reports SwiftUI body size changes back via a closure
         // so we can resize the NSStatusItem to fit.
+        // The tooltip is set on the button in AppKit, not left to SwiftUI's
+        // `.help()` inside the hosted view. On macOS 26+ `.help()` in content
+        // hosted in a menu-bar surface produces no tooltip window at all —
+        // confirmed by `make verify-tooltip`, which hovered the row and saw
+        // nothing appear. `NSView.toolTip` works on every OS Pacer supports,
+        // so this is the reliable half and `.help()` is left in place as the
+        // declarative statement of intent.
+        // Built here, not inline in the view closure below. Written inline the
+        // `[weak item]` capture would sit inside a closure that captures `item`
+        // strongly anyway, which is exactly the mixed ownership Swift 6.4's
+        // ImplicitStrongCapture diagnostic flags. Hoisted, the view closure
+        // captures this closure value and never sees `item` at all.
+        //
+        // Weak because the closure outlives this function: the item owns the
+        // button, which owns the hosted view, which retains this. A strong
+        // capture would be a cycle.
+        let applyToolTip: (String) -> Void = { [weak item] text in
+            item?.button?.toolTip = text
+        }
         let host = SizingHostingView(
             rootView: AnyView(
                 DayKeyedContent {
-                    MenuBarLabel()
+                    MenuBarLabel(onTooltipChange: applyToolTip)
                         .modelContainer(self.container)
                 }
             )

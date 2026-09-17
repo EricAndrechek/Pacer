@@ -116,7 +116,7 @@ public struct ExternalAccountDirectory: Sendable {
                 guard fileManager.fileExists(atPath: projects.path, isDirectory: &isDir),
                       isDir.boolValue
                 else { continue }
-                let standardized = entry.standardizedFileURL
+                let standardized = entry.canonicalPathURL
                 guard seen.insert(standardized.path).inserted else { continue }
                 out.append(standardized)
             }

@@ -160,7 +160,7 @@ struct ProjectAliasManager: View {
                     Label("Merge multiple…", systemImage: "arrow.triangle.merge")
                         .labelStyle(.titleAndIcon)
                 }
-                .controlSize(.small)
+                .pacerDenseControl()
                 .help("Pick one canonical, check every path that should fold into it. Creates all aliases at once.")
             }
             Button {
@@ -169,7 +169,7 @@ struct ProjectAliasManager: View {
                 Label("Add alias", systemImage: "plus.circle.fill")
                     .labelStyle(.titleAndIcon)
             }
-            .controlSize(.small)
+            .pacerDenseControl()
         }
     }
 
@@ -359,7 +359,7 @@ private struct AliasRow: View {
             }
             Spacer()
             Button("Edit", action: onEdit)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .opacity(hovering ? 1.0 : 0.0)
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "minus.circle.fill")
@@ -403,7 +403,7 @@ private struct SuggestionRow: View {
             }
             Spacer()
             Button("Merge", action: onAccept)
-                .controlSize(.small)
+                .pacerDenseControl()
             Button(action: onDismiss) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.tertiary)

@@ -28,7 +28,29 @@ public enum PacerDesign {
 
     /// Hairline stroke around cards. Visible in light mode, near-
     /// invisible in dark.
+    ///
+    /// Deliberately left faint. macOS 26 collapsed `windowBackgroundColor`
+    /// and `controlBackgroundColor` to the same value, so the fill difference
+    /// that used to separate a card from the window is gone, and the obvious
+    /// reaction is to make this stroke carry the separation instead. That was
+    /// tried and backed out: Apple's guidance for the new design is that extra
+    /// backgrounds and borders are *becoming unnecessary*, and depth should
+    /// come from materials and elevation. A heavier hairline reads as an app
+    /// that has not been updated. If cards need more definition, the answer is
+    /// a material, not a line — prototype it before shipping it.
     public static var cardStroke: Color { Color.primary.opacity(0.06) }
+
+    /// The control size Pacer's dense header and card rows use.
+    ///
+    /// A token rather than 51 literal `.controlSize(.small)` calls, because
+    /// this is a live question, not a settled one: macOS 26 rebuilt control
+    /// metrics around the default size, and `.small` visibly compresses them —
+    /// less internal padding, a cramped selection capsule on segmented
+    /// controls. Whether Pacer keeps its density or follows the platform is one
+    /// decision, and it should be one edit.
+    ///
+    /// Apply with `.pacerDenseControl()` rather than reading this directly.
+    public static let denseControlSize: ControlSize = .regular
 
     /// The card's solid fill. Mirrored to the widget container
     /// background so the panel and the dashboard cards blend.
@@ -570,5 +592,15 @@ public struct HoverRow<Content: View>: View {
         // Arrow cursor (default) — macOS HIG reserves the pointing-hand
         // for hyperlinks. Native Mac list rows (Finder, Mail, Things)
         // keep the arrow; the hover background is the affordance.
+    }
+}
+
+// MARK: - Control sizing
+
+public extension View {
+    /// The control size Pacer's dense rows use — see
+    /// `PacerDesign.denseControlSize`.
+    func pacerDenseControl() -> some View {
+        controlSize(PacerDesign.denseControlSize)
     }
 }

@@ -16,7 +16,7 @@ private func makeProfile(_ home: URL, _ name: String, withProjects: Bool) throws
         try FileManager.default.createDirectory(
             at: dir.appendingPathComponent("projects"), withIntermediateDirectories: true)
     }
-    return dir.standardizedFileURL
+    return dir.canonicalPathURL
 }
 
 @Suite("Session profile discovery")
@@ -53,7 +53,8 @@ struct SessionProfileDiscoveryTests {
         let roots = resolver.resolveAdditional([profile])
         #expect(roots.count == 1)
         #expect(roots.first?.root == profile)
-        #expect(roots.first?.projectsDirectory == profile.appendingPathComponent("projects"))
+        #expect(roots.first?.projectsDirectory
+                == profile.appendingPathComponent("projects").canonicalPathURL)
     }
 
     @Test("a bogus path is dropped rather than breaking the scan")
@@ -91,5 +92,33 @@ struct SessionProfileDiscoveryTests {
         #expect(observation?.accountKey == "org-personal")
         #expect(observation?.emailAddress == "me@example.com")
         #expect(observation?.rootPath == profile.path)
+    }
+
+    @Test("a root found by enumeration equals the same root built by hand")
+    func enumeratedAndConstructedRootsCompareEqual() throws {
+        // `ScanCoordinator.resolveAllRoots()` drops a discovered profile that
+        // is already a primary root with `primary.contains($0)`, comparing
+        // `ResolvedRoot` — synthesized `Equatable` over two `URL`s. The two
+        // sides reach it by different routes: primary roots are built with
+        // `appendingPathComponent`, discovered ones come out of
+        // `FileManager.contentsOfDirectory(at:)`.
+        //
+        // Those used to agree. On macOS 26+ enumeration started returning
+        // directory URLs with a trailing slash, `URL ==` compares
+        // `absoluteString`, and the guard silently stopped matching — so the
+        // same root would be scanned twice. This pins the two provenances
+        // together on every OS rather than pinning the slash itself.
+        let home = try makeHome()
+        let profile = try makeProfile(home, "1-work", withProjects: true)
+        let resolver = ClaudePathResolver(environment: [:], homeDirectory: home)
+
+        let enumerated = resolver.resolveAdditional(
+            ExternalAccountDirectory.discoverProfileRoots(homeDirectory: home))
+        let constructed = resolver.resolveAdditional([profile])
+
+        #expect(enumerated == constructed)
+        #expect(enumerated.count == 1)
+        let discovered = try #require(enumerated.first)
+        #expect(constructed.contains(discovered))
     }
 }

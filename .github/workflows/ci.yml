@@ -14,9 +14,29 @@ concurrency:
 
 jobs:
   pacercore-test:
-    name: PacerCore tests
-    runs-on: macos-15
+    # Two runner images on purpose, not one.
+    #
+    # macOS 26 changed Foundation behaviour the source can't see: URL
+    # directory-ness is now decided by consulting the filesystem, so a
+    # directory URL's trailing slash — and therefore `URL` equality —
+    # depends on how and when it was built. That silently broke the
+    # duplicate-root guard in `ScanCoordinator.resolveAllRoots()`, and
+    # macos-15 could not have caught it: the old Foundation agrees with
+    # itself. Matrix-testing both is the only way this class of
+    # divergence fails in CI rather than on a user's Mac.
+    #
+    # macos-15 is not legacy coverage to drop once 26 is the default —
+    # it is the oldest OS Pacer supports, and the deployment target is
+    # still 15.0.
+    name: PacerCore tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      # One image failing should not hide the other's result — the
+      # interesting output is usually *which* of the two disagreed.
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
     steps:
       - uses: actions/checkout@v5
 
@@ -26,7 +46,9 @@ jobs:
           swift --version
 
       # PacerCore is pure SPM — no Xcode project needed, just a warm package
-      # cache so Sparkle isn't refetched every run.
+      # cache so Sparkle isn't refetched every run. Keyed on the image as
+      # well: the two runners ship different Swift versions and must not
+      # restore each other's build products.
       - name: Cache Swift packages
         uses: actions/cache@v6
         with:
@@ -34,9 +56,9 @@ jobs:
             ~/Library/Caches/org.swift.swiftpm
             ~/.swiftpm
             PacerCore/.build
-          key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
+          key: spm-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('PacerCore/Package.swift', 'PacerCore/Package.resolved') }}
           restore-keys: |
-            spm-${{ runner.os }}-${{ runner.arch }}-
+            spm-${{ matrix.os }}-${{ runner.arch }}-
 
       # Standalone SPM package — no Xcode project required for the
       # PacerCore + PacerUI tests. Runs in well under a minute on the
@@ -47,7 +69,18 @@ jobs:
 
   app-build:
     name: App + widgets verify build
-    runs-on: macos-15
+    # Matches the runner `release.yml` builds on, so the verify build compiles
+    # against the same SDK that ships. That is the point of the pin: the SDK a
+    # binary links decides its appearance from macOS 26 on, and Pacer adopts
+    # the current design rather than staying on the old one. It does NOT
+    # decide compatibility — `MACOSX_DEPLOYMENT_TARGET` is 15.0 and the macOS
+    # 26 SDK's own floor is well below that, so one binary still serves
+    # macOS 15 users, who see no change because their AppKit has no new design
+    # to draw.
+    #
+    # Deliberately NOT `macos-latest`: that label moves on GitHub's schedule,
+    # and an app's appearance is not something to let drift silently.
+    runs-on: macos-26
     # 25 was right when the only compile was Pacer's own. A DuckDB cache miss
     # builds the engine from source, which does not fit in it.
     timeout-minutes: 60

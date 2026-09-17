@@ -176,7 +176,18 @@ struct MenuBarLabel: View {
         accountLabels = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0.shortLabel) })
     }
 
-    init() {
+    /// Called with the tooltip text whenever it changes, and once on appear.
+    ///
+    /// The status item mirrors this onto `NSStatusItem.button.toolTip`.
+    /// `.help()` below is kept because it is the right expression of intent
+    /// and costs nothing, but it cannot be relied on alone: on macOS 26+ a
+    /// `.help()` inside SwiftUI content hosted in a menu-bar surface produces
+    /// no tooltip at all. AppKit's `NSView.toolTip` still does, on every OS
+    /// Pacer supports.
+    private let onTooltipChange: ((String) -> Void)?
+
+    init(onTooltipChange: ((String) -> Void)? = nil) {
+        self.onTooltipChange = onTooltipChange
         var signal = FetchDescriptor<RateLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         signal.fetchLimit = 1
@@ -466,6 +477,11 @@ struct MenuBarLabel: View {
         // item only redraws when `rendered` actually differs.
         MenuBarLabelContent(rendered: rendered).equatable()
             .task(id: reloadKey) { reloadWindows() }
+            // `initial: true` so the button gets a tooltip on first draw, not
+            // only after the first value change.
+            .onChange(of: rendered.tooltip, initial: true) { _, text in
+                onTooltipChange?(text)
+            }
     }
 
     /// Equatable render payload — captures exactly what the status item
@@ -813,6 +829,10 @@ struct MenuStatusContent: View {
                       ? "These limits belong to the account Claude Code is using."
                       : "Pacer is scoped to this account, but Claude Code is signed "
                         + "into a different one — your next message is billed elsewhere.")
+                .pacerToolTip(ownerIsSignedIn
+                      ? "These limits belong to the account Claude Code is using."
+                      : "Pacer is scoped to this account, but Claude Code is signed "
+                        + "into a different one — your next message is billed elsewhere.")
             }
             if perAccount.isEmpty {
                 // One pace row per window — 5h, 7d, then each scoped per-model
@@ -901,6 +921,7 @@ struct MenuStatusContent: View {
                         .fill(Color.accentColor)
                         .frame(width: 5, height: 5)
                         .help("Currently in effect")
+                        .pacerToolTip("Currently in effect")
                 }
                 Text(window.displayName.uppercased())
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -1015,6 +1036,7 @@ struct MenuStatusContent: View {
                 .monospacedDigit()
                 .foregroundStyle(.primary)
                 .help(tooltip ?? value)
+                .pacerToolTip(tooltip ?? value)
         }
     }
 }
