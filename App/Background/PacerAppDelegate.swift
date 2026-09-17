@@ -783,10 +783,29 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // free. The host is a `SizingHostingView` — a tiny subclass
         // that reports SwiftUI body size changes back via a closure
         // so we can resize the NSStatusItem to fit.
+        // The tooltip is set on the button in AppKit, not left to SwiftUI's
+        // `.help()` inside the hosted view. On macOS 26+ `.help()` in content
+        // hosted in a menu-bar surface produces no tooltip window at all —
+        // confirmed by `make verify-tooltip`, which hovered the row and saw
+        // nothing appear. `NSView.toolTip` works on every OS Pacer supports,
+        // so this is the reliable half and `.help()` is left in place as the
+        // declarative statement of intent.
+        // Built here, not inline in the view closure below. Written inline the
+        // `[weak item]` capture would sit inside a closure that captures `item`
+        // strongly anyway, which is exactly the mixed ownership Swift 6.4's
+        // ImplicitStrongCapture diagnostic flags. Hoisted, the view closure
+        // captures this closure value and never sees `item` at all.
+        //
+        // Weak because the closure outlives this function: the item owns the
+        // button, which owns the hosted view, which retains this. A strong
+        // capture would be a cycle.
+        let applyToolTip: (String) -> Void = { [weak item] text in
+            item?.button?.toolTip = text
+        }
         let host = SizingHostingView(
             rootView: AnyView(
                 DayKeyedContent {
-                    MenuBarLabel()
+                    MenuBarLabel(onTooltipChange: applyToolTip)
                         .modelContainer(self.container)
                 }
             )

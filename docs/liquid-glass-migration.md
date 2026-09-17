@@ -104,13 +104,21 @@ Rendered off-screen from an SDK-27 build and diffed against the SDK-15 baseline:
   green text its separation.
 
   This is only reachable from an SDK-26+ build, so released builds are
-  unaffected — it is a migration cost, not a live bug. Three ways to go, none
-  taken: accept it as the platform's intended widget look; give widgets an
-  explicit opaque colour instead of the semantic one; or raise widget text
-  contrast only. **Note `cardBackground` is shared with every dashboard card by
+  unaffected — it is a migration cost, not a live bug.
+
+  **Decided 2026-09-17: accept it.** This is how macOS renders widgets now, and
+  every other app's widgets get the same treatment, so matching the platform is
+  worth more than holding the original contrast. No code change; do not "fix"
+  this later without revisiting the decision.
+
+  Rejected, and why they are recorded rather than deleted: giving widgets an
+  explicit opaque colour would make Pacer's widgets deliberately unlike every
+  other widget on the system, and the host may composite over it anyway; raising
+  widget text contrast only would be fighting the same material from the other
+  side. Note also that `cardBackground` is shared with every dashboard card **by
   design** ("mirrored to the widget container background so the panel and the
-  dashboard cards blend"), so option two must not be done by editing the shared
-  token — it needs a widget-local colour, and sign-off on the divergence.
+  dashboard cards blend"), so either would have needed a widget-local colour and
+  a deliberate decision to let the two diverge.
 
 Both must be signed off before shipping, and neither can be automated.
 
