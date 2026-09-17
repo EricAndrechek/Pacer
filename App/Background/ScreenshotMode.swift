@@ -1040,7 +1040,15 @@ enum ScreenshotMode {
         if card {
             decorated = AnyView(
                 framed
-                    .background(Color(nsColor: .windowBackgroundColor))
+                    // `underPageBackgroundColor`, not `windowBackgroundColor`.
+                    // The latter now resolves to exactly the card fill on
+                    // macOS 26+, so every screenshot rendered cards onto a
+                    // canvas of their own colour and the card edges vanished —
+                    // the renders looked flatter than the running app, which
+                    // paints a material here and still separates. This is the
+                    // semantic "surface behind grouped content" and stays
+                    // distinct in both appearances.
+                    .background(Color(nsColor: .underPageBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

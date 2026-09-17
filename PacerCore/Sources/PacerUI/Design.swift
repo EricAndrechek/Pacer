@@ -26,9 +26,20 @@ public enum PacerDesign {
     /// Vertical spacing between stacked sections inside a column.
     public static let sectionSpacing: CGFloat = 16
 
-    /// Hairline stroke around cards. Visible in light mode, near-
-    /// invisible in dark.
-    public static var cardStroke: Color { Color.primary.opacity(0.06) }
+    /// Hairline stroke around cards.
+    ///
+    /// This used to be a light-mode nicety — separation came from the card
+    /// fill being lighter than the window behind it. macOS 26 collapsed that:
+    /// `windowBackgroundColor` and `controlBackgroundColor` now resolve to the
+    /// *same* value (255/255 light, 30/30 dark), where macOS 15 had them 19-20
+    /// levels apart. With the fill difference gone the stroke is the only
+    /// thing left drawing a card's edge, and "near-invisible in dark" is no
+    /// longer good enough.
+    ///
+    /// `separatorColor` is the system's own answer for delineating grouped
+    /// content — 10% in both appearances, and it tracks any future change to
+    /// what a separator means rather than pinning a number we chose.
+    public static var cardStroke: Color { Color(nsColor: .separatorColor) }
 
     /// The card's solid fill. Mirrored to the widget container
     /// background so the panel and the dashboard cards blend.
