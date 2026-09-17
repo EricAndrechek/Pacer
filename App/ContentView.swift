@@ -107,17 +107,13 @@ struct ContentView: View {
         return accounts.first { $0.isActive } ?? accounts.first
     }
 
-    /// The freshness readout, without the capsule macOS 26 puts behind a
-    /// toolbar item.
+    /// The freshness readout, wearing the toolbar's own capsule and no other.
     ///
-    /// It is a status readout, not a control. With the shared background on it
-    /// looked identical to the account menu beside it — same capsule, same
-    /// weight, one of them not clickable — and it crowded the window's rounded
-    /// corner. Hiding the shared background is the platform's own way to say
-    /// "this is not a control", rather than us drawing or undrawing chrome.
-    ///
-    /// Gated because the API is macOS 26+. On macOS 15 there is no shared
-    /// background to hide, so the unmodified item is already correct.
+    /// It used to draw a `Capsule` of its own *inside* the one macOS 26 puts
+    /// behind a toolbar item — a pill in a pill. Removing ours was the fix.
+    /// Hiding the system's as well was tried and reverted: with no background
+    /// at all the readout looked stripped rather than deliberate. The toolbar
+    /// owns this chrome; we neither add to it nor take it away.
     @ToolbarContentBuilder
     private var freshnessSpacer: some ToolbarContent {
         if #available(macOS 26.0, *) {
@@ -125,17 +121,9 @@ struct ContentView: View {
         }
     }
 
-    @ToolbarContentBuilder
     private var freshnessToolbarItem: some ToolbarContent {
-        if #available(macOS 26.0, *) {
-            ToolbarItem(placement: .primaryAction) {
-                ToolbarFreshness()
-            }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .primaryAction) {
-                ToolbarFreshness()
-            }
+        ToolbarItem(placement: .primaryAction) {
+            ToolbarFreshness()
         }
     }
 

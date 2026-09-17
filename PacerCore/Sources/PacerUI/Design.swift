@@ -50,7 +50,7 @@ public enum PacerDesign {
     /// decision, and it should be one edit.
     ///
     /// Apply with `.pacerDenseControl()` rather than reading this directly.
-    public static let denseControlSize: ControlSize = .small
+    public static let denseControlSize: ControlSize = .regular
 
     /// The card's solid fill. Mirrored to the widget container
     /// background so the panel and the dashboard cards blend.
