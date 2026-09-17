@@ -412,7 +412,6 @@ struct HeatmapCard: View {
             }
         }
         .pickerStyle(.segmented)
-        .frame(width: 220)
         .pacerDenseControl()
         .labelsHidden()
     }
