@@ -86,6 +86,32 @@ Rendered off-screen from an SDK-27 build and diffed against the SDK-15 baseline:
   the system widget daemon, which is exactly where this project has been bitten
   before (v0.3.10 → v0.3.11).
 
+### Checked by the maintainer on an SDK-27 build (2026-09-17)
+
+- **Menu-bar item: looks right.** Renders correctly, no clipped chips, and the
+  click-down menu works.
+- **Menu-bar tooltip: did not appear.** Unresolved — see below. It is a real
+  feature (`MenuBarContent.swift`, `.help(rendered.tooltip)`), added precisely
+  because Apple's Battery / Wi-Fi / Volume items all show one and ours did not.
+- **Widgets: install and render, with visibly less contrast.** Measured rather
+  than eyeballed. `PacerDesign.cardBackground` is
+  `NSColor.controlBackgroundColor`, which in dark mode resolves to an **opaque
+  rgb(30, 30, 30)**. Sampling the maintainer's screenshot of a live widget gives
+  **rgb(42, 42, 42) to rgb(60, 59, 59)**, varying top-to-bottom. An opaque flat
+  fill cannot produce a gradient, so the macOS 26+ widget host is compositing its
+  own material with our container background rather than drawing it as specified.
+  The card lands 40–100% lighter than designed, which is what costs the white and
+  green text its separation.
+
+  This is only reachable from an SDK-26+ build, so released builds are
+  unaffected — it is a migration cost, not a live bug. Three ways to go, none
+  taken: accept it as the platform's intended widget look; give widgets an
+  explicit opaque colour instead of the semantic one; or raise widget text
+  contrast only. **Note `cardBackground` is shared with every dashboard card by
+  design** ("mirrored to the widget container background so the panel and the
+  dashboard cards blend"), so option two must not be done by editing the shared
+  token — it needs a widget-local colour, and sign-off on the divergence.
+
 Both must be signed off before shipping, and neither can be automated.
 
 ## The one-way door
