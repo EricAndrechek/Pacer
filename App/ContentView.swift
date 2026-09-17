@@ -107,6 +107,31 @@ struct ContentView: View {
         return accounts.first { $0.isActive } ?? accounts.first
     }
 
+    /// The freshness readout, without the capsule macOS 26 puts behind a
+    /// toolbar item.
+    ///
+    /// It is a status readout, not a control. With the shared background on it
+    /// looked identical to the account menu beside it — same capsule, same
+    /// weight, one of them not clickable — and it crowded the window's rounded
+    /// corner. Hiding the shared background is the platform's own way to say
+    /// "this is not a control", rather than us drawing or undrawing chrome.
+    ///
+    /// Gated because the API is macOS 26+. On macOS 15 there is no shared
+    /// background to hide, so the unmodified item is already correct.
+    @ToolbarContentBuilder
+    private var freshnessToolbarItem: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .primaryAction) {
+                ToolbarFreshness()
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .primaryAction) {
+                ToolbarFreshness()
+            }
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -127,9 +152,14 @@ struct ContentView: View {
                     ToolbarItem(placement: .primaryAction) {
                         AccountScopeControl()
                     }
-                    ToolbarItem(placement: .primaryAction) {
-                        ToolbarFreshness()
-                    }
+                    // The freshness readout is not a control, so it should
+                    // not wear the capsule macOS 26 draws behind toolbar
+                    // items. `sharedBackgroundVisibility(.hidden)` is the
+                    // platform's own way to say that — and it also removes the
+                    // capsule that was crowding the window's rounded corner.
+                    // macOS 26+ only; on 15 there is no shared background to
+                    // hide and the item renders bare already.
+                    freshnessToolbarItem
                 }
         }
         .navigationSplitViewStyle(.balanced)

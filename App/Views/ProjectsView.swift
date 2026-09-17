@@ -162,7 +162,6 @@ struct ProjectsView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 260)
             .controlSize(.small)
             .labelsHidden()
         }
@@ -870,7 +869,6 @@ private struct ProjectsContent: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 240)
                 .controlSize(.small)
                 .labelsHidden()
             }
