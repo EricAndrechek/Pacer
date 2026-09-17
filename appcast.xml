@@ -1106,5 +1106,58 @@ people would notice.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="+QY8vDc7uoD9exWrDs+tqT1CXt/9ZlA5RGJFiPgdwHwUAYSzGA9uKfsxNm46bI+cw5GOyAm7GNmvLqOCOZqABA==" />
     </item>
+            <item>
+        <title>Version 0.7.0</title>
+        <description><![CDATA[<p>Pacer looks like a macOS 26 app now — and on macOS 15 it looks exactly like it always has.</p>
+<h2>The new design</h2>
+<p>On <strong>macOS 26 (Tahoe) and macOS 27</strong>, Pacer adopts the system's current design:<br>
+buttons, pickers, menus and the toolbar all pick up Liquid Glass. Until now it<br>
+did not, and the reason is a detail worth stating once — macOS decides an app's<br>
+appearance from the SDK it was built against, not the version you are running.<br>
+Pacer was still built against the macOS 15 SDK, so it kept the old look even on<br>
+a brand-new Mac. This release changes what it is built with.</p>
+<p><strong>Your data is untouched.</strong> No database reset, no re-import, no re-scan. This<br>
+is a minor version because the app looks materially different, not because<br>
+anything underneath moved.</p>
+<p><strong>On macOS 15 (Sequoia) nothing changes at all</strong> — that version of macOS has no<br>
+new design to draw, and Pacer still runs there from the same single download.<br>
+macOS 15 remains the minimum.</p>
+<h2>Four things that were broken on macOS 26+ and are fixed</h2>
+<p>These only affected people already on Tahoe. Each one came from the system<br>
+changing behaviour underneath the app rather than from anything Pacer did.</p>
+<p><strong>A second account could be scanned twice.</strong> If you use <code class="notranslate">claude-swap</code>, Pacer<br>
+checks whether a discovered profile is a folder it already scans, and that<br>
+check compared two file URLs. macOS 26 changed how it decides whether a<br>
+directory URL ends in a slash, so the same folder stopped comparing equal to<br>
+itself and the guard silently stopped working. Totals stayed right — duplicate<br>
+turns are caught later by message id — but every file under that folder was<br>
+being parsed twice on every scan.</p>
+<p><strong>The Models trend axis was unreadable.</strong> It asks for six date labels across 90<br>
+days; macOS 26 drew all ninety, stacked on top of each other.</p>
+<p><strong>Menu-bar tooltips stopped appearing.</strong> Hovering the menu-bar item, and the<br>
+rows inside its dropdown, showed nothing. They use AppKit's tooltips again<br>
+rather than SwiftUI's, which still work.</p>
+<p><strong>Pacer could steal focus at launch and land on the wrong screen.</strong> Restoring<br>
+the dashboard you had left open brought the app to the front over whatever you<br>
+were working in, and a dashboard parked on a display that was not currently<br>
+connected reappeared somewhere arbitrary instead of where you keep it. It now<br>
+hands the front back to the app that had it, and falls back predictably when<br>
+its home display is missing.</p>
+<h2>Smaller things</h2>
+<p>Controls sit at the size macOS 26 designs around, rather than being compressed<br>
+a step smaller everywhere. The status readout in the toolbar no longer draws a<br>
+second pill inside the one the toolbar already draws for it. Cards keep their<br>
+edges: macOS 26 made the window background and the card background the same<br>
+colour, which had quietly flattened every stacked view.</p>]]></description>
+        <pubDate>Thu, 17 Sep 2026 22:25:45 +0000</pubDate>
+        <sparkle:version>1789683457</sparkle:version>
+        <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.0/Pacer-0.7.0.dmg"
+            length="21642941"
+            type="application/octet-stream"
+            sparkle:edSignature="NmH1YElT2StO6S6HAUkcs9Eg3RwzNYTNARA2CaG88lttudLYq7TPJOTShQoB7Wddz8PX/m5888TCvsN8JR2QCQ==" />
+    </item>
         </channel>
 </rss>
