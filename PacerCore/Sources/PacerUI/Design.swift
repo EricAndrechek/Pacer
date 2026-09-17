@@ -40,6 +40,18 @@ public enum PacerDesign {
     /// a material, not a line — prototype it before shipping it.
     public static var cardStroke: Color { Color.primary.opacity(0.06) }
 
+    /// The control size Pacer's dense header and card rows use.
+    ///
+    /// A token rather than 51 literal `.controlSize(.small)` calls, because
+    /// this is a live question, not a settled one: macOS 26 rebuilt control
+    /// metrics around the default size, and `.small` visibly compresses them —
+    /// less internal padding, a cramped selection capsule on segmented
+    /// controls. Whether Pacer keeps its density or follows the platform is one
+    /// decision, and it should be one edit.
+    ///
+    /// Apply with `.pacerDenseControl()` rather than reading this directly.
+    public static let denseControlSize: ControlSize = .small
+
     /// The card's solid fill. Mirrored to the widget container
     /// background so the panel and the dashboard cards blend.
     public static var cardBackground: Color { Color(nsColor: .controlBackgroundColor) }
@@ -580,5 +592,15 @@ public struct HoverRow<Content: View>: View {
         // Arrow cursor (default) — macOS HIG reserves the pointing-hand
         // for hyperlinks. Native Mac list rows (Finder, Mail, Things)
         // keep the arrow; the hover background is the affordance.
+    }
+}
+
+// MARK: - Control sizing
+
+public extension View {
+    /// The control size Pacer's dense rows use — see
+    /// `PacerDesign.denseControlSize`.
+    func pacerDenseControl() -> some View {
+        controlSize(PacerDesign.denseControlSize)
     }
 }

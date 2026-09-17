@@ -119,6 +119,13 @@ struct ContentView: View {
     /// Gated because the API is macOS 26+. On macOS 15 there is no shared
     /// background to hide, so the unmodified item is already correct.
     @ToolbarContentBuilder
+    private var freshnessSpacer: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+    }
+
+    @ToolbarContentBuilder
     private var freshnessToolbarItem: some ToolbarContent {
         if #available(macOS 26.0, *) {
             ToolbarItem(placement: .primaryAction) {
@@ -152,6 +159,12 @@ struct ContentView: View {
                     ToolbarItem(placement: .primaryAction) {
                         AccountScopeControl()
                     }
+                    // Separates the account menu from the readout. With the
+                    // readout's shared background hidden it sat right against
+                    // the menu's capsule and read as a stripped-down control
+                    // rather than a separate status line. `ToolbarSpacer` is
+                    // the platform's own grouping tool.
+                    freshnessSpacer
                     // The freshness readout is not a control, so it should
                     // not wear the capsule macOS 26 draws behind toolbar
                     // items. `sharedBackgroundVisibility(.hidden)` is the

@@ -60,7 +60,7 @@ struct ModelsView: View {
                         ForEach(ModelGrouping.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .labelsHidden()
                     Picker("Time range", selection: rangeBinding) {
                         ForEach(TimeRange.allCases) { r in
@@ -68,7 +68,7 @@ struct ModelsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .labelsHidden()
                 }
             }
@@ -605,7 +605,7 @@ private struct ModelsContent: View {
                     ForEach(ModelMetric.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .labelsHidden()
             }
         }) {

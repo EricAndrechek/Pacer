@@ -372,14 +372,14 @@ struct BulkMergeSheet: View {
                 if !selectedSources.isEmpty {
                     Button("Clear") { selectedSources.removeAll() }
                         .buttonStyle(.link)
-                        .controlSize(.small)
+                        .pacerDenseControl()
                 }
                 if !filteredSources.isEmpty {
                     Button(allFilteredSelected ? "Deselect filtered" : "Select filtered") {
                         toggleFilteredSelection()
                     }
                     .buttonStyle(.link)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                 }
             }
             // Quick "fold every missing path into the canonical" shortcut.
@@ -396,11 +396,11 @@ struct BulkMergeSheet: View {
                         .font(.caption)
                 }
                 .buttonStyle(.link)
-                .controlSize(.small)
+                .pacerDenseControl()
             }
             TextField("Filter by path or name", text: $filterText)
                 .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+                .pacerDenseControl()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if filteredSources.isEmpty {

@@ -170,7 +170,7 @@ struct CollectionEditorSheet: View {
                     .help("Glob pattern, e.g. ~/Code/**/web-* . Use * within a folder and ** across folders.")
                 Spacer()
             }
-            .controlSize(.small)
+            .pacerDenseControl()
         } header: {
             Text("Rules — auto-include matching projects")
         }
@@ -182,7 +182,7 @@ struct CollectionEditorSheet: View {
         Section {
             TextField("Filter projects", text: $projectFilter)
                 .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
+                .pacerDenseControl()
             if memberListPaths.isEmpty {
                 Text(projectFilter.isEmpty ? "No projects seen yet." : "No projects match.")
                     .font(.caption).foregroundStyle(.tertiary)
@@ -209,7 +209,7 @@ struct CollectionEditorSheet: View {
                 importTarget = .member
                 showImporter = true
             } label: { Label("Add folder…", systemImage: "folder.badge.plus") }
-                .controlSize(.small)
+                .pacerDenseControl()
                 .help("Tag a folder by hand — including one with no usage yet. It'll light up once Claude Code runs there.")
         } header: {
             HStack {
@@ -326,7 +326,7 @@ private struct RuleRowView: View {
                     Text(rule.value.isEmpty ? "Choose a folder…" : pacerShortPath(rule.value))
                         .foregroundStyle(rule.value.isEmpty ? .secondary : .primary)
                         .help(rule.value)
-                    Button("Choose…", action: onChooseFolder).controlSize(.small)
+                    Button("Choose…", action: onChooseFolder).pacerDenseControl()
                 } else {
                     TextField("~/Code/**/web-*", text: $rule.value)
                         .textFieldStyle(.roundedBorder)
@@ -450,7 +450,7 @@ private struct CollectionColorField: View {
                     colorHex = nil
                 } label: { Image(systemName: "arrow.uturn.backward") }
                     .buttonStyle(.borderless)
-                    .controlSize(.small)
+                    .pacerDenseControl()
                     .help("Reset to automatic color")
             }
         }

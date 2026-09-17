@@ -1929,7 +1929,7 @@ private struct MacWindowChrome<Trailing: View>: View {
             // width it is offered; without it the control spanned the bar.
             trailing
                 .labelStyle(.iconOnly)
-                .controlSize(.small)
+                .pacerDenseControl()
                 .fixedSize()
         }
         .padding(.horizontal, 16)
