@@ -103,4 +103,45 @@ struct WindowPlacementGateTests {
         #expect(gate.isPlacingNewWindow(at: t0.addingTimeInterval(2.0)))
         #expect(!gate.isPlacingNewWindow(at: t0.addingTimeInterval(2.6)))
     }
+
+    /// 2026-09-22: monitors slept, AppKit moved the dashboard, and only then
+    /// reported the display change. The move passed every forward-looking
+    /// grace and was stored as home; every later launch restored it to a spot
+    /// that no longer existed.
+    @Test("a move reported just before the display change that caused it is not recorded")
+    func moveThatPrecedesItsDisplayChangeIsDropped() {
+        var gate = WindowPlacementGate()
+        let moved = t0
+        #expect(gate.shouldRecordMove(at: moved))            // looks innocent on arrival
+        gate.noteDisplayConfigurationChanged(at: moved.addingTimeInterval(0.3))
+        #expect(!gate.shouldCommitSettledMove(
+            observedAt: moved, at: moved.addingTimeInterval(WindowPlacementGate.settleDelay)))
+        #expect(!gate.shouldCommitSettledMove(
+            observedAt: moved, at: moved.addingTimeInterval(60)))
+    }
+
+    @Test("the change and the move in the same instant, change first, is still dropped")
+    func sameInstantEitherOrder() {
+        var gate = WindowPlacementGate()
+        gate.noteDisplayConfigurationChanged(at: t0)
+        #expect(!gate.shouldCommitSettledMove(
+            observedAt: t0.addingTimeInterval(0.2), at: t0.addingTimeInterval(60)))
+    }
+
+    @Test("a quiet non-drag move commits once it has settled, not before")
+    func quietMoveCommitsAfterSettling() {
+        let gate = WindowPlacementGate()
+        #expect(!gate.shouldCommitSettledMove(observedAt: t0, at: t0.addingTimeInterval(0.5)))
+        #expect(gate.shouldCommitSettledMove(
+            observedAt: t0, at: t0.addingTimeInterval(WindowPlacementGate.settleDelay)))
+    }
+
+    @Test("a display change long before the move does not block it")
+    func oldDisplayChangeDoesNotBlock() {
+        var gate = WindowPlacementGate()
+        gate.noteDisplayConfigurationChanged(at: t0)
+        let moved = t0.addingTimeInterval(WindowPlacementGate.displayChangeGrace + 10)
+        #expect(gate.shouldCommitSettledMove(
+            observedAt: moved, at: moved.addingTimeInterval(WindowPlacementGate.settleDelay)))
+    }
 }

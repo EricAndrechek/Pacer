@@ -291,19 +291,43 @@ enum MainWindowPlacement {
     }
 
     /// Record a move the user actually made.
+    ///
+    /// A drag is stored at once. Anything else waits out
+    /// `WindowPlacementGate.settleDelay` first and is dropped if the displays
+    /// changed around it or the window has moved on since — AppKit can move
+    /// the window *before* it reports the display change that caused it.
     static func record(_ window: NSWindow) {
         guard isEnabled, isDashboard(window), window.isVisible else { return }
         let userDriven = isUserDrivenMove()
         guard gate.shouldRecordMove(userDriven: userDriven) else { return }
         guard isUsable(window.frame) else { return }
-        if userDriven { gate.noteUserParked() }
-        guard window.frame != storedFrame else {
+        if userDriven {
+            gate.noteUserParked()
+            store(window.frame)
+            return
+        }
+        let frame = window.frame
+        let observedAt = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + WindowPlacementGate.settleDelay) {
+            MainActor.assumeIsolated {
+                guard window.isVisible, window.frame == frame,
+                      gate.shouldCommitSettledMove(observedAt: observedAt),
+                      // Judged again against the screens as they are now:
+                      // the layout it was usable in may have been transient.
+                      isUsable(frame) else { return }
+                store(frame)
+            }
+        }
+    }
+
+    private static func store(_ frame: NSRect) {
+        guard frame != storedFrame else {
             wasOpen = true
             return
         }
-        storedFrame = window.frame
+        storedFrame = frame
         wasOpen = true
-        Log.write("Placement", "parked at \(fmt(window.frame))")
+        Log.write("Placement", "parked at \(fmt(frame))")
     }
 
     /// Is the user's hand on this move?
