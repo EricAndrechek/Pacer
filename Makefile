@@ -183,7 +183,7 @@ clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for c
 .PHONY: record record-relaunch
 ## Record Pacer's window (only Pacer's pixels) through a scenario, lined up with
 ## the log — see bin/dev-record.sh. RECORDS THE SCREEN: owner's go-ahead only.
-## Usage: make record SCENARIO=relaunch|tabs APPROVED=1  (without APPROVED: plan only)
+## Usage: make record SCENARIO=relaunch|tabs|idle APPROVED=1  (without APPROVED: plan only)
 record:
 	@SCENARIO=$(or $(SCENARIO),relaunch) bin/dev-record.sh $(if $(APPROVED),--owner-approved,)
 record-relaunch:

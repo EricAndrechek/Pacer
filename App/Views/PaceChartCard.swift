@@ -933,7 +933,10 @@ struct PaceChartCard: View {
                 if let limitOwnerNote {
                     Text(limitOwnerNote)
                 }
-                if hasScoped {
+                // While loading, the footnote the loaded card will have — it is
+                // a line tall, and appearing with the charts it was the last
+                // 13 pt the remembered loading height could not cover.
+                if hasScoped || (!hasAnyReading && RememberedHeight.lastHadScoped(scope: scope.accountId)) {
                     Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
                 }
             }
@@ -946,6 +949,9 @@ struct PaceChartCard: View {
         // the day — flips `scopeKey` and pulls the other account's columns in.
         .task(id: reloadSignal) {
             await reload()
+        }
+        .onChange(of: hasScoped) { _, scoped in
+            if hasAnyReading { RememberedHeight.storeHadScoped(scoped, scope: scope.accountId) }
         }
         // A scope change invalidates everything loaded. The card is *not*
         // rebuilt by identity for this — doing that threw away its measured
@@ -993,6 +999,18 @@ struct PaceChartCard: View {
     struct RememberedHeight: ViewModifier {
         let scope: String?
         private static let key = "PaceChartCard.rememberedHeight"
+
+        private static let scopedKey = "PaceChartCard.rememberedHadScoped"
+
+        static func lastHadScoped(scope: String?) -> Bool {
+            (UserDefaults.standard.dictionary(forKey: scopedKey)?[scope ?? "all"] as? Bool) ?? false
+        }
+
+        static func storeHadScoped(_ value: Bool, scope: String?) {
+            var all = UserDefaults.standard.dictionary(forKey: scopedKey) ?? [:]
+            all[scope ?? "all"] = value
+            UserDefaults.standard.set(all, forKey: scopedKey)
+        }
 
         static func last(scope: String?) -> CGFloat? {
             (UserDefaults.standard.dictionary(forKey: key)?[scope ?? "all"] as? Double)
@@ -1517,6 +1535,7 @@ private struct PaceColumn: View {
             // stale reading, and two facts of different ages side by side is
             // what made this confusing in the first place.
             Text("last read \(pacerRelative(readingAt))")
+                .lineLimit(1)
                 .font(.system(size: 10))
                 .foregroundStyle(.orange)
                 .help("This account is not being polled right now — Pacer can only "
@@ -1526,9 +1545,25 @@ private struct PaceColumn: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         } else if let resets = column.resetsAt {
-            Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            // One line, always. The caption is recomputed as time passes
+            // ("resets in 4 days · Mon 5 AM" → "resets in 3 days 23 hr · …")
+            // and in a column narrowed by a "critical" chip it wrapped to a
+            // second line and back — the pace card grew and shrank by a line
+            // while the dashboard sat idle, moving every card below. When the
+            // whole caption does not fit, the absolute time alone does; the
+            // full text stays on hover.
+            let full = pacerResetCaption(resetsAt: resets, durationSeconds: duration)
+            let parts = full.components(separatedBy: " · ")
+            ViewThatFits(in: .horizontal) {
+                Text(full).lineLimit(1)
+                if parts.count > 1 {
+                    Text("resets \(parts[parts.count - 1])").lineLimit(1)
+                }
+                Text(full).lineLimit(1).truncationMode(.tail)
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .help(full)
         } else if idleUsedPct != nil {
             Text("idle · no active window")
                 .font(.system(size: 10))

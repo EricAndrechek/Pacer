@@ -77,19 +77,30 @@ Concretely, never write, run, or leave behind anything that:
 - records the screen or captures another app's windows — with one sanctioned
   exception, below.
 
-**The one screen-recording tool: `make record-relaunch`**
-(`bin/dev-record-relaunch.sh`). Committed at the owner's request so any
-session can use it, and bound by the same rule as everything above: **it
-records the screen, so every run needs the owner's go-ahead for that run.**
-Run it bare first — it prints its plan (the two rectangles, the command, the
-output folder) and exits without recording; show him that plan, and only on
-his "go" run `make record-relaunch APPROVED=1`. It records only Pacer's own
-window rectangles (home frame + SwiftUI's default spot, read from the
-`[Placement]` log), never a whole display, while `make install` relaunches the
-app; then it writes the matching log slice (ms timestamps), the instants the
-picture changed, and contact sheets to `screenshots/recordings/`. Anchor the
-video on `[Lifecycle] terminating` / `[Placement] dashboard is id=main`. Do not
-extend it to other apps, whole displays, input, or unattended runs.
+**The one screen-recording tool: `make record`** (`bin/dev-record.sh`).
+Committed at the owner's request so any session can use it, and bound by the
+same rule as everything above: **it records the screen, so it runs only with
+the owner's go-ahead** — per run, or for a stretch of work he explicitly
+approves ("iterate on the layout shifts, record as often as you need"). Run it
+bare first; it prints its plan and exits. Scenarios:
+
+- `SCENARIO=relaunch` — `make install`, i.e. quit → replace → relaunch;
+- `SCENARIO=tabs` — Pacer switches through every tab and back to where it was,
+  via `bin/pacer-select-tab.swift` (a distributed notification the app acts on
+  itself: no input events, no activation, no focus change);
+- `SCENARIO=idle` — nothing; whatever changes on its own.
+
+What makes it acceptable to run while he works (`bin/pacer-window-recorder.swift`):
+ScreenCaptureKit, one stream cropped to the dashboard's current frame with
+**every other application excluded** — only Pacer's pixels are ever captured,
+nothing is dimmed (`screencapture -V -R` dims every other display, which is why
+it is not used), and a relaunched Pacer is captured from its first frame because
+a new process is not in the exclusion list. Frames are PNGs named by wall-clock
+ms, the log has ms timestamps, so they line up exactly; `changes.txt`
+(`bin/dev-frame-diff.sh`) lists every frame that differs from the last, with the
+changed area. Output goes to `screenshots/recordings/` (gitignored) — delete a
+run's folder once it has been analysed. Do not extend it to other apps, whole
+displays, input, or unattended runs.
 
 Reading is fine: `NSEvent.mouseLocation` to place a window the *user* asked
 for, `NSScreen.frame`, and so on. The line is between observing the machine and
