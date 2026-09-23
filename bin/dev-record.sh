@@ -4,6 +4,7 @@
 #   make record SCENARIO=relaunch APPROVED=1   # reinstall + relaunch (make install)
 #   make record SCENARIO=tabs APPROVED=1       # walk every tab, end where it started
 #   make record SCENARIO=idle APPROVED=1       # just watch it sit (DUR=300 default)
+#   make record SCENARIO=reopen APPROVED=1     # quit + reopen, no rebuild (REPEAT=5 default)
 #
 # THIS RECORDS THE SCREEN — AGENTS.md → "Never take over the machine". Only
 # with the owner's go-ahead. Without APPROVED=1 it prints its plan and exits.
@@ -29,7 +30,8 @@ case $SCENARIO in
     relaunch) DUR=${DUR:-75} ;;
     tabs)     DUR=${DUR:-30} ;;
     idle)     DUR=${DUR:-300} ;;
-    *) echo "SCENARIO must be relaunch, tabs or idle" >&2; exit 64 ;;
+    reopen)   REPEAT=${REPEAT:-5}; DUR=${DUR:-$(( REPEAT * 12 + 6 ))} ;;
+    *) echo "SCENARIO must be relaunch, tabs, idle or reopen" >&2; exit 64 ;;
 esac
 OUT=${OUT:-$ROOT/screenshots/recordings/$SCENARIO-$(date +%Y%m%d-%H%M%S)}
 BIN=$ROOT/build
@@ -40,6 +42,7 @@ case $SCENARIO in
     relaunch) echo "      running \`make install\` once it is ready (quits + relaunches Pacer in the background)." ;;
     tabs)     echo "      asking Pacer to switch through every tab (2.5s each) and back to where it was." ;;
     idle)     echo "      doing nothing else — whatever changes on its own is what gets recorded." ;;
+    reopen)   echo "      quitting Pacer (bin/dev-quit-app.sh, as make install does) and reopening it in the background, ${REPEAT}×." ;;
 esac
 echo "      Output: $OUT"
 if [[ "${1:-}" != "--owner-approved" ]]; then
@@ -83,6 +86,18 @@ tabs)
     done
     ;;
 idle) ;;
+reopen)
+    # The same quit and reopen `make install` does, minus the build: a clean
+    # quit request, then `open -g` (background — no activation, no focus).
+    for i in $(seq 1 $REPEAT); do
+        sleep 2
+        mark "quit $i"
+        "$ROOT/bin/dev-quit-app.sh" > /dev/null 2>&1
+        mark "reopen $i"
+        open -g /Applications/Pacer.app
+        sleep 8
+    done
+    ;;
 esac
 wait $REC
 mark "recording end"
