@@ -145,7 +145,11 @@ event("ready — recording \(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.wid
       + "(top-left coords) on display \(display.displayID), only \(bundleID), for \(Int(seconds))s")
 
 var known = dashboardWindows()
-for (id, r) in known { event("window w\(id) present at \(Int(r.minX)),\(Int(r.minY))") }
+for (id, r) in known {
+    let name = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?
+        .first?[kCGWindowName as String] as? String ?? ""
+    event("window w\(id) present at \(Int(r.minX)),\(Int(r.minY)) title \"\(name)\"")
+}
 let deadline = Date().addingTimeInterval(seconds)
 while Date() < deadline {
     let now = dashboardWindows()

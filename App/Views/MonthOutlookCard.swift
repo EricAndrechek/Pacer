@@ -122,6 +122,16 @@ struct MonthOutlookCard: View {
                             projectedLabel: "≈\(IntelligenceFormatting.approxCost(max(p.value, cached.monthSoFar)))",
                             help: projectionHelp(p)
                         )
+                    } else if projection == nil {
+                        // Held open until the engine answers — its first answer
+                        // after launch lands seconds after the card draws, and
+                        // the bar arriving then grew the card 31 pt. Below the
+                        // fold, but it still changed the page's height and
+                        // flashed the scroller. Collapses only if the answer
+                        // turns out not to warrant a bar.
+                        SpendProgressBar(spent: 0, projected: 1, projectedLabel: " ", help: "")
+                            .hidden()
+                            .accessibilityHidden(true)
                     }
                 }
             } else {

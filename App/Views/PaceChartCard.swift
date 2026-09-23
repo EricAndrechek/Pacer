@@ -894,6 +894,7 @@ struct PaceChartCard: View {
                     Divider().frame(height: 110)
                     column(cols[1])
                 }
+                .modifier(RememberedHeight(scope: scope.accountId))
             } else {
                 // N windows (> 2) — a balanced, width-aware grid. The column
                 // count is computed from the measured content width so rows
@@ -919,10 +920,12 @@ struct PaceChartCard: View {
                             }
                         }
                     }
+                    .modifier(RememberedHeight(scope: scope.accountId))
                 } else {
                     PaceColumnGrid() {
                         ForEach(cols) { column($0) }
                     }
+                    .modifier(RememberedHeight(scope: scope.accountId))
                 }
             }
         } footer: {
@@ -974,6 +977,35 @@ struct PaceChartCard: View {
         .task(id: windowKey) { await runProjectionRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
+        }
+    }
+
+    /// Remembers how tall the loaded charts were, per picked scope, across
+    /// launches — the loading state's height on the next cold start.
+    ///
+    /// On a cold launch there is nothing in memory to draw from (a tab switch
+    /// is covered by `PaceSeriesCache`), so the card has to show *something*
+    /// for the half-second the history takes to load. A short spinner row was
+    /// honest but made the whole page jump when the charts replaced it. Sizing
+    /// it to the last real height is the usual answer: the space is right
+    /// nearly always, and when the column set did change it is off by a row
+    /// rather than by the whole card. Written only when the height changes.
+    struct RememberedHeight: ViewModifier {
+        let scope: String?
+        private static let key = "PaceChartCard.rememberedHeight"
+
+        static func last(scope: String?) -> CGFloat? {
+            (UserDefaults.standard.dictionary(forKey: key)?[scope ?? "all"] as? Double)
+                .map { CGFloat($0) }
+        }
+
+        func body(content: Content) -> some View {
+            content.onGeometryChange(for: CGFloat.self) { $0.size.height.rounded() } action: { height in
+                guard height > 0, Self.last(scope: scope) != height else { return }
+                var all = UserDefaults.standard.dictionary(forKey: Self.key) ?? [:]
+                all[scope ?? "all"] = Double(height)
+                UserDefaults.standard.set(all, forKey: Self.key)
+            }
         }
     }
 
@@ -1121,7 +1153,12 @@ struct PaceChartCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 110, alignment: .center)
+        // As tall as the charts were last time, so their arrival fills the
+        // space instead of pushing every card below down — ~550 pt on a
+        // three-account dashboard, on every launch. See `RememberedHeight`.
+        .frame(maxWidth: .infinity,
+               minHeight: RememberedHeight.last(scope: scope.accountId) ?? 110,
+               alignment: .center)
     }
 
     private var emptyState: some View {
@@ -1260,8 +1297,23 @@ private struct PaceColumn: View {
     }
 
     /// Status + burn chips under the hero numbers — the at-a-glance verdict row.
-    @ViewBuilder
+    ///
+    /// Always a chip's height, chips or not. A column goes stale and fresh on
+    /// its own — `cswap` idles an account, the poller reads it again — and the
+    /// row used to collapse to nothing while stale, so a fresh reading landing
+    /// grew that row of columns by 25 pt and pushed everything below it down,
+    /// while the user was just looking at the dashboard.
     private var chipRow: some View {
+        ZStack(alignment: .leading) {
+            Chip(text: "·", systemImage: "circle", tint: .clear, size: .compact)
+                .hidden()
+                .accessibilityHidden(true)
+            chipRowContent
+        }
+    }
+
+    @ViewBuilder
+    private var chipRowContent: some View {
         // Every chip here is a verdict about the present — "behind", "on pace",
         // "limit in 40 min". A stale reading cannot support any of them: the
         // account may have been sitting untouched since, or may have been
@@ -1308,11 +1360,16 @@ private struct PaceColumn: View {
 
     /// One muted line of the user's own history with this window
     /// ("topped 90% in 3 of 73 cycles · hit the limit 1×").
+    ///
+    /// The line is held open (blank) until the engine's outlook lands, and
+    /// stays blank if it brings no history to state. It used to appear only
+    /// with the outlook, a few seconds after the chart — one line per row of
+    /// columns, so on a three-account dashboard the card grew 42 pt and pushed
+    /// everything below it down on every launch and every return to the tab.
     @ViewBuilder
     private var outlookLines: some View {
-        if cycle?.isAwaiting == false, let o = outlook,
-           let freq = IntelligenceFormatting.frequencyLine(o) {
-            Text(freq)
+        if cycle?.isAwaiting == false {
+            Text(outlook.flatMap(IntelligenceFormatting.frequencyLine) ?? " ")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
