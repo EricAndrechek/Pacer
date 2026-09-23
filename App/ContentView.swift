@@ -128,7 +128,14 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            detail
+            // A stable container, so the toolbar below hangs off a view that
+            // survives a tab switch. `detail` is a `switch` — attached to it
+            // directly, every switch tore the toolbar items down with the old
+            // tab and rebuilt them, and a recording caught the frame between:
+            // both items drawn as empty capsules. Rebuilding is also the
+            // moment a toolbar slot gets re-measured, which is why "switch
+            // tabs and back" was the fix for a cut-off freshness pill.
+            ZStack { detail }
                 .navigationTitle(selection.wrappedValue.title)
                 .navigationSubtitle(windowSubtitle)
                 .toolbar {
@@ -172,6 +179,18 @@ struct ContentView: View {
         // The notification carries the destination as its `object`.
         .onReceive(NotificationCenter.default.publisher(for: .pacerSelectDestination)) { note in
             if let dest = note.object as? Destination {
+                selectionRaw = dest.rawValue
+            }
+        }
+        // The same request from outside the process — `make record-relaunch`
+        // walks the tabs this way to record what switching looks like. It is
+        // the app changing its own tab, not input posted at it: no event, no
+        // activation, no focus change, so the owner keeps working while it
+        // runs. The object is the destination's raw value (a sandboxed app is
+        // not delivered a distributed notification's userInfo, only this).
+        .onReceive(DistributedNotificationCenter.default().publisher(for: .pacerSelectDestinationExternal)) { note in
+            if let raw = note.object as? String, let dest = Destination(rawValue: raw) {
+                Log.write("Navigation", "tab → \(raw) (external request)")
                 selectionRaw = dest.rawValue
             }
         }
@@ -788,6 +807,11 @@ extension Notification.Name {
     /// Button inside .background turned out to miss keystrokes) while
     /// keeping `selection` private to ContentView.
     static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
+
+    /// Distributed twin of `pacerSelectDestination`, for tooling outside the
+    /// process. Object: a `Destination` raw value ("history", "projects", …).
+    static let pacerSelectDestinationExternal =
+        Notification.Name("com.ericandrechek.pacer.selectDestination")
 
     /// Fired by UI surfaces that just made a change requiring the
     /// scan coordinator to re-apply canonicalization or re-derive

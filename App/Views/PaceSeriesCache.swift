@@ -49,4 +49,22 @@ final class PaceSeriesCache {
     func store(_ series: Series, for account: String?) {
         byAccount[Self.key(account)] = series
     }
+
+    /// The accounts the card last drew for a picked scope, in order.
+    ///
+    /// The card's `init` reads this to rebuild its series before the first
+    /// frame. It cannot ask the store which accounts exist — that is a
+    /// `@Query`, and it has no value until after `init` — so without this a
+    /// tab switch back to the dashboard drew "Loading history…" for a frame and
+    /// then the charts, shoving every card below by ~550 pt, for data that was
+    /// sitting right here the whole time.
+    private var targetsByScope: [String: [(accountId: String?, label: String?)]] = [:]
+
+    func lastTargets(forPickedScope scope: String?) -> [(accountId: String?, label: String?)]? {
+        targetsByScope[Self.key(scope)]
+    }
+
+    func storeTargets(_ targets: [(accountId: String?, label: String?)], forPickedScope scope: String?) {
+        targetsByScope[Self.key(scope)] = targets
+    }
 }

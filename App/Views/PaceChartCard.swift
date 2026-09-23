@@ -195,6 +195,22 @@ struct PaceChartCard: View {
         scopedSignal.propertiesToFetch = [\.sampledAt]
         _newestScopedSignal = Query(scopedSignal)
 
+        // Seed from what this session already loaded, so the first frame draws
+        // the charts rather than "Loading history…" — see
+        // `PaceSeriesCache.lastTargets`. `reload()` still runs on appear and
+        // tops up incrementally from `loadedThrough`.
+        let cache = PaceSeriesCache.shared
+        if let targets = cache.lastTargets(forPickedScope: UsageScope.shared.accountId) {
+            let seeded = targets.map { target -> AccountSeries in
+                let c = cache.series(for: target.accountId)
+                return AccountSeries(accountId: target.accountId, label: target.label,
+                                     fixed: c.fixed, scoped: c.scoped, windows: c.windows,
+                                     loadedThrough: c.loadedThrough)
+            }
+            if seeded.allSatisfy({ $0.loadedThrough != nil }) {
+                _series = State(initialValue: seeded)
+            }
+        }
     }
 
     /// Newest timestamp across both sources — the trigger for a reload.
@@ -337,6 +353,7 @@ struct PaceChartCard: View {
 
         isLoading = false
         series = next
+        PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
 
         // Built in steps: as one expression the type checker gives up.
         let totalMs = Int(Date().timeIntervalSince(started) * 1000)
