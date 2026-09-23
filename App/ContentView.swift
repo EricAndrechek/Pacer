@@ -766,6 +766,7 @@ struct ToolbarFreshness: View {
             // both axes to the intrinsic size so the toolbar centers the
             // pill at full height instead of squashing it.
             .fixedSize()
+            .background(ToolbarSlotProbe(name: "freshness", label: display.label))
             .help(display.tooltip)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Activity status: \(display.label)")
