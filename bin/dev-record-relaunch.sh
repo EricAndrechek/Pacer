@@ -21,8 +21,10 @@
 #   home.mov / default.mov   the recordings
 #   marks.txt                wall-clock marks from this script (ms)
 #   log.txt                  Pacer log lines from the recorded span (ms)
-#   changes-*.txt            every instant the picture changed (video seconds)
-#   frames-*/                a frame at each change, plus sheet-*.png contact sheets
+#   changes-*.txt            every frame that differs from the last: video time,
+#                            changed pixels, and the bounding box of the change
+#   frames-*/                every frame (half scale) + times.txt; sheet-*.png
+#                            is a contact sheet of the changed ones
 #
 # Aligning: video t=0 is roughly "recording start" in marks.txt, but
 # screencapture's own startup adds a few hundred ms. Anchor instead on the
@@ -96,22 +98,43 @@ else
     cp "$LOG" "$OUT/log.txt"
 fi
 
+# Every frame, diffed against the one before it. ffmpeg's scene score was tried
+# first and missed exactly what matters here — a 3pt card shift or a scrollbar
+# flash scores far below any threshold that also ignores encoder noise — and
+# with `-fps_mode vfr` it silently dropped frames that shared a timestamp.
+# Recordings are at the display's backing scale (2× on Retina); frames are
+# written at half width, which is still ≥ 1pt per pixel.
 for clip in home default; do
     [[ -f "$OUT/$clip.mov" ]] || continue
     mkdir -p "$OUT/frames-$clip"
-    # Scene score > 0.001 catches a few-point card shift in a large rect; each
-    # kept frame is written and its video time logged by showinfo.
     ffmpeg -hide_banner -loglevel info -i "$OUT/$clip.mov" \
-        -vf "select='gt(scene,0.001)+eq(n,0)',showinfo,scale=540:-1" -fps_mode vfr \
-        "$OUT/frames-$clip/%04d.png" 2>&1 \
-        | grep -o 'pts_time:[0-9.]*' | cut -d: -f2 \
-        | awk '{printf "%04d %8.3fs\n", NR, $1}' > "$OUT/changes-$clip.txt"
-    n=$(wc -l < "$OUT/changes-$clip.txt" | tr -d ' ')
-    if (( n > 0 )); then
+        -vf "showinfo,scale=iw/2:-1" -fps_mode passthrough "$OUT/frames-$clip/%05d.png" 2>&1 \
+        | grep -o 'pts_time:[0-9.]*' | cut -d: -f2 > "$OUT/frames-$clip/times.txt"
+    : > "$OUT/changes-$clip.txt"
+    changed=()
+    i=0; prev=""
+    for f in "$OUT/frames-$clip"/*.png; do
+        i=$((i + 1))
+        if [[ -n "$prev" ]]; then
+            magick "$prev" "$f" -compose difference -composite -colorspace gray \
+                -threshold 6% "$OUT/.diff.png"
+            px=$(magick "$OUT/.diff.png" -format '%[fx:round(mean*w*h)]' info:)
+            if (( px > 0 )); then
+                box=$(magick "$OUT/.diff.png" -trim -format '%wx%h+%X+%Y' info: 2>/dev/null)
+                printf "%s  %9.3fs  changed_px=%-7d box=%s\n" "${f:t}" \
+                    "$(sed -n "${i}p" "$OUT/frames-$clip/times.txt")" "$px" "$box" \
+                    >> "$OUT/changes-$clip.txt"
+                changed+=("$f")
+            fi
+        fi
+        prev=$f
+    done
+    if (( ${#changed} > 0 )); then
         # An explicit font: ImageMagick has no default on macOS and -label fails.
         magick montage -font /System/Library/Fonts/Supplemental/Arial.ttf -label '%f' \
-            "$OUT/frames-$clip"/*.png -tile 8x -geometry +4+4 "$OUT/sheet-$clip.png"
+            "${changed[@]:0:64}" -tile 8x -geometry 400x+4+4 "$OUT/sheet-$clip.png"
     fi
-    echo "$clip: $n visual change(s) → $OUT/changes-$clip.txt"
+    rm -f "$OUT/.diff.png"
+    echo "$clip: ${#changed} changed frame(s) of $i → $OUT/changes-$clip.txt"
 done
 echo "$OUT"
