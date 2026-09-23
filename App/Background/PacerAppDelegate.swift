@@ -435,6 +435,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // now. Those moves are not the user's, and recording one as the
         // dashboard's home is permanent — every later launch restores it.
         Self.observeDisplayChanges()
+        Self.observeExternalWindowRequests()
 
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
@@ -494,6 +495,35 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// of the agent shape is that we keep collecting data after the
     /// user dismisses the dashboard. Quit happens via Cmd+Q or the
     /// menu-bar Quit button.
+    /// Close or reopen the dashboard on request from outside the process —
+    /// `make record SCENARIO=window` uses it to exercise window creation (the
+    /// menu-bar "Open Pacer" path) under a recording.
+    ///
+    /// The app acting on its own window, like the tab-switch request in
+    /// `ContentView`: no input events, and reopening goes through
+    /// `reopenInBackground`, which never activates, so whatever the owner is
+    /// typing into keeps focus. Object: "close" or "reopen".
+    private static func observeExternalWindowRequests() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.ericandrechek.pacer.dashboardWindow"),
+            object: nil, queue: .main
+        ) { note in
+            let request = note.object as? String
+            MainActor.assumeIsolated {
+                switch request {
+                case "close":
+                    Log.write("Placement", "closing the dashboard (external request)")
+                    NSApp.windows.first { MainWindowPlacement.isDashboard($0) && $0.isVisible }?.close()
+                case "reopen":
+                    Log.write("Placement", "reopening the dashboard (external request)")
+                    MainWindowPlacement.reopenInBackground()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {

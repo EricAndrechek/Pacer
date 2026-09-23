@@ -431,16 +431,25 @@ enum MainWindowPlacement {
                 guard !NSApp.windows.contains(where: { isDashboard($0) && $0.isVisible })
                 else { return }
                 Log.write("Placement", "reopening the dashboard it was quit with")
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = false
-                configuration.createsNewApplicationInstance = false
-                NSWorkspace.shared.openApplication(
-                    at: Bundle.main.bundleURL, configuration: configuration
-                ) { _, error in
-                    if let error {
-                        Log.write("MainWindowPlacement", "reopen failed: \(error)")
-                    }
-                }
+                reopenInBackground()
+            }
+        }
+    }
+
+    /// Materialize the dashboard through the reopen flow, without activating.
+    ///
+    /// The window is created exactly as the menu-bar "Open Pacer" cold path
+    /// creates it — reopening our own bundle makes SwiftUI rebuild the scene's
+    /// window — minus `NSApp.activate()`, so nobody's focus moves.
+    static func reopenInBackground() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.createsNewApplicationInstance = false
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL, configuration: configuration
+        ) { _, error in
+            if let error {
+                Log.write("MainWindowPlacement", "reopen failed: \(error)")
             }
         }
     }

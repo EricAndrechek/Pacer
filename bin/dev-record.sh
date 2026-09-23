@@ -5,6 +5,7 @@
 #   make record SCENARIO=tabs APPROVED=1       # walk every tab, end where it started
 #   make record SCENARIO=idle APPROVED=1       # just watch it sit (DUR=300 default)
 #   make record SCENARIO=reopen APPROVED=1     # quit + reopen, no rebuild (REPEAT=5 default)
+#   make record SCENARIO=window APPROVED=1     # close + reopen the window, app keeps running
 #
 # THIS RECORDS THE SCREEN — AGENTS.md → "Never take over the machine". Only
 # with the owner's go-ahead. Without APPROVED=1 it prints its plan and exits.
@@ -31,7 +32,8 @@ case $SCENARIO in
     tabs)     DUR=${DUR:-30} ;;
     idle)     DUR=${DUR:-300} ;;
     reopen)   REPEAT=${REPEAT:-5}; DUR=${DUR:-$(( REPEAT * 12 + 6 ))} ;;
-    *) echo "SCENARIO must be relaunch, tabs, idle or reopen" >&2; exit 64 ;;
+    window)   REPEAT=${REPEAT:-8}; DUR=${DUR:-$(( REPEAT * 6 + 6 ))} ;;
+    *) echo "SCENARIO must be relaunch, tabs, idle, reopen or window" >&2; exit 64 ;;
 esac
 OUT=${OUT:-$ROOT/screenshots/recordings/$SCENARIO-$(date +%Y%m%d-%H%M%S)}
 BIN=$ROOT/build
@@ -42,6 +44,7 @@ case $SCENARIO in
     relaunch) echo "      running \`make install\` once it is ready (quits + relaunches Pacer in the background)." ;;
     tabs)     echo "      asking Pacer to switch through every tab (2.5s each) and back to where it was." ;;
     idle)     echo "      doing nothing else — whatever changes on its own is what gets recorded." ;;
+    window)   echo "      closing and reopening the dashboard window (the menu-bar open path, minus activation), ${REPEAT}×." ;;
     reopen)   echo "      quitting Pacer (bin/dev-quit-app.sh, as make install does) and reopening it in the background, ${REPEAT}×." ;;
 esac
 echo "      Output: $OUT"
@@ -96,6 +99,17 @@ reopen)
         mark "reopen $i"
         open -g /Applications/Pacer.app
         sleep 8
+    done
+    ;;
+window)
+    for i in $(seq 1 $REPEAT); do
+        sleep 1.5
+        "$BIN/pacer-select-tab" --window close
+        mark "close $i"
+        sleep 1.5
+        "$BIN/pacer-select-tab" --window reopen
+        mark "reopen $i"
+        sleep 3
     done
     ;;
 esac
