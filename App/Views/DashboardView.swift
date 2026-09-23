@@ -40,16 +40,18 @@ struct DashboardView: View {
                 // *and* the data-source chip flow together in one wrapping
                 // layout, so they spill to a tidy second row when several fire.
                 AdvisorBadges(scopeAccountId: scope.accountId)
+                    .layoutShiftProbe("header")
             }
         ) {
-            WelcomeCard()
-            DesktopCredentialPrompt()
+            WelcomeCard().layoutShiftProbe("welcome")
+            DesktopCredentialPrompt().layoutShiftProbe("desktop-prompt")
             NowStrip(
                 onTodayTap: openToday,
                 onSessionTap: { sessionId, displayName in
                     modalRoot = .session(sessionId: sessionId, projectDisplayName: displayName)
                 }
             )
+            .layoutShiftProbe("now-strip")
             // Pace charts for EVERY rate-limit window — the fixed 5h/7d blocks
             // and each scoped per-model window (e.g. a "Fable" weekly cap) as
             // first-class, identically-treated columns. `window` is the fixed
@@ -58,18 +60,25 @@ struct DashboardView: View {
             PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window, account in
                 modalRoot = .projection(window: window, accountId: account)
             })
+            .layoutShiftProbe("pace")
             // Directly under the pace chart, because it answers the question
             // that chart raises the moment a second account exists: whose
             // numbers am I looking at? Renders nothing at all for a
             // single-account user, which is almost everyone.
             TodayDetailsCard(scopeAccountId: scope.accountId)
+                .layoutShiftProbe("today-details")
             TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scope.accountId)
+                .layoutShiftProbe("today-timeline")
             PerModelTodayCard(scopeAccountId: scope.accountId)
+                .layoutShiftProbe("per-model")
             WeeklyComparisonCard(scopeAccountId: scope.accountId)
+                .layoutShiftProbe("weekly")
             DailyCostChartCard(scopeAccountId: scope.accountId, onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
+            .layoutShiftProbe("daily-cost")
             MonthOutlookCard(scopeAccountId: scope.accountId)
+                .layoutShiftProbe("month-outlook")
         }
         .pacerModalNavigation(root: $modalRoot)
     }

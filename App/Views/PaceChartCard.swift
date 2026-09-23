@@ -84,10 +84,23 @@ struct PaceChartCard: View {
     @State private var scope = UsageScope.shared
 
     /// What actually decides the card's contents: the account the user picked
-    /// (nil for "all"), the one that resolves to, and whether both are live.
-    /// Any of the three changing means a different set of columns.
+    /// (nil for "all") and the accounts that resolves to drawing.
+    ///
+    /// Keyed on the *targets*, not on `limitAccountId`. On "all accounts" with
+    /// several logins the card draws every one of them whichever is active, but
+    /// `limitAccountId` follows the active login — so a `cswap` switch or a
+    /// Claude Code re-login changed the key, wiped the card to "Loading
+    /// history…" for most of a second and redrew the identical charts. The card
+    /// collapsing and regrowing by a few hundred points shoved everything under
+    /// it up and back down: the dashboard's "occasional flicker", matched
+    /// second-for-second in the log against "reconciling active account".
     private var scopeKey: String {
-        "\(scope.accountId ?? "all")|\(limitAccountId ?? "-")"
+        let targets = loadTargets().map { $0.accountId ?? "-" }.joined(separator: ",")
+        return "\(scope.accountId ?? "all")|\(targets)"
+    }
+
+    private static func pickedPart(of key: String) -> Substring {
+        key.split(separator: "|", maxSplits: 1).first ?? ""
     }
 
     /// Rate limits belong to a *login*, so "all accounts" cannot combine them —
@@ -925,9 +938,15 @@ struct PaceChartCard: View {
         // both resolve `limitAccountId` to work, so switching between them
         // changed nothing and the card kept showing three columns where it
         // should have shown six.
-        .onChange(of: scopeKey) { _, key in
+        //
+        // Only a scope the *user* picked clears first — what is on screen is
+        // then another account's, and must not linger under the new label. A
+        // change that merely adds or drops an account (a second login's first
+        // reading) keeps the charts up and swaps them when the load lands:
+        // `reload` reuses entries by account id, so nothing drawn is wrong.
+        .onChange(of: scopeKey) { old, key in
             guard key != loadedScopeKey else { return }
-            series = []
+            if Self.pickedPart(of: old) != Self.pickedPart(of: key) { series = [] }
             Task { await reload() }
         }
         // Awaited directly, not scheduled: this is the path that first fills
