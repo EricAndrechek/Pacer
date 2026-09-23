@@ -180,6 +180,13 @@ clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for c
 		echo "Cancelled."; \
 	fi
 
+.PHONY: record-relaunch
+## Record Pacer's window area on screen through a reinstall + relaunch, lined up
+## with the log (see bin/dev-record-relaunch.sh). RECORDS THE SCREEN: needs the
+## owner's go-ahead per run. Without APPROVED=1 it only prints the plan.
+record-relaunch:
+	@bin/dev-record-relaunch.sh $(if $(APPROVED),--owner-approved,)
+
 .PHONY: render-live
 ## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).
 ## Usage: make render-live            (all accounts + each account)

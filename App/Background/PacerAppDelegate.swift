@@ -311,6 +311,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Log.write("Lifecycle", "launched")
         // Screenshot/demo mode: skip scan, menu bar, hotkey, and Dock
         // policy. Seed synthetic data, capture the views off-screen, exit.
         if ScreenshotMode.isActive {
@@ -464,6 +465,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // saves flush. Also fires the "you stopped tracking" banner
         // before exit so a user who quits unintentionally has a
         // visible reminder.
+        //
+        // Logged because a relaunch otherwise has no "old process went away"
+        // instant, and that is the anchor `make record-relaunch` lines the
+        // video up against.
+        Log.write("Lifecycle", "terminating")
         Task { @MainActor in
             await backgroundService.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()

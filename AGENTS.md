@@ -74,7 +74,22 @@ Concretely, never write, run, or leave behind anything that:
   thing this rule exists to stop;
 - activates, raises, resizes, moves, closes or Spaces-switches any window,
   including Pacer's own;
-- records the screen or captures another app's windows.
+- records the screen or captures another app's windows — with one sanctioned
+  exception, below.
+
+**The one screen-recording tool: `make record-relaunch`**
+(`bin/dev-record-relaunch.sh`). Committed at the owner's request so any
+session can use it, and bound by the same rule as everything above: **it
+records the screen, so every run needs the owner's go-ahead for that run.**
+Run it bare first — it prints its plan (the two rectangles, the command, the
+output folder) and exits without recording; show him that plan, and only on
+his "go" run `make record-relaunch APPROVED=1`. It records only Pacer's own
+window rectangles (home frame + SwiftUI's default spot, read from the
+`[Placement]` log), never a whole display, while `make install` relaunches the
+app; then it writes the matching log slice (ms timestamps), the instants the
+picture changed, and contact sheets to `screenshots/recordings/`. Anchor the
+video on `[Lifecycle] terminating` / `[Placement] dashboard is id=main`. Do not
+extend it to other apps, whole displays, input, or unattended runs.
 
 Reading is fine: `NSEvent.mouseLocation` to place a window the *user* asked
 for, `NSScreen.frame`, and so on. The line is between observing the machine and
