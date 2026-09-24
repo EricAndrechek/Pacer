@@ -97,6 +97,31 @@ public struct AccountTrail: Sendable {
         return out
     }
 
+    /// Whether a pinned profile bound to `accountId` covers `instant`.
+    ///
+    /// A sample carries no record of which root it came from, so when a
+    /// default-login span is corrected after the fact, a turn stamped with
+    /// the refuted account could equally be a pinned profile's own turn.
+    /// Callers re-stamping history use this to leave that ambiguous case
+    /// alone rather than move a pinned session's usage by mistake.
+    public func isPinned(_ accountId: String, at instant: Date) -> Bool {
+        pinned.values.contains { spans in
+            spans.contains { $0.accountId == accountId && $0.covers(instant) }
+        }
+    }
+
+    /// Whether any default-login span naming an account other than
+    /// `accountKey` overlaps `[from, through]`. The cheap in-memory probe that
+    /// lets credential reconciliation skip the store on the common cycle,
+    /// where the trail and the credential already agree.
+    public func defaultLoginConflicts(with accountKey: String, from: Date, through: Date) -> Bool {
+        defaultLogin.contains { span in
+            guard span.accountId != accountKey else { return false }
+            let end = span.endedAt ?? .distantFuture
+            return end > span.startedAt && span.startedAt <= through && end > from
+        }
+    }
+
     /// The most recent span for the default login, if any is still open.
     public var currentDefaultLogin: Span? {
         defaultLogin.last { $0.endedAt == nil }

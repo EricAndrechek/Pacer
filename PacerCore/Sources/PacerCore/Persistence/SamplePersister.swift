@@ -818,6 +818,37 @@ public final class SamplePersister {
     /// session bucket from the underlying TokenSamples. Re-uses the
     /// same one-pass scan we already do at preload, just without
     /// subtracting the existing aggregate set.
+    /// Force a full rebuild of every bucket these samples touch.
+    ///
+    /// For edits to rows already stored — an account re-stamp after the trail
+    /// is corrected. The buckets are marked *polluted* as well as dirty, for
+    /// the same reason `markEverySampleDirty` does: the existing rollup rows
+    /// hold the old split, so the fast path's incremental add would compound
+    /// it rather than replace it.
+    public func markSamplesForRebuild(_ samples: [TokenSample]) {
+        for sample in samples {
+            let pair = DateModelPair(date: sample.date, model: sample.model)
+            dirtyPairs.insert(pair)
+            pollutedDailyPairs.insert(pair)
+            pendingPairSamples[pair] = nil
+            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+            dirtyProjectDates.insert(projectPair)
+            pollutedProjectPairs.insert(projectPair)
+            pendingProjectSamples[projectPair] = nil
+            let hourBucket = DateHourModelTriple(
+                date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
+            dirtyHourBuckets.insert(hourBucket)
+            pollutedHourBuckets.insert(hourBucket)
+            pendingHourSamples[hourBucket] = nil
+            if let sid = sample.sessionId, !sid.isEmpty {
+                dirtySessionIds.insert(sid)
+                pollutedSessionIds.insert(sid)
+                pendingSessionSamples[sid] = nil
+            }
+        }
+    }
+
     public func markEverySampleDirty() throws {
         var descriptor = FetchDescriptor<TokenSample>()
         // sampledAt is needed here too — hour bucket derives from it.

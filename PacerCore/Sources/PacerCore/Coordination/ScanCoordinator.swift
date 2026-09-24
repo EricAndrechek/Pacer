@@ -366,6 +366,16 @@ public final class ScanCoordinator {
     /// The login this process last saw, so account-following reacts to a
     /// change rather than re-asserting the same answer every cycle.
     private var lastObservedLoginAccount: String?
+    /// The keychain credential's account, published by the poller and read
+    /// by the attribution trail. Shared by reference so the scan never hops
+    /// onto the poller's actor to read it.
+    private let signedInCredential = SignedInCredentialMonitor()
+    /// When the trail last asked the poller to re-read the keychain.
+    private var lastCredentialCheckAt: Date?
+    /// Minimum gap between those requests. Below the trail's verification
+    /// timeout, so a held observation always gets a fresh read before it
+    /// would be accepted unverified.
+    private static let credentialCheckInterval: TimeInterval = 30
     private var scanInFlight = false
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
@@ -462,7 +472,8 @@ public final class ScanCoordinator {
                 client: oauthClient,
                 container: container,
                 configuration: configuration.oauthPolling,
-                poolStore: oauthPoolStore
+                poolStore: oauthPoolStore,
+                signedInCredential: signedInCredential
             )
         } else {
             self.oauthPoller = nil
@@ -925,7 +936,29 @@ public final class ScanCoordinator {
         // already in the trail when its transcripts are parsed below —
         // otherwise its first batch of turns would come out unattributed.
         recorder.pollPinnedRoots(sessionProfileRoots.map(\.root))
-        let observedAccount = recorder.poll()
+        // The keychain credential is what Claude Code bills, so it outranks
+        // `oauthAccount` in the config file, which any Claude Code process
+        // sharing the root can rewrite with a stale identity. `poll` holds
+        // back a disagreeing observation until the keychain has been read
+        // since the file changed; `reconcile` repairs any span the credential
+        // contradicts. See `SignedInCredentialReading`.
+        let credential = signedInCredential.current
+        let polledAccount = recorder.poll(
+            credential: credential, credentialExpected: oauthPoller != nil)
+        if let credential { recorder.reconcile(with: credential) }
+        if recorder.needsCredentialCheck, let oauthPoller {
+            let now = Date()
+            if lastCredentialCheckAt.map({ now.timeIntervalSince($0) >= Self.credentialCheckInterval }) ?? true {
+                lastCredentialCheckAt = now
+                Task { await oauthPoller.refreshSignedInCredential() }
+            }
+        }
+        // A maintainer-supplied history repair, if one has been dropped beside
+        // the store. One `stat` when there is none.
+        let reassign = applyReassignRequest(recorder: recorder)
+        let reassignURL = reassign?.url
+        let trailCorrections = recorder.drainCorrections() + (reassign?.corrections ?? [])
+        let observedAccount = polledAccount.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         activePersister.accountTrail = recorder.trail()
 
         // Follow the login. Pacer's headline numbers should describe the
@@ -995,6 +1028,18 @@ public final class ScanCoordinator {
         // Each cycle starts with a clean dirty-pairs slate so the
         // recomputers only touch buckets the cycle actually changed.
         activePersister.clearDirtyPairs()
+        // After the clear, so the rebuild the re-stamp needs is not wiped.
+        if !trailCorrections.isEmpty {
+            let moved = try restampAccounts(
+                trailCorrections, trail: recorder.trail(), persister: activePersister)
+            if let reassignURL {
+                // Recorded beside the request so whoever asked can see it
+                // landed, without reading the log.
+                finishReassignRequest(at: reassignURL, outcome: "applied: \(moved) turn(s) moved")
+            }
+        } else if let reassignURL {
+            finishReassignRequest(at: reassignURL, outcome: "applied: nothing matched")
+        }
         // Integrity recovery: on the first cycle of a persister's
         // lifetime, fold any (date, model) pairs that have TokenSamples
         // but no DailyAggregate into the dirty set. Without this the
@@ -1562,6 +1607,75 @@ public final class ScanCoordinator {
             durationSeconds: Date().timeIntervalSince(started),
             phaseTimings: phase
         )
+    }
+
+    /// Move turns already stored against a refuted account onto the one the
+    /// corrected trail names, and queue every bucket they touch for rebuild so
+    /// the per-account rollups (and `AccountSessionInfo`, which the session
+    /// API and the "sessions drawing on it" count read) follow.
+    ///
+    @discardableResult
+    private func restampAccounts(
+        _ corrections: [AccountTrailRecorder.Correction],
+        trail: AccountTrail,
+        persister: SamplePersister
+    ) throws -> Int {
+        let moved = try AccountBackfill.restamp(corrections, trail: trail, context: context)
+        guard !moved.isEmpty else { return 0 }
+        persister.markSamplesForRebuild(moved)
+        log("accounts: re-attributed \(moved.count) turn(s) after the trail was corrected")
+        return moved.count
+    }
+
+    /// Apply `account-reassign.json` if it exists beside this store. Returns
+    /// the request's URL when one was applied, so the cycle can record the
+    /// outcome once the re-stamp has run. A request that fails validation is
+    /// set aside with the reason and never retried.
+    ///
+    /// The request's whole range is also returned as a correction, not just
+    /// the spans rewritten this time. If a cycle dies between the trail edit
+    /// (saved at once) and the re-stamp, the retry finds no span left to
+    /// rewrite; the range still re-stamps, and `restamp` only moves turns the
+    /// corrected trail now gives to the right account.
+    private func applyReassignRequest(
+        recorder: AccountTrailRecorder
+    ) -> (url: URL, corrections: [AccountTrailRecorder.Correction])? {
+        let storeConfig = container.configurations.first
+        guard storeConfig?.isStoredInMemoryOnly == false,
+              let url = AccountReassignRequest.url(storeURL: storeConfig?.url),
+              FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do {
+            let known = Set(try context.fetch(FetchDescriptor<Account>()).map(\.id))
+            let requests = try AccountReassignRequest.parse(
+                try Data(contentsOf: url), knownAccounts: known)
+            for r in requests {
+                let made = recorder.reassign(
+                    from: r.from, to: r.to, wrongAccount: r.wrongAccount,
+                    rightAccount: r.rightAccount,
+                    evidence: "reassigned by the maintainer via \(AccountReassignRequest.fileName)")
+                log("accounts: reassign \(r.wrongAccount.prefix(8))→\(r.rightAccount.prefix(8)) "
+                    + "[\(r.from) … \(r.to)): \(made.count) trail span(s) rewritten")
+            }
+            return (url, requests.map {
+                AccountTrailRecorder.Correction(
+                    from: $0.from, to: $0.to,
+                    wrongAccount: $0.wrongAccount, rightAccount: $0.rightAccount)
+            })
+        } catch {
+            log("accounts: reassign request rejected (\(error))")
+            finishReassignRequest(at: url, outcome: "rejected: \(error)")
+            return nil
+        }
+    }
+
+    /// Move a processed request aside so it runs exactly once, keeping it and
+    /// its outcome for inspection.
+    private func finishReassignRequest(at url: URL, outcome: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let done = url.deletingPathExtension()
+            .appendingPathExtension("done-\(stamp.replacingOccurrences(of: ":", with: "")).json")
+        try? FileManager.default.moveItem(at: url, to: done)
+        try? outcome.write(to: done.appendingPathExtension("result"), atomically: true, encoding: .utf8)
     }
 
     private func makePersister() throws -> SamplePersister {

@@ -37,7 +37,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 .PHONY: help build verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
         verify-archive \
-        assign-accounts \
+        assign-accounts reassign-account \
         pricing-snapshot
 
 # Default target — show help so a bare `make` doesn't do something
@@ -77,6 +77,14 @@ assign-accounts:  ## Assign historical usage to an account. SPEC='<accountId>|<f
 	@for i in $$(seq 1 30); do pgrep -x Pacer >/dev/null || break; sleep 1; done; sleep 2
 	@PACER_ACCOUNT_ASSIGN='$(SPEC)' /Applications/Pacer.app/Contents/MacOS/Pacer 2>&1 | grep -E "^(assign|accounts|unattributed|every|activation|  )" || true
 	@open -g -a Pacer
+
+reassign-account:  ## Move history between accounts. FROM=<ISO> TO=<ISO|now> WRONG=<accountId> RIGHT=<accountId>. The running app applies it on its next scan; no restart.
+	@test -n "$(FROM)" -a -n "$(TO)" -a -n "$(WRONG)" -a -n "$(RIGHT)" || { echo "usage: make reassign-account FROM=… TO=…|now WRONG=… RIGHT=…"; exit 2; }
+	@to='$(TO)'; [ "$$to" = now ] && to=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
+	tmp="$(STORE_DIR)/.account-reassign.json.tmp"; \
+	printf '{"from":"%s","to":"%s","wrongAccount":"%s","rightAccount":"%s"}\n' '$(FROM)' "$$to" '$(WRONG)' '$(RIGHT)' > "$$tmp" && \
+	mv "$$tmp" "$(STORE_DIR)/account-reassign.json" && \
+	echo "queued [$(FROM) … $$to) $(WRONG) → $(RIGHT); watch: grep reassign $(LOG_ERR)"
 
 verify-data:  ## Check every rollup against the raw samples in the REAL store. Read-only; exits non-zero on any inconsistency.
 	@$(REPO_ROOT)/bin/dev-verify-data.sh
