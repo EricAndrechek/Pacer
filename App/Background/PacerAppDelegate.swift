@@ -868,6 +868,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // collapses to the system-default ~38pt and clips any chips
         // beyond a single icon.
         let item = NSStatusBar.system.statusItem(withLength: 30)
+        // A stable autosave name so macOS remembers where the user dragged
+        // the item in the menu bar. Without one, macOS 26 (Tahoe) clears the
+        // item's saved "Preferred Position" — and Pacer tears the item down
+        // and rebuilds it (a fresh NSStatusItem, no autosave identity)
+        // whenever the chip list toggles empty/non-empty, which is exactly
+        // the kind of churn that loses an unnamed item's position.
+        item.autosaveName = "com.ericandrechek.pacer.status"
         guard let button = item.button else {
             return
         }
