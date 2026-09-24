@@ -116,6 +116,7 @@ for name kind display in $shots; do
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if [[ ${PACER_WIDGETSIM_DEBUG:-} == 1 && $name == pace-gauges ]]; then   # DIAGNOSIS — temporary
         sleep 3
+        osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 | sed 's/^/[widgets] processes: /'
         osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
             try
                 select (first row of outline 1 of scroll area 1 of splitter group 1 of group 1 of window 1 whose value of static text 1 is "Info")

@@ -216,7 +216,11 @@ struct ReadmeShotWidget: Widget {
             ReadmeShotView(kind: Self.shot.kind)
         }
         .configurationDisplayName("README screenshot")
-        .supportedFamilies([Self.shot.family])
+        // Small as well as the shot's own family: the simulator renders its
+        // default size (small), and a widget offering only medium came up on
+        // an empty timeline. Offered both, it shows both; the capture keeps
+        // the larger card.
+        .supportedFamilies(Self.shot.family == .systemSmall ? [.systemSmall] : [.systemSmall, Self.shot.family])
         .contentMarginsDisabled()
     }
 }
