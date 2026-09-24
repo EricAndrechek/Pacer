@@ -213,13 +213,28 @@ enum ScreenshotMode {
         // the app the way the hand-drawn `MacWindowChrome` did.
         await captureRealWindow("dashboard", size: CGSize(width: 1280, height: 912), scheme: .light, tab: .dashboard)
         await captureRealWindow("dashboard-dark", size: CGSize(width: 1280, height: 912), scheme: .dark, tab: .dashboard)
-        await captureRealWindow("history", size: CGSize(width: 1280, height: 892), scheme: .light, tab: .history)
-        await captureRealWindow("models", size: CGSize(width: 1280, height: 952), scheme: .light, tab: .models)
+        await captureRealWindow("history", size: CGSize(width: 1280, height: 892), scheme: .light, tab: .history,
+                                sidebarHidden: true)
+        await captureRealWindow("models", size: CGSize(width: 1280, height: 952), scheme: .light, tab: .models,
+                                sidebarHidden: true)
+        await captureRealWindow("projects-collections", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects)
+        // Scoped into a nested collection — shows the composition breakdown.
+        await captureRealWindow("projects-collections-scoped", size: CGSize(width: 1280, height: 992),
+                                scheme: .light, tab: .projects, projectsScope: "client", sidebarHidden: true)
         if windowsOnly {
-            await captureRealWindow("projects-collections", size: CGSize(width: 1280, height: 952),
-                                    scheme: .light, tab: .projects)
             log("window screenshots complete")
             return
+        }
+        // Every real-window scene is done; the rest are views drawn off-screen.
+        // On CI the app was activated at launch so the window could be key —
+        // left active, the collection sheets drew under a grey wash there.
+        // Activation cannot be asked for again later, so real windows first,
+        // then this.
+        if activatesForCapture {
+            sceneWindow?.orderOut(nil)
+            NSApp.deactivate()
+            await settle(seconds: 0.5)
         }
 
         // The menu-bar experience as one cohesive image: a slice of the
@@ -259,11 +274,6 @@ enum ScreenshotMode {
         }
         // The integrated Projects tab: collection filter bar + per-row
         // membership chips (the "not a separate tab" model).
-        await captureRealWindow("projects-collections", size: CGSize(width: 1280, height: 952),
-                                scheme: .light, tab: .projects)
-        // Scoped into a nested collection — shows the composition breakdown.
-        await captureRealWindow("projects-collections-scoped", size: CGSize(width: 1280, height: 992),
-                                scheme: .light, tab: .projects, projectsScope: "client")
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
@@ -1175,7 +1185,11 @@ enum ScreenshotMode {
     @MainActor
     private static func captureRealWindow(
         _ name: String, size: CGSize, scheme: ColorScheme,
-        tab: ContentView.Destination, projectsScope: String? = nil
+        tab: ContentView.Destination, projectsScope: String? = nil,
+        /// A README that only ever shows the sidebar open hides that it can be
+        /// closed. (Narrowing was tried: the sidebar's minimum is its widest
+        /// label, so a "narrow" one looked the same as a normal one.)
+        sidebarHidden: Bool = false
     ) async {
         guard let window = sceneWindow else { note("capture \(name): the app made no scene window"); return }
         guard let dir = captureDirectory else {
@@ -1203,6 +1217,7 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerSelectDestination, object: away)
         await settle(seconds: 0.3)
         NotificationCenter.default.post(name: .pacerSelectDestination, object: tab)
+        NotificationCenter.default.post(name: .pacerScreenshotSidebar, object: sidebarHidden)
         // SwiftUI attaches the toolbar and the navigation title when the window
         // is ordered in — but not on the first order-in after launch, since the
         // run orders the scene window out while SwiftUI is still setting it up.

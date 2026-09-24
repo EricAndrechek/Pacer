@@ -62,6 +62,11 @@ struct ContentView: View {
     /// label can never clip in the gap. Grows with accessibility text.
     @State private var measuredLabelWidth: CGFloat?
 
+    /// Explicit so the README screenshot run can show the window with the
+    /// sidebar closed (`ScreenshotMode.captureRealWindow`); for a user it
+    /// behaves exactly as the split view's own state did.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     private var selection: Binding<Destination> {
         Binding(
             get: { Destination(rawValue: selectionRaw) ?? .dashboard },
@@ -125,7 +130,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
             // A stable container, so the toolbar below hangs off a view that
@@ -193,6 +198,10 @@ struct ContentView: View {
                 Log.write("Navigation", "tab → \(raw) (external request)")
                 selectionRaw = dest.rawValue
             }
+        }
+        // Only ever posted by the README screenshot run.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotSidebar)) { note in
+            columnVisibility = (note.object as? Bool) == true ? .detailOnly : .all
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selectionRaw = Destination.settings.rawValue
@@ -807,6 +816,9 @@ extension Notification.Name {
     /// Button inside .background turned out to miss keystrokes) while
     /// keeping `selection` private to ContentView.
     static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
+
+    /// README screenshot run: hide the sidebar (object `true`) or show it.
+    static let pacerScreenshotSidebar = Notification.Name("PacerScreenshotSidebar")
 
     /// Distributed twin of `pacerSelectDestination`, for tooling outside the
     /// process. Object: a `Destination` raw value ("history", "projects", …).
