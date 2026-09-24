@@ -1335,17 +1335,15 @@ enum ScreenshotMode {
         let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
         let barTop = mainHeight - screen.frame.maxY
         let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
-        // The helper clicks the status item for real — the window server
-        // handles it exactly like a person's click (placement under the bar,
-        // the gap, the pressed highlight) — then photographs the menu it opens.
-        let click = [itemFrame.midX, mainHeight - itemFrame.midY]
         let request: [String: Any] = ["kind": "menubar",
                                       "rect": [left, barTop, right - left, height],
-                                      "click": click,
                                       "png": png.path]
-        // The click starts a menu-tracking loop on this thread that does not
-        // return until the menu closes, so the close is scheduled in that loop:
-        // as soon as the helper has the picture, or after a deadline.
+        if let data = try? JSONSerialization.data(withJSONObject: request) {
+            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        }
+        // Opening the menu runs a tracking loop that does not return until it
+        // closes, so the close is scheduled inside that loop: as soon as the
+        // helper has the picture, or after a deadline.
         let deadline = Date().addingTimeInterval(25)
         let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
             if FileManager.default.fileExists(atPath: png.path)
@@ -1356,14 +1354,18 @@ enum ScreenshotMode {
         }
         RunLoop.main.add(closer, forMode: .common)
         RunLoop.main.add(closer, forMode: .eventTracking)
-        log("\(name): active \(NSApp.isActive), item \(itemFrame)")
-        if let data = try? JSONSerialization.data(withJSONObject: request) {
-            try? data.write(to: dir.appendingPathComponent("\(name).request"))
-        }
-        while Date() < deadline,
-              !FileManager.default.fileExists(atPath: png.path),
-              !FileManager.default.fileExists(atPath: failed.path) {
-            await settle(seconds: 0.1)
+        log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
+        // The status item's own menu presentation — placement (the gap under
+        // the bar) and the item's highlight exactly as a click gives them.
+        // `popUpStatusItemMenu:` is deprecated but is the one call that does
+        // this; a synthesized `performClick` did not open the menu on the
+        // runner, and `NSMenu.popUp` under the button put it flush against
+        // the bar. Called by selector to keep the deprecation out of the build.
+        let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
+        if item.responds(to: statusPopUp) {
+            _ = item.perform(statusPopUp, with: menu)
+        } else {
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
         }
         closer.invalidate()
         if FileManager.default.fileExists(atPath: png.path) {
