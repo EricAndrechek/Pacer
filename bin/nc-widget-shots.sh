@@ -47,6 +47,8 @@ ditto "$SRC_APP" "$APP" 2>/dev/null || sudo ditto "$SRC_APP" "$APP" || { log "ca
 pluginkit -r "$SRC_APP/Contents/PlugIns/PacerWidgets.appex" 2>/dev/null
 codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
 codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
+# chronod drops an extension LaunchServices has no containing app for.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
 pluginkit -a "$APPEX"
 log "registered: $(pluginkit -m -i com.ericandrechek.pacer.widgets 2>&1)"
 
@@ -75,7 +77,16 @@ launchctl print "gui/$uid" 2>&1 | grep -iE 'notificationcenter|chrono' | head -1
 # own agents.
 launchctl enable "gui/$uid/com.apple.notificationcenterui.agent" 2>&1 | sed 's/^/[widgets] enable: /'
 launchctl bootstrap "gui/$uid" /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] bootstrap: /'
+launchctl load -w /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] load: /'
+sleep 2
+pgrep -x NotificationCenter >/dev/null || open -g /System/Library/CoreServices/NotificationCenter.app 2>&1 | sed 's/^/[widgets] open-nc: /'
 sleep 3
+if ! pgrep -x NotificationCenter >/dev/null; then
+    /System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter >"$WORK/nc.out" 2>&1 &
+    sleep 4
+    log "direct exec: $(pgrep -x NotificationCenter || echo 'not running'); $(head -c 600 "$WORK/nc.out")"
+fi
+log "NotificationCenter pid: $(pgrep -x NotificationCenter || echo none)"
 for svc in com.apple.notificationcenterui.agent com.apple.chronod; do
     launchctl print "gui/$uid/$svc" 2>&1 | grep -E 'state|path|program|last exit|disabled' | head -6 | sed "s/^/[widgets] $svc: /"
     launchctl kickstart -k "gui/$uid/$svc" 2>&1 | sed "s/^/[widgets] kickstart $svc: /"
