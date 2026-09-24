@@ -1326,13 +1326,17 @@ enum ScreenshotMode {
             note("capture \(name): the status item has no window")
             return
         }
+        // Tight around what the scene is about: the status item and the menu
+        // that drops from its left edge, a margin of menu bar and wallpaper
+        // around them, and the gap macOS leaves under the bar.
         let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
-        let margin: CGFloat = 36
+        let margin: CGFloat = 20
         let left = max(screen.frame.minX, itemFrame.minX - margin)
+        let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
         let barTop = mainHeight - screen.frame.maxY
-        let height = (screen.frame.maxY - itemFrame.minY) + menu.size.height + 8 + margin
+        let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
         let request: [String: Any] = ["kind": "menubar",
-                                      "rect": [left, barTop, screen.frame.maxX - left, height],
+                                      "rect": [left, barTop, right - left, height],
                                       "png": png.path]
         if let data = try? JSONSerialization.data(withJSONObject: request) {
             try? data.write(to: dir.appendingPathComponent("\(name).request"))
@@ -1351,9 +1355,18 @@ enum ScreenshotMode {
         RunLoop.main.add(closer, forMode: .common)
         RunLoop.main.add(closer, forMode: .eventTracking)
         log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
-        // `popUp` under the button — what the status item does on a click. A
-        // synthesized `performClick` did not open the menu on the runner.
-        _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        // The status item's own menu presentation — placement (the gap under
+        // the bar) and the item's highlight exactly as a click gives them.
+        // `popUpStatusItemMenu:` is deprecated but is the one call that does
+        // this; a synthesized `performClick` did not open the menu on the
+        // runner, and `NSMenu.popUp` under the button put it flush against
+        // the bar. Called by selector to keep the deprecation out of the build.
+        let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
+        if item.responds(to: statusPopUp) {
+            _ = item.perform(statusPopUp, with: menu)
+        } else {
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
         closer.invalidate()
         if FileManager.default.fileExists(atPath: png.path) {
             log("✓ \(name).png (real menu bar and menu)")
