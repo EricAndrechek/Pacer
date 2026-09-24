@@ -91,4 +91,9 @@ public final class AccountActivation {
     /// range — history that we cannot attribute stays unattributed rather
     /// than being quietly assigned to whoever is convenient.
     public static let sourceBackfill = "backfill"
+    /// The token Claude Code bills — the keychain credential — resolved to
+    /// this account while a config-file observation said otherwise. Outranks
+    /// `sourceObserved` for the default login: the file can be rewritten by
+    /// any Claude Code process, the credential is what the requests carry.
+    public static let sourceCredential = "credential"
 }

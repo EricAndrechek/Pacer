@@ -366,6 +366,16 @@ public final class ScanCoordinator {
     /// The login this process last saw, so account-following reacts to a
     /// change rather than re-asserting the same answer every cycle.
     private var lastObservedLoginAccount: String?
+    /// The keychain credential's account, published by the poller and read
+    /// by the attribution trail. Shared by reference so the scan never hops
+    /// onto the poller's actor to read it.
+    private let signedInCredential = SignedInCredentialMonitor()
+    /// When the trail last asked the poller to re-read the keychain.
+    private var lastCredentialCheckAt: Date?
+    /// Minimum gap between those requests. Below the trail's verification
+    /// timeout, so a held observation always gets a fresh read before it
+    /// would be accepted unverified.
+    private static let credentialCheckInterval: TimeInterval = 30
     private var scanInFlight = false
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
@@ -462,7 +472,8 @@ public final class ScanCoordinator {
                 client: oauthClient,
                 container: container,
                 configuration: configuration.oauthPolling,
-                poolStore: oauthPoolStore
+                poolStore: oauthPoolStore,
+                signedInCredential: signedInCredential
             )
         } else {
             self.oauthPoller = nil
@@ -925,7 +936,25 @@ public final class ScanCoordinator {
         // already in the trail when its transcripts are parsed below —
         // otherwise its first batch of turns would come out unattributed.
         recorder.pollPinnedRoots(sessionProfileRoots.map(\.root))
-        let observedAccount = recorder.poll()
+        // The keychain credential is what Claude Code bills, so it outranks
+        // `oauthAccount` in the config file, which any Claude Code process
+        // sharing the root can rewrite with a stale identity. `poll` holds
+        // back a disagreeing observation until the keychain has been read
+        // since the file changed; `reconcile` repairs any span the credential
+        // contradicts. See `SignedInCredentialReading`.
+        let credential = signedInCredential.current
+        let polledAccount = recorder.poll(
+            credential: credential, credentialExpected: oauthPoller != nil)
+        if let credential { recorder.reconcile(with: credential) }
+        if recorder.needsCredentialCheck, let oauthPoller {
+            let now = Date()
+            if lastCredentialCheckAt.map({ now.timeIntervalSince($0) >= Self.credentialCheckInterval }) ?? true {
+                lastCredentialCheckAt = now
+                Task { await oauthPoller.refreshSignedInCredential() }
+            }
+        }
+        let trailCorrections = recorder.drainCorrections()
+        let observedAccount = polledAccount.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         activePersister.accountTrail = recorder.trail()
 
         // Follow the login. Pacer's headline numbers should describe the
@@ -995,6 +1024,10 @@ public final class ScanCoordinator {
         // Each cycle starts with a clean dirty-pairs slate so the
         // recomputers only touch buckets the cycle actually changed.
         activePersister.clearDirtyPairs()
+        // After the clear, so the rebuild the re-stamp needs is not wiped.
+        if !trailCorrections.isEmpty {
+            try restampAccounts(trailCorrections, trail: recorder.trail(), persister: activePersister)
+        }
         // Integrity recovery: on the first cycle of a persister's
         // lifetime, fold any (date, model) pairs that have TokenSamples
         // but no DailyAggregate into the dirty set. Without this the
@@ -1562,6 +1595,23 @@ public final class ScanCoordinator {
             durationSeconds: Date().timeIntervalSince(started),
             phaseTimings: phase
         )
+    }
+
+    /// Move turns already stored against a refuted account onto the one the
+    /// corrected trail names, and queue every bucket they touch for rebuild so
+    /// the per-account rollups (and `AccountSessionInfo`, which the session
+    /// API and the "sessions drawing on it" count read) follow.
+    ///
+    private func restampAccounts(
+        _ corrections: [AccountTrailRecorder.Correction],
+        trail: AccountTrail,
+        persister: SamplePersister
+    ) throws {
+        let moved = try AccountBackfill.restamp(corrections, trail: trail, context: context)
+        guard !moved.isEmpty else { return }
+        persister.markSamplesForRebuild(moved)
+        log("accounts: re-attributed \(moved.count) turn(s) after the signed-in credential "
+            + "corrected the trail")
     }
 
     private func makePersister() throws -> SamplePersister {

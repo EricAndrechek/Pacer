@@ -25,6 +25,41 @@ public final class AccountTrailRecorder {
     /// Cached trail, invalidated whenever this recorder writes.
     private var cachedTrail: AccountTrail?
 
+    /// A retroactive edit to the default login's trail: turns stamped
+    /// `wrongAccount` in `[from, to)` belong to `rightAccount`. Samples are
+    /// attributed as they are inserted, so any edit that reaches into the past
+    /// leaves already-stored rows behind; the scan loop re-stamps them from
+    /// these.
+    public struct Correction: Sendable, Equatable {
+        public let from: Date
+        /// nil means "through now" — the corrected span is still open.
+        public let to: Date?
+        public let wrongAccount: String
+        public let rightAccount: String
+    }
+
+    /// A config observation held back because the credential disagreed with
+    /// it and had not been read since the file changed. Carries the instant
+    /// it was first seen so that, if it turns out to be a real switch, the
+    /// span starts where the switch happened rather than where it was
+    /// confirmed.
+    private var pendingObservation: (observation: ActiveAccountObserver.Observation, firstSeen: Date, fileModified: Date)?
+    /// Set by `poll` when a disagreeing observation is waiting on a fresh
+    /// keychain read; the caller asks the poller for one.
+    public private(set) var needsCredentialCheck = false
+    /// Corrections produced since the caller last drained them.
+    private var corrections: [Correction] = []
+    /// The account last rejected as a stale config write, so the log says
+    /// so once per episode rather than on every rewrite of the file.
+    private var lastRejectedKey: String?
+
+    /// How long an observation may wait for the credential to confirm or
+    /// refute it before it is accepted anyway. Long enough for a throttled
+    /// keychain re-read to land; short enough that an unreadable keychain
+    /// cannot freeze attribution. Acceptance is backdated to first sighting
+    /// either way, so the wait costs nothing in accuracy.
+    public static let credentialVerificationTimeout: TimeInterval = 180
+
     public init(
         context: ModelContext,
         observer: ActiveAccountObserver = ActiveAccountObserver(),
@@ -35,23 +70,6 @@ public final class AccountTrailRecorder {
         self.homeDirectory = homeDirectory
     }
 
-    /// Poll the default login's config and record any change.
-    ///
-    /// Returns the account key currently observed, or nil if it couldn't be
-    /// read this cycle.
-    ///
-    /// **Only the default login for now.** Pinned session profiles
-    /// (`CLAUDE_CONFIG_DIR` set to a per-account directory) are not yet
-    /// scanned for transcripts — `ClaudePathResolver` resolves roots from
-    /// *Pacer's* environment, which never has that variable set, so those
-    /// files are outside the scan entirely. That is why attribution can
-    /// safely assume "every sample came from the default login" today.
-    ///
-    /// The moment session roots become scannable, that assumption breaks and
-    /// silently misattributes a second account's turns to the first. So the
-    /// two changes have to land together: adding a root to the scan requires
-    /// carrying its path through `ParsedUsageEntry` into
-    /// `AccountTrail.accountId(at:rootPath:)`, which already takes it.
     /// Poll every pinned session profile, so a root that a terminal has
     /// bound to a second account is attributed to that account rather than
     /// to whoever happens to be the default login.
@@ -78,15 +96,56 @@ public final class AccountTrailRecorder {
         }
     }
 
+    /// Poll the default login's config and record any change.
+    ///
+    /// Returns the account key currently observed, or nil if it couldn't be
+    /// read this cycle.
+    ///
+    /// **Only the default login for now.** Pinned session profiles
+    /// (`CLAUDE_CONFIG_DIR` set to a per-account directory) are not yet
+    /// scanned for transcripts — `ClaudePathResolver` resolves roots from
+    /// *Pacer's* environment, which never has that variable set, so those
+    /// files are outside the scan entirely. That is why attribution can
+    /// safely assume "every sample came from the default login" today.
+    ///
+    /// The moment session roots become scannable, that assumption breaks and
+    /// silently misattributes a second account's turns to the first. So the
+    /// two changes have to land together: adding a root to the scan requires
+    /// carrying its path through `ParsedUsageEntry` into
+    /// `AccountTrail.accountId(at:rootPath:)`, which already takes it.
+    ///
+    /// `credential` is what the keychain token Claude Code bills resolved to.
+    /// When it is known and names a different account than the config file,
+    /// the file loses: `oauthAccount` is rewritten by every Claude Code
+    /// process sharing the root, including ones still holding an identity
+    /// from before the last switch, while the credential is the thing on the
+    /// wire. See `SignedInCredentialReading`.
+    ///
+    /// `credentialExpected` says a keychain reading will arrive (the poller is
+    /// running) even if none has yet — true for the first cycles after launch.
+    /// A disagreeing observation is then held for it instead of accepted,
+    /// because a launch is exactly when a stale config is most likely to be
+    /// the first thing read.
     @discardableResult
-    public func poll(now: Date = Date()) -> String? {
+    public func poll(
+        now: Date = Date(),
+        credential: SignedInCredentialReading? = nil,
+        credentialExpected: Bool = false
+    ) -> String? {
+        needsCredentialCheck = false
         guard let (url, modified) = observer.currentConfig(
             forRoot: nil, homeDirectory: homeDirectory
         ) else { return nil }
 
         let key = url.path
         if let seen = lastModified[key], seen == modified {
-            // Unchanged since last look — whatever we recorded still holds.
+            // Unchanged since last look — whatever we recorded still holds,
+            // unless an observation is still waiting on the credential.
+            if let pending = pendingObservation {
+                decide(pending.observation, fileModified: pending.fileModified,
+                       credential: credential, credentialExpected: credentialExpected,
+                       now: now, evidence: url.lastPathComponent)
+            }
             return trail().currentDefaultLogin?.accountId
         }
         lastModified[key] = modified
@@ -94,11 +153,185 @@ public final class AccountTrailRecorder {
         guard let observation = observer.read(configAt: url, rootPath: nil) else {
             return trail().currentDefaultLogin?.accountId
         }
-        record(observation, now: now, source: AccountActivation.sourceObserved,
-               evidence: "oauthAccount in \(url.lastPathComponent)")
+        decide(observation, fileModified: modified, credential: credential,
+               credentialExpected: credentialExpected, now: now,
+               evidence: url.lastPathComponent)
         applyLabels(from: observation)
         enrichUnlabelledAccounts()
-        return observation.accountKey
+        return trail().currentDefaultLogin?.accountId ?? observation.accountKey
+    }
+
+    /// Accept, defer, or reject one config observation of the default login.
+    private func decide(
+        _ observation: ActiveAccountObserver.Observation,
+        fileModified: Date,
+        credential: SignedInCredentialReading?,
+        credentialExpected: Bool,
+        now: Date,
+        evidence: String
+    ) {
+        let observed = observation.accountKey
+        let current = trail().currentDefaultLogin?.accountId
+        if current == observed {
+            pendingObservation = nil
+            return
+        }
+        // A pending sighting of this same account keeps its first-seen time.
+        let firstSeen = (pendingObservation?.observation.accountKey == observed)
+            ? (pendingObservation?.firstSeen ?? now) : now
+
+        // No keychain read yet, but one is on its way: hold rather than let
+        // the first thing read after a launch overwrite a known login.
+        guard let credential else {
+            if credentialExpected, current != nil {
+                hold(observation, firstSeen: firstSeen, fileModified: fileModified,
+                     now: now, evidence: evidence)
+            } else {
+                accept(observation, at: firstSeen, now: now, evidence: evidence)
+            }
+            return
+        }
+        // No verdict available from the credential — an unresolved token (a
+        // switch in progress, before its first poll), or it agrees. Nothing
+        // can veto the file.
+        guard let signedIn = credential.accountKey, signedIn != observed else {
+            accept(observation, at: firstSeen, now: now, evidence: evidence)
+            return
+        }
+        // The keychain was read after the file was written and still held
+        // another account's token: nothing switched. Some other Claude Code
+        // process wrote back an identity it was holding.
+        if credential.readAt >= fileModified {
+            pendingObservation = nil
+            // A trail with no open default span would otherwise stay empty and
+            // leave every turn unattributed; the credential is itself an
+            // observation of who is signed in, so open the span from it.
+            if current == nil {
+                record(ActiveAccountObserver.Observation(
+                           organizationId: signedIn, accountUuid: nil, emailAddress: nil,
+                           organizationName: nil, rootPath: nil),
+                       now: now, source: AccountActivation.sourceCredential,
+                       evidence: "signed-in credential (keychain)")
+            }
+            if lastRejectedKey != observed {
+                lastRejectedKey = observed
+                Log.write("AccountTrail",
+                          "config names \(observed.prefix(4)) but the signed-in credential is "
+                            + "\(signedIn.prefix(4)) — ignoring the stale config write")
+            }
+            return
+        }
+        // The credential predates the write, so it cannot tell a real switch
+        // from a stale one yet. Hold the observation and ask for a re-read.
+        hold(observation, firstSeen: firstSeen, fileModified: fileModified,
+             now: now, evidence: evidence)
+    }
+
+    private func hold(
+        _ observation: ActiveAccountObserver.Observation,
+        firstSeen: Date,
+        fileModified: Date,
+        now: Date,
+        evidence: String
+    ) {
+        pendingObservation = (observation, firstSeen, fileModified)
+        if now.timeIntervalSince(firstSeen) >= Self.credentialVerificationTimeout {
+            accept(observation, at: firstSeen, now: now, evidence: evidence)
+            return
+        }
+        needsCredentialCheck = true
+    }
+
+    private func accept(
+        _ observation: ActiveAccountObserver.Observation,
+        at start: Date,
+        now: Date,
+        evidence: String
+    ) {
+        pendingObservation = nil
+        lastRejectedKey = nil
+        let previous = trail().currentDefaultLogin?.accountId
+        record(observation, now: start, source: AccountActivation.sourceObserved,
+               evidence: "oauthAccount in \(evidence)")
+        // Accepted late: turns between the sighting and now were stamped with
+        // the account being left.
+        if start < now, let previous, previous != observation.accountKey {
+            corrections.append(Correction(
+                from: start, to: nil,
+                wrongAccount: previous, rightAccount: observation.accountKey))
+        }
+    }
+
+    /// Bring the default login's trail in line with the signed-in credential.
+    ///
+    /// Between `reading.since` and `reading.readAt` every keychain read found
+    /// the same account's token, so any default-login span naming a different
+    /// account inside that interval is contradicted by what Claude Code was
+    /// actually billing. A span that *starts* inside it was opened by a stale
+    /// config write and is refuted outright (kept, zero-length, for the
+    /// record); one that started earlier is cut off at `since`. Either way the
+    /// credential's account takes over the range, and the range is returned
+    /// so the caller can re-stamp turns already stored against the wrong one.
+    ///
+    /// Spans starting after `readAt` are left alone: the keychain has not been
+    /// read since, so they may be a real switch not yet confirmed. Manual and
+    /// backfilled ranges are the user's statements and are never overridden.
+    ///
+    /// Cheap on the common cycle: an in-memory probe of the cached trail, and
+    /// no store access unless it finds a conflict.
+    public func reconcile(with reading: SignedInCredentialReading, now: Date = Date()) {
+        guard let signedIn = reading.accountKey else { return }
+        guard trail().defaultLoginConflicts(
+            with: signedIn, from: reading.since, through: reading.readAt) else { return }
+
+        let descriptor = FetchDescriptor<AccountActivation>(
+            predicate: #Predicate { $0.rootPath == nil },
+            sortBy: [SortDescriptor(\.startedAt)]
+        )
+        let rows = (try? context.fetch(descriptor)) ?? []
+        var changed = false
+        for row in rows where row.accountId != signedIn {
+            guard row.source != AccountActivation.sourceManual,
+                  row.source != AccountActivation.sourceBackfill else { continue }
+            let end = row.endedAt ?? .distantFuture
+            guard end > row.startedAt,
+                  row.startedAt <= reading.readAt,
+                  end > reading.since else { continue }
+
+            let from = max(row.startedAt, reading.since)
+            let to = row.endedAt
+            if row.startedAt >= reading.since {
+                row.endedAt = row.startedAt
+                row.evidence = (row.evidence.map { $0 + " · " } ?? "")
+                    + "refuted by the signed-in credential"
+            } else {
+                row.endedAt = reading.since
+            }
+            context.insert(AccountActivation(
+                accountId: signedIn,
+                startedAt: from,
+                endedAt: to,
+                rootPath: nil,
+                source: AccountActivation.sourceCredential,
+                evidence: "signed-in credential (keychain)"
+            ))
+            corrections.append(Correction(
+                from: from, to: to, wrongAccount: row.accountId, rightAccount: signedIn))
+            changed = true
+            Log.write("AccountTrail",
+                      "signed-in credential is \(signedIn.prefix(4)), not \(row.accountId.prefix(4)), "
+                        + "from \(from) — correcting the trail")
+        }
+        if changed {
+            cachedTrail = nil
+            try? context.save()
+        }
+    }
+
+    /// Corrections produced since the last call, oldest first.
+    public func drainCorrections() -> [Correction] {
+        defer { corrections.removeAll() }
+        return corrections
     }
 
     /// Attach the live login's real identity to its `Account` row.
