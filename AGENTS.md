@@ -282,6 +282,23 @@ Rules that follow from it:
   Anthropic OAuth fallback) — leave a comment so the next reader doesn't
   "fix" it back.
 
+## Opening and landing pull requests
+
+- **Open every PR as a draft** (`gh pr create --draft`) once the work is
+  pushable. CI runs on drafts.
+- **Mark it ready only on the owner's go-ahead to ship.** Marking it ready runs
+  `.github/workflows/screenshots.yml`, which renders the README images on a
+  `macos-26` runner and pushes a `docs: regenerate README screenshots` commit
+  onto the PR branch — the owner reviews that commit before anything merges.
+- **Merge only after that review**, and always squash. A commit pushed by the
+  workflow's token triggers no CI run of its own; `main` is unprotected, so this
+  does not block the merge, but say so when asking.
+- **Keep personal details out of commits and comments** — monitor layouts and
+  coordinates, usernames, real paths. The repo is public.
+- **Mind the free runners' space.** No artifacts from new workflows (the
+  screenshots workflow's output is its commit), and no new caches without a
+  reason — reuse `prepare-build`'s.
+
 ## Reviewing pull requests
 
 - **Always pull a PR into an isolated worktree with `wt`** — never check
