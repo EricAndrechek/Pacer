@@ -62,6 +62,11 @@ struct ContentView: View {
     /// label can never clip in the gap. Grows with accessibility text.
     @State private var measuredLabelWidth: CGFloat?
 
+    /// Explicit so the README screenshot run can show the window with the
+    /// sidebar closed (`ScreenshotMode.captureRealWindow`); for a user it
+    /// behaves exactly as the split view's own state did.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     private var selection: Binding<Destination> {
         Binding(
             get: { Destination(rawValue: selectionRaw) ?? .dashboard },
@@ -86,10 +91,7 @@ struct ContentView: View {
     /// surfacing the dashboard.
     private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
 
-    /// Shared with the screenshot harness, which draws its own title bar and
-    /// would otherwise carry a second copy of this format — a copy that could
-    /// only ever drift away from what the window actually says.
-    static func windowSubtitle(for account: Account?) -> String {
+    private static func windowSubtitle(for account: Account?) -> String {
         guard let account else { return "" }
         let parts: [String?] = [
             account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
@@ -128,10 +130,17 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
-            detail
+            // A stable container, so the toolbar below hangs off a view that
+            // survives a tab switch. `detail` is a `switch` — attached to it
+            // directly, every switch tore the toolbar items down with the old
+            // tab and rebuilt them, and a recording caught the frame between:
+            // both items drawn as empty capsules. Rebuilding is also the
+            // moment a toolbar slot gets re-measured, which is why "switch
+            // tabs and back" was the fix for a cut-off freshness pill.
+            ZStack { detail }
                 .navigationTitle(selection.wrappedValue.title)
                 .navigationSubtitle(windowSubtitle)
                 .toolbar {
@@ -177,6 +186,22 @@ struct ContentView: View {
             if let dest = note.object as? Destination {
                 selectionRaw = dest.rawValue
             }
+        }
+        // The same request from outside the process — `make record-relaunch`
+        // walks the tabs this way to record what switching looks like. It is
+        // the app changing its own tab, not input posted at it: no event, no
+        // activation, no focus change, so the owner keeps working while it
+        // runs. The object is the destination's raw value (a sandboxed app is
+        // not delivered a distributed notification's userInfo, only this).
+        .onReceive(DistributedNotificationCenter.default().publisher(for: .pacerSelectDestinationExternal)) { note in
+            if let raw = note.object as? String, let dest = Destination(rawValue: raw) {
+                Log.write("Navigation", "tab → \(raw) (external request)")
+                selectionRaw = dest.rawValue
+            }
+        }
+        // Only ever posted by the README screenshot run.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotSidebar)) { note in
+            columnVisibility = (note.object as? Bool) == true ? .detailOnly : .all
         }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selectionRaw = Destination.settings.rawValue
@@ -388,7 +413,7 @@ struct ContentView: View {
         switch selection.wrappedValue {
         case .dashboard: DashboardView().id(dayKey)
         case .history:   HistoryView().id(dayKey)
-        case .projects:  ProjectsView().id(dayKey)
+        case .projects:  ProjectsView(initialScope: ScreenshotMode.projectsInitialScope).id(dayKey)
         case .models:    ModelsView().id(dayKey)
         case .settings:  SettingsView()
         }
@@ -490,9 +515,6 @@ private struct SidebarItem: View {
 /// Previously lived in the sidebar header; moved to the toolbar to
 /// match macOS-native chrome conventions (Linear / Reeder / Things
 /// all surface live state in their toolbars, not their sidebars).
-/// Not `private` only so the screenshot harness can host it in its synthetic
-/// title bar — a `.toolbar` item cannot render into an offscreen `NSHostingView`
-/// on its own. See `MacWindowChrome`.
 struct ToolbarFreshness: View {
     // MARK: Why these are fetched on a timer instead of via `@Query`
     //
@@ -772,6 +794,7 @@ struct ToolbarFreshness: View {
             // both axes to the intrinsic size so the toolbar centers the
             // pill at full height instead of squashing it.
             .fixedSize()
+            .background(ToolbarSlotProbe(name: "freshness", label: display.label))
             .help(display.tooltip)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Activity status: \(display.label)")
@@ -793,6 +816,14 @@ extension Notification.Name {
     /// Button inside .background turned out to miss keystrokes) while
     /// keeping `selection` private to ContentView.
     static let pacerSelectDestination = Notification.Name("PacerSelectDestination")
+
+    /// README screenshot run: hide the sidebar (object `true`) or show it.
+    static let pacerScreenshotSidebar = Notification.Name("PacerScreenshotSidebar")
+
+    /// Distributed twin of `pacerSelectDestination`, for tooling outside the
+    /// process. Object: a `Destination` raw value ("history", "projects", …).
+    static let pacerSelectDestinationExternal =
+        Notification.Name("com.ericandrechek.pacer.selectDestination")
 
     /// Fired by UI surfaces that just made a change requiring the
     /// scan coordinator to re-apply canonicalization or re-derive

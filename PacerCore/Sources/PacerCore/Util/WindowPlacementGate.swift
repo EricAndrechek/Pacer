@@ -41,6 +41,18 @@ public struct WindowPlacementGate: Sendable {
     /// behind a Mac that woke first can move windows twice, seconds apart.
     public static let displayChangeGrace: TimeInterval = 5.0
 
+    /// How long a move that is not the user's hand waits before it may be
+    /// stored — long enough for a display change that *caused* it to be
+    /// reported.
+    ///
+    /// The display-change grace only looks forward, and AppKit does not
+    /// promise to announce the change first. When monitors sleep it moves the
+    /// window, then posts the change in the same second: on 2026-09-22 the
+    /// dashboard was stored at an origin that only existed in the
+    /// half-rearranged layout — and every launch after restored it to nowhere.
+    public static let settleDelay: TimeInterval = 2.0
+
+    private var lastDisplayChangeAt: Date = .distantPast
     private var programmaticEndsAt: Date = .distantPast
     private var appearanceEndsAt: Date = .distantPast
     private var displayChangeEndsAt: Date = .distantPast
@@ -71,6 +83,7 @@ public struct WindowPlacementGate: Sendable {
     /// A display was connected, disconnected, woken, or rearranged.
     public mutating func noteDisplayConfigurationChanged(at now: Date = Date()) {
         displayChangeEndsAt = max(displayChangeEndsAt, now + Self.displayChangeGrace)
+        lastDisplayChangeAt = max(lastDisplayChangeAt, now)
     }
 
     /// The user parked the window; stop second-guessing moves.
@@ -95,6 +108,19 @@ public struct WindowPlacementGate: Sendable {
     public func shouldRecordMove(userDriven: Bool = false, at now: Date = Date()) -> Bool {
         if now >= ignoreMovesUntil { return true }
         return userDriven && now >= programmaticEndsAt
+    }
+
+    /// May a move observed at `observedAt`, not driven by the user, be stored
+    /// now that it has waited out `settleDelay`?
+    ///
+    /// No if the displays changed at any point since just before it — that
+    /// change is the likelier author of the move than the user is.
+    public func shouldCommitSettledMove(observedAt: Date, at now: Date = Date()) -> Bool {
+        guard now >= observedAt + Self.settleDelay else { return false }
+        // A little slack before the move: the change and the move it causes
+        // are posted in the same instant, in either order.
+        guard lastDisplayChangeAt < observedAt - 0.5 else { return false }
+        return shouldRecordMove(at: now)
     }
 
     /// True while a newly appeared window may still be moved by SwiftUI's

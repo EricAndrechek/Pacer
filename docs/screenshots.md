@@ -1,20 +1,38 @@
 # Screenshots
 
 The README images in `docs/screenshots/` are **generated, not hand-captured** —
-one command renders the real app views against synthetic data and writes
-deterministic PNGs. This keeps them in sync with the UI and makes them a
-first-class, repeatable part of the dev/release cycle.
+the real app renders against synthetic data and writes deterministic PNGs. This
+keeps them in sync with the UI and makes them a first-class, repeatable part of
+the dev/release cycle.
+
+**The committed images come from CI.** Marking a draft PR **ready for review**
+runs the *README screenshots* workflow, which renders on a `macos-26` runner — the
+SDK releases are built with, so the images show the chrome users get — and
+pushes a `docs: regenerate README screenshots` commit onto that PR's branch, to
+be reviewed with the change it illustrates. Nothing is captured from anyone's
+screen, only synthetic data is ever rendered, and no artifacts are kept. To run
+it by hand: `gh workflow run screenshots.yml --ref <branch>` (on `main` it parks
+the commit on an `automation/readme-screenshots-*` branch instead).
+
+**A local preview** (written to the gitignored `screenshots/preview/`, never to
+`docs/screenshots/`):
 
 ```sh
-make screenshots
+make screenshots APPROVED=1
 ```
+
+It captures the screen — invisibly: the window sits beneath the desktop picture
+and is never activated — so, like `make record`, it runs only with the owner's
+go-ahead (AGENTS.md). Traffic lights are grey in a preview: only a key window
+has colour, and a preview never takes focus.
 
 ## What it produces
 
 | File | Scene | Notes |
 | --- | --- | --- |
-| `dashboard.png` / `dashboard-dark.png` | Main dashboard (`ContentView`) | macOS window chrome (traffic-light titlebar); light + dark |
-| `history.png` | History view (`HistoryView`) | lifetime totals, six-month heatmap, monthly spend |
+| `dashboard.png` / `dashboard-dark.png` | Main dashboard | the app's real window — title bar, toolbar, sidebar; light + dark |
+| `history.png` / `models.png` | History, Models tabs | real window |
+| `projects-collections*.png` | Projects tab, unscoped and scoped to a collection | real window |
 | `menubar.png` / `menubar-dark.png` | Menu-bar experience (`MenuBarExperience`) | the menu-bar readout chips + the click-down popover beneath, in one image; light + dark |
 | `widgets.png` | Widget gallery | one composite of the real widget views (Today, pace gauges, live session, daily cost, top projects) |
 | `share-card.png` / `share-card-dark.png` | Share-image export (`App/Share`) | the branded 7-day pace card from the in-app "Share…" action, via the same `ImageRenderer` path; light + dark |
@@ -57,15 +75,25 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
    output ≫ non-cached input, and the rate-limit curves below). Absolute
    magnitudes are kept to a believable-heavy range for a public README rather
    than mirroring any one person's exact spend.
-3. **Capture.** `ScreenshotMode.captureAll(...)` hosts each **real** view in an
-   off-screen, never-activated window so the full SwiftUI lifecycle runs
-   (`@Query` fetches land, `@State` caches refresh, Charts lay out — a one-shot
-   `ImageRenderer` pass renders empty cards, which is why we use a real window),
-   then snapshots the hosting view to a PNG.
-4. **Exit.** The process exits when done.
-
-Because the window is positioned far off-screen and the app never activates,
-running this **steals no focus** — you can keep working while it renders.
+3. **Capture — window scenes.** The dashboard, History, Models and Projects
+   shots are the app's **real window**: the `Window("Pacer", id: "main")` scene
+   hosting `ContentView` over the seeded container, switched to the right tab.
+   `bin/pacer-screenshot-capture.swift` — a separate process, started by
+   `bin/dev-screenshots.sh` — photographs it through the window server with
+   ScreenCaptureKit. So the title bar, traffic lights, toolbar capsules, sidebar
+   and shadow are whatever macOS draws for Pacer. They used to be a hand-drawn
+   copy (`MacWindowChrome`) that drifted from the real thing again and again
+   (#128). The helper is a separate process so that Pacer.app itself never
+   needs the Screen Recording permission. In CI it also adds a 2× virtual
+   display (the runners only have a 1× one) and the window is made key; locally
+   the window goes beneath the desktop picture, unactivated.
+4. **Capture — everything else.** Cards, the menu bar, widgets and the share
+   card have no window chrome to get wrong, so they are still rendered from the
+   views: each **real** view hosted in an off-screen, never-activated window so
+   the full SwiftUI lifecycle runs (`@Query` fetches land, `@State` caches
+   refresh, Charts lay out — a one-shot `ImageRenderer` pass renders empty
+   cards), then snapshotted to a PNG.
+5. **Exit.** The process exits when done, non-zero if any scene failed.
 
 ### Gotchas worth knowing (and not re-discovering)
 
@@ -102,17 +130,20 @@ To re-tune the story, edit the `keyframes` arrays in `seedRateLimits`.
 
 ## Adding or changing a scene
 
-- **New view shot:** add a `capture(...)` call in `ScreenshotMode.captureAll`.
-  Use `card: true` (+ `chrome: true, title:`) for window scenes, `card: false`
-  for self-decorating views (widgets/status bar). Pass `width`/`height` for a
-  fixed size or `nil` to size to the content.
+- **New window shot:** add a `captureRealWindow(...)` call in
+  `ScreenshotMode.captureAll` with the window size, appearance and tab. Never
+  draw window chrome by hand — that is what #128 removed.
+- **New view shot:** add a `capture(...)` call. Use `card: true` for cards,
+  `card: false` for self-decorating views (widgets/status bar). Pass
+  `width`/`height` for a fixed size or `nil` to size to the content.
 - **New data a scene needs:** extend `ScreenshotMode.seed(...)`.
 - **New widget:** add a fake entry to `ScreenshotEntries` and a tile to
   `WidgetGallery`.
 
 ## When to regenerate
 
-**Re-run `make screenshots` after any meaningful UI change** to the dashboard,
-history, menu bar, popover, or widgets, and **commit the updated PNGs in the same
-PR**. It's also a step in the [release checklist](releasing.md) — the published
-README and any store assets should match the version being shipped.
+**Every UI PR gets fresh images when it is marked ready for review** — review
+that commit with the rest of the change. For a UI change that went in without
+them, run the workflow by hand. It's also
+a step in the [release checklist](releasing.md) — the published README and any
+store assets should match the version being shipped.

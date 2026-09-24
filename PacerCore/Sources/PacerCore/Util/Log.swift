@@ -4,7 +4,11 @@ import Foundation
 /// the daemon log is reasoned-about-able after the fact ("when did
 /// the OAuth poller fail?" needs a clock).
 ///
-/// Format: `2026-05-07T01:42:13Z [Tag] message`
+/// Format: `2026-05-07T01:42:13.482Z [Tag] message`
+///
+/// Milliseconds because whole seconds cannot be lined up against anything
+/// faster than a person — a screen recording of a relaunch, or the order of a
+/// window move and the display change that caused it, both happen inside one.
 ///
 /// Writes are short enough (well under PIPE_BUF) that a single
 /// `FileHandle.write` is atomic; we don't need to add a lock just to
@@ -13,7 +17,7 @@ import Foundation
 public enum Log {
     nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
 

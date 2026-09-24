@@ -84,10 +84,23 @@ struct PaceChartCard: View {
     @State private var scope = UsageScope.shared
 
     /// What actually decides the card's contents: the account the user picked
-    /// (nil for "all"), the one that resolves to, and whether both are live.
-    /// Any of the three changing means a different set of columns.
+    /// (nil for "all") and the accounts that resolves to drawing.
+    ///
+    /// Keyed on the *targets*, not on `limitAccountId`. On "all accounts" with
+    /// several logins the card draws every one of them whichever is active, but
+    /// `limitAccountId` follows the active login — so a `cswap` switch or a
+    /// Claude Code re-login changed the key, wiped the card to "Loading
+    /// history…" for most of a second and redrew the identical charts. The card
+    /// collapsing and regrowing by a few hundred points shoved everything under
+    /// it up and back down: the dashboard's "occasional flicker", matched
+    /// second-for-second in the log against "reconciling active account".
     private var scopeKey: String {
-        "\(scope.accountId ?? "all")|\(limitAccountId ?? "-")"
+        let targets = loadTargets().map { $0.accountId ?? "-" }.joined(separator: ",")
+        return "\(scope.accountId ?? "all")|\(targets)"
+    }
+
+    private static func pickedPart(of key: String) -> Substring {
+        key.split(separator: "|", maxSplits: 1).first ?? ""
     }
 
     /// Rate limits belong to a *login*, so "all accounts" cannot combine them —
@@ -182,6 +195,22 @@ struct PaceChartCard: View {
         scopedSignal.propertiesToFetch = [\.sampledAt]
         _newestScopedSignal = Query(scopedSignal)
 
+        // Seed from what this session already loaded, so the first frame draws
+        // the charts rather than "Loading history…" — see
+        // `PaceSeriesCache.lastTargets`. `reload()` still runs on appear and
+        // tops up incrementally from `loadedThrough`.
+        let cache = PaceSeriesCache.shared
+        if let targets = cache.lastTargets(forPickedScope: UsageScope.shared.accountId) {
+            let seeded = targets.map { target -> AccountSeries in
+                let c = cache.series(for: target.accountId)
+                return AccountSeries(accountId: target.accountId, label: target.label,
+                                     fixed: c.fixed, scoped: c.scoped, windows: c.windows,
+                                     loadedThrough: c.loadedThrough)
+            }
+            if seeded.allSatisfy({ $0.loadedThrough != nil }) {
+                _series = State(initialValue: seeded)
+            }
+        }
     }
 
     /// Newest timestamp across both sources — the trigger for a reload.
@@ -324,6 +353,7 @@ struct PaceChartCard: View {
 
         isLoading = false
         series = next
+        PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
 
         // Built in steps: as one expression the type checker gives up.
         let totalMs = Int(Date().timeIntervalSince(started) * 1000)
@@ -864,6 +894,7 @@ struct PaceChartCard: View {
                     Divider().frame(height: 110)
                     column(cols[1])
                 }
+                .modifier(RememberedHeight(scope: scope.accountId))
             } else {
                 // N windows (> 2) — a balanced, width-aware grid. The column
                 // count is computed from the measured content width so rows
@@ -889,10 +920,12 @@ struct PaceChartCard: View {
                             }
                         }
                     }
+                    .modifier(RememberedHeight(scope: scope.accountId))
                 } else {
                     PaceColumnGrid() {
                         ForEach(cols) { column($0) }
                     }
+                    .modifier(RememberedHeight(scope: scope.accountId))
                 }
             }
         } footer: {
@@ -900,7 +933,10 @@ struct PaceChartCard: View {
                 if let limitOwnerNote {
                     Text(limitOwnerNote)
                 }
-                if hasScoped {
+                // While loading, the footnote the loaded card will have — it is
+                // a line tall, and appearing with the charts it was the last
+                // 13 pt the remembered loading height could not cover.
+                if hasScoped || (!hasAnyReading && RememberedHeight.lastHadScoped(scope: scope.accountId)) {
                     Text("Per-model windows Anthropic reports for this account, forecast the same way as the 5-hour and 7-day pace — projected fill, time-to-limit, and calibrated bands. A dot marks the window currently in effect. Tap any window to compare every forecast model.")
                 }
             }
@@ -914,6 +950,9 @@ struct PaceChartCard: View {
         .task(id: reloadSignal) {
             await reload()
         }
+        .onChange(of: hasScoped) { _, scoped in
+            if hasAnyReading { RememberedHeight.storeHadScoped(scoped, scope: scope.accountId) }
+        }
         // A scope change invalidates everything loaded. The card is *not*
         // rebuilt by identity for this — doing that threw away its measured
         // grid width and re-laid the columns out lopsided — so it clears its
@@ -925,9 +964,15 @@ struct PaceChartCard: View {
         // both resolve `limitAccountId` to work, so switching between them
         // changed nothing and the card kept showing three columns where it
         // should have shown six.
-        .onChange(of: scopeKey) { _, key in
+        //
+        // Only a scope the *user* picked clears first — what is on screen is
+        // then another account's, and must not linger under the new label. A
+        // change that merely adds or drops an account (a second login's first
+        // reading) keeps the charts up and swaps them when the load lands:
+        // `reload` reuses entries by account id, so nothing drawn is wrong.
+        .onChange(of: scopeKey) { old, key in
             guard key != loadedScopeKey else { return }
-            series = []
+            if Self.pickedPart(of: old) != Self.pickedPart(of: key) { series = [] }
             Task { await reload() }
         }
         // Awaited directly, not scheduled: this is the path that first fills
@@ -938,6 +983,47 @@ struct PaceChartCard: View {
         .task(id: windowKey) { await runProjectionRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
+        }
+    }
+
+    /// Remembers how tall the loaded charts were, per picked scope, across
+    /// launches — the loading state's height on the next cold start.
+    ///
+    /// On a cold launch there is nothing in memory to draw from (a tab switch
+    /// is covered by `PaceSeriesCache`), so the card has to show *something*
+    /// for the half-second the history takes to load. A short spinner row was
+    /// honest but made the whole page jump when the charts replaced it. Sizing
+    /// it to the last real height is the usual answer: the space is right
+    /// nearly always, and when the column set did change it is off by a row
+    /// rather than by the whole card. Written only when the height changes.
+    struct RememberedHeight: ViewModifier {
+        let scope: String?
+        private static let key = "PaceChartCard.rememberedHeight"
+
+        private static let scopedKey = "PaceChartCard.rememberedHadScoped"
+
+        static func lastHadScoped(scope: String?) -> Bool {
+            (UserDefaults.standard.dictionary(forKey: scopedKey)?[scope ?? "all"] as? Bool) ?? false
+        }
+
+        static func storeHadScoped(_ value: Bool, scope: String?) {
+            var all = UserDefaults.standard.dictionary(forKey: scopedKey) ?? [:]
+            all[scope ?? "all"] = value
+            UserDefaults.standard.set(all, forKey: scopedKey)
+        }
+
+        static func last(scope: String?) -> CGFloat? {
+            (UserDefaults.standard.dictionary(forKey: key)?[scope ?? "all"] as? Double)
+                .map { CGFloat($0) }
+        }
+
+        func body(content: Content) -> some View {
+            content.onGeometryChange(for: CGFloat.self) { $0.size.height.rounded() } action: { height in
+                guard height > 0, Self.last(scope: scope) != height else { return }
+                var all = UserDefaults.standard.dictionary(forKey: Self.key) ?? [:]
+                all[scope ?? "all"] = Double(height)
+                UserDefaults.standard.set(all, forKey: Self.key)
+            }
         }
     }
 
@@ -1085,7 +1171,12 @@ struct PaceChartCard: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, minHeight: 110, alignment: .center)
+        // As tall as the charts were last time, so their arrival fills the
+        // space instead of pushing every card below down — ~550 pt on a
+        // three-account dashboard, on every launch. See `RememberedHeight`.
+        .frame(maxWidth: .infinity,
+               minHeight: RememberedHeight.last(scope: scope.accountId) ?? 110,
+               alignment: .center)
     }
 
     private var emptyState: some View {
@@ -1224,8 +1315,23 @@ private struct PaceColumn: View {
     }
 
     /// Status + burn chips under the hero numbers — the at-a-glance verdict row.
-    @ViewBuilder
+    ///
+    /// Always a chip's height, chips or not. A column goes stale and fresh on
+    /// its own — `cswap` idles an account, the poller reads it again — and the
+    /// row used to collapse to nothing while stale, so a fresh reading landing
+    /// grew that row of columns by 25 pt and pushed everything below it down,
+    /// while the user was just looking at the dashboard.
     private var chipRow: some View {
+        ZStack(alignment: .leading) {
+            Chip(text: "·", systemImage: "circle", tint: .clear, size: .compact)
+                .hidden()
+                .accessibilityHidden(true)
+            chipRowContent
+        }
+    }
+
+    @ViewBuilder
+    private var chipRowContent: some View {
         // Every chip here is a verdict about the present — "behind", "on pace",
         // "limit in 40 min". A stale reading cannot support any of them: the
         // account may have been sitting untouched since, or may have been
@@ -1272,11 +1378,16 @@ private struct PaceColumn: View {
 
     /// One muted line of the user's own history with this window
     /// ("topped 90% in 3 of 73 cycles · hit the limit 1×").
+    ///
+    /// The line is held open (blank) until the engine's outlook lands, and
+    /// stays blank if it brings no history to state. It used to appear only
+    /// with the outlook, a few seconds after the chart — one line per row of
+    /// columns, so on a three-account dashboard the card grew 42 pt and pushed
+    /// everything below it down on every launch and every return to the tab.
     @ViewBuilder
     private var outlookLines: some View {
-        if cycle?.isAwaiting == false, let o = outlook,
-           let freq = IntelligenceFormatting.frequencyLine(o) {
-            Text(freq)
+        if cycle?.isAwaiting == false {
+            Text(outlook.flatMap(IntelligenceFormatting.frequencyLine) ?? " ")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -1424,6 +1535,7 @@ private struct PaceColumn: View {
             // stale reading, and two facts of different ages side by side is
             // what made this confusing in the first place.
             Text("last read \(pacerRelative(readingAt))")
+                .lineLimit(1)
                 .font(.system(size: 10))
                 .foregroundStyle(.orange)
                 .help("This account is not being polled right now — Pacer can only "
@@ -1433,9 +1545,25 @@ private struct PaceColumn: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
         } else if let resets = column.resetsAt {
-            Text(pacerResetCaption(resetsAt: resets, durationSeconds: duration))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            // One line, always. The caption is recomputed as time passes
+            // ("resets in 4 days · Mon 5 AM" → "resets in 3 days 23 hr · …")
+            // and in a column narrowed by a "critical" chip it wrapped to a
+            // second line and back — the pace card grew and shrank by a line
+            // while the dashboard sat idle, moving every card below. When the
+            // whole caption does not fit, the absolute time alone does; the
+            // full text stays on hover.
+            let full = pacerResetCaption(resetsAt: resets, durationSeconds: duration)
+            let parts = full.components(separatedBy: " · ")
+            ViewThatFits(in: .horizontal) {
+                Text(full).lineLimit(1)
+                if parts.count > 1 {
+                    Text("resets \(parts[parts.count - 1])").lineLimit(1)
+                }
+                Text(full).lineLimit(1).truncationMode(.tail)
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .help(full)
         } else if idleUsedPct != nil {
             Text("idle · no active window")
                 .font(.system(size: 10))

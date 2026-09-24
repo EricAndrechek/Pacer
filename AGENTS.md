@@ -74,15 +74,44 @@ Concretely, never write, run, or leave behind anything that:
   thing this rule exists to stop;
 - activates, raises, resizes, moves, closes or Spaces-switches any window,
   including Pacer's own;
-- records the screen or captures another app's windows.
+- records the screen or captures another app's windows — with one sanctioned
+  exception, below.
+
+**The one screen-recording tool: `make record`** (`bin/dev-record.sh`).
+Committed at the owner's request so any session can use it, and bound by the
+same rule as everything above: **it records the screen, so it runs only with
+the owner's go-ahead** — per run, or for a stretch of work he explicitly
+approves ("iterate on the layout shifts, record as often as you need"). Run it
+bare first; it prints its plan and exits. Scenarios:
+
+- `SCENARIO=relaunch` — `make install`, i.e. quit → replace → relaunch;
+- `SCENARIO=tabs` — Pacer switches through every tab and back to where it was,
+  via `bin/pacer-select-tab.swift` (a distributed notification the app acts on
+  itself: no input events, no activation, no focus change);
+- `SCENARIO=idle` — nothing; whatever changes on its own.
+
+What makes it acceptable to run while he works (`bin/pacer-window-recorder.swift`):
+ScreenCaptureKit, one stream cropped to the dashboard's current frame with
+**every other application excluded** — only Pacer's pixels are ever captured,
+nothing is dimmed (`screencapture -V -R` dims every other display, which is why
+it is not used), and a relaunched Pacer is captured from its first frame because
+a new process is not in the exclusion list. Frames are PNGs named by wall-clock
+ms, the log has ms timestamps, so they line up exactly; `changes.txt`
+(`bin/dev-frame-diff.sh`) lists every frame that differs from the last, with the
+changed area. Output goes to `screenshots/recordings/` (gitignored) — delete a
+run's folder once it has been analysed. Do not extend it to other apps, whole
+displays, input, or unattended runs.
 
 Reading is fine: `NSEvent.mouseLocation` to place a window the *user* asked
 for, `NSScreen.frame`, and so on. The line is between observing the machine and
 operating it.
 
 **What to do instead.** Everything Pacer needs to see it can render off-screen,
-headlessly, as a PNG — that is the entire reason `make render-live`,
-`make screenshots` and `OffscreenRenderer` exist (next section). Behaviour that
+headlessly, as a PNG — that is the entire reason `make render-live` and
+`OffscreenRenderer` exist (next section). The README screenshots render in CI
+(when a PR is marked ready for review); a local `make screenshots APPROVED=1`
+captures the screen, invisibly, and needs the owner's go-ahead like any other
+capture. Behaviour that
 is not visual belongs in a unit test. If something genuinely can only be
 confirmed on a real session — an `NSMenu` tooltip is the standing example,
 because NSMenu tracking cannot be exercised off-screen at all — then build it,
@@ -252,6 +281,23 @@ Rules that follow from it:
   decisions where Pacer deviates from ccusage (e.g. cache-tier split,
   Anthropic OAuth fallback) — leave a comment so the next reader doesn't
   "fix" it back.
+
+## Opening and landing pull requests
+
+- **Open every PR as a draft** (`gh pr create --draft`) once the work is
+  pushable. CI runs on drafts.
+- **Mark it ready only on the owner's go-ahead to ship.** Marking it ready runs
+  `.github/workflows/screenshots.yml`, which renders the README images on a
+  `macos-26` runner and pushes a `docs: regenerate README screenshots` commit
+  onto the PR branch — the owner reviews that commit before anything merges.
+- **Merge only after that review**, and always squash. A commit pushed by the
+  workflow's token triggers no CI run of its own; `main` is unprotected, so this
+  does not block the merge, but say so when asking.
+- **Keep personal details out of commits and comments** — monitor layouts and
+  coordinates, usernames, real paths. The repo is public.
+- **Mind the free runners' space.** No artifacts from new workflows (the
+  screenshots workflow's output is its commit), and no new caches without a
+  reason — reuse `prepare-build`'s.
 
 ## Reviewing pull requests
 

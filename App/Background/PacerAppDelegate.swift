@@ -311,6 +311,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Log.write("Lifecycle", "launched")
         // Screenshot/demo mode: skip scan, menu bar, hotkey, and Dock
         // policy. Seed synthetic data, capture the views off-screen, exit.
         if ScreenshotMode.isActive {
@@ -325,9 +326,18 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // it. Off-screen `NSWindow` rendering still works, because that is
             // drawing rather than presentation.
             //
-            // The README screenshot run keeps `.accessory`: it is invoked
-            // deliberately by `make screenshots`, not alongside a live app.
-            NSApp.setActivationPolicy(LiveRenderMode.isActive ? .prohibited : .accessory)
+            // The README screenshot run is `.prohibited` too on a person's Mac
+            // (`make screenshots APPROVED=1` runs beside their live Pacer), and
+            // `.regular` + activated only on a CI runner, where there is nobody
+            // to take focus from and a key window is what colours the traffic
+            // lights. Activated *here*, at launch: macOS 14+ refuses an
+            // activation a background app asks for later.
+            if ScreenshotMode.activatesForCapture {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                NSApp.setActivationPolicy(.prohibited)
+            }
             // Suppress any window macOS restores for the bundle — the same
             // guard the other diagnostic modes carry.
             Self.suppressWindowsWhileDiagnosticRuns()
@@ -354,7 +364,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // because it gets committed. Exit non-zero so
                     // `make screenshots` stops instead.
                     guard ScreenshotMode.validateFixture(container) else { exit(3) }
-                    await ScreenshotMode.captureAll(container: container)
+                    await ScreenshotMode.captureAll(container: container,
+                                                    sceneEngines: self.backgroundService.engines)
                     // Again afterwards: scenes that build their own series
                     // report through `ScreenshotMode.note` while rendering, and
                     // those problems only exist once the render has run.
@@ -425,6 +436,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // now. Those moves are not the user's, and recording one as the
         // dashboard's home is permanent — every later launch restores it.
         Self.observeDisplayChanges()
+        Self.observeExternalWindowRequests()
 
         NotificationCoordinator.shared.clearCollectionPausedNotification()
         // If the bundle was just replaced under us (Sparkle auto-update
@@ -455,6 +467,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // saves flush. Also fires the "you stopped tracking" banner
         // before exit so a user who quits unintentionally has a
         // visible reminder.
+        //
+        // Logged because a relaunch otherwise has no "old process went away"
+        // instant, and that is the anchor `make record-relaunch` lines the
+        // video up against.
+        Log.write("Lifecycle", "terminating")
         Task { @MainActor in
             await backgroundService.stop()
             await NotificationCoordinator.shared.notifyCollectionPaused()
@@ -479,6 +496,35 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// of the agent shape is that we keep collecting data after the
     /// user dismisses the dashboard. Quit happens via Cmd+Q or the
     /// menu-bar Quit button.
+    /// Close or reopen the dashboard on request from outside the process —
+    /// `make record SCENARIO=window` uses it to exercise window creation (the
+    /// menu-bar "Open Pacer" path) under a recording.
+    ///
+    /// The app acting on its own window, like the tab-switch request in
+    /// `ContentView`: no input events, and reopening goes through
+    /// `reopenInBackground`, which never activates, so whatever the owner is
+    /// typing into keeps focus. Object: "close" or "reopen".
+    private static func observeExternalWindowRequests() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.ericandrechek.pacer.dashboardWindow"),
+            object: nil, queue: .main
+        ) { note in
+            let request = note.object as? String
+            MainActor.assumeIsolated {
+                switch request {
+                case "close":
+                    Log.write("Placement", "closing the dashboard (external request)")
+                    NSApp.windows.first { MainWindowPlacement.isDashboard($0) && $0.isVisible }?.close()
+                case "reopen":
+                    Log.write("Placement", "reopening the dashboard (external request)")
+                    MainWindowPlacement.reopenInBackground()
+                default:
+                    break
+                }
+            }
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
@@ -501,10 +547,32 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // itself is required because the block is nonisolated even though
             // `queue: .main` delivers it on the main thread.
             let window = note.object as? NSWindow
-            Task { @MainActor in window?.close() }
+            Task { @MainActor in
+                guard let window else { return }
+                // The README run photographs the real dashboard window, so that
+                // one is kept rather than closed (closing it as it came on
+                // screen left CI capturing a window with no toolbar) — but
+                // kept *hidden* on a person's Mac. Left visible, it sat at
+                // SwiftUI's default spot on the owner's screen for seconds at
+                // every local launch. On CI there is nobody to see it; locally
+                // it is only ever allowed beneath the desktop picture.
+                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                    if !ScreenshotMode.activatesForCapture, !ScreenshotMode.isBeneathWallpaper(window) {
+                        window.orderOut(nil)
+                    }
+                    return
+                }
+                window.close()
+            }
         }
         DispatchQueue.main.async {
-            for window in NSApp.windows { window.close() }
+            for window in NSApp.windows {
+                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                    if !ScreenshotMode.activatesForCapture { window.orderOut(nil) }
+                } else {
+                    window.close()
+                }
+            }
         }
     }
 

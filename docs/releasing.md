@@ -39,8 +39,10 @@ The steps `bin/ship.sh` automates, spelled out:
 1. Land your changes on `main`. `CI` (PacerCore tests + verify build)
    should be green.
 1b. If any UI changed this cycle, regenerate the README screenshots so the
-   published assets match the shipping version: `make screenshots`, then
-   commit the updated PNGs. See [`docs/screenshots.md`](screenshots.md).
+   published assets match the shipping version: run the README screenshots
+   workflow — it runs when a PR is marked ready, or by hand with
+   `gh workflow run screenshots.yml --ref <branch>` — and land its commit. See
+   [`docs/screenshots.md`](screenshots.md).
 2. Decide the version number. Pacer pre-1.0 uses `0.<minor>.<patch>`
    semver-ish. Breaking changes that need a clean SwiftData reset bump
    the minor; bug fixes / additive UX bumps the patch.

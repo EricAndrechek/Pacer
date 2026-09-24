@@ -465,6 +465,15 @@ struct NowStrip: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                // Always a chip's height, chip or not. The outlook chip comes
+                // from the engine a beat after the tile first draws, and a chip
+                // is 3 pt taller than the bare token count — so its arrival
+                // grew the whole strip and nudged every card below it, on
+                // every launch and every return to the dashboard.
+                ZStack(alignment: .leading) {
+                Chip(text: "·", systemImage: "circle", tint: .clear, size: .compact)
+                    .hidden()
+                    .accessibilityHidden(true)
                 HStack(spacing: 6) {
                     if let o = todayOutlook {
                         Chip(text: o.text, systemImage: o.icon, tint: o.tint, size: .compact)
@@ -486,6 +495,7 @@ struct NowStrip: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .help("\(pacerTokensExact(cached.todayTokens)) tokens")
+                }
                 }
                 Spacer(minLength: 0)
                 if showEODBar, let e = todayEOD {

@@ -25,21 +25,21 @@ you never edit `.xcodeproj` directly.
 make verify       # fast compile-only check (no signing, no install)
 make test         # PacerCore unit + ground-truth tests
 make install      # build + sign + notarize + install to /Applications, relaunch
-make screenshots  # regenerate the README screenshots (see below)
+make screenshots APPROVED=1  # local preview of the README screenshots (see below)
 make help         # all targets
 ```
 
 ### Regenerating the README screenshots
 
-`make screenshots` rebuilds the app and runs it in a headless capture mode
-(`PACER_SCREENSHOT_MODE=1`, implemented in `App/Background/ScreenshotMode.swift`).
-It spins up an **in-memory** SwiftData store seeded with synthetic usage, renders
-the real views off-screen (light and dark, framed with rounded corners + a
-shadow), and writes PNGs to `docs/screenshots/` — dashboard, history, the
-menu-bar readout and popover, and a composite of the home-screen widgets. It
-never reads or touches your real `~/.claude` data or `pacer.sqlite`, steals no
-focus, and is safe to run while a real Pacer is open. **Re-run it after any
-meaningful UI change** so the README images don't drift from the app.
+The README screenshots are rendered in CI by the **README screenshots**
+workflow when a PR is marked ready for review; it commits the new PNGs onto that
+PR's branch. It runs the app in a capture mode
+(`PACER_SCREENSHOT_MODE=1`, `App/Background/ScreenshotMode.swift`) over an
+**in-memory** store seeded with synthetic usage: window scenes are the app's
+real window captured through the window server, everything else is rendered
+from the views. **Run it after any meaningful UI change** so the README images
+don't drift from the app. `make screenshots APPROVED=1` renders a local preview
+into `screenshots/preview/` — see [`docs/screenshots.md`](docs/screenshots.md).
 
 The widget *views* are compiled into the app target (see the `Widgets` source
 entry in `project.yml`) purely so the generator can render them with fake

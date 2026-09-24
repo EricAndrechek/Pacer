@@ -404,14 +404,36 @@ private struct ProjectsContent: View {
     /// Falls back to a synchronous compute when the cache hasn't been
     /// populated yet — that's the first render after a `.id(range)`
     /// re-init, before `.onAppear` fires `refreshAllRows`.
+    ///
+    /// The fallback is memoised for that first render. Every visible row's
+    /// context menu reads `mergeCandidates` while the list is built, and
+    /// without the memo each one recomputed every row from the aggregates —
+    /// O(rows²) on exactly the render a tab switch waits for. Sampled at
+    /// ~90 ms of a 627 ms main-thread stall switching to this tab.
     private var allRows: [ProjectRow] {
-        cachedAllRows ?? computeAllRowsSync()
+        if let cached = cachedAllRows { return cached }
+        if let memo = firstRenderMemo.rows { return memo }
+        let rows = computeAllRowsSync()
+        firstRenderMemo.rows = rows
+        return rows
     }
 
     private var mergeCandidates: [ProjectRow] {
         if let cached = cachedMergeCandidates { return cached }
-        return allRows.filter { $0.path != ProjectDailyAggregate.unknownProjectPath }
+        if let memo = firstRenderMemo.candidates { return memo }
+        let candidates = allRows.filter { $0.path != ProjectDailyAggregate.unknownProjectPath }
+        firstRenderMemo.candidates = candidates
+        return candidates
     }
+
+    /// A reference, so `body` can fill it: `@State` cannot be written during
+    /// a render, and this only has to live until `refreshAllRows` fills the
+    /// real caches on appear (which clears it).
+    private final class FirstRenderMemo {
+        var rows: [ProjectRow]?
+        var candidates: [ProjectRow]?
+    }
+    @State private var firstRenderMemo = FirstRenderMemo()
 
     /// Rebuild the `cachedAllRows` snapshot. Called on appear, on
     /// scan-meta tick, and whenever sort/range changes invalidate the
@@ -421,6 +443,7 @@ private struct ProjectsContent: View {
     private func refreshAllRows() {
         let rows = computeAllRowsSync()
         cachedAllRows = rows
+        firstRenderMemo = FirstRenderMemo()
         // Pre-build the merge-candidate list once. Each row's context
         // menu used to do `allRows.filter { $0.path != row.path && ... }`
         // — O(rows) per row, O(rows²) per table render. With the

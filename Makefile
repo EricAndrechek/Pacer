@@ -95,13 +95,8 @@ verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — 
 pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
 	@bin/update-pricing-snapshot.sh
 
-screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. Headless, synthetic data, no focus steal — safe to run alongside a live Pacer. Re-run after any meaningful UI change.
-	@mkdir -p "$(REPO_ROOT)/docs/screenshots"
-	@bin="$(REPO_ROOT)/Build/Products/Debug/Pacer.app/Contents/MacOS/Pacer"; \
-	if [ ! -x "$$bin" ]; then echo "ERROR: build missing at $$bin (did 'make verify' succeed?)"; exit 1; fi; \
-	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin" \
-	  || { echo "ERROR: screenshot run failed (exit $$?) — see the lines above"; exit 1; }; \
-	echo "Wrote PNGs to $(REPO_ROOT)/docs/screenshots/"
+screenshots: verify  ## README screenshots: real window, synthetic data. CI → docs/screenshots; locally APPROVED=1 → screenshots/preview (captures the screen invisibly — see bin/dev-screenshots.sh).
+	@bin/dev-screenshots.sh $(if $(APPROVED),--owner-approved,)
 
 app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate
@@ -184,6 +179,15 @@ clean-data:  ## DESTRUCTIVE: also remove SwiftData store and logs. Prompts for c
 	else \
 		echo "Cancelled."; \
 	fi
+
+.PHONY: record record-relaunch
+## Record Pacer's window (only Pacer's pixels) through a scenario, lined up with
+## the log — see bin/dev-record.sh. RECORDS THE SCREEN: owner's go-ahead only.
+## Usage: make record SCENARIO=relaunch|tabs|idle APPROVED=1  (without APPROVED: plan only)
+record:
+	@SCENARIO=$(or $(SCENARIO),relaunch) bin/dev-record.sh $(if $(APPROVED),--owner-approved,)
+record-relaunch:
+	@SCENARIO=relaunch bin/dev-record.sh $(if $(APPROVED),--owner-approved,)
 
 .PHONY: render-live
 ## Render the real cards against the real store to PNGs (see bin/dev-render-live.sh).

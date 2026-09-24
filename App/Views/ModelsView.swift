@@ -289,9 +289,24 @@ private struct ModelsContent: View {
     /// first render after a `.id(range)` re-init takes, so the page
     /// shows real data immediately instead of flashing empty before
     /// `.onAppear` can populate the cache.
+    ///
+    /// Memoised for that first render: `body` reads `derived` (through `rows`,
+    /// `dailyMix`, the donut and the trend) dozens of times, and each read
+    /// recomputed everything from the aggregates until `.onAppear` filled the
+    /// cache — the same first-render trap that made the Projects tab switch
+    /// stall the main thread.
     private var derived: DerivedData {
-        cachedDerived ?? computeDerived()
+        if let cachedDerived { return cachedDerived }
+        if let memo = firstRenderMemo.value { return memo }
+        let value = computeDerived()
+        firstRenderMemo.value = value
+        return value
     }
+
+    /// A reference, so `body` can fill it — `@State` cannot be written during
+    /// a render. Lives until `refreshDerived` fills the real cache.
+    private final class FirstRenderMemo { var value: DerivedData? }
+    @State private var firstRenderMemo = FirstRenderMemo()
 
     private var rows: [ModelRow] { derived.rows }
     private var dailyMix: [DailyMix] { derived.dailyMix }
@@ -300,6 +315,7 @@ private struct ModelsContent: View {
     private func refreshDerived() {
         let started = Date()
         cachedDerived = computeDerived()
+        firstRenderMemo = FirstRenderMemo()
         // The trend chart is the heaviest thing on this page and it is rebuilt
         // from here. A regression that put an O(n) pass inside the chart's
         // `ForEach` made the tab beachball and left no trace beyond a run of

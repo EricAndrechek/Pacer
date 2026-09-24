@@ -265,7 +265,7 @@ directly.
 make verify       # unsigned compile-only check (no Apple account needed)
 make test         # PacerCore unit + ground-truth tests
 make install      # signed + notarized build → /Applications/Pacer.app
-make screenshots  # regenerate the README screenshots (see docs/screenshots.md)
+make screenshots APPROVED=1  # local preview of the README screenshots (CI renders the real ones — see docs/screenshots.md)
 make help         # everything else
 ```
 

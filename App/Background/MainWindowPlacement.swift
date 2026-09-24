@@ -162,6 +162,15 @@ enum MainWindowPlacement {
     /// content view is put into a window — earlier than any of AppKit's
     /// visibility notifications, which is the point.
     static func register(_ window: NSWindow) {
+        // A local README screenshot run keeps this window to photograph it,
+        // beside the owner's live Pacer. Hide it here — before its first
+        // frame — not when AppKit next reports on it: hidden any later, it
+        // flashed on the owner's screen at launch. Transparent and beneath
+        // the desktop picture until `ScreenshotMode.place` takes it.
+        if ScreenshotMode.capturesRealWindow, !ScreenshotMode.activatesForCapture {
+            window.alphaValue = 0
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) - 2)
+        }
         if dashboardWindow !== window {
             dashboardWindow = window
             hasPlacedDashboard = false
@@ -291,19 +300,43 @@ enum MainWindowPlacement {
     }
 
     /// Record a move the user actually made.
+    ///
+    /// A drag is stored at once. Anything else waits out
+    /// `WindowPlacementGate.settleDelay` first and is dropped if the displays
+    /// changed around it or the window has moved on since — AppKit can move
+    /// the window *before* it reports the display change that caused it.
     static func record(_ window: NSWindow) {
         guard isEnabled, isDashboard(window), window.isVisible else { return }
         let userDriven = isUserDrivenMove()
         guard gate.shouldRecordMove(userDriven: userDriven) else { return }
         guard isUsable(window.frame) else { return }
-        if userDriven { gate.noteUserParked() }
-        guard window.frame != storedFrame else {
+        if userDriven {
+            gate.noteUserParked()
+            store(window.frame)
+            return
+        }
+        let frame = window.frame
+        let observedAt = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + WindowPlacementGate.settleDelay) {
+            MainActor.assumeIsolated {
+                guard window.isVisible, window.frame == frame,
+                      gate.shouldCommitSettledMove(observedAt: observedAt),
+                      // Judged again against the screens as they are now:
+                      // the layout it was usable in may have been transient.
+                      isUsable(frame) else { return }
+                store(frame)
+            }
+        }
+    }
+
+    private static func store(_ frame: NSRect) {
+        guard frame != storedFrame else {
             wasOpen = true
             return
         }
-        storedFrame = window.frame
+        storedFrame = frame
         wasOpen = true
-        Log.write("Placement", "parked at \(fmt(window.frame))")
+        Log.write("Placement", "parked at \(fmt(frame))")
     }
 
     /// Is the user's hand on this move?
@@ -407,16 +440,25 @@ enum MainWindowPlacement {
                 guard !NSApp.windows.contains(where: { isDashboard($0) && $0.isVisible })
                 else { return }
                 Log.write("Placement", "reopening the dashboard it was quit with")
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = false
-                configuration.createsNewApplicationInstance = false
-                NSWorkspace.shared.openApplication(
-                    at: Bundle.main.bundleURL, configuration: configuration
-                ) { _, error in
-                    if let error {
-                        Log.write("MainWindowPlacement", "reopen failed: \(error)")
-                    }
-                }
+                reopenInBackground()
+            }
+        }
+    }
+
+    /// Materialize the dashboard through the reopen flow, without activating.
+    ///
+    /// The window is created exactly as the menu-bar "Open Pacer" cold path
+    /// creates it — reopening our own bundle makes SwiftUI rebuild the scene's
+    /// window — minus `NSApp.activate()`, so nobody's focus moves.
+    static func reopenInBackground() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.createsNewApplicationInstance = false
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL, configuration: configuration
+        ) { _, error in
+            if let error {
+                Log.write("MainWindowPlacement", "reopen failed: \(error)")
             }
         }
     }
