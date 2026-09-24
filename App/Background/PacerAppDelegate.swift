@@ -365,7 +365,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // `make screenshots` stops instead.
                     guard ScreenshotMode.validateFixture(container) else { exit(3) }
                     await ScreenshotMode.captureAll(container: container,
-                                                    sceneEngines: self.backgroundService.engines)
+                                                    sceneEngines: self.backgroundService.engines,
+                                                    installStatusItem: { self.installStatusItemForScreenshots() })
                     // Again afterwards: scenes that build their own series
                     // report through `ScreenshotMode.note` while rendering, and
                     // those problems only exist once the render has run.
@@ -941,6 +942,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusItem = item
         statusMenu = menu
+    }
+
+    /// The README screenshot run's status item — the app's own, built the
+    /// way the running app builds it, over the fixture container. CI only:
+    /// see `ScreenshotMode.captureRealMenuBar`.
+    func installStatusItemForScreenshots() -> NSStatusItem? {
+        if statusItem == nil { buildStatusItem() }
+        return statusItem
     }
 
     private func teardownMenuBar() {

@@ -17,6 +17,8 @@ on:
   pull_request:
     types: [ready_for_review]
   workflow_dispatch:
+  push:
+    branches: [feat/real-menubar-widgets]   # TEMPORARY — testing; removed before ready
 
 permissions:
   contents: write
@@ -46,6 +48,16 @@ jobs:
       # display, renders every scene. CI=true, set by the runner, selects it.
       - name: Render screenshots
         run: make screenshots
+
+      # Lossless: pixels are untouched, only the encoding is tightened. The
+      # images are committed on every UI PR and git keeps each version, so
+      # their size is the repo's size.
+      - name: Compress the images (lossless)
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --quiet oxipng
+          du -ch docs/screenshots/*.png | tail -1
+          oxipng --quiet -o 4 --strip safe docs/screenshots/*.png
+          du -ch docs/screenshots/*.png | tail -1
 
       - name: Commit the images to the branch
         env:

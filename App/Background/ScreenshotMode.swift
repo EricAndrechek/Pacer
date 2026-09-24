@@ -61,7 +61,12 @@ enum ScreenshotMode {
     /// window — passed in because `NSApp.delegate` is SwiftUI's adaptor, not
     /// `PacerAppDelegate`, and the cast to reach it failed silently, so the
     /// real window's engines were never warmed.
-    static func captureAll(container: ModelContainer, sceneEngines: EngineHost? = nil) async {
+    static func captureAll(
+        container: ModelContainer, sceneEngines: EngineHost? = nil,
+        /// The app's real status item, built by `PacerAppDelegate` — for the
+        /// menu-bar scenes, which photograph it rather than draw a copy.
+        installStatusItem: @MainActor () -> NSStatusItem? = { nil }
+    ) async {
         let outDir = outputDirectory
         try? FileManager.default.createDirectory(
             at: outDir, withIntermediateDirectories: true
@@ -228,13 +233,6 @@ enum ScreenshotMode {
         }
         sceneWindow?.orderOut(nil)
 
-        // The menu-bar experience as one cohesive image: a slice of the
-        // macOS menu bar with Pacer's readout, and the click-down popover
-        // hanging beneath it. Self-decorated on a transparent canvas.
-        await capture("menubar", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { MenuBarExperience() }
-        await capture("menubar-dark", width: nil, height: nil, scheme: .dark,
-                      card: false, container: container) { MenuBarExperience() }
 
         // The home-screen widget family.
         await capture("widgets", width: nil, height: nil, scheme: .light,
@@ -269,6 +267,10 @@ enum ScreenshotMode {
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
         captureShareCard(container: container)
+
+        // Last: the dark one switches the whole system to dark mode.
+        await captureRealMenuBar("menubar", dark: false, installStatusItem: installStatusItem)
+        await captureRealMenuBar("menubar-dark", dark: true, installStatusItem: installStatusItem)
 
         log("screenshots complete")
     }
@@ -1261,6 +1263,91 @@ enum ScreenshotMode {
             note("capture \(name): \(why)")
         }
         window.orderOut(nil)
+    }
+
+    /// The menu bar with Pacer's real menu open, photographed by the helper.
+    ///
+    /// Replaces `MenuBarExperience` for the README: a hand-drawn strip of menu
+    /// bar with a hand-drawn popover under it — which was not even the right
+    /// control. Pacer's dropdown is an `NSMenu` (native chrome, and native
+    /// Open / Settings / Quit items the drawing left out), and this opens the
+    /// real one on the real status item, over the fixture.
+    ///
+    /// CI only. It needs the app active — a menu will not open for an inactive
+    /// app — and it needs the system menu bar, which cannot be captured without
+    /// being on screen. A local preview skips it.
+    @MainActor
+    private static func captureRealMenuBar(
+        _ name: String, dark: Bool, installStatusItem: @MainActor () -> NSStatusItem?
+    ) async {
+        guard activatesForCapture, let dir = captureDirectory else {
+            log("skipping \(name) — the menu bar is captured in CI only")
+            return
+        }
+        // The menu bar follows the *system* appearance, not the app's.
+        if dark, !(await helperRequest(dir, "appearance", ["dark": true], timeout: 20)) {
+            note("capture \(name): could not switch the system to dark mode")
+            return
+        }
+        NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        guard let item = installStatusItem(), let button = item.button, let menu = item.menu else {
+            note("capture \(name): the app made no status item")
+            return
+        }
+        // Let the label lay out and its @Query fetches land.
+        await settle(seconds: 2.5)
+
+        let png = outputDirectory.appendingPathComponent("\(name).png")
+        let failed = dir.appendingPathComponent("\(name).failed")
+        try? FileManager.default.removeItem(at: png)
+        try? FileManager.default.removeItem(at: failed)
+        let request: [String: Any] = ["kind": "menubar",
+                                      "pid": Int(ProcessInfo.processInfo.processIdentifier),
+                                      "png": png.path]
+        if let data = try? JSONSerialization.data(withJSONObject: request) {
+            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        }
+        // Opening the menu runs a tracking loop that does not return until it
+        // closes, so the close is scheduled inside that loop: as soon as the
+        // helper has the picture, or after a deadline.
+        let deadline = Date().addingTimeInterval(25)
+        let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
+            if FileManager.default.fileExists(atPath: png.path)
+                || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
+                menu.cancelTracking()
+                timer.invalidate()
+            }
+        }
+        RunLoop.main.add(closer, forMode: .common)
+        RunLoop.main.add(closer, forMode: .eventTracking)
+        button.performClick(nil)
+        closer.invalidate()
+        if FileManager.default.fileExists(atPath: png.path) {
+            log("✓ \(name).png (real menu bar and menu)")
+        } else {
+            let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "the menu did not open"
+            note("capture \(name): \(why)")
+        }
+    }
+
+    /// Ask the capture helper for something and wait for it to be done.
+    @MainActor
+    private static func helperRequest(
+        _ dir: URL, _ kind: String, _ payload: [String: Any], timeout: TimeInterval
+    ) async -> Bool {
+        let name = "\(kind)-\(UUID().uuidString.prefix(8))"
+        var body = payload
+        body["kind"] = kind
+        body["done"] = dir.appendingPathComponent("\(name).done").path
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).done").path) { return true }
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).failed").path) { return false }
+            await settle(seconds: 0.1)
+        }
+        return false
     }
 
     /// Put the window somewhere it can be captured without anyone seeing it.
