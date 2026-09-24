@@ -94,6 +94,7 @@ struct Request: Decodable {
     var scale: Double?
     var png: String?
     var rect: [Double]?
+    var click: [Double]?
     var dark: Bool?
     var done: String?
 }
@@ -129,9 +130,45 @@ func setDarkMode(_ dark: Bool) throws {
 func captureMenuBar(_ request: Request) async throws {
     guard ProcessInfo.processInfo.environment["CI"] == "true" else { throw fail("menubar: CI only") }
     guard let r = request.rect, r.count == 4, let png = request.png else { throw fail("menubar: rect and png required") }
-    let rect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
-    // The menu opens just after the request is written; let it finish animating.
-    try await Task.sleep(for: .milliseconds(1200))
+    var rect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+    if let c = request.click, c.count == 2 {
+        // A real click on the status item, posted to the window server: the
+        // menu opens exactly as it does for a person — its placement, the gap
+        // under the bar, the item's pressed highlight. Posting input is for
+        // the disposable CI runner only (guarded above); never on a person's Mac.
+        let point = CGPoint(x: c[0], y: c[1])
+        for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+            CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
+                .post(tap: .cghidEventTap)
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        try await Task.sleep(for: .milliseconds(1200))   // open + animation
+        // Crop to the menu the click opened — found by its window level, since
+        // on macOS 26 menu windows are not listed under the app's process.
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let menuLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+        let menus = list.compactMap { w -> CGRect? in
+            guard (w[kCGWindowLayer as String] as? Int) == menuLevel,
+                  let b = w[kCGWindowBounds as String] as? NSDictionary,
+                  let f = CGRect(dictionaryRepresentation: b),
+                  f.minY >= rect.minY, f.minY < rect.minY + 80,
+                  abs(f.minX - point.x) < 600 else { return nil }
+            return f
+        }
+        if let menuFrame = menus.max(by: { $0.height < $1.height }) {
+            let margin: CGFloat = 20
+            let item = CGRect(x: point.x - 60, y: rect.minY, width: 120, height: 1)
+            let union = menuFrame.union(item)
+            rect = CGRect(x: union.minX - margin, y: rect.minY,
+                          width: union.width + 2 * margin, height: menuFrame.maxY - rect.minY + margin)
+            log("menu at \(menuFrame) — cropping to \(rect)")
+        } else {
+            log("no menu window found by level — using the app's rectangle")
+        }
+    } else {
+        // The menu opens just after the request is written; let it finish animating.
+        try await Task.sleep(for: .milliseconds(1200))
+    }
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
         throw fail("menubar: no display holds \(rect)")
