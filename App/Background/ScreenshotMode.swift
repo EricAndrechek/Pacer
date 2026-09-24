@@ -1294,8 +1294,11 @@ enum ScreenshotMode {
             note("capture \(name): the app made no status item")
             return
         }
-        // Let the label lay out and its @Query fetches land.
-        await settle(seconds: 2.5)
+        // The menu's content was just built and asked a cold engine once, like
+        // the window's cards at launch ("Outlook —" in the first capture).
+        NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        // Let the label lay out and its @Query fetches and engine answers land.
+        await settle(seconds: 3.5)
 
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
@@ -1338,9 +1341,7 @@ enum ScreenshotMode {
         log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
         // `popUp` under the button — what the status item does on a click. A
         // synthesized `performClick` did not open the menu on the runner.
-        button.highlight(true)
         _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
-        button.highlight(false)
         closer.invalidate()
         if FileManager.default.fileExists(atPath: png.path) {
             log("✓ \(name).png (real menu bar and menu)")
