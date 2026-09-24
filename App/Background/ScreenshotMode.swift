@@ -1299,47 +1299,63 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         // Let the label lay out and its @Query fetches and engine answers land.
         await settle(seconds: 3.5)
-        // One open and close first. The menu refreshes its content as it
-        // opens, so the very first open shows what it had before — the light
-        // image read "Outlook —" where the dark one, taken on a second open,
-        // had the projection.
-        if !menuWarmed {
+
+        let png = outputDirectory.appendingPathComponent("\(name).png")
+        let failed = dir.appendingPathComponent("\(name).failed")
+        let requestURL = dir.appendingPathComponent("\(name).request")
+        try? FileManager.default.removeItem(at: png)
+        try? FileManager.default.removeItem(at: failed)
+        // Any leftover `.request` from a previous run would make the very
+        // next check ("did `writeRequest` run") lie — see below.
+        try? FileManager.default.removeItem(at: requestURL)
+
+        // Opens and closes a menu once before it's used for anything real.
+        // The menu refreshes its content as it opens, so the very first
+        // open on a given NSMenu shows what it had before — the light image
+        // once read "Outlook —" where a later open had the real projection.
+        // `installStatusItemForScreenshots` always hands back a freshly
+        // built item now (see its doc comment), so every item this function
+        // ends up using — the one from the guard above, or another one
+        // rebuilt below after a failed click — is a brand new, never-opened
+        // NSMenu and needs its own warm-up.
+        func warmUp(_ button: NSStatusBarButton, _ menu: NSMenu) async {
             let warm = Timer(timeInterval: 0.6, repeats: false) { _ in menu.cancelTracking() }
             RunLoop.main.add(warm, forMode: .common)
             RunLoop.main.add(warm, forMode: .eventTracking)
             _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
-            menuWarmed = true
             await settle(seconds: 2)
         }
+        await warmUp(button, menu)
 
-        let png = outputDirectory.appendingPathComponent("\(name).png")
-        let failed = dir.appendingPathComponent("\(name).failed")
-        try? FileManager.default.removeItem(at: png)
-        try? FileManager.default.removeItem(at: failed)
         // The rectangle to photograph, in the window server's top-left points:
         // from a margin left of the status item to the display's right edge,
         // and from the top of the screen to a margin under the menu, which
         // drops from the item's left edge. Worked out here rather than found
         // by the helper: on macOS 26 the status item and menu windows are not
         // listed under the app's process, so searching for them failed.
-        guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
-            note("capture \(name): the status item has no window")
-            return
+        //
+        // A function, not a one-shot `let`: recomputed for whichever
+        // button/menu actually ends up being captured, since a status item
+        // rebuilt after a failed click (below) can come back a different
+        // length once its SwiftUI content lays out again.
+        func makeRequestData(_ button: NSStatusBarButton, _ menu: NSMenu) -> Data? {
+            guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
+                return nil
+            }
+            // Tight around what the scene is about: the status item and the
+            // menu that drops from its left edge, a margin of menu bar and
+            // wallpaper around them, and the gap macOS leaves under the bar.
+            let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
+            let margin: CGFloat = 20
+            let left = max(screen.frame.minX, itemFrame.minX - margin)
+            let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
+            let barTop = mainHeight - screen.frame.maxY
+            let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
+            let request: [String: Any] = ["kind": "menubar",
+                                          "rect": [left, barTop, right - left, height],
+                                          "png": png.path]
+            return try? JSONSerialization.data(withJSONObject: request)
         }
-        // Tight around what the scene is about: the status item and the menu
-        // that drops from its left edge, a margin of menu bar and wallpaper
-        // around them, and the gap macOS leaves under the bar.
-        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
-        let margin: CGFloat = 20
-        let left = max(screen.frame.minX, itemFrame.minX - margin)
-        let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
-        let barTop = mainHeight - screen.frame.maxY
-        let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
-        let request: [String: Any] = ["kind": "menubar",
-                                      "rect": [left, barTop, right - left, height],
-                                      "png": png.path]
-        let requestURL = dir.appendingPathComponent("\(name).request")
-        let requestData = try? JSONSerialization.data(withJSONObject: request)
         // Deferred — written only once we know the menu genuinely opened
         // (see below). The helper photographs whatever is in this rect on
         // its own ~1.2s delay regardless of whether a menu is actually
@@ -1350,18 +1366,18 @@ enum ScreenshotMode {
         // `nonisolated`: this runs from the `NSMenuDidBeginTrackingNotification`
         // observer below, whose block is `@Sendable` and not MainActor-isolated
         // — without this, the local function would inherit this (@MainActor)
-        // function's isolation and the call wouldn't type-check. Its captures
-        // (`requestData`, `requestURL`) are plain Sendable values, so nothing
-        // unsafe crosses actors here.
-        @Sendable nonisolated func writeRequest() {
-            if let requestData { try? requestData.write(to: requestURL) }
+        // function's isolation and the call wouldn't type-check. Its
+        // parameter and capture (`data`, `requestURL`) are plain Sendable
+        // values, so nothing unsafe crosses actors here.
+        @Sendable nonisolated func writeRequest(_ data: Data?) {
+            if let data { try? data.write(to: requestURL) }
         }
         // Opening the menu runs a tracking loop that does not return until it
         // closes, so the close is scheduled inside that loop: as soon as the
         // helper has the picture, or after a deadline. Reused for both the
         // primary and fallback open attempts below.
         let deadline = Date().addingTimeInterval(25)
-        func armCloser() -> Timer {
+        func armCloser(_ menu: NSMenu) -> Timer {
             let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
                 if FileManager.default.fileExists(atPath: png.path)
                     || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
@@ -1391,13 +1407,17 @@ enum ScreenshotMode {
         // signal that the click actually worked: the helper photographs
         // whatever is in the target rect on its own timer regardless of
         // whether a menu is open there, so a PNG existing doesn't prove the
-        // click did anything — `writeRequest()` only runs from this
+        // click did anything — `writeRequest` only runs from this
         // notification, so `requestURL` existing afterward means tracking
         // genuinely began.
+        guard let clickRequestData = makeRequestData(button, menu) else {
+            note("capture \(name): the status item has no window")
+            return
+        }
         let trackingObserver = NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: menu, queue: .main
-        ) { _ in writeRequest() }
-        let clickCloser = armCloser()
+        ) { _ in writeRequest(clickRequestData) }
+        let clickCloser = armCloser(menu)
         button.performClick(nil)
         clickCloser.invalidate()
         NotificationCenter.default.removeObserver(trackingObserver)
@@ -1413,23 +1433,33 @@ enum ScreenshotMode {
             // helper process, then via System Events) either got silently
             // dropped for lacking an Accessibility grant or was reverted.
             //
-            // The failed click still primed something — without a moment to
-            // unwind, this fallback's own `popUpStatusItemMenu:` call also
-            // returned instantly with no menu drawn (a PNG of empty menu
-            // bar, not a failure the closer below would have caught). Clear
-            // the highlight `performClick` set and give AppKit a beat before
-            // trying again.
-            button.highlight(false)
-            await settle(seconds: 0.3)
-            writeRequest()
-            let fallbackCloser = armCloser()
+            // Recovering the SAME item wasn't enough either — a 0.3s pause
+            // and un-highlighting the button still came back with a PNG of
+            // an empty menu bar (2026-09-24). Rebuild the status item fresh
+            // instead: `installStatusItem()` always tears down and rebuilds
+            // (see its doc comment), so this is a brand new
+            // NSStatusItem/NSMenu that carries none of whatever the failed
+            // click left behind.
+            guard let freshItem = installStatusItem(), let freshButton = freshItem.button,
+                  let freshMenu = freshItem.menu else {
+                note("capture \(name): rebuild after a failed click produced no status item")
+                return
+            }
+            await warmUp(freshButton, freshMenu)
+            guard let fallbackRequestData = makeRequestData(freshButton, freshMenu) else {
+                note("capture \(name): the rebuilt status item has no window")
+                return
+            }
+            writeRequest(fallbackRequestData)
+            let fallbackCloser = armCloser(freshMenu)
             let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
-            if item.responds(to: statusPopUp) {
+            if freshItem.responds(to: statusPopUp) {
                 openedVia = "popUpStatusItemMenu:"
-                _ = item.perform(statusPopUp, with: menu)
+                _ = freshItem.perform(statusPopUp, with: freshMenu)
             } else {
                 openedVia = "NSMenu.popUp"
-                _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+                _ = freshMenu.popUp(positioning: nil,
+                                    at: NSPoint(x: 0, y: freshButton.bounds.height + 4), in: freshButton)
             }
             fallbackCloser.invalidate()
         }
@@ -1441,8 +1471,6 @@ enum ScreenshotMode {
             note("capture \(name): \(why) (tried \(openedVia))")
         }
     }
-
-    @MainActor private static var menuWarmed = false
 
     /// Ask the capture helper for something and wait for it to be done.
     @MainActor
