@@ -208,8 +208,11 @@ struct ReadmeShotWidget: Widget {
     } ?? WidgetFixtures.readmeShots[0]
 
     var body: some WidgetConfiguration {
-        // Its own kind: two widgets in one bundle may not share one.
-        StaticConfiguration(kind: "ReadmeShot.\(Self.shot.kind)", provider: ReadmeShotProvider()) { _ in
+        // One constant kind of its own (two widgets in a bundle may not share
+        // one). Constant across launches: the simulator reopens the kind it
+        // last showed, and a kind that changed per shot left every launch
+        // after the first on an empty timeline.
+        StaticConfiguration(kind: "ReadmeShot", provider: ReadmeShotProvider()) { _ in
             ReadmeShotView(kind: Self.shot.kind)
         }
         .configurationDisplayName("README screenshot")
