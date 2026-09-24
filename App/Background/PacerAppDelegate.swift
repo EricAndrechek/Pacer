@@ -1049,6 +1049,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         menu.addItem(quitItem)
 
+        // No icons on these three — a deliberate, consistent choice rather
+        // than whatever each OS defaults to. macOS 27 already defaults to
+        // hiding menu-item symbol images and lets us say so explicitly via
+        // `preferredImageVisibility`; macOS 26 has no such opt-out and adds
+        // an SF Symbol to `terminate:` (Quit) regardless of anything set
+        // here, so this only takes effect from 27 on — the Quit item may
+        // still carry macOS 26's auto-added symbol on an older OS.
+        if #available(macOS 27, *) {
+            for item in [openItem, settingsItem, quitItem] {
+                item.preferredImageVisibility = .hidden
+            }
+        }
+
         return menu
     }
 
