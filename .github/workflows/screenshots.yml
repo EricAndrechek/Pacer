@@ -17,8 +17,6 @@ on:
   pull_request:
     types: [ready_for_review]
   workflow_dispatch:
-  push:
-    branches: [feat/real-menubar-widgets]   # TEMPORARY — testing; removed before ready
 
 permissions:
   contents: write
@@ -30,7 +28,7 @@ concurrency:
 jobs:
   screenshots:
     # A fork's branch cannot be pushed to with this token.
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository   # push: TEMPORARY
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     # Pinned like ci.yml: the SDK decides the app's appearance.
     runs-on: macos-26
     timeout-minutes: 60

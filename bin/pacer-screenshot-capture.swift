@@ -58,11 +58,13 @@ if wantsVirtualDisplay {
     settings.modes = [CGVirtualDisplayMode(width: 1600, height: 1200, refreshRate: 60)]
     guard display.apply(settings) else { log("virtual display: settings rejected"); exit(1) }
     virtualDisplay = display
+    // Then a real macOS wallpaper, or the bar sits on a black desktop.
     // The main display, so the menu bar the menu-bar scenes photograph is this
-    // 2× one; then a real macOS wallpaper, or the bar sits on a black desktop.
-    // EXPERIMENT: the runner's display mirrors the 2x one, which makes the
-    // 2x one main without moving origins (moving them flipped the text of
-    // Pacer's SwiftUI status-item label).
+    // 2× one. By mirroring the runner's own display onto it, not by moving
+    // display origins: moved, the runner drew the text of Pacer's SwiftUI
+    // status-item label upside down (a plain title was fine, and so is every
+    // real Mac — checked on the owner's three displays). Restarting the
+    // menu-bar processes did not help; mirroring did.
     do {
         var config: CGDisplayConfigRef?
         let previousMain = CGMainDisplayID()

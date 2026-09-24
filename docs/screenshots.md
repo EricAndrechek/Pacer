@@ -33,7 +33,7 @@ has colour, and a preview never takes focus.
 | `dashboard.png` / `dashboard-dark.png` | Main dashboard | the app's real window — title bar, toolbar, sidebar; light + dark |
 | `history.png` / `models.png` | History, Models tabs | real window |
 | `projects-collections*.png` | Projects tab, unscoped and scoped to a collection | real window |
-| `menubar.png` / `menubar-dark.png` | Menu-bar experience (`MenuBarExperience`) | the menu-bar readout chips + the click-down popover beneath, in one image; light + dark |
+| `menubar.png` / `menubar-dark.png` | Menu bar with Pacer's menu open | the real status item and its real `NSMenu` (native Open / Settings / Quit items) in the real menu bar, captured in CI with the system in light, then dark, mode; local previews skip it |
 | `widgets.png` | Widget gallery | one composite of the real widget views (Today, pace gauges, live session, daily cost, top projects) |
 | `share-card.png` / `share-card-dark.png` | Share-image export (`App/Share`) | the branded 7-day pace card from the in-app "Share…" action, via the same `ImageRenderer` path; light + dark |
 
