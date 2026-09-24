@@ -67,6 +67,14 @@ if wantsVirtualDisplay {
         CGConfigureDisplayOrigin(config, display.displayID, 0, 0)
         CGConfigureDisplayOrigin(config, previousMain, 1600, 0)
         _ = CGCompleteDisplayConfiguration(config, .forSession)
+        // EXPERIMENT: the menu bar's own processes set up their geometry for
+        // the old main display; restart them so they start on this one.
+        let k = Process()
+        k.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        k.arguments = ["ControlCenter", "SystemUIServer"]
+        try? k.run(); k.waitUntilExit()
+        try? await Task.sleep(for: .seconds(3))
+        log("restarted the menu bar processes")
     }
     try? await Task.sleep(for: .seconds(1))
     let pictures = "/System/Library/Desktop Pictures"
