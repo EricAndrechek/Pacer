@@ -116,25 +116,32 @@ for name kind display in $shots; do
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if [[ ${PACER_WIDGETSIM_DEBUG:-} == 1 && $name == pace-gauges ]]; then   # DIAGNOSIS — temporary
         sleep 3
-        osascript -e 'tell application "System Events" to get UI elements enabled' 2>&1 | sed 's/^/[widgets] ax enabled: /'
+        osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator" to click menu item "Select Widget…" of menu 1 of menu bar item "File" of menu bar 1' 2>&1 | sed 's/^/[widgets] select: /'
+        sleep 3
         osascript -e 'set out to ""
             tell application "System Events" to tell process "WidgetKit Simulator"
-                repeat with mb in menu bar items of menu bar 1
-                    set out to out & "MENU " & (name of mb) & ": "
+                set targets to {}
+                try
+                    set targets to targets & (entire contents of sheet 1 of window 1)
+                end try
+                if (count of targets) is 0 then
                     try
-                        repeat with mi in menu items of menu 1 of mb
-                            set out to out & (name of mi as text) & " / "
-                            try
-                                repeat with sub in menu items of menu 1 of mi
-                                    set out to out & "  >" & (name of sub as text)
-                                end repeat
-                            end try
-                        end repeat
+                        set targets to targets & (entire contents of window 1)
                     end try
-                    set out to out & linefeed
+                end if
+                repeat with e in targets
+                    try
+                        set out to out & (role of e) & " | " & (name of e as text) & " | " & (description of e as text) & " | " & (value of e as text) & linefeed
+                    on error
+                        try
+                            set out to out & (role of e) & linefeed
+                        end try
+                    end try
                 end repeat
+                set out to out & "windows: " & (name of every window as text)
             end tell
-            return out' 2>&1 | sed 's/^/[widgets] menus: /'
+            return out' 2>&1 | sed 's/^/[widgets] picker: /' | head -150
+        screencapture -x /tmp/picker.png && mkdir -p "$OUT/debug-widgets" && cp /tmp/picker.png "$OUT/debug-widgets/picker.png"
         osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 | sed 's/^/[widgets] processes: /'
         osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
             try
