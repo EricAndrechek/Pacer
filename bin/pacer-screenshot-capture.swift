@@ -60,21 +60,16 @@ if wantsVirtualDisplay {
     virtualDisplay = display
     // The main display, so the menu bar the menu-bar scenes photograph is this
     // 2× one; then a real macOS wallpaper, or the bar sits on a black desktop.
-    if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_KEEP_MAIN"] != "1" {   // EXPERIMENT
+    // EXPERIMENT: the runner's display mirrors the 2x one, which makes the
+    // 2x one main without moving origins (moving them flipped the text of
+    // Pacer's SwiftUI status-item label).
+    do {
         var config: CGDisplayConfigRef?
         let previousMain = CGMainDisplayID()
         CGBeginDisplayConfiguration(&config)
-        CGConfigureDisplayOrigin(config, display.displayID, 0, 0)
-        CGConfigureDisplayOrigin(config, previousMain, 1600, 0)
-        _ = CGCompleteDisplayConfiguration(config, .forSession)
-        // EXPERIMENT: the menu bar's own processes set up their geometry for
-        // the old main display; restart them so they start on this one.
-        let k = Process()
-        k.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        k.arguments = ["ControlCenter", "SystemUIServer"]
-        try? k.run(); k.waitUntilExit()
-        try? await Task.sleep(for: .seconds(3))
-        log("restarted the menu bar processes")
+        CGConfigureDisplayMirrorOfDisplay(config, previousMain, display.displayID)
+        let err = CGCompleteDisplayConfiguration(config, .forSession)
+        log("mirror \(previousMain) of \(display.displayID): \(err.rawValue); main now \(CGMainDisplayID())")
     }
     try? await Task.sleep(for: .seconds(1))
     let pictures = "/System/Library/Desktop Pictures"
