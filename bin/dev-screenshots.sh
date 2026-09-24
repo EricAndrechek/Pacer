@@ -61,6 +61,6 @@ PACER_SCREENSHOT_DIR="$OUT" \
 PACER_SCREENSHOT_CAPTURE_DIR="$REQ" \
 PACER_SCREENSHOT_LOCAL_APPROVED=$LOCAL \
     "$APP"
-status=$?
-(( status == 0 )) || { echo "ERROR: screenshot run failed (exit $status) — see the lines above"; exit $status; }
+rc=$?
+(( rc == 0 )) || { echo "ERROR: screenshot run failed (exit $rc) — see the lines above"; exit $rc; }
 echo "Wrote PNGs to $OUT"

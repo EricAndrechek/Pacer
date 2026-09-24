@@ -73,14 +73,21 @@ func capture(_ request: Request) async throws {
     guard let window = content.windows.first(where: { $0.windowID == request.windowID }) else {
         throw NSError(domain: "capture", code: 1, userInfo: [NSLocalizedDescriptionKey: "window \(request.windowID) not listed"])
     }
+    let filter = SCContentFilter(desktopIndependentWindow: window)
     let config = SCStreamConfiguration()
-    config.width = Int(window.frame.width * request.scale)
-    config.height = Int(window.frame.height * request.scale)
+    // Sized from the filter, not the window frame: with the shadow included the
+    // content is larger than the window, and a frame-sized capture squeezed it.
+    let scale = max(Double(filter.pointPixelScale), request.scale)
+    config.width = Int((filter.contentRect.width * scale).rounded())
+    config.height = Int((filter.contentRect.height * scale).rounded())
     config.showsCursor = false
     config.captureResolution = .best
+    // The window's real shadow, on a transparent margin — what a macOS window
+    // screenshot looks like, and what the README's images have always had.
+    config.ignoreShadowsSingleWindow = false
     log("capturing \(window.frame) level \(window.windowLayer) onScreen \(window.isOnScreen)")
     let image = try await SCScreenshotManager.captureImage(
-        contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+        contentFilter: filter, configuration: config)
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
         throw NSError(domain: "capture", code: 2, userInfo: [NSLocalizedDescriptionKey: "PNG encoding failed"])
     }

@@ -1242,8 +1242,17 @@ enum ScreenshotMode {
                                    width: size.width, height: size.height), display: true)
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
+            // `orderFrontRegardless` first: straight after the policy change
+            // `makeKeyAndOrderFront` alone left the window off screen on the
+            // runner — no toolbar, and a capture of whatever its buffer held.
+            window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
-            return true
+            await settle(seconds: 0.3)
+            if !window.isKeyWindow {
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+            }
+            return window.isVisible
         }
 
         guard ProcessInfo.processInfo.environment["PACER_SCREENSHOT_LOCAL_APPROVED"] == "1" else { return false }
