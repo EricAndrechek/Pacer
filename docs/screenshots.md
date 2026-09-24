@@ -5,15 +5,14 @@ the real app renders against synthetic data and writes deterministic PNGs. This
 keeps them in sync with the UI and makes them a first-class, repeatable part of
 the dev/release cycle.
 
-**The committed images come from CI:**
-
-```sh
-gh workflow run screenshots.yml     # or Actions → "README screenshots" → Run
-```
-
-It renders on a `macos-26` runner — the SDK releases are built with, so the
-images show the chrome users get — and opens a PR with the new PNGs. Nothing is
-captured from anyone's screen, and only synthetic data is ever rendered.
+**The committed images come from CI.** Marking a draft PR **ready for review**
+runs the *README screenshots* workflow, which renders on a `macos-26` runner — the
+SDK releases are built with, so the images show the chrome users get — and
+pushes a `docs: regenerate README screenshots` commit onto that PR's branch, to
+be reviewed with the change it illustrates. Nothing is captured from anyone's
+screen, only synthetic data is ever rendered, and no artifacts are kept. To run
+it by hand: `gh workflow run screenshots.yml --ref <branch>` (on `main` it parks
+the commit on an `automation/readme-screenshots-*` branch instead).
 
 **A local preview** (written to the gitignored `screenshots/preview/`, never to
 `docs/screenshots/`):
@@ -143,7 +142,8 @@ To re-tune the story, edit the `keyframes` arrays in `seedRateLimits`.
 
 ## When to regenerate
 
-**Run the workflow after any meaningful UI change** to the dashboard, history,
-menu bar, popover, or widgets, and merge its PR alongside the change. It's also
+**Every UI PR gets fresh images when it is marked ready for review** — review
+that commit with the rest of the change. For a UI change that went in without
+them, run the workflow by hand. It's also
 a step in the [release checklist](releasing.md) — the published README and any
 store assets should match the version being shipped.

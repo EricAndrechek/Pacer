@@ -25,14 +25,15 @@ you never edit `.xcodeproj` directly.
 make verify       # fast compile-only check (no signing, no install)
 make test         # PacerCore unit + ground-truth tests
 make install      # build + sign + notarize + install to /Applications, relaunch
-gh workflow run screenshots.yml  # regenerate the README screenshots (see below)
+make screenshots APPROVED=1  # local preview of the README screenshots (see below)
 make help         # all targets
 ```
 
 ### Regenerating the README screenshots
 
 The README screenshots are rendered in CI by the **README screenshots**
-workflow, which opens a PR with the new PNGs. It runs the app in a capture mode
+workflow when a PR is marked ready for review; it commits the new PNGs onto that
+PR's branch. It runs the app in a capture mode
 (`PACER_SCREENSHOT_MODE=1`, `App/Background/ScreenshotMode.swift`) over an
 **in-memory** store seeded with synthetic usage: window scenes are the app's
 real window captured through the window server, everything else is rendered

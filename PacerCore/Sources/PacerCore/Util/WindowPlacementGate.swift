@@ -48,7 +48,7 @@ public struct WindowPlacementGate: Sendable {
     /// The display-change grace only looks forward, and AppKit does not
     /// promise to announce the change first. When monitors sleep it moves the
     /// window, then posts the change in the same second: on 2026-09-22 the
-    /// dashboard was stored at `1932,-98` — a spot that only existed in the
+    /// dashboard was stored at an origin that only existed in the
     /// half-rearranged layout — and every launch after restored it to nowhere.
     public static let settleDelay: TimeInterval = 2.0
 

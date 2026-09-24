@@ -40,7 +40,8 @@ The steps `bin/ship.sh` automates, spelled out:
    should be green.
 1b. If any UI changed this cycle, regenerate the README screenshots so the
    published assets match the shipping version: run the README screenshots
-   workflow (`gh workflow run screenshots.yml`) and merge its PR. See
+   workflow — it runs when a PR is marked ready, or by hand with
+   `gh workflow run screenshots.yml --ref <branch>` — and land its commit. See
    [`docs/screenshots.md`](screenshots.md).
 2. Decide the version number. Pacer pre-1.0 uses `0.<minor>.<patch>`
    semver-ish. Breaking changes that need a clean SwiftData reset bump
