@@ -1458,6 +1458,14 @@ extension ScreenshotMode {
             ("\(home)/Code/oss/pacer", 12),
             ("\(home)/Code/personal/dotfiles", 2),
         ]
+        // On a CI runner — disposable, and where the README images come from —
+        // the folders exist, so the Projects rows don't all carry the "missing"
+        // badge a path that isn't on disk gets. Never on a person's Mac.
+        if ProcessInfo.processInfo.environment["CI"] == "true" {
+            for (path, _) in leaves {
+                try? FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+            }
+        }
         for (li, leaf) in leaves.enumerated() {
             let (path, base) = leaf
             for d in 0..<42 {
@@ -2007,9 +2015,6 @@ extension ScreenshotMode {
     }
 }
 
-/// A macOS window titlebar — traffic-light buttons at the left, a faint
-/// centered window title — prepended to window scenes so they read like a
-/// real app-window screenshot.
 /// Renders the redesigned collection editor with representative data so
 /// `make screenshots` shows the rule live-preview, the disambiguated
 /// member rows, and the color picker.
