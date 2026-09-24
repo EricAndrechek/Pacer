@@ -77,15 +77,12 @@ launchctl print "gui/$uid" 2>&1 | grep -iE 'notificationcenter|chrono' | head -1
 # own agents.
 launchctl enable "gui/$uid/com.apple.notificationcenterui.agent" 2>&1 | sed 's/^/[widgets] enable: /'
 launchctl bootstrap "gui/$uid" /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] bootstrap: /'
-launchctl load -w /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] load: /'
-sleep 2
-pgrep -x NotificationCenter >/dev/null || open -g /System/Library/CoreServices/NotificationCenter.app 2>&1 | sed 's/^/[widgets] open-nc: /'
+# As a user, bootstrap fails with EIO; as root it says why, and may succeed.
+# Started any other way, Notification Center runs but cannot claim its XPC
+# services, so the menu bar clock cannot open it.
+sudo launchctl bootstrap "gui/$uid" /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] sudo bootstrap: /'
 sleep 3
-if ! pgrep -x NotificationCenter >/dev/null; then
-    /System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter >"$WORK/nc.out" 2>&1 &
-    sleep 4
-    log "direct exec: $(pgrep -x NotificationCenter || echo 'not running'); $(head -c 600 "$WORK/nc.out")"
-fi
+sudo launchctl print "gui/$uid/com.apple.notificationcenterui.agent" 2>&1 | grep -E 'state|pid|last exit|reason' | head -6 | sed 's/^/[widgets] nc svc: /'
 log "NotificationCenter pid: $(pgrep -x NotificationCenter || echo none)"
 for svc in com.apple.notificationcenterui.agent com.apple.chronod; do
     launchctl print "gui/$uid/$svc" 2>&1 | grep -E 'state|path|program|last exit|disabled' | head -6 | sed "s/^/[widgets] $svc: /"
