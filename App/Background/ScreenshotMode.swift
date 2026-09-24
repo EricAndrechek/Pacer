@@ -234,9 +234,10 @@ enum ScreenshotMode {
         sceneWindow?.orderOut(nil)
 
 
-        // The home-screen widget family.
-        await capture("widgets", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { WidgetGallery() }
+        // The home-screen widgets (`widgets.png`) are not rendered here: they
+        // are the real extension, rendered by WidgetKit Simulator over
+        // `WidgetFixtures` after this process exits (bin/widgetkit-sim-shots.sh,
+        // CI only).
 
         // Scoped windows as first-class pace items — the dashboard pace card
         // with 5h + 7d + several per-model windows in the responsive N-column
@@ -925,21 +926,21 @@ enum ScreenshotMode {
     private static func captureWidgetPickerScenes() async {
         await captureWidgetTile("widget-picker-small-scoped", w: 158, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: ScreenshotEntries.fableKey, secondaryKey: "seven_day"),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: WidgetFixtures.fableKey, secondaryKey: "seven_day"),
                 forcedFamily: .systemSmall)
         }
         await captureWidgetTile("widget-picker-medium-5h-7d", w: 348, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
                 forcedFamily: .systemMedium)
         }
         await captureWidgetTile("widget-picker-medium-5h-fable", w: 348, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: ScreenshotEntries.fableKey),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: "five_hour", secondaryKey: WidgetFixtures.fableKey),
                 forcedFamily: .systemMedium)
         }
         await captureWidgetTile("widget-picker-large", w: 340, h: 384) {
-            PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge, forcedFamily: .systemLarge)
+            PaceChartWidgetView(entry: WidgetFixtures.paceChartScopedLarge, forcedFamily: .systemLarge)
         }
     }
 
@@ -2308,51 +2309,6 @@ private struct MenuBarSettingsMock: View {
     }
 }
 
-/// A single composite image of the home-screen widget family — the real
-/// widget views, fed fake `TimelineEntry` values, each framed at its
-/// native size with the rounded corners + shadow widgets get on the
-/// desktop. One image keeps the README compact while still showing the
-/// range of widget options.
-private struct WidgetGallery: View {
-    private let small = CGSize(width: 158, height: 158)
-    private let medium = CGSize(width: 348, height: 158)
-
-    var body: some View {
-        VStack(spacing: 22) {
-            HStack(alignment: .top, spacing: 22) {
-                tile(small) { TodayCostWidgetView(entry: ScreenshotEntries.todayCost) }
-                tile(medium) { PaceGaugesWidgetView(entry: ScreenshotEntries.paceGauges) }
-            }
-            HStack(alignment: .top, spacing: 22) {
-                tile(medium) { LiveSessionWidgetView(entry: ScreenshotEntries.liveSession) }
-                tile(medium) { DailyChartWidgetView(entry: ScreenshotEntries.dailyChart) }
-            }
-            HStack(alignment: .top, spacing: 22) {
-                tile(medium) { TopProjectsWidgetView(entry: ScreenshotEntries.topProjects) }
-            }
-        }
-        .padding(28)
-    }
-
-    @ViewBuilder
-    private func tile(
-        _ size: CGSize,
-        @ViewBuilder _ content: () -> some View
-    ) -> some View {
-        content()
-            .frame(width: size.width, height: size.height)
-            // `.containerBackground(for: .widget)` is a no-op outside a
-            // real widget, so paint the card fill ourselves.
-            .background(PacerDesign.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
-    }
-}
-
 /// The two large widget families showing scoped per-model windows as
 /// first-class rows / gauges alongside 5h and 7d — the widget half of the
 /// "scoped windows are treated identically to 5h/7d" story. Hand-built entries
@@ -2361,7 +2317,7 @@ private struct ScopedFirstClassWidgetGallery: View {
     var body: some View {
         HStack(alignment: .top, spacing: 24) {
             tile(w: 340, h: 384) {
-                PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
+                PaceChartWidgetView(entry: WidgetFixtures.paceChartScopedLarge,
                                     forcedFamily: .systemLarge)
             }
             // Shorter, because with one row of rings it has no use for the
@@ -2370,7 +2326,7 @@ private struct ScopedFirstClassWidgetGallery: View {
             // `systemLarge` is whatever size the OS gives it; this is the
             // mockup showing the card at the size its content wants.
             tile(w: 340, h: 206) {
-                PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
+                PaceGaugesWidgetView(entry: WidgetFixtures.paceGaugesScopedLarge,
                                      forcedFamily: .systemLarge)
             }
         }
@@ -2388,166 +2344,5 @@ private struct ScopedFirstClassWidgetGallery: View {
                     .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
-    }
-}
-
-/// Deterministic fake `TimelineEntry` values for the widget gallery —
-/// kept consistent with the dashboard seed (Opus-heavy, cache-dominated,
-/// 5h ≈32% / 7d ≈62%, ~$124 today).
-private enum ScreenshotEntries {
-    private static let now = Date()
-    static let opus = "claude-opus-4-7"
-
-    static var todayCost: TodayCostEntry {
-        TodayCostEntry(date: now, costUSD: 124.0, tokens: 540_000, modelCount: 3, isFresh: true)
-    }
-
-    static var paceGauges: PaceGaugesEntry {
-        PaceGaugesEntry(
-            date: now,
-            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// Synthetic identity for the "Fable" scoped weekly window used by the
-    /// widget-picker mockups — the stable key a config-stored selection uses.
-    static let fableKey = "weekly_scoped|Fable|"
-
-    /// Large pace-chart widget with scoped per-model windows as first-class
-    /// rows below 5h/7d.
-    static var paceChartScopedLarge: PaceChartEntry {
-        PaceChartEntry(
-            date: now,
-            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
-            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
-            // Fable only. Anthropic reports exactly one per-model window
-            // today, so caps for Haiku/Opus/Sonnet beside it advertised a
-            // product nobody has. The grid is built for N of these; a
-            // committed screenshot is a claim about what you get.
-            scoped: [
-                .init(key: fableKey, label: "Fable",
-                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71),
-                      isActive: true),
-            ],
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// A pace-chart entry with 5h, 7d, and a scoped "Fable" weekly window, for
-    /// the widget-picker mockups. `primaryKey`/`secondaryKey` pick which windows
-    /// the small/medium canvases render — exactly what the Edit-Widget sheet
-    /// stores. (Large ignores them and shows every window.)
-    static func paceChartPicker(primaryKey: String, secondaryKey: String) -> PaceChartEntry {
-        PaceChartEntry(
-            date: now,
-            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
-            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
-            scoped: [
-                .init(key: fableKey, label: "Fable",
-                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71), isActive: true),
-            ],
-            primaryKey: primaryKey, secondaryKey: secondaryKey)
-    }
-
-    /// Large gauges widget with scoped per-model windows as ring gauges.
-    static var paceGaugesScopedLarge: PaceGaugesEntry {
-        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
-        let weeklyDur: TimeInterval = 7 * 86_400
-        return PaceGaugesEntry(
-            date: now,
-            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            // See `paceChartScopedLarge`: one real per-model window, not four
-            // invented ones.
-            scoped: [
-                .init(key: fableKey, label: "Fable", usedPct: 49,
-                      resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
-            ],
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// A climbing actual line with a dashed linear projection to `projectTo` at
-    /// reset — the shape a real window shows. `~62%` elapsed so the dashed
-    /// segment is visible.
-    private static func chartWindow(duration: TimeInterval, usedPct: Double, projectTo: Double) -> PaceChartEntry.WindowState {
-        let resets = now.addingTimeInterval(duration * 0.38)
-        let cycleStart = resets.addingTimeInterval(-duration)
-        let elapsed = now.timeIntervalSince(cycleStart)
-        let n = 12
-        let points = (0..<n).map { i -> PaceChartView.Data.Point in
-            let f = Double(i) / Double(n - 1)
-            return .init(time: cycleStart.addingTimeInterval(elapsed * f),
-                         value: usedPct * (f * (1.06 - 0.06 * f)))
-        }
-        let steps = 6
-        let projection = (0...steps).map { i -> PaceChartView.Data.Point in
-            let f = Double(i) / Double(steps)
-            return .init(time: now.addingTimeInterval(resets.timeIntervalSince(now) * f),
-                         value: min(100, usedPct + (projectTo - usedPct) * f))
-        }
-        let crossing: Date? = (projectTo > usedPct && projectTo >= 100)
-            ? now.addingTimeInterval(resets.timeIntervalSince(now) * ((100 - usedPct) / (projectTo - usedPct)))
-            : nil
-        return PaceChartEntry.WindowState(
-            chart: PaceChartView.Data(
-                cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-                points: points, usedPct: usedPct,
-                projection: projection, projectionCrossesFullAt: crossing),
-            resetsAt: resets)
-    }
-
-    static var liveSession: LiveSessionEntry {
-        LiveSessionEntry(
-            date: now,
-            session: .init(
-                projectDisplayName: "atlas-api",
-                totalTokens: 9_400_000,
-                costUSD: 142.0,
-                topModel: opus,
-                firstSeenAt: now.addingTimeInterval(-6.5 * 3600),
-                lastSeenAt: now.addingTimeInterval(-30)
-            )
-        )
-    }
-
-    static var dailyChart: DailyChartEntry {
-        // Weekday-driven with weekend dips and a spike — same shape as the
-        // dashboard's 30-day chart.
-        let cal = Calendar.current
-        let days = (0..<14).map { i -> DailyChartEntry.DayCost in
-            let day = cal.date(byAdding: .day, value: -(13 - i), to: now) ?? now
-            let wd = cal.component(.weekday, from: day)
-            let weekend = (wd == 1 || wd == 7)
-            var cost = weekend ? 34.0 : 120.0
-            cost *= 0.7 + 0.7 * Double((i * 7 + 3) % 11) / 11.0
-            if i == 9 { cost *= 2.6 }          // a spike day
-            return DailyChartEntry.DayCost(date: TokenSample.formatDate(day), cost: cost)
-        }
-        let total = days.reduce(0) { $0 + $1.cost }
-        return DailyChartEntry(
-            date: now, days: days,
-            totalCostUSD: total,
-            avgCostUSD: total / Double(days.count),
-            todayCostUSD: days.last?.cost ?? 0,
-            isFresh: true, range: .days14
-        )
-    }
-
-    static var topProjects: TopProjectsEntry {
-        let rows = [
-            TopProjectsEntry.Row(displayName: "atlas-api", costUSD: 1_284.0),
-            TopProjectsEntry.Row(displayName: "ml-pipeline", costUSD: 892.0),
-            TopProjectsEntry.Row(displayName: "payments-svc", costUSD: 613.0),
-            TopProjectsEntry.Row(displayName: "web-dashboard", costUSD: 421.0),
-        ]
-        return TopProjectsEntry(
-            date: now, range: .days7,
-            totalCostUSD: rows.reduce(0) { $0 + $1.costUSD } + 340,
-            projectCount: 12,
-            rows: rows, focus: nil
-        )
     }
 }

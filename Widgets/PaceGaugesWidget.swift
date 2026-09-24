@@ -112,6 +112,8 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
     }
 
     private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceGaugesEntry {
+        // README screenshot builds only; see `WidgetFixtures.enabled`.
+        if WidgetFixtures.enabled { return WidgetFixtures.paceGauges }
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -408,7 +410,7 @@ struct PaceGaugesWidget: Widget {
         }
         .configurationDisplayName("Rate limits")
         .description("Claude Code rate-limit usage — the 5-hour and 7-day windows, plus any per-model windows in the large size.")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .supportedFamilies(WidgetFixtures.families([.systemSmall, .systemMedium, .systemLarge], kind: kind))
         .contentMarginsDisabled()
     }
 }

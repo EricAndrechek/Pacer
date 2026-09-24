@@ -17,6 +17,8 @@ on:
   pull_request:
     types: [ready_for_review]
   workflow_dispatch:
+  push:  # TEMPORARY — verifying the WidgetKit Simulator widget shots
+    branches: [feat/widgetkit-sim-shots]
 
 permissions:
   contents: write
@@ -28,7 +30,7 @@ concurrency:
 jobs:
   screenshots:
     # A fork's branch cannot be pushed to with this token.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository  # TEMPORARY: push
     # Pinned like ci.yml: the SDK decides the app's appearance.
     runs-on: macos-26
     timeout-minutes: 60
@@ -44,8 +46,19 @@ jobs:
 
       # Builds (make verify), starts the capture helper on a 2× virtual
       # display, renders every scene. CI=true, set by the runner, selects it.
+      #
+      # PACER_WIDGET_FIXTURES: the widget extension serves fixture entries,
+      # for widgets.png (bin/widgetkit-sim-shots.sh). Compiled in only here,
+      # through an xcconfig xcodebuild applies over every target, so no build
+      # that ships can show fake numbers.
       - name: Render screenshots
-        run: make screenshots
+        continue-on-error: true  # TEMPORARY — keep the debug captures
+        env:
+          PACER_WIDGETSIM_DEBUG: "1"  # TEMPORARY
+        run: |
+          printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) PACER_WIDGET_FIXTURES\n' \
+              > "$RUNNER_TEMP/widget-fixtures.xcconfig"
+          XCODE_XCCONFIG_FILE="$RUNNER_TEMP/widget-fixtures.xcconfig" make screenshots
 
       # Lossless: pixels are untouched, only the encoding is tightened. The
       # images are committed on every UI PR and git keeps each version, so

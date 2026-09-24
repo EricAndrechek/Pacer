@@ -154,6 +154,8 @@ struct PaceChartProvider: AppIntentTimelineProvider {
     }
 
     private func currentEntry(primary: PaceWindowEntity?, secondary: PaceWindowEntity?) -> PaceChartEntry {
+        // README screenshot builds only; see `WidgetFixtures.enabled`.
+        if WidgetFixtures.enabled { return WidgetFixtures.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day") }
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -733,7 +735,7 @@ struct PaceChartWidget: Widget {
         // that LocalizedStringKey + interpolation crashes the bundle on
         // launch. See `Widgets/TopProjectsWidget.swift` history.
         .description("Your usage line traced against the dashed pace target. The 5-hour and 7-day windows, plus any per-model windows in the large size.")
-        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+        .supportedFamilies(WidgetFixtures.families([.systemSmall, .systemMedium, .systemLarge], kind: kind))
         // Opt out of the system's default ~16pt content margin so our
         // own `WidgetStyle.*Pad` is the only inset. Without this, every
         // widget got system-padding + ours stacked, leaving content

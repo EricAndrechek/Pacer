@@ -56,6 +56,8 @@ struct LiveSessionProvider: TimelineProvider {
     }
 
     private func currentEntry() -> LiveSessionEntry {
+        // README screenshot builds only; see `WidgetFixtures.enabled`.
+        if WidgetFixtures.enabled { return WidgetFixtures.liveSession }
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -248,7 +250,7 @@ struct LiveSessionWidget: Widget {
         }
         .configurationDisplayName("Current session")
         .description("Project, tokens, cost, and freshness for the most-recent Claude Code session.")
-        .supportedFamilies([.systemSmall, .systemMedium])
+        .supportedFamilies(WidgetFixtures.families([.systemSmall, .systemMedium], kind: kind))
         .contentMarginsDisabled()
     }
 }

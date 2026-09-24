@@ -34,6 +34,8 @@ struct TodayCostProvider: TimelineProvider {
     }
 
     private func currentEntry() -> TodayCostEntry {
+        // README screenshot builds only; see `WidgetFixtures.enabled`.
+        if WidgetFixtures.enabled { return WidgetFixtures.todayCost }
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -129,7 +131,7 @@ struct TodayCostWidget: Widget {
         }
         .configurationDisplayName("Today")
         .description("Today's Claude Code spend at a glance.")
-        .supportedFamilies([.systemSmall])
+        .supportedFamilies(WidgetFixtures.families([.systemSmall], kind: kind))
         .contentMarginsDisabled()
     }
 }
