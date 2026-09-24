@@ -1382,8 +1382,10 @@ enum ScreenshotMode {
         // pattern other menu-bar projects converged on for "the click
         // highlights the item but no menu appears" (tauri tray-icon 0.25.1,
         // tauri-apps/tao#1324): reattach the item's menu immediately before
-        // the click — even though `buildStatusItem` already assigned it —
-        // and restore exactly what was there afterward.
+        // the click. Pacer's `item.menu` is already permanently assigned
+        // (`buildStatusItem`) rather than attached only for a click as
+        // tauri's is, so there's nothing to reattach or restore here — the
+        // fix that pattern converges on is already true of Pacer's setup.
         //
         // `NSMenuDidBeginTrackingNotification` (not the PNG landing) is the
         // signal that the click actually worked: the helper photographs
@@ -1395,11 +1397,8 @@ enum ScreenshotMode {
         let trackingObserver = NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: menu, queue: .main
         ) { _ in writeRequest() }
-        let originalMenu = item.menu
-        item.menu = menu
         let clickCloser = armCloser()
         button.performClick(nil)
-        item.menu = originalMenu
         clickCloser.invalidate()
         NotificationCenter.default.removeObserver(trackingObserver)
 
@@ -1413,6 +1412,15 @@ enum ScreenshotMode {
             // alone failed on the runner, and posting a real click (via a
             // helper process, then via System Events) either got silently
             // dropped for lacking an Accessibility grant or was reverted.
+            //
+            // The failed click still primed something — without a moment to
+            // unwind, this fallback's own `popUpStatusItemMenu:` call also
+            // returned instantly with no menu drawn (a PNG of empty menu
+            // bar, not a failure the closer below would have caught). Clear
+            // the highlight `performClick` set and give AppKit a beat before
+            // trying again.
+            button.highlight(false)
+            await settle(seconds: 0.3)
             writeRequest()
             let fallbackCloser = armCloser()
             let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
