@@ -1301,8 +1301,23 @@ enum ScreenshotMode {
         let failed = dir.appendingPathComponent("\(name).failed")
         try? FileManager.default.removeItem(at: png)
         try? FileManager.default.removeItem(at: failed)
+        // The rectangle to photograph, in the window server's top-left points:
+        // from a margin left of the status item to the display's right edge,
+        // and from the top of the screen to a margin under the menu, which
+        // drops from the item's left edge. Worked out here rather than found
+        // by the helper: on macOS 26 the status item and menu windows are not
+        // listed under the app's process, so searching for them failed.
+        guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
+            note("capture \(name): the status item has no window")
+            return
+        }
+        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
+        let margin: CGFloat = 36
+        let left = max(screen.frame.minX, itemFrame.minX - margin)
+        let barTop = mainHeight - screen.frame.maxY
+        let height = (screen.frame.maxY - itemFrame.minY) + menu.size.height + 8 + margin
         let request: [String: Any] = ["kind": "menubar",
-                                      "pid": Int(ProcessInfo.processInfo.processIdentifier),
+                                      "rect": [left, barTop, screen.frame.maxX - left, height],
                                       "png": png.path]
         if let data = try? JSONSerialization.data(withJSONObject: request) {
             try? data.write(to: dir.appendingPathComponent("\(name).request"))

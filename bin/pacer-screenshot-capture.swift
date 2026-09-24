@@ -86,7 +86,7 @@ struct Request: Decodable {
     var windowID: UInt32?
     var scale: Double?
     var png: String?
-    var pid: Int32?
+    var rect: [Double]?
     var dark: Bool?
     var done: String?
 }
@@ -116,40 +116,22 @@ func setDarkMode(_ dark: Bool) throws {
     log("system appearance: \(dark ? "dark" : "light")")
 }
 
-/// The menu bar with Pacer's menu open: every window on the display in the
-/// rectangle around Pacer's status item and its open menu — the real bar,
-/// the neighbouring status items, the wallpaper beneath. CI only.
+/// The menu bar with Pacer's menu open: everything on the display inside the
+/// rectangle the app sends (top-left points) — the real bar, the neighbouring
+/// status items, the wallpaper beneath. CI only.
 func captureMenuBar(_ request: Request) async throws {
     guard ProcessInfo.processInfo.environment["CI"] == "true" else { throw fail("menubar: CI only") }
-    guard let pid = request.pid, let png = request.png else { throw fail("menubar: pid and png required") }
-    // The menu opens after the request is written; wait for it.
-    var menuRect: CGRect?, itemRect: CGRect?
-    for _ in 0..<50 {
-        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-        let mine = list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid }
-        func rect(_ w: [String: Any]) -> CGRect? {
-            (w[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
-        }
-        itemRect = mine.first { ($0[kCGWindowLayer as String] as? Int) == Int(CGWindowLevelForKey(.statusWindow)) }.flatMap(rect)
-        menuRect = mine.first { ($0[kCGWindowLayer as String] as? Int) == Int(CGWindowLevelForKey(.popUpMenuWindow)) }.flatMap(rect)
-        if itemRect != nil, menuRect != nil { break }
-        try await Task.sleep(for: .milliseconds(100))
-    }
-    guard let item = itemRect, let menu = menuRect else { throw fail("menubar: the status item or its menu never appeared") }
-    try await Task.sleep(for: .milliseconds(600))   // the menu's open animation
+    guard let r = request.rect, r.count == 4, let png = request.png else { throw fail("menubar: rect and png required") }
+    let rect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+    // The menu opens just after the request is written; let it finish animating.
+    try await Task.sleep(for: .milliseconds(1200))
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-    guard let display = content.displays.first(where: { $0.frame.contains(item.origin) }) else {
-        throw fail("menubar: no display holds the status item")
+    guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
+        throw fail("menubar: no display holds \(rect)")
     }
-    // From a little left of whichever is further left, to the display's right
-    // edge; from the top of the screen to a margin under the menu.
-    let margin: CGFloat = 36
-    let left = max(display.frame.minX, min(item.minX, menu.minX) - margin)
-    let rect = CGRect(x: left - display.frame.minX, y: 0,
-                      width: display.frame.maxX - left, height: menu.maxY - display.frame.minY + margin)
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let config = SCStreamConfiguration()
-    config.sourceRect = rect
+    config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
     let scale = Double(filter.pointPixelScale)
     config.width = Int(rect.width * scale); config.height = Int(rect.height * scale)
     config.showsCursor = false
