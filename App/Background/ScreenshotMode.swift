@@ -1342,6 +1342,7 @@ enum ScreenshotMode {
         let request: [String: Any] = ["kind": "menubar",
                                       "rect": [left, barTop, right - left, height],
                                       "click": click,
+                                      "pid": Int(ProcessInfo.processInfo.processIdentifier),
                                       "png": png.path]
         // The click starts a menu-tracking loop on this thread that does not
         // return until the menu closes, so the close is scheduled in that loop:
