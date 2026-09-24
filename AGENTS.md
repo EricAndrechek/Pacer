@@ -81,8 +81,11 @@ for, `NSScreen.frame`, and so on. The line is between observing the machine and
 operating it.
 
 **What to do instead.** Everything Pacer needs to see it can render off-screen,
-headlessly, as a PNG — that is the entire reason `make render-live`,
-`make screenshots` and `OffscreenRenderer` exist (next section). Behaviour that
+headlessly, as a PNG — that is the entire reason `make render-live` and
+`OffscreenRenderer` exist (next section). The README screenshots render in CI
+(`gh workflow run screenshots.yml`); a local `make screenshots APPROVED=1`
+captures the screen, invisibly, and needs the owner's go-ahead like any other
+capture. Behaviour that
 is not visual belongs in a unit test. If something genuinely can only be
 confirmed on a real session — an `NSMenu` tooltip is the standing example,
 because NSMenu tracking cannot be exercised off-screen at all — then build it,
