@@ -71,6 +71,11 @@ log "instances now: $(python3 -c "import plistlib,sys;print(len(plistlib.load(op
 log "procs: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget|controlcenter' | sort -u | tr '\n' ' ')"
 uid=$(id -u)
 launchctl print "gui/$uid" 2>&1 | grep -iE 'notificationcenter|chrono' | head -10 | sed 's/^/[widgets] launchd: /'
+# The runner image ships Notification Center disabled; a user may enable their
+# own agents.
+launchctl enable "gui/$uid/com.apple.notificationcenterui.agent" 2>&1 | sed 's/^/[widgets] enable: /'
+launchctl bootstrap "gui/$uid" /System/Library/LaunchAgents/com.apple.notificationcenterui.agent.plist 2>&1 | sed 's/^/[widgets] bootstrap: /'
+sleep 3
 for svc in com.apple.notificationcenterui.agent com.apple.chronod; do
     launchctl print "gui/$uid/$svc" 2>&1 | grep -E 'state|path|program|last exit|disabled' | head -6 | sed "s/^/[widgets] $svc: /"
     launchctl kickstart -k "gui/$uid/$svc" 2>&1 | sed "s/^/[widgets] kickstart $svc: /"
@@ -78,7 +83,7 @@ done
 launchctl print-disabled "gui/$uid" 2>&1 | grep -iE 'notification|chrono' | sed 's/^/[widgets] disabled: /'
 sleep 6
 log "procs after kickstart: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget' | sort -u | tr '\n' ' ')"
-log show --last 2m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot|widget' | head -40 | sed 's/^/[widgets] oslog: /'
+/usr/bin/log show --last 2m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot|widget' | head -40 | sed 's/^/[widgets] oslog: /'
 debug_shot nc-before-open
 
 # Open the panel: the menu bar clock.
@@ -101,7 +106,7 @@ osascript -e 'tell application "System Events" to tell process "ControlCenter"
 sleep 5
 debug_shot nc-open
 log "procs after click: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget' | sort -u | tr '\n' ' ')"
-log show --last 1m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot' | head -40 | sed 's/^/[widgets] oslog2: /'
+/usr/bin/log show --last 1m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot' | head -40 | sed 's/^/[widgets] oslog2: /'
 osascript -e 'set out to ""
     tell application "System Events" to tell process "NotificationCenter"
         repeat with w in windows
