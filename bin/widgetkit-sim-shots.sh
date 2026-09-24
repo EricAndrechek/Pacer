@@ -116,6 +116,25 @@ for name kind display in $shots; do
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if [[ ${PACER_WIDGETSIM_DEBUG:-} == 1 && $name == pace-gauges ]]; then   # DIAGNOSIS — temporary
         sleep 3
+        osascript -e 'tell application "System Events" to get UI elements enabled' 2>&1 | sed 's/^/[widgets] ax enabled: /'
+        osascript -e 'set out to ""
+            tell application "System Events" to tell process "WidgetKit Simulator"
+                repeat with mb in menu bar items of menu bar 1
+                    set out to out & "MENU " & (name of mb) & ": "
+                    try
+                        repeat with mi in menu items of menu 1 of mb
+                            set out to out & (name of mi as text) & " / "
+                            try
+                                repeat with sub in menu items of menu 1 of mi
+                                    set out to out & "  >" & (name of sub as text)
+                                end repeat
+                            end try
+                        end repeat
+                    end try
+                    set out to out & linefeed
+                end repeat
+            end tell
+            return out' 2>&1 | sed 's/^/[widgets] menus: /'
         osascript -e 'tell application "System Events" to get name of every process whose background only is false' 2>&1 | sed 's/^/[widgets] processes: /'
         osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
             try
