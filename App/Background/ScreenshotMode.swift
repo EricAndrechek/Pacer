@@ -182,6 +182,12 @@ enum ScreenshotMode {
             for account in accounts {
                 await service.engines.engine(forAccount: account.id).recompute(now: Date())
             }
+            // What the app posts after a refit. The real window's cards were
+            // built at launch, asked a cold engine once, and got "not enough
+            // data" — the Today tile's end-of-day bar and outlook chip and the
+            // header's "yesterday" badge were missing from every render until
+            // this told them to ask again.
+            NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         }
 
         // A richer menu-bar readout for the status-bar shot than the default
@@ -1137,6 +1143,12 @@ enum ScreenshotMode {
     /// means activating the app. Never anywhere else.
     static var activatesForCapture: Bool {
         capturesRealWindow && ProcessInfo.processInfo.environment["CI"] == "true"
+    }
+
+    /// True for a window placed by `place` beneath the desktop picture —
+    /// covered on every display, so the one place a local run may show it.
+    @MainActor static func isBeneathWallpaper(_ window: NSWindow) -> Bool {
+        window.level.rawValue < Int(CGWindowLevelForKey(.desktopWindow))
     }
 
     /// Where `bin/pacer-screenshot-capture.swift` listens for requests. Set by

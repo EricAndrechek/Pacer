@@ -547,17 +547,30 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // `queue: .main` delivers it on the main thread.
             let window = note.object as? NSWindow
             Task { @MainActor in
+                guard let window else { return }
                 // The README run photographs the real dashboard window, so that
-                // one is the run's own — closing it as it came on screen is what
-                // left CI capturing a window with no toolbar.
-                if let window, ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) { return }
-                window?.close()
+                // one is kept rather than closed (closing it as it came on
+                // screen left CI capturing a window with no toolbar) — but
+                // kept *hidden* on a person's Mac. Left visible, it sat at
+                // SwiftUI's default spot on the owner's screen for seconds at
+                // every local launch. On CI there is nobody to see it; locally
+                // it is only ever allowed beneath the desktop picture.
+                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                    if !ScreenshotMode.activatesForCapture, !ScreenshotMode.isBeneathWallpaper(window) {
+                        window.orderOut(nil)
+                    }
+                    return
+                }
+                window.close()
             }
         }
         DispatchQueue.main.async {
-            for window in NSApp.windows
-            where !(ScreenshotMode.capturesRealWindow && MainWindowPlacement.isDashboard(window)) {
-                window.close()
+            for window in NSApp.windows {
+                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                    if !ScreenshotMode.activatesForCapture { window.orderOut(nil) }
+                } else {
+                    window.close()
+                }
             }
         }
     }
