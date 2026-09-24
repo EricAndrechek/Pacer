@@ -114,6 +114,31 @@ for name kind display in $shots; do
     open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
     debug=
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
+    if [[ ${PACER_WIDGETSIM_DEBUG:-} == 1 && $name == pace-gauges ]]; then   # DIAGNOSIS — temporary
+        sleep 3
+        osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
+            try
+                select (first row of outline 1 of scroll area 1 of splitter group 1 of group 1 of window 1 whose value of static text 1 is "Info")
+            end try
+            try
+                click (first UI element of window 1 whose name is "Info")
+            end try
+        end tell' 2>&1 | sed 's/^/[widgets] ax-click: /'
+        sleep 2
+        osascript -e 'set out to ""
+            tell application "System Events" to tell process "WidgetKit Simulator"
+                repeat with e in (entire contents of window 1)
+                    try
+                        set out to out & (role of e) & " | " & (name of e as text) & " | " & (value of e as text) & " | " & (description of e as text) & linefeed
+                    on error
+                        try
+                            set out to out & (role of e) & linefeed
+                        end try
+                    end try
+                end repeat
+            end tell
+            return out' 2>&1 | sed 's/^/[widgets] ax: /' | head -120
+    fi
     if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
         log "✓ $name ($kind)"
     else
