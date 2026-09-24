@@ -17,11 +17,6 @@ on:
   pull_request:
     types: [ready_for_review]
   workflow_dispatch:
-  # TEMPORARY: verify the menu-bar CI changes on this branch directly, without
-  # a PR. Remove this trigger (and the matching `if:` allowance below) once
-  # docs/screenshots/menubar*.png have been reviewed.
-  push:
-    branches: [feat/menubar-ci-polish]
 
 permissions:
   contents: write
@@ -33,9 +28,7 @@ concurrency:
 jobs:
   screenshots:
     # A fork's branch cannot be pushed to with this token.
-    # TEMPORARY: `github.event_name == 'push'` allows the temporary trigger
-    # above to run without a PR; remove alongside it.
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     # Pinned like ci.yml: the SDK decides the app's appearance.
     runs-on: macos-26
     timeout-minutes: 60
