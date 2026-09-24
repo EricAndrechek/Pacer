@@ -284,6 +284,17 @@ struct HeatmapCard: View {
                 monthLabels.append(nil)
             }
         }
+        // A label is wider than a column (~18 pt of text over 13 pt), so two
+        // within three columns overlap. That only happens at the left edge,
+        // where the grid opens on the tail of a month and the next one starts
+        // a column or two later — it drew "Sep" and "Oct" on top of each
+        // other. Drop the earlier, partial month: the full one is the label
+        // worth reading, and whole months are always four or more columns wide.
+        var lastLabelled: Int?
+        for i in monthLabels.indices where monthLabels[i] != nil {
+            if let j = lastLabelled, i - j < 3 { monthLabels[j] = nil }
+            lastLabelled = i
+        }
 
         // 95th-percentile cap per metric so a single outlier doesn't
         // wash out the rest of the year. Same algorithm as before but
