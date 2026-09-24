@@ -118,9 +118,25 @@ for name kind display in $shots; do
         sleep 3
         osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator" to click menu item "Select Widget…" of menu 1 of menu bar item "File" of menu bar 1' 2>&1 | sed 's/^/[widgets] select: /'
         sleep 3
+        osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
+                set theOutline to outline 1 of scroll area 1 of group 1 of splitter group 1 of group 1 of window "Choose a Widget"
+                repeat with r in rows of theOutline
+                    try
+                        if value of static text 1 of UI element 1 of r is "Pacer" then
+                            select r
+                            return "selected Pacer"
+                        end if
+                    end try
+                end repeat
+                return "Pacer row not found"
+            end tell' 2>&1 | sed 's/^/[widgets] pick-app: /'
+        sleep 3
         osascript -e 'set out to ""
             tell application "System Events" to tell process "WidgetKit Simulator"
                 set targets to {}
+                try
+                    set targets to entire contents of group 2 of splitter group 1 of group 1 of window "Choose a Widget"
+                end try
                 try
                     set targets to targets & (entire contents of sheet 1 of window 1)
                 end try
