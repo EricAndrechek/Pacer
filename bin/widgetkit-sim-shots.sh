@@ -87,8 +87,8 @@ prepare() {   # kind, build-number
 }
 
 shots=(
-    today         TodayCostWidget    "Today"
     pace-gauges   PaceGaugesWidget   "Rate limits"
+    today         TodayCostWidget    "Today"
     live-session  LiveSessionWidget  "Current session"
     daily-chart   DailyChartWidget   "Daily cost"
     top-projects  TopProjectsWidget  "Top projects"
@@ -99,6 +99,14 @@ for name kind display in $shots; do
     quit_simulator
     build=$((build + 1))
     prepare "$kind" "$build"
+    # The simulator remembers the last document's widget; a fresh start per
+    # shot, so each opens on the stand-in as it is now. (Logged once, to see
+    # what it keeps.)
+    [[ $build == 9001 ]] || log "simulator state before $name: $(defaults read com.apple.widgetkit.simulator 2>&1 | tr '\n' ' ' | cut -c1-600)"
+    defaults delete com.apple.widgetkit.simulator 2>/dev/null
+    defaults write com.apple.widgetkit.simulator NSQuitAlwaysKeepsWindows -bool NO
+    rm -rf ~/Library/Containers/com.apple.widgetkit.simulator/Data/Library/Saved\ Application\ State \
+           ~/Library/Saved\ Application\ State/com.apple.widgetkit.simulator.savedState 2>/dev/null
     # chronod keeps an extension process alive between launches; a fresh one
     # is what reads the new Info.plist.
     pkill -f "PacerWidgets.appex/Contents/MacOS/PacerWidgets" 2>/dev/null
