@@ -98,8 +98,6 @@ struct TopProjectsProvider: AppIntentTimelineProvider {
     }
 
     private func currentEntry(configuration: TopProjectsConfigurationIntent) -> TopProjectsEntry {
-        // README screenshot builds only; see `WidgetFixtures.enabled`.
-        if WidgetFixtures.enabled { return WidgetFixtures.topProjects }
         let range = configuration.range
         do {
             let container = try PacerStore.sharedModelContainer()
@@ -348,7 +346,7 @@ struct TopProjectsWidget: Widget {
         // takes `LocalizedStringKey`, and interpolating into it asserts
         // at extension launch.
         .description("Project breakdown over a configurable lookback. Pin a single project to focus on its daily spend.")
-        .supportedFamilies(WidgetFixtures.families([.systemMedium, .systemLarge], kind: kind))
+        .supportedFamilies([.systemMedium, .systemLarge])
         .contentMarginsDisabled()
     }
 }

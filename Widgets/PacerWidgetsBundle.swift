@@ -25,6 +25,11 @@ import SwiftUI
 @main
 struct PacerWidgetsBundle: WidgetBundle {
     var body: some Widget {
+        #if PACER_WIDGET_FIXTURES
+        // CI README screenshot builds only — first, so WidgetKit Simulator
+        // opens it. See `ReadmeShotWidget`.
+        ReadmeShotWidget()
+        #endif
         TodayCostWidget()
         PaceGaugesWidget()
         PaceChartWidget()

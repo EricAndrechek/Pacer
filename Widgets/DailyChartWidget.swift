@@ -69,8 +69,6 @@ struct DailyChartProvider: AppIntentTimelineProvider {
     }
 
     private func currentEntry(range: LookbackRangeOption) -> DailyChartEntry {
-        // README screenshot builds only; see `WidgetFixtures.enabled`.
-        if WidgetFixtures.enabled { return WidgetFixtures.dailyChart }
         do {
             let container = try PacerStore.sharedModelContainer()
             let context = ModelContext(container)
@@ -225,7 +223,7 @@ struct DailyChartWidget: Widget {
         .configurationDisplayName("Daily cost")
         // Description stays generic — the actual range is user-picked.
         .description("Daily Claude Code spend over a configurable lookback window.")
-        .supportedFamilies(WidgetFixtures.families([.systemMedium, .systemLarge], kind: kind))
+        .supportedFamilies([.systemMedium, .systemLarge])
         // See `PaceChartWidget` for the rationale: drops the system's
         // ~16pt default content margin so `WidgetStyle.*Pad` is the
         // only inset.

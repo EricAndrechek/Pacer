@@ -65,123 +65,27 @@ request widget-appearance '{"kind":"appearance","dark":false}' || exit 1
 
 # Register this copy, and only this one. Launching the app from the build
 # directory for the other scenes registered the build's own (unsigned) appex
-# under the same identifier and version, and the simulator loaded that one
-# ("WidgetDocument.Error error 5"): so a higher build number, and the build
-# directory's copy unregistered.
-for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 9999" "$plist"
-done
+# under the same identifier, and the simulator loaded that one ("WidgetDocument.
+# Error error 5"): so that copy is unregistered, and every shot below carries a
+# higher build number than anything registered before it.
 pluginkit -r "$SRC_APP/Contents/PlugIns/PacerWidgets.appex" 2>/dev/null
-codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
-codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
-pluginkit -a "$APPEX"
 
-# Point the open document at one widget: File › Select Widget…, the widget by
-# its display name, then the sheet's confirm button. Through Accessibility
-# (osascript holds that grant on GitHub's runners), on the disposable runner
-# only. Prints what it saw, for when the simulator's layout changes.
-pick() {
-    perl -e 'alarm 60; exec @ARGV' osascript - "$1" "${DEBUG_DIR:-/dev/null}" <<'OSA'
-on textsOf(e)
-    set out to {}
-    tell application "System Events"
-        try
-            set end of out to (name of e as text)
-        end try
-        try
-            set end of out to (value of e as text)
-        end try
-        try
-            set end of out to (description of e as text)
-        end try
-    end tell
-    return out
-end textsOf
-
-on pressFor(w, label)
-    tell application "System Events"
-        set els to entire contents of w
-        repeat with e in els
-            if my textsOf(e) contains label then
-                set target to e
-                repeat 6 times
-                    try
-                        if role of target is "AXRow" then
-                            set selected of target to true
-                            return "selected row for " & label
-                        end if
-                    end try
-                    try
-                        perform action "AXPress" of target
-                        return "pressed " & (role of target) & " for " & label
-                    end try
-                    try
-                        set target to value of attribute "AXParent" of target
-                    on error
-                        exit repeat
-                    end try
-                end repeat
-            end if
-        end repeat
-    end tell
-    return "NOT FOUND: " & label
-end pressFor
-
-on run argv
-    set widgetName to item 1 of argv
-    set debugDir to item 2 of argv
-    tell application "System Events" to tell process "WidgetKit Simulator"
-        set frontmost to true
-        repeat 60 times
-            if (count of windows) > 0 then exit repeat
-            delay 0.25
-        end repeat
-        click menu item "Select Widget…" of menu 1 of menu bar item "File" of menu bar 1
-        delay 2
-        set w to window 1
-        set kindOf to "window " & (name of w as text)
-        if exists sheet 1 of window 1 then
-            set w to sheet 1 of window 1
-            set kindOf to "sheet"
-        end if
-        try
-            set dump to (entire contents of w) as text
-        on error
-            set dump to ""
-        end try
-        if debugDir is not "/dev/null" then
-            try
-                do shell script "cat > " & quoted form of (debugDir & "/select-widget-ax.txt") & " <<'EOF'
-" & dump & "
-EOF"
-            end try
-        end if
-        set log1 to my pressFor(w, widgetName)
-        delay 0.5
-        set log2 to "no confirm button"
-        repeat with b in {"Open", "Select", "Choose", "Done", "OK"}
-            try
-                click button (b as text) of w
-                set log2 to "clicked " & b
-                exit repeat
-            end try
-        end repeat
-        return kindOf & ": " & log1 & "; " & log2
-    end tell
-end run
-OSA
+# One widget per launch. The simulator opens an extension on its first widget
+# and has no scriptable way to choose another (its picker lists nothing on a
+# runner), so the fixture build's first widget is `ReadmeShotWidget`, which
+# becomes whichever kind `PacerFixtureKind` in the extension's Info.plist
+# names. Set it, re-sign (the plist is sealed by the signature), re-register.
+prepare() {   # kind, build-number
+    /usr/libexec/PlistBuddy -c "Delete :PacerFixtureKind" "$APPEX/Contents/Info.plist" 2>/dev/null
+    /usr/libexec/PlistBuddy -c "Add :PacerFixtureKind string $1" "$APPEX/Contents/Info.plist"
+    for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $2" "$plist"
+    done
+    codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
+    codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
+    pluginkit -a "$APPEX"
 }
 
-# Everything the simulator shows in its front window, for the debug dump.
-ax_dump() {
-    perl -e 'alarm 40; exec @ARGV' osascript -e \
-        'tell application "System Events" to tell process "WidgetKit Simulator" to get entire contents of front window' \
-        > "$DEBUG_DIR/$1-ax.txt" 2>&1
-    screencapture -x "$DEBUG_DIR/$1-screen.png" 2>/dev/null
-}
-
-# name, kind, display name — the gallery's order; the family is the one
-# WidgetFixtures.readmeShots gives the kind.
 shots=(
     today         TodayCostWidget    "Today"
     pace-gauges   PaceGaugesWidget   "Rate limits"
@@ -190,19 +94,22 @@ shots=(
     top-projects  TopProjectsWidget  "Top projects"
 )
 failed=0
+build=9000
 for name kind display in $shots; do
     quit_simulator
+    build=$((build + 1))
+    prepare "$kind" "$build"
+    # chronod keeps an extension process alive between launches; a fresh one
+    # is what reads the new Info.plist.
+    pkill -f "PacerWidgets.appex/Contents/MacOS/PacerWidgets" 2>/dev/null
+    sleep 1
     open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
-    # Opened on the extension, the simulator shows its first widget kind —
-    # Today; every other one is chosen.
-    [[ $name == today ]] || log "$name: $(pick "$display" 2>&1)"
     debug=
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
         log "✓ $name ($kind)"
     else
         failed=1
-        [[ -n $DEBUG_DIR ]] && ax_dump "$name-after"
     fi
 done
 quit_simulator
