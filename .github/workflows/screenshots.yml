@@ -48,6 +48,8 @@ jobs:
       # display, renders every scene. CI=true, set by the runner, selects it.
       - name: Render screenshots
         run: make screenshots
+        env:
+          PACER_SCREENSHOT_KEEP_MAIN: "1"   # EXPERIMENT
 
       # Lossless: pixels are untouched, only the encoding is tightened. The
       # images are committed on every UI PR and git keeps each version, so

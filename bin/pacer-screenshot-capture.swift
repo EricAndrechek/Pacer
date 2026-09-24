@@ -60,12 +60,14 @@ if wantsVirtualDisplay {
     virtualDisplay = display
     // The main display, so the menu bar the menu-bar scenes photograph is this
     // 2× one; then a real macOS wallpaper, or the bar sits on a black desktop.
-    var config: CGDisplayConfigRef?
-    let previousMain = CGMainDisplayID()
-    CGBeginDisplayConfiguration(&config)
-    CGConfigureDisplayOrigin(config, display.displayID, 0, 0)
-    CGConfigureDisplayOrigin(config, previousMain, 1600, 0)
-    _ = CGCompleteDisplayConfiguration(config, .forSession)
+    if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_KEEP_MAIN"] != "1" {   // EXPERIMENT
+        var config: CGDisplayConfigRef?
+        let previousMain = CGMainDisplayID()
+        CGBeginDisplayConfiguration(&config)
+        CGConfigureDisplayOrigin(config, display.displayID, 0, 0)
+        CGConfigureDisplayOrigin(config, previousMain, 1600, 0)
+        _ = CGCompleteDisplayConfiguration(config, .forSession)
+    }
     try? await Task.sleep(for: .seconds(1))
     let pictures = "/System/Library/Desktop Pictures"
     if let picture = ((try? FileManager.default.contentsOfDirectory(atPath: pictures)) ?? [])
