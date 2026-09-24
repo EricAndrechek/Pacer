@@ -63,19 +63,25 @@ defaults write com.apple.widgetkit.simulator NSQuitAlwaysKeepsWindows -bool NO
 # whole system to dark): the widgets are photographed on a light desktop.
 request widget-appearance '{"kind":"appearance","dark":false}' || exit 1
 
-# Sign once; LaunchServices must know the app for the simulator's widget picker
-# to list it.
+# Register this copy, and only this one. Launching the app from the build
+# directory for the other scenes registered the build's own (unsigned) appex
+# under the same identifier and version, and the simulator loaded that one
+# ("WidgetDocument.Error error 5"): so a higher build number, and the build
+# directory's copy unregistered.
+for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 9999" "$plist"
+done
+pluginkit -r "$SRC_APP/Contents/PlugIns/PacerWidgets.appex" 2>/dev/null
 codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
 codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
 pluginkit -a "$APPEX"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
 
-# Choose one widget in the simulator's "Choose a Widget" window: select the
-# app, then the widget by its display name, then Open. Through Accessibility
+# Point the open document at one widget: File › Select Widget…, the widget by
+# its display name, then the sheet's confirm button. Through Accessibility
 # (osascript holds that grant on GitHub's runners), on the disposable runner
-# only. Prints what it found, for when the simulator's layout changes.
+# only. Prints what it saw, for when the simulator's layout changes.
 pick() {
-    perl -e 'alarm 60; exec @ARGV' osascript - "$1" "$2" <<'OSA'
+    perl -e 'alarm 60; exec @ARGV' osascript - "$1" "${DEBUG_DIR:-/dev/null}" <<'OSA'
 on textsOf(e)
     set out to {}
     tell application "System Events"
@@ -122,27 +128,45 @@ on pressFor(w, label)
 end pressFor
 
 on run argv
-    set appName to item 1 of argv
-    set widgetName to item 2 of argv
+    set widgetName to item 1 of argv
+    set debugDir to item 2 of argv
     tell application "System Events" to tell process "WidgetKit Simulator"
         set frontmost to true
         repeat 60 times
-            if exists window "Choose a Widget" then exit repeat
+            if (count of windows) > 0 then exit repeat
             delay 0.25
         end repeat
-        if not (exists window "Choose a Widget") then return "no Choose a Widget window; windows: " & (name of every window as text)
-        set w to window "Choose a Widget"
-        delay 1
-        set log1 to my pressFor(w, appName)
-        delay 1.5
-        set log2 to my pressFor(w, widgetName)
-        delay 0.5
-        set log3 to "no Open button"
+        click menu item "Select Widget…" of menu 1 of menu bar item "File" of menu bar 1
+        delay 2
+        set w to window 1
+        set kindOf to "window " & (name of w as text)
+        if exists sheet 1 of window 1 then
+            set w to sheet 1 of window 1
+            set kindOf to "sheet"
+        end if
         try
-            click button "Open" of w
-            set log3 to "clicked Open"
+            set dump to (entire contents of w) as text
+        on error
+            set dump to ""
         end try
-        return log1 & "; " & log2 & "; " & log3
+        if debugDir is not "/dev/null" then
+            try
+                do shell script "cat > " & quoted form of (debugDir & "/select-widget-ax.txt") & " <<'EOF'
+" & dump & "
+EOF"
+            end try
+        end if
+        set log1 to my pressFor(w, widgetName)
+        delay 0.5
+        set log2 to "no confirm button"
+        repeat with b in {"Open", "Select", "Choose", "Done", "OK"}
+            try
+                click button (b as text) of w
+                set log2 to "clicked " & b
+                exit repeat
+            end try
+        end repeat
+        return kindOf & ": " & log1 & "; " & log2
     end tell
 end run
 OSA
@@ -168,15 +192,10 @@ shots=(
 failed=0
 for name kind display in $shots; do
     quit_simulator
-    if [[ $name == today ]]; then
-        # Opened on the extension, the simulator shows its first widget kind.
-        open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
-    else
-        open -a "$SIM" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
-        sleep 2
-        [[ -n $DEBUG_DIR ]] && ax_dump "$name-picker"
-        log "$name: $(pick Pacer "$display" 2>&1)"
-    fi
+    open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
+    # Opened on the extension, the simulator shows its first widget kind —
+    # Today; every other one is chosen.
+    [[ $name == today ]] || log "$name: $(pick "$display" 2>&1)"
     debug=
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
@@ -184,11 +203,6 @@ for name kind display in $shots; do
     else
         failed=1
         [[ -n $DEBUG_DIR ]] && ax_dump "$name-after"
-    fi
-    if [[ -n $DEBUG_DIR && $name == today ]]; then
-        perl -e 'alarm 20; exec @ARGV' osascript -e \
-            'tell application "System Events" to tell process "WidgetKit Simulator" to get name of every menu item of menu 1 of menu bar item "File" of menu bar 1' \
-            > "$DEBUG_DIR/file-menu.txt" 2>&1
     fi
 done
 quit_simulator
