@@ -328,6 +328,83 @@ public final class AccountTrailRecorder {
         }
     }
 
+    /// Move the default login's `[from, to)` from `wrongAccount` to
+    /// `rightAccount`, because the user said so.
+    ///
+    /// The repair for history written before the credential could speak for
+    /// itself. A stale config write that predates this fix left turns stamped
+    /// with the wrong account, and nothing in the store records which token
+    /// the keychain held back then: rate-limit rows carry the account a
+    /// response named, not which lane asked, and the poller's own "active"
+    /// flag followed the same stale file. So this takes a statement, not an
+    /// inference, and records it as `sourceManual` so nothing automatic ever
+    /// overrides it afterwards.
+    ///
+    /// Only rows naming `wrongAccount` are rewritten; a stretch the trail
+    /// already gives to anyone else stays as it is. Manual and backfilled
+    /// ranges are never rewritten, and pinned profiles are not touched at all
+    /// (this is the default login's trail). A row straddling a boundary is
+    /// split so the part outside the range keeps its account. The corrections
+    /// are returned and also queued for `drainCorrections`.
+    @discardableResult
+    public func reassign(
+        from: Date,
+        to: Date,
+        wrongAccount: String,
+        rightAccount: String,
+        evidence: String
+    ) -> [Correction] {
+        guard from < to, wrongAccount != rightAccount else { return [] }
+        let wrong = wrongAccount
+        let descriptor = FetchDescriptor<AccountActivation>(
+            predicate: #Predicate { $0.rootPath == nil && $0.accountId == wrong },
+            sortBy: [SortDescriptor(\.startedAt)]
+        )
+        let rows = (try? context.fetch(descriptor)) ?? []
+        var made: [Correction] = []
+        let note = "reassigned to \(rightAccount.prefix(8)) by the maintainer"
+        for row in rows {
+            guard row.source != AccountActivation.sourceManual,
+                  row.source != AccountActivation.sourceBackfill else { continue }
+            let start = row.startedAt
+            let originalEnd = row.endedAt
+            let end = originalEnd ?? .distantFuture
+            guard end > start, start < to, end > from else { continue }
+
+            let overlapStart = max(start, from)
+            let overlapEnd = min(end, to)
+            if start < from {
+                // Keep the head; carry a tail on if the row runs past `to`.
+                row.endedAt = from
+                if end > to {
+                    context.insert(AccountActivation(
+                        accountId: row.accountId, startedAt: to, endedAt: originalEnd,
+                        rootPath: nil, source: row.source, evidence: row.evidence))
+                }
+            } else if end > to {
+                // Starts inside the range and runs past it: keep only the tail.
+                row.startedAt = to
+                row.evidence = (row.evidence.map { $0 + " · " } ?? "") + note
+            } else {
+                // Wholly inside: kept for the record, covering nothing.
+                row.endedAt = row.startedAt
+                row.evidence = (row.evidence.map { $0 + " · " } ?? "") + note
+            }
+            context.insert(AccountActivation(
+                accountId: rightAccount, startedAt: overlapStart, endedAt: overlapEnd,
+                rootPath: nil, source: AccountActivation.sourceManual, evidence: evidence))
+            made.append(Correction(
+                from: overlapStart, to: overlapEnd,
+                wrongAccount: wrongAccount, rightAccount: rightAccount))
+        }
+        if !made.isEmpty {
+            cachedTrail = nil
+            try? context.save()
+            corrections.append(contentsOf: made)
+        }
+        return made
+    }
+
     /// Corrections produced since the last call, oldest first.
     public func drainCorrections() -> [Correction] {
         defer { corrections.removeAll() }

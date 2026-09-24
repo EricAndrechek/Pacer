@@ -109,7 +109,10 @@ public enum AccountBackfill {
     /// rebuild the rollups they feed.
     ///
     /// Only rows carrying the refuted account are touched, so turns that were
-    /// already right stay put. A turn that a pinned profile bound to that same
+    /// already right stay put, and only where the corrected trail now names
+    /// the right account for the default login — so a stretch the trail still
+    /// gives to someone else (a manual range, say) is never moved by a
+    /// correction whose range happens to cover it. A turn that a pinned profile bound to that same
     /// account could have written is left alone: samples do not record their
     /// root, and moving a pinned session's usage would be a new error.
     public static func restamp(
@@ -127,6 +130,7 @@ public enum AccountBackfill {
             })
             for sample in try context.fetch(descriptor) {
                 if trail.isPinned(correction.wrongAccount, at: sample.sampledAt) { continue }
+                guard trail.accountId(at: sample.sampledAt) == correction.rightAccount else { continue }
                 sample.accountId = correction.rightAccount
                 moved.append(sample)
             }

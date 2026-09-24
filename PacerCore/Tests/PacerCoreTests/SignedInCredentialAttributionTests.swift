@@ -210,6 +210,7 @@ struct SignedInCredentialAttributionTests {
 
         let trail = AccountTrail(spans: [
             .init(accountId: "pinned", startedAt: t(0), endedAt: nil, rootPath: "/profiles/2"),
+            .init(accountId: "signed-in", startedAt: t(2_000), endedAt: nil, rootPath: nil),
         ])
         let moved = try AccountBackfill.restamp([
             .init(from: t(2_000), to: nil, wrongAccount: "idle", rightAccount: "signed-in"),
@@ -282,5 +283,117 @@ struct SignedInCredentialLaunchTests {
         _ = recorder.poll(now: t(1_000))
         try writeConfig(home, org: "b", modified: t(2_000))
         #expect(recorder.poll(now: t(2_000)) == "b")
+    }
+}
+
+
+@Suite("Maintainer reassignment of history")
+@ScanActor
+struct AccountReassignTests {
+    private func setUp(_ rows: [AccountActivation]) throws -> (ModelContext, AccountTrailRecorder) {
+        let context = ModelContext(try makeContainer())
+        for r in rows { context.insert(r) }
+        try context.save()
+        return (context, AccountTrailRecorder(context: context, homeDirectory: try makeHome()))
+    }
+
+    /// The machine state the fix shipped into: a stale write's span, already
+    /// cut off by the credential at install, with turns stamped under it.
+    @Test("a stale span before the fix moves to the account named, turns and all")
+    func repairsThePreFixWindow() throws {
+        let (context, recorder) = try setUp([
+            AccountActivation(accountId: "signed-in", startedAt: t(0), endedAt: t(1_000),
+                              source: AccountActivation.sourceObserved),
+            AccountActivation(accountId: "idle", startedAt: t(1_000), endedAt: t(5_000),
+                              source: AccountActivation.sourceObserved),
+            AccountActivation(accountId: "signed-in", startedAt: t(5_000), endedAt: nil,
+                              source: AccountActivation.sourceCredential),
+        ])
+        let early = makeSample(t(500), account: "signed-in")
+        let wrong = makeSample(t(3_000), account: "idle")
+        let later = makeSample(t(6_000), account: "signed-in")
+        for s in [early, wrong, later] { context.insert(s) }
+        try context.save()
+
+        let made = recorder.reassign(from: t(1_000), to: t(5_000),
+                                     wrongAccount: "idle", rightAccount: "signed-in",
+                                     evidence: "test")
+        #expect(made.count == 1)
+        let trail = recorder.trail()
+        #expect(trail.accountId(at: t(3_000)) == "signed-in")
+        #expect(trail.defaultLoginConflicts(with: "signed-in", from: t(0), through: t(9_000)) == false)
+
+        let moved = try AccountBackfill.restamp(recorder.drainCorrections(), trail: trail, context: context)
+        #expect(moved.count == 1)
+        #expect(wrong.accountId == "signed-in")
+        #expect(early.accountId == "signed-in" && later.accountId == "signed-in")
+
+        // The statement is durable and outranks automation.
+        let manual = try spans(context).filter { $0.source == AccountActivation.sourceManual }
+        #expect(manual.count == 1)
+    }
+
+    @Test("a span straddling the range keeps its outside parts")
+    func splitsAtBothBoundaries() throws {
+        let (_, recorder) = try setUp([
+            AccountActivation(accountId: "idle", startedAt: t(0), endedAt: nil,
+                              source: AccountActivation.sourceObserved),
+        ])
+        recorder.reassign(from: t(1_000), to: t(2_000),
+                          wrongAccount: "idle", rightAccount: "signed-in", evidence: "test")
+        let trail = recorder.trail()
+        #expect(trail.accountId(at: t(500)) == "idle")
+        #expect(trail.accountId(at: t(1_500)) == "signed-in")
+        #expect(trail.accountId(at: t(2_500)) == "idle")
+        #expect(trail.currentDefaultLogin?.accountId == "idle")
+    }
+
+    @Test("only spans of the wrong account move; manual ranges never do")
+    func leavesOtherAccountsAndManualRangesAlone() throws {
+        let (context, recorder) = try setUp([
+            AccountActivation(accountId: "idle", startedAt: t(0), endedAt: t(1_000),
+                              source: AccountActivation.sourceManual),
+            AccountActivation(accountId: "third", startedAt: t(1_000), endedAt: t(2_000),
+                              source: AccountActivation.sourceObserved),
+        ])
+        let inManual = makeSample(t(500), account: "idle")
+        context.insert(inManual)
+        try context.save()
+
+        let made = recorder.reassign(from: t(0), to: t(2_000),
+                                     wrongAccount: "idle", rightAccount: "signed-in", evidence: "test")
+        #expect(made.isEmpty)
+        #expect(recorder.trail().accountId(at: t(500)) == "idle")
+        #expect(recorder.trail().accountId(at: t(1_500)) == "third")
+        // Even a correction covering the manual range cannot move its turns:
+        // the trail still gives that instant to someone else.
+        let moved = try AccountBackfill.restamp(
+            [.init(from: t(0), to: t(2_000), wrongAccount: "idle", rightAccount: "signed-in")],
+            trail: recorder.trail(), context: context)
+        #expect(moved.isEmpty)
+        #expect(inManual.accountId == "idle")
+    }
+
+    @Test("a request is validated before anything moves")
+    func requestValidation() throws {
+        let known: Set<String> = ["a", "b"]
+        let one = #"{"from":"2026-01-01T00:00:00Z","to":"2026-01-01T06:00:00Z","wrongAccount":"a","rightAccount":"b"}"#
+        let parsed = try AccountReassignRequest.parse(Data(one.utf8), knownAccounts: known)
+        #expect(parsed.count == 1 && parsed[0].rightAccount == "b")
+        #expect(try AccountReassignRequest.parse(Data("[\(one)]".utf8), knownAccounts: known).count == 1)
+
+        #expect(throws: AccountReassignRequest.LoadError.unknownAccount("c")) {
+            try AccountReassignRequest.parse(Data(one.replacingOccurrences(of: #""b""#, with: #""c""#).utf8),
+                                             knownAccounts: known)
+        }
+        #expect(throws: AccountReassignRequest.LoadError.emptyRange) {
+            try AccountReassignRequest.parse(Data(one.replacingOccurrences(of: "06:00", with: "00:00").utf8),
+                                             knownAccounts: known)
+        }
+        #expect(throws: AccountReassignRequest.LoadError.malformed) {
+            try AccountReassignRequest.parse(Data("{}".utf8), knownAccounts: known)
+        }
+        // In-memory stores have no request location at all.
+        #expect(AccountReassignRequest.url(storeURL: nil) == nil)
     }
 }
