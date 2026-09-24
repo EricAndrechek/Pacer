@@ -59,42 +59,136 @@ ditto "$SRC_APP" "$APP" 2>/dev/null || sudo ditto "$SRC_APP" "$APP" || { log "ca
 defaults write com.apple.widgetkit.simulator ApplePersistenceIgnoreState -bool YES
 defaults write com.apple.widgetkit.simulator NSQuitAlwaysKeepsWindows -bool NO
 
-# name, kind — the gallery's order; the family is WidgetFixtures.readmeShots'.
+# Light, whatever the scenes before left it in (menubar-dark switches the
+# whole system to dark): the widgets are photographed on a light desktop.
+request widget-appearance '{"kind":"appearance","dark":false}' || exit 1
+
+# Sign once; LaunchServices must know the app for the simulator's widget picker
+# to list it.
+codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
+codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
+pluginkit -a "$APPEX"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
+
+# Choose one widget in the simulator's "Choose a Widget" window: select the
+# app, then the widget by its display name, then Open. Through Accessibility
+# (osascript holds that grant on GitHub's runners), on the disposable runner
+# only. Prints what it found, for when the simulator's layout changes.
+pick() {
+    perl -e 'alarm 60; exec @ARGV' osascript - "$1" "$2" <<'OSA'
+on textsOf(e)
+    set out to {}
+    tell application "System Events"
+        try
+            set end of out to (name of e as text)
+        end try
+        try
+            set end of out to (value of e as text)
+        end try
+        try
+            set end of out to (description of e as text)
+        end try
+    end tell
+    return out
+end textsOf
+
+on pressFor(w, label)
+    tell application "System Events"
+        set els to entire contents of w
+        repeat with e in els
+            if my textsOf(e) contains label then
+                set target to e
+                repeat 6 times
+                    try
+                        if role of target is "AXRow" then
+                            set selected of target to true
+                            return "selected row for " & label
+                        end if
+                    end try
+                    try
+                        perform action "AXPress" of target
+                        return "pressed " & (role of target) & " for " & label
+                    end try
+                    try
+                        set target to value of attribute "AXParent" of target
+                    on error
+                        exit repeat
+                    end try
+                end repeat
+            end if
+        end repeat
+    end tell
+    return "NOT FOUND: " & label
+end pressFor
+
+on run argv
+    set appName to item 1 of argv
+    set widgetName to item 2 of argv
+    tell application "System Events" to tell process "WidgetKit Simulator"
+        set frontmost to true
+        repeat 60 times
+            if exists window "Choose a Widget" then exit repeat
+            delay 0.25
+        end repeat
+        if not (exists window "Choose a Widget") then return "no Choose a Widget window; windows: " & (name of every window as text)
+        set w to window "Choose a Widget"
+        delay 1
+        set log1 to my pressFor(w, appName)
+        delay 1.5
+        set log2 to my pressFor(w, widgetName)
+        delay 0.5
+        set log3 to "no Open button"
+        try
+            click button "Open" of w
+            set log3 to "clicked Open"
+        end try
+        return log1 & "; " & log2 & "; " & log3
+    end tell
+end run
+OSA
+}
+
+# Everything the simulator shows in its front window, for the debug dump.
+ax_dump() {
+    perl -e 'alarm 40; exec @ARGV' osascript -e \
+        'tell application "System Events" to tell process "WidgetKit Simulator" to get entire contents of front window' \
+        > "$DEBUG_DIR/$1-ax.txt" 2>&1
+    screencapture -x "$DEBUG_DIR/$1-screen.png" 2>/dev/null
+}
+
+# name, kind, display name — the gallery's order; the family is the one
+# WidgetFixtures.readmeShots gives the kind.
 shots=(
-    today         TodayCostWidget
-    pace-gauges   PaceGaugesWidget
-    live-session  LiveSessionWidget
-    daily-chart   DailyChartWidget
-    top-projects  TopProjectsWidget
+    today         TodayCostWidget    "Today"
+    pace-gauges   PaceGaugesWidget   "Rate limits"
+    live-session  LiveSessionWidget  "Current session"
+    daily-chart   DailyChartWidget   "Daily cost"
+    top-projects  TopProjectsWidget  "Top projects"
 )
-failed=0 version=100
-for name kind in $shots; do
+failed=0
+for name kind display in $shots; do
     quit_simulator
-    version=$(( version + 1 ))
-    for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
-        # A fresh build number per kind: nothing may serve the previous kind's
-        # descriptors from a cache keyed on the bundle version.
-        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$plist"
-    done
-    /usr/libexec/PlistBuddy -c "Delete :PacerFixtureKind" "$APPEX/Contents/Info.plist" 2>/dev/null
-    /usr/libexec/PlistBuddy -c "Add :PacerFixtureKind string $kind" "$APPEX/Contents/Info.plist"
-    codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
-    codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
-    pluginkit -a "$APPEX"
-    open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
+    if [[ $name == today ]]; then
+        # Opened on the extension, the simulator shows its first widget kind.
+        open -a "$SIM" "$APPEX" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
+    else
+        open -a "$SIM" || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
+        sleep 2
+        [[ -n $DEBUG_DIR ]] && ax_dump "$name-picker"
+        log "$name: $(pick Pacer "$display" 2>&1)"
+    fi
     debug=
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
         log "✓ $name ($kind)"
     else
         failed=1
+        [[ -n $DEBUG_DIR ]] && ax_dump "$name-after"
     fi
     if [[ -n $DEBUG_DIR && $name == today ]]; then
-        # What the simulator exposes, for whoever next needs to drive it.
-        perl -e 'alarm 40; exec @ARGV' osascript -e \
-            'tell application "System Events" to tell process "WidgetKit Simulator" to get entire contents of front window' \
-            > "$DEBUG_DIR/ax-tree.txt" 2>&1
-        defaults read com.apple.widgetkit.simulator > "$DEBUG_DIR/defaults.txt" 2>&1
+        perl -e 'alarm 20; exec @ARGV' osascript -e \
+            'tell application "System Events" to tell process "WidgetKit Simulator" to get name of every menu item of menu 1 of menu bar item "File" of menu bar 1' \
+            > "$DEBUG_DIR/file-menu.txt" 2>&1
     fi
 done
 quit_simulator
