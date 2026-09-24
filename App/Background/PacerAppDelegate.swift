@@ -364,7 +364,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // because it gets committed. Exit non-zero so
                     // `make screenshots` stops instead.
                     guard ScreenshotMode.validateFixture(container) else { exit(3) }
-                    await ScreenshotMode.captureAll(container: container)
+                    await ScreenshotMode.captureAll(container: container,
+                                                    sceneEngines: self.backgroundService.engines)
                     // Again afterwards: scenes that build their own series
                     // report through `ScreenshotMode.note` while rendering, and
                     // those problems only exist once the render has run.

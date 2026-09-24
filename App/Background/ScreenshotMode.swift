@@ -57,7 +57,11 @@ enum ScreenshotMode {
 
     /// Render every scene and write the PNGs, then return. The caller
     /// (`applicationDidFinishLaunching`) exits the process afterward.
-    static func captureAll(container: ModelContainer) async {
+    /// `sceneEngines` is the engine host `PacerApp` injects into the real
+    /// window — passed in because `NSApp.delegate` is SwiftUI's adaptor, not
+    /// `PacerAppDelegate`, and the cast to reach it failed silently, so the
+    /// real window's engines were never warmed.
+    static func captureAll(container: ModelContainer, sceneEngines: EngineHost? = nil) async {
         let outDir = outputDirectory
         try? FileManager.default.createDirectory(
             at: outDir, withIntermediateDirectories: true
@@ -176,11 +180,11 @@ enum ScreenshotMode {
         // `PacerApp` injects — warm it the way `screenshotEngine` is warmed.
         // And each account's: on "all accounts" the pace card asks every
         // account's own fit, so an unwarmed one draws no forecast at all.
-        if let service = (NSApp.delegate as? PacerAppDelegate)?.backgroundService {
-            await service.engine.recompute(now: Date())
+        if let sceneEngines {
+            await sceneEngines.global.recompute(now: Date())
             let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
             for account in accounts {
-                await service.engines.engine(forAccount: account.id).recompute(now: Date())
+                await sceneEngines.engine(forAccount: account.id).recompute(now: Date())
             }
             // What the app posts after a refit. The real window's cards were
             // built at launch, asked a cold engine once, and got "not enough
