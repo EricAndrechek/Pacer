@@ -1320,7 +1320,12 @@ enum ScreenshotMode {
         }
         RunLoop.main.add(closer, forMode: .common)
         RunLoop.main.add(closer, forMode: .eventTracking)
-        button.performClick(nil)
+        log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
+        // `popUp` under the button — what the status item does on a click. A
+        // synthesized `performClick` did not open the menu on the runner.
+        button.highlight(true)
+        _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        button.highlight(false)
         closer.invalidate()
         if FileManager.default.fileExists(atPath: png.path) {
             log("✓ \(name).png (real menu bar and menu)")
