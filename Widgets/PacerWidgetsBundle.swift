@@ -29,11 +29,11 @@ struct PacerWidgetsBundle: WidgetBundle {
         // CI README screenshot builds only: the README's widgets, each the
         // real widget view over fixture data at its real size, and nothing
         // else — see `ReadmeShotWidget`. Never in a build that ships.
-        ReadmeShotWidget(shot: 0)
-        ReadmeShotWidget(shot: 1)
-        ReadmeShotWidget(shot: 2)
-        ReadmeShotWidget(shot: 3)
-        ReadmeShotWidget(shot: 4)
+        ReadmeShotWidget<ReadmeShot0>()
+        ReadmeShotWidget<ReadmeShot1>()
+        ReadmeShotWidget<ReadmeShot2>()
+        ReadmeShotWidget<ReadmeShot3>()
+        ReadmeShotWidget<ReadmeShot4>()
         #else
         TodayCostWidget()
         PaceGaugesWidget()

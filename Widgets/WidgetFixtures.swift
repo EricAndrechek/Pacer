@@ -11,8 +11,8 @@ import PacerUI
 /// One source of truth for two consumers: the app's screenshot mode renders
 /// the views with them directly (the widget-picker and scoped mockups), and
 /// `ReadmeShotWidget` — compiled into the extension only for the CI screenshot
-/// build — serves them to WidgetKit Simulator for `docs/screenshots/widgets.png`
-/// (bin/widgetkit-sim-shots.sh).
+/// build — serves them to Notification Center for `docs/screenshots/widgets.png`
+/// (bin/nc-widget-shots.sh).
 enum WidgetFixtures {
     /// The widgets `widgets.png` shows, each in the one family it is
     /// photographed in — in the gallery's order.
@@ -184,30 +184,26 @@ enum WidgetFixtures {
 #if PACER_WIDGET_FIXTURES
 // MARK: - README screenshot widget (CI screenshot builds only)
 
-/// The widget WidgetKit Simulator photographs for `widgets.png`.
+/// The README's widgets, as Notification Center photographs them for
+/// `widgets.png` (bin/nc-widget-shots.sh).
 ///
-/// Why a stand-in rather than the real widget types: the simulator opens an
-/// extension on its *first* widget, and offers no way to ask for another that
-/// can be scripted — its "Choose a Widget" window lists no applications on a
-/// CI runner. So the screenshot build puts this widget first in the bundle and
-/// it becomes, per launch, whichever widget `PacerFixtureKind` in the
-/// extension's Info.plist names (bin/widgetkit-sim-shots.sh writes it and
-/// re-signs). What it renders is the real widget view, in the real family,
-/// in the real extension, laid out and drawn by WidgetKit; only this wrapper
-/// is not the shipping `Widget`. It mirrors the one configuration modifier
-/// that affects rendering — every Pacer widget opts out of the system content
-/// margins — so keep it in step if that changes.
+/// Why stand-ins rather than the real widget types: each README shot needs one
+/// widget in one family over fixture data, and the fixture build must not
+/// contain the real, store-reading widgets at all. What each renders is the
+/// real widget view, in the real extension, laid out and drawn by WidgetKit;
+/// only this wrapper is not the shipping `Widget`. It mirrors the one
+/// configuration modifier that affects rendering — every Pacer widget opts out
+/// of the system content margins — so keep it in step if that changes.
 ///
 /// Compiled in only with `PACER_WIDGET_FIXTURES`, which only the README
 /// screenshot workflow sets (an xcconfig over the whole build), so no build
 /// that ships contains it — a stray setting on somebody's Mac can never put
 /// fake numbers on their desktop.
-struct ReadmeShotWidget: Widget {
-    /// Index into `WidgetFixtures.readmeShots`.
-    let shot: Int
-
+struct ReadmeShotWidget<Slot: ReadmeShotSlot>: Widget {
+    // Generic over a slot type rather than taking an index: `Widget` requires
+    // a bare `init()`.
     var body: some WidgetConfiguration {
-        let (kind, family) = WidgetFixtures.readmeShots[shot]
+        let (kind, family) = WidgetFixtures.readmeShots[Slot.index]
         // `ReadmeShot.<kind>`: its own kind (a bundle's kinds must differ), a
         // stable one, so a widget placed by kind in Notification Center finds
         // it; the one family the README shows it in.
@@ -219,6 +215,14 @@ struct ReadmeShotWidget: Widget {
         .contentMarginsDisabled()
     }
 }
+
+/// Which of `WidgetFixtures.readmeShots` a `ReadmeShotWidget` shows.
+protocol ReadmeShotSlot { static var index: Int { get } }
+enum ReadmeShot0: ReadmeShotSlot { static let index = 0 }
+enum ReadmeShot1: ReadmeShotSlot { static let index = 1 }
+enum ReadmeShot2: ReadmeShotSlot { static let index = 2 }
+enum ReadmeShot3: ReadmeShotSlot { static let index = 3 }
+enum ReadmeShot4: ReadmeShotSlot { static let index = 4 }
 
 struct ReadmeShotEntry: TimelineEntry { let date: Date }
 
