@@ -24,7 +24,7 @@ DEBUG_DIR=
 [[ ${PACER_WIDGETSIM_DEBUG:-} == 1 ]] && { DEBUG_DIR=$OUT/debug-widgets; mkdir -p "$DEBUG_DIR"; }
 
 log() { print -r -- "[widgets] $*"; }
-debug_shot() { [[ -n $DEBUG_DIR ]] && screencapture -x "$DEBUG_DIR/$1.png" 2>&1 | sed 's/^/[widgets] screencapture: /'; }
+debug_shot() { [[ -n $DEBUG_DIR ]] && screencapture -x -t jpg "$DEBUG_DIR/$1.jpg" 2>&1 | sed 's/^/[widgets] screencapture: /'; }
 
 request() {
     local name=$1 json=$2
@@ -65,9 +65,20 @@ defaults export "$NC_PREFS" "$WORK/nc-in.plist" 2>&1 | sed 's/^/[widgets] export
 "$ROOT/bin/nc-widget-records.py" "$WORK/nc-in.plist" "$WORK/nc-out.plist" \
     com.ericandrechek.pacer com.ericandrechek.pacer.widgets $specs || exit 1
 defaults import "$NC_PREFS" "$WORK/nc-out.plist" 2>&1 | sed 's/^/[widgets] import: /'
-log "instances now: $(defaults read "$NC_PREFS" widgets 2>&1 | grep -c 'uuid\|<' ) lines; file: $(ls -l "$NC_PREFS.plist" 2>&1)"
-killall NotificationCenter 2>&1 | sed 's/^/[widgets] killall: /'
-sleep 4
+defaults export "$NC_PREFS" "$WORK/nc-check.plist"
+log "instances now: $(python3 -c "import plistlib,sys;print(len(plistlib.load(open(sys.argv[1],'rb')).get('widgets',{}).get('instances',[])))" "$WORK/nc-check.plist")"
+# DIAGNOSIS — is Notification Center running at all on a runner, and can it be started?
+log "procs: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget|controlcenter' | sort -u | tr '\n' ' ')"
+uid=$(id -u)
+launchctl print "gui/$uid" 2>&1 | grep -iE 'notificationcenter|chrono' | head -10 | sed 's/^/[widgets] launchd: /'
+for svc in com.apple.notificationcenterui.agent com.apple.chronod; do
+    launchctl print "gui/$uid/$svc" 2>&1 | grep -E 'state|path|program|last exit|disabled' | head -6 | sed "s/^/[widgets] $svc: /"
+    launchctl kickstart -k "gui/$uid/$svc" 2>&1 | sed "s/^/[widgets] kickstart $svc: /"
+done
+launchctl print-disabled "gui/$uid" 2>&1 | grep -iE 'notification|chrono' | sed 's/^/[widgets] disabled: /'
+sleep 6
+log "procs after kickstart: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget' | sort -u | tr '\n' ' ')"
+log show --last 2m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot|widget' | head -40 | sed 's/^/[widgets] oslog: /'
 debug_shot nc-before-open
 
 # Open the panel: the menu bar clock.
@@ -89,6 +100,8 @@ osascript -e 'tell application "System Events" to tell process "ControlCenter"
     end tell' 2>&1 | sed 's/^/[widgets] open: /'
 sleep 5
 debug_shot nc-open
+log "procs after click: $(ps -axo comm | grep -iE 'notificationcenter|chronod|widget' | sort -u | tr '\n' ' ')"
+log show --last 1m --style compact --predicate 'process == "NotificationCenter" OR process == "chronod"' 2>/dev/null | grep -iE 'error|fail|pacer|ReadmeShot' | head -40 | sed 's/^/[widgets] oslog2: /'
 osascript -e 'set out to ""
     tell application "System Events" to tell process "NotificationCenter"
         repeat with w in windows
