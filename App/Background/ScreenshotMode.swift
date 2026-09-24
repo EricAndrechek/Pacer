@@ -1166,7 +1166,13 @@ enum ScreenshotMode {
             note("capture \(name): no capture helper — run through `make screenshots`")
             return
         }
-        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        // App-wide, not just the window's: the scene's SwiftUI content follows
+        // the app's appearance and ignored `window.appearance`, so every scene
+        // came out in whatever the machine was set to — the CI "dark" dashboard
+        // was light, and a local "light" one dark.
+        let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        NSApp.appearance = appearance
+        window.appearance = appearance
         guard await place(window, size: size, captureDirectory: dir) else {
             note("capture \(name): could not place the window where it can be captured unseen")
             return

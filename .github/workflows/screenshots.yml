@@ -36,8 +36,6 @@ jobs:
       # that path; it is set by the runner.
       - name: Render screenshots
         run: make screenshots
-        env:
-          PACER_SCREENSHOT_WINDOWS_ONLY: ${{ github.event_name == 'push' && '1' || '' }}   # TEMPORARY
 
       - uses: actions/upload-artifact@v4
         with:
