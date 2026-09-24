@@ -1299,6 +1299,18 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         // Let the label lay out and its @Query fetches and engine answers land.
         await settle(seconds: 3.5)
+        // One open and close first. The menu refreshes its content as it
+        // opens, so the very first open shows what it had before — the light
+        // image read "Outlook —" where the dark one, taken on a second open,
+        // had the projection.
+        if !menuWarmed {
+            let warm = Timer(timeInterval: 0.6, repeats: false) { _ in menu.cancelTracking() }
+            RunLoop.main.add(warm, forMode: .common)
+            RunLoop.main.add(warm, forMode: .eventTracking)
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+            menuWarmed = true
+            await settle(seconds: 2)
+        }
 
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
@@ -1350,6 +1362,8 @@ enum ScreenshotMode {
             note("capture \(name): \(why)")
         }
     }
+
+    @MainActor private static var menuWarmed = false
 
     /// Ask the capture helper for something and wait for it to be done.
     @MainActor
