@@ -1127,6 +1127,18 @@ enum ScreenshotMode {
     /// rather than the harness's; `ContentView` reads it when it builds the tab.
     @MainActor static var projectsInitialScope: String?
 
+    /// This run photographs the app's real window (a README run with the
+    /// capture helper), rather than only rendering views off-screen.
+    static var capturesRealWindow: Bool {
+        isActive && !LiveRenderMode.isActive && captureDirectory != nil
+    }
+
+    /// On a CI runner the window is made key — colour traffic lights — which
+    /// means activating the app. Never anywhere else.
+    static var activatesForCapture: Bool {
+        capturesRealWindow && ProcessInfo.processInfo.environment["CI"] == "true"
+    }
+
     /// Where `bin/pacer-screenshot-capture.swift` listens for requests. Set by
     /// `make screenshots`, which starts it; without it there is nothing to
     /// capture a window with, and the window scenes fail.

@@ -325,9 +325,18 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // it. Off-screen `NSWindow` rendering still works, because that is
             // drawing rather than presentation.
             //
-            // The README screenshot run keeps `.accessory`: it is invoked
-            // deliberately by `make screenshots`, not alongside a live app.
-            NSApp.setActivationPolicy(LiveRenderMode.isActive ? .prohibited : .accessory)
+            // The README screenshot run is `.prohibited` too on a person's Mac
+            // (`make screenshots APPROVED=1` runs beside their live Pacer), and
+            // `.regular` + activated only on a CI runner, where there is nobody
+            // to take focus from and a key window is what colours the traffic
+            // lights. Activated *here*, at launch: macOS 14+ refuses an
+            // activation a background app asks for later.
+            if ScreenshotMode.activatesForCapture {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+            } else {
+                NSApp.setActivationPolicy(.prohibited)
+            }
             // Suppress any window macOS restores for the bundle — the same
             // guard the other diagnostic modes carry.
             Self.suppressWindowsWhileDiagnosticRuns()
@@ -501,10 +510,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // itself is required because the block is nonisolated even though
             // `queue: .main` delivers it on the main thread.
             let window = note.object as? NSWindow
-            Task { @MainActor in window?.close() }
+            Task { @MainActor in
+                // The README run photographs the real dashboard window, so that
+                // one is the run's own — closing it as it came on screen is what
+                // left CI capturing a window with no toolbar.
+                if let window, ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) { return }
+                window?.close()
+            }
         }
         DispatchQueue.main.async {
-            for window in NSApp.windows { window.close() }
+            for window in NSApp.windows
+            where !(ScreenshotMode.capturesRealWindow && MainWindowPlacement.isDashboard(window)) {
+                window.close()
+            }
         }
     }
 
