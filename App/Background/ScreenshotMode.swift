@@ -1299,178 +1299,103 @@ enum ScreenshotMode {
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
         // Let the label lay out and its @Query fetches and engine answers land.
         await settle(seconds: 3.5)
-
-        let png = outputDirectory.appendingPathComponent("\(name).png")
-        let failed = dir.appendingPathComponent("\(name).failed")
-        let requestURL = dir.appendingPathComponent("\(name).request")
-        try? FileManager.default.removeItem(at: png)
-        try? FileManager.default.removeItem(at: failed)
-        // Any leftover `.request` from a previous run would make the very
-        // next check ("did `writeRequest` run") lie — see below.
-        try? FileManager.default.removeItem(at: requestURL)
-
-        // Opens and closes a menu once before it's used for anything real.
-        // The menu refreshes its content as it opens, so the very first
-        // open on a given NSMenu shows what it had before — the light image
-        // once read "Outlook —" where a later open had the real projection.
-        // `installStatusItemForScreenshots` always hands back a freshly
-        // built item now (see its doc comment), so every item this function
-        // ends up using — the one from the guard above, or another one
-        // rebuilt below after a failed click — is a brand new, never-opened
-        // NSMenu and needs its own warm-up.
-        func warmUp(_ button: NSStatusBarButton, _ menu: NSMenu) async {
+        // One open and close first. The menu refreshes its content as it
+        // opens, so the very first open shows what it had before — the light
+        // image read "Outlook —" where the dark one, taken on a second open,
+        // had the projection.
+        if !menuWarmed {
             let warm = Timer(timeInterval: 0.6, repeats: false) { _ in menu.cancelTracking() }
             RunLoop.main.add(warm, forMode: .common)
             RunLoop.main.add(warm, forMode: .eventTracking)
             _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+            menuWarmed = true
             await settle(seconds: 2)
         }
-        await warmUp(button, menu)
 
+        let png = outputDirectory.appendingPathComponent("\(name).png")
+        let failed = dir.appendingPathComponent("\(name).failed")
+        try? FileManager.default.removeItem(at: png)
+        try? FileManager.default.removeItem(at: failed)
         // The rectangle to photograph, in the window server's top-left points:
         // from a margin left of the status item to the display's right edge,
         // and from the top of the screen to a margin under the menu, which
         // drops from the item's left edge. Worked out here rather than found
         // by the helper: on macOS 26 the status item and menu windows are not
         // listed under the app's process, so searching for them failed.
-        //
-        // A function, not a one-shot `let`: recomputed for whichever
-        // button/menu actually ends up being captured, since a status item
-        // rebuilt after a failed click (below) can come back a different
-        // length once its SwiftUI content lays out again.
-        func makeRequestData(_ button: NSStatusBarButton, _ menu: NSMenu) -> Data? {
-            guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
-                return nil
-            }
-            // Tight around what the scene is about: the status item and the
-            // menu that drops from its left edge, a margin of menu bar and
-            // wallpaper around them, and the gap macOS leaves under the bar.
-            let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
-            let margin: CGFloat = 20
-            let left = max(screen.frame.minX, itemFrame.minX - margin)
-            let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
-            let barTop = mainHeight - screen.frame.maxY
-            let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
-            let request: [String: Any] = ["kind": "menubar",
-                                          "rect": [left, barTop, right - left, height],
-                                          "png": png.path]
-            return try? JSONSerialization.data(withJSONObject: request)
-        }
-        // Deferred — written only once we know the menu genuinely opened
-        // (see below). The helper photographs whatever is in this rect on
-        // its own ~1.2s delay regardless of whether a menu is actually
-        // there, so writing the request unconditionally would let a
-        // silently-failed click "succeed" with a screenshot of an empty
-        // menu bar.
-        //
-        // `nonisolated`: this runs from the `NSMenuDidBeginTrackingNotification`
-        // observer below, whose block is `@Sendable` and not MainActor-isolated
-        // — without this, the local function would inherit this (@MainActor)
-        // function's isolation and the call wouldn't type-check. Its
-        // parameter and capture (`data`, `requestURL`) are plain Sendable
-        // values, so nothing unsafe crosses actors here.
-        @Sendable nonisolated func writeRequest(_ data: Data?) {
-            if let data { try? data.write(to: requestURL) }
-        }
-        // Opening the menu runs a tracking loop that does not return until it
-        // closes, so the close is scheduled inside that loop: as soon as the
-        // helper has the picture, or after a deadline. Reused for both the
-        // primary and fallback open attempts below.
-        let deadline = Date().addingTimeInterval(25)
-        func armCloser(_ menu: NSMenu) -> Timer {
-            let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
-                if FileManager.default.fileExists(atPath: png.path)
-                    || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
-                    menu.cancelTracking()
-                    timer.invalidate()
-                }
-            }
-            RunLoop.main.add(closer, forMode: .common)
-            RunLoop.main.add(closer, forMode: .eventTracking)
-            return closer
-        }
-        log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
-
-        // Try a real click first. `performClick` gives the menu its native
-        // placement (the gap under the bar) and the button's pressed
-        // highlight — the same thing a person's click gives it — without
-        // the deprecated `popUpStatusItemMenu:` selector. This is the
-        // pattern other menu-bar projects converged on for "the click
-        // highlights the item but no menu appears" (tauri tray-icon 0.25.1,
-        // tauri-apps/tao#1324): reattach the item's menu immediately before
-        // the click. Pacer's `item.menu` is already permanently assigned
-        // (`buildStatusItem`) rather than attached only for a click as
-        // tauri's is, so there's nothing to reattach or restore here — the
-        // fix that pattern converges on is already true of Pacer's setup.
-        //
-        // `NSMenuDidBeginTrackingNotification` (not the PNG landing) is the
-        // signal that the click actually worked: the helper photographs
-        // whatever is in the target rect on its own timer regardless of
-        // whether a menu is open there, so a PNG existing doesn't prove the
-        // click did anything — `writeRequest` only runs from this
-        // notification, so `requestURL` existing afterward means tracking
-        // genuinely began.
-        guard let clickRequestData = makeRequestData(button, menu) else {
+        guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
             note("capture \(name): the status item has no window")
             return
         }
-        let trackingObserver = NotificationCenter.default.addObserver(
-            forName: NSMenu.didBeginTrackingNotification, object: menu, queue: .main
-        ) { _ in writeRequest(clickRequestData) }
-        let clickCloser = armCloser(menu)
-        button.performClick(nil)
-        clickCloser.invalidate()
-        NotificationCenter.default.removeObserver(trackingObserver)
-
-        var openedVia = "performClick"
-        if !FileManager.default.fileExists(atPath: requestURL.path) {
-            // The click never opened the menu — fall back to the deprecated
-            // selector, which reliably gives the same native placement (a
-            // plain `NSMenu.popUp` puts it flush against the bar, losing
-            // the gap under it). See git history around 2026-09-24 for what
-            // was tried before landing here: a synthesized `performClick`
-            // alone failed on the runner, and posting a real click (via a
-            // helper process, then via System Events) either got silently
-            // dropped for lacking an Accessibility grant or was reverted.
-            //
-            // Recovering the SAME item wasn't enough either — a 0.3s pause
-            // and un-highlighting the button still came back with a PNG of
-            // an empty menu bar (2026-09-24). Rebuild the status item fresh
-            // instead: `installStatusItem()` always tears down and rebuilds
-            // (see its doc comment), so this is a brand new
-            // NSStatusItem/NSMenu that carries none of whatever the failed
-            // click left behind.
-            guard let freshItem = installStatusItem(), let freshButton = freshItem.button,
-                  let freshMenu = freshItem.menu else {
-                note("capture \(name): rebuild after a failed click produced no status item")
-                return
-            }
-            await warmUp(freshButton, freshMenu)
-            guard let fallbackRequestData = makeRequestData(freshButton, freshMenu) else {
-                note("capture \(name): the rebuilt status item has no window")
-                return
-            }
-            writeRequest(fallbackRequestData)
-            let fallbackCloser = armCloser(freshMenu)
-            let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
-            if freshItem.responds(to: statusPopUp) {
-                openedVia = "popUpStatusItemMenu:"
-                _ = freshItem.perform(statusPopUp, with: freshMenu)
-            } else {
-                openedVia = "NSMenu.popUp"
-                _ = freshMenu.popUp(positioning: nil,
-                                    at: NSPoint(x: 0, y: freshButton.bounds.height + 4), in: freshButton)
-            }
-            fallbackCloser.invalidate()
+        // Tight around what the scene is about: the status item and the menu
+        // that drops from its left edge, a margin of menu bar and wallpaper
+        // around them, and the gap macOS leaves under the bar.
+        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
+        let margin: CGFloat = 20
+        let left = max(screen.frame.minX, itemFrame.minX - margin)
+        let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
+        let barTop = mainHeight - screen.frame.maxY
+        let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
+        let request: [String: Any] = ["kind": "menubar",
+                                      "rect": [left, barTop, right - left, height],
+                                      "png": png.path]
+        if let data = try? JSONSerialization.data(withJSONObject: request) {
+            try? data.write(to: dir.appendingPathComponent("\(name).request"))
         }
-
+        // Opening the menu runs a tracking loop that does not return until it
+        // closes, so the close is scheduled inside that loop: as soon as the
+        // helper has the picture, or after a deadline.
+        let deadline = Date().addingTimeInterval(25)
+        let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
+            if FileManager.default.fileExists(atPath: png.path)
+                || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
+                menu.cancelTracking()
+                timer.invalidate()
+            }
+        }
+        RunLoop.main.add(closer, forMode: .common)
+        RunLoop.main.add(closer, forMode: .eventTracking)
+        log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
+        // The status item's own menu presentation — placement (the gap under
+        // the bar) and the item's highlight exactly as a click gives them.
+        // `popUpStatusItemMenu:` is deprecated, and the modern replacement
+        // other menu-bar projects converged on for exactly this ("the click
+        // highlights the item but no menu appears") is a real `performClick`
+        // (tauri tray-icon 0.25.1, tauri-apps/tao#1324). It was tried here
+        // three times on 2026-09-24, each confirmed against the actual CI
+        // images rather than just "did a PNG land":
+        //   1. `button.performClick(nil)` alone never opened the menu
+        //      (`NSMenuDidBeginTrackingNotification` never fired for it).
+        //   2. Falling back to `popUpStatusItemMenu:` right after — even
+        //      with the button un-highlighted and a 0.3s pause first — came
+        //      back with a PNG of an *empty* menu bar: the failed click
+        //      hadn't just done nothing, it had left the item unable to
+        //      present its menu again.
+        //   3. Rebuilding the status item from scratch after the failed
+        //      click (a brand new NSStatusItem/NSMenu, carrying no state
+        //      from the old one) made no difference either — same empty
+        //      result. Whatever `performClick` breaks isn't per-object.
+        // So a synthesized `performClick` isn't attempted at all here — on
+        // this runner, trying it doesn't just fail to open the menu, it
+        // costs the one mechanism that does. `NSMenu.popUp` under the
+        // button is the other fallback, if the selector is ever removed,
+        // but it puts the menu flush against the bar rather than in the
+        // native spot with its gap.
+        let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
+        if item.responds(to: statusPopUp) {
+            _ = item.perform(statusPopUp, with: menu)
+        } else {
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
+        closer.invalidate()
         if FileManager.default.fileExists(atPath: png.path) {
-            log("✓ \(name).png (real menu bar and menu, opened via \(openedVia))")
+            log("✓ \(name).png (real menu bar and menu)")
         } else {
             let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "the menu did not open"
-            note("capture \(name): \(why) (tried \(openedVia))")
+            note("capture \(name): \(why)")
         }
     }
+
+    @MainActor private static var menuWarmed = false
 
     /// Ask the capture helper for something and wait for it to be done.
     @MainActor

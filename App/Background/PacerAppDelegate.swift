@@ -954,18 +954,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The README screenshot run's status item — the app's own, built the
     /// way the running app builds it, over the fixture container. CI only:
     /// see `ScreenshotMode.captureRealMenuBar`.
-    ///
-    /// Always tears down and rebuilds rather than reusing whatever's
-    /// already there. `captureRealMenuBar` calls this once per capture
-    /// (light, then dark), and again from its fallback when a failed
-    /// `performClick` probe leaves the existing item unable to present its
-    /// menu again by any mechanism — confirmed 2026-09-24: pausing and
-    /// un-highlighting the same item wasn't enough to recover it, but a
-    /// fresh `NSStatusItem`/`NSMenu` object graph carries none of whatever
-    /// internal AppKit state the failed click left behind.
     func installStatusItemForScreenshots() -> NSStatusItem? {
-        teardownMenuBar()
-        buildStatusItem()
+        if statusItem == nil { buildStatusItem() }
         return statusItem
     }
 
