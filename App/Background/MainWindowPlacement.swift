@@ -162,6 +162,15 @@ enum MainWindowPlacement {
     /// content view is put into a window — earlier than any of AppKit's
     /// visibility notifications, which is the point.
     static func register(_ window: NSWindow) {
+        // A local README screenshot run keeps this window to photograph it,
+        // beside the owner's live Pacer. Hide it here — before its first
+        // frame — not when AppKit next reports on it: hidden any later, it
+        // flashed on the owner's screen at launch. Transparent and beneath
+        // the desktop picture until `ScreenshotMode.place` takes it.
+        if ScreenshotMode.capturesRealWindow, !ScreenshotMode.activatesForCapture {
+            window.alphaValue = 0
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) - 2)
+        }
         if dashboardWindow !== window {
             dashboardWindow = window
             hasPlacedDashboard = false
