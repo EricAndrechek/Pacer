@@ -30,7 +30,7 @@ concurrency:
 jobs:
   screenshots:
     # A fork's branch cannot be pushed to with this token.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository   # push: TEMPORARY
     # Pinned like ci.yml: the SDK decides the app's appearance.
     runs-on: macos-26
     timeout-minutes: 60
