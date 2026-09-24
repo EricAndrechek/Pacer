@@ -10,8 +10,6 @@ name: README screenshots
 # drifted. Run it from the Actions tab or `gh workflow run screenshots.yml`.
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/real-window-screenshots]   # TEMPORARY — removed before merge
 
 permissions:
   contents: write
@@ -43,7 +41,6 @@ jobs:
           path: docs/screenshots/
 
       - name: Open a PR with the new images
-        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
