@@ -226,16 +226,7 @@ enum ScreenshotMode {
             log("window screenshots complete")
             return
         }
-        // Every real-window scene is done; the rest are views drawn off-screen.
-        // On CI the app was activated at launch so the window could be key —
-        // left active, the collection sheets drew under a grey wash there.
-        // Activation cannot be asked for again later, so real windows first,
-        // then this.
-        if activatesForCapture {
-            sceneWindow?.orderOut(nil)
-            NSApp.deactivate()
-            await settle(seconds: 0.5)
-        }
+        sceneWindow?.orderOut(nil)
 
         // The menu-bar experience as one cohesive image: a slice of the
         // macOS menu bar with Pacer's readout, and the click-down popover
@@ -265,11 +256,11 @@ enum ScreenshotMode {
         // integrated Projects tab. Synthetic collections over synthetic
         // project rollups (see `seedCollections`).
         await capture("collections-manager", width: nil, height: nil, scheme: .light,
-                      card: true, container: container) {
+                      card: true, backdrop: .windowBackgroundColor, container: container) {
             CollectionsManager()
         }
         await capture("collections-editor", width: nil, height: nil, scheme: .light,
-                      card: true, container: container) {
+                      card: true, backdrop: .windowBackgroundColor, container: container) {
             CollectionEditorShowcase()
         }
         // The integrated Projects tab: collection filter bar + per-row
@@ -1035,6 +1026,12 @@ enum ScreenshotMode {
         scheme: ColorScheme,
         card: Bool,
         cornerRadius: CGFloat = 14,
+        /// What shows through a view with no background of its own. Cards sit
+        /// on the page behind grouped content; a sheet sits on the window
+        /// background, which is what the app puts behind the collection
+        /// sheets — `underPageBackgroundColor` there rendered them as a flat
+        /// grey slab on the CI runner.
+        backdrop: NSColor = .underPageBackgroundColor,
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
@@ -1067,7 +1064,7 @@ enum ScreenshotMode {
                     // paints a material here and still separates. This is the
                     // semantic "surface behind grouped content" and stays
                     // distinct in both appearances.
-                    .background(Color(nsColor: .underPageBackgroundColor))
+                    .background(Color(nsColor: backdrop))
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
