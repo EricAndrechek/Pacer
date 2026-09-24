@@ -203,24 +203,19 @@ enum WidgetFixtures {
 /// that ships contains it — a stray setting on somebody's Mac can never put
 /// fake numbers on their desktop.
 struct ReadmeShotWidget: Widget {
-    private static let shot = WidgetFixtures.readmeShots.first {
-        $0.kind == Bundle.main.object(forInfoDictionaryKey: "PacerFixtureKind") as? String
-    } ?? WidgetFixtures.readmeShots[0]
+    /// Index into `WidgetFixtures.readmeShots`.
+    let shot: Int
 
     var body: some WidgetConfiguration {
-        // One constant kind of its own (two widgets in a bundle may not share
-        // one). Constant across launches: the simulator reopens the kind it
-        // last showed, and a kind that changed per shot left every launch
-        // after the first on an empty timeline.
-        StaticConfiguration(kind: "ReadmeShot", provider: ReadmeShotProvider()) { _ in
-            ReadmeShotView(kind: Self.shot.kind)
+        let (kind, family) = WidgetFixtures.readmeShots[shot]
+        // `ReadmeShot.<kind>`: its own kind (a bundle's kinds must differ), a
+        // stable one, so a widget placed by kind in Notification Center finds
+        // it; the one family the README shows it in.
+        return StaticConfiguration(kind: "ReadmeShot.\(kind)", provider: ReadmeShotProvider()) { _ in
+            ReadmeShotView(kind: kind)
         }
-        .configurationDisplayName("README screenshot")
-        // Small as well as the shot's own family: the simulator renders its
-        // default size (small), and a widget offering only medium came up on
-        // an empty timeline. Offered both, it shows both; the capture keeps
-        // the larger card.
-        .supportedFamilies(Self.shot.family == .systemSmall ? [.systemSmall] : [.systemSmall, Self.shot.family])
+        .configurationDisplayName("README · \(kind)")
+        .supportedFamilies([family])
         .contentMarginsDisabled()
     }
 }
