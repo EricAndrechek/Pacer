@@ -131,11 +131,31 @@ for name kind display in $shots; do
                 return "Pacer row not found"
             end tell' 2>&1 | sed 's/^/[widgets] pick-app: /'
         sleep 3
+        osascript -e 'tell application "System Events" to tell process "WidgetKit Simulator"
+                set theList to outline 1 of scroll area 1 of group 2 of splitter group 1 of group 1 of window "Choose a Widget"
+                repeat with r in rows of theList
+                    try
+                        if (value of static text 1 of UI element 1 of r) starts with "README screenshot" then
+                            select r
+                            exit repeat
+                        end if
+                    end try
+                end repeat
+                set bs to buttons of group 2 of splitter group 1 of group 1 of window "Choose a Widget"
+                set out to "buttons: "
+                repeat with b in bs
+                    set out to out & (title of b as text) & "/" & (description of b as text) & "; "
+                end repeat
+                click item (count of bs) of bs
+                return out & "clicked last"
+            end tell' 2>&1 | sed 's/^/[widgets] choose: /'
+        sleep 4
+        screencapture -x /tmp/after-choose.png && mkdir -p "$OUT/debug-widgets" && cp /tmp/after-choose.png "$OUT/debug-widgets/after-choose.png"
         osascript -e 'set out to ""
             tell application "System Events" to tell process "WidgetKit Simulator"
                 set targets to {}
                 try
-                    set targets to entire contents of group 2 of splitter group 1 of group 1 of window "Choose a Widget"
+                    set targets to entire contents of window 1
                 end try
                 try
                     set targets to targets & (entire contents of sheet 1 of window 1)
