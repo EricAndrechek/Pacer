@@ -86,10 +86,7 @@ struct ContentView: View {
     /// surfacing the dashboard.
     private var windowSubtitle: String { Self.windowSubtitle(for: scopedAccount) }
 
-    /// Shared with the screenshot harness, which draws its own title bar and
-    /// would otherwise carry a second copy of this format — a copy that could
-    /// only ever drift away from what the window actually says.
-    static func windowSubtitle(for account: Account?) -> String {
+    private static func windowSubtitle(for account: Account?) -> String {
         guard let account else { return "" }
         let parts: [String?] = [
             account.latestFiveHourPct.map { "5h \(Int($0.rounded()))%" },
@@ -388,7 +385,7 @@ struct ContentView: View {
         switch selection.wrappedValue {
         case .dashboard: DashboardView().id(dayKey)
         case .history:   HistoryView().id(dayKey)
-        case .projects:  ProjectsView().id(dayKey)
+        case .projects:  ProjectsView(initialScope: ScreenshotMode.projectsInitialScope).id(dayKey)
         case .models:    ModelsView().id(dayKey)
         case .settings:  SettingsView()
         }
@@ -490,9 +487,6 @@ private struct SidebarItem: View {
 /// Previously lived in the sidebar header; moved to the toolbar to
 /// match macOS-native chrome conventions (Linear / Reeder / Things
 /// all surface live state in their toolbars, not their sidebars).
-/// Not `private` only so the screenshot harness can host it in its synthetic
-/// title bar — a `.toolbar` item cannot render into an offscreen `NSHostingView`
-/// on its own. See `MacWindowChrome`.
 struct ToolbarFreshness: View {
     // MARK: Why these are fetched on a timer instead of via `@Query`
     //

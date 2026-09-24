@@ -95,13 +95,8 @@ verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — 
 pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + models.dev anthropic gap-fill). Commit the resulting JSON.
 	@bin/update-pricing-snapshot.sh
 
-screenshots: verify  ## Regenerate README screenshots into docs/screenshots/. Headless, synthetic data, no focus steal — safe to run alongside a live Pacer. Re-run after any meaningful UI change.
-	@mkdir -p "$(REPO_ROOT)/docs/screenshots"
-	@bin="$(REPO_ROOT)/Build/Products/Debug/Pacer.app/Contents/MacOS/Pacer"; \
-	if [ ! -x "$$bin" ]; then echo "ERROR: build missing at $$bin (did 'make verify' succeed?)"; exit 1; fi; \
-	PACER_SCREENSHOT_MODE=1 PACER_SCREENSHOT_DIR="$(REPO_ROOT)/docs/screenshots" "$$bin" \
-	  || { echo "ERROR: screenshot run failed (exit $$?) — see the lines above"; exit 1; }; \
-	echo "Wrote PNGs to $(REPO_ROOT)/docs/screenshots/"
+screenshots: verify  ## README screenshots: real window, synthetic data. CI → docs/screenshots; locally APPROVED=1 → screenshots/preview (captures the screen invisibly — see bin/dev-screenshots.sh).
+	@bin/dev-screenshots.sh $(if $(APPROVED),--owner-approved,)
 
 app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate

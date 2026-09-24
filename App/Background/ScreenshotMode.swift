@@ -164,10 +164,25 @@ enum ScreenshotMode {
         await engine.recompute(now: Date())
         screenshotEngine = engine
 
-        // Order out any stray scene window SwiftUI may have created so
-        // nothing flashes on screen. We capture our own hosting views
-        // directly, so other windows are irrelevant to the output.
+        // The app's own dashboard window — the one `Window("Pacer", id: "main")`
+        // makes at launch, hosting the real `ContentView` over this fixture's
+        // container. Kept for the window scenes (see `captureRealWindow`);
+        // every other window SwiftUI made is ordered out so nothing flashes.
+        sceneWindow = NSApp.windows.first { MainWindowPlacement.isDashboard($0) }
         for window in NSApp.windows { window.orderOut(nil) }
+        log(sceneWindow == nil ? "⚠️ no scene window — window scenes will fail"
+                               : "scene window: \(sceneWindow!.identifier?.rawValue ?? "-")")
+        // The real window's forecasts come from the app's own engine, the one
+        // `PacerApp` injects — warm it the way `screenshotEngine` is warmed.
+        // And each account's: on "all accounts" the pace card asks every
+        // account's own fit, so an unwarmed one draws no forecast at all.
+        if let service = (NSApp.delegate as? PacerAppDelegate)?.backgroundService {
+            await service.engine.recompute(now: Date())
+            let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
+            for account in accounts {
+                await service.engines.engine(forAccount: account.id).recompute(now: Date())
+            }
+        }
 
         // A richer menu-bar readout for the status-bar shot than the default
         // (icon + 5-hour %): the icon, both fixed windows, and the seeded
@@ -178,17 +193,24 @@ enum ScreenshotMode {
             forKey: PacerSettings.Key.menuBarChips
         )
 
-        // Window scenes — framed like a real macOS window screenshot:
-        // traffic-light titlebar, rounded corners, a soft drop shadow on
-        // a transparent margin.
-        await capture("dashboard", width: 1280, height: 860, scheme: .light,
-                      card: true, chrome: true, title: "Dashboard", container: container) { ContentView() }
-        await capture("dashboard-dark", width: 1280, height: 860, scheme: .dark,
-                      card: true, chrome: true, title: "Dashboard", container: container) { ContentView() }
-        await capture("history", width: 1180, height: 840, scheme: .light,
-                      card: true, chrome: true, title: "History", container: container) { HistoryView() }
-        await capture("models", width: 1180, height: 900, scheme: .light,
-                      card: true, chrome: true, title: "Models", container: container) { ModelsView() }
+        // Iterating on the window scenes alone: skips the minutes of view
+        // renders around them.
+        let windowsOnly = ProcessInfo.processInfo.environment["PACER_SCREENSHOT_WINDOWS_ONLY"] == "1"
+
+        // Window scenes — the app's real window, captured by the window server
+        // (#128). Title bar, traffic lights, toolbar capsules, sidebar and
+        // shadow are whatever macOS draws for Pacer, so they cannot drift from
+        // the app the way the hand-drawn `MacWindowChrome` did.
+        await captureRealWindow("dashboard", size: CGSize(width: 1280, height: 912), scheme: .light, tab: .dashboard)
+        await captureRealWindow("dashboard-dark", size: CGSize(width: 1280, height: 912), scheme: .dark, tab: .dashboard)
+        await captureRealWindow("history", size: CGSize(width: 1280, height: 892), scheme: .light, tab: .history)
+        await captureRealWindow("models", size: CGSize(width: 1280, height: 952), scheme: .light, tab: .models)
+        if windowsOnly {
+            await captureRealWindow("projects-collections", size: CGSize(width: 1280, height: 952),
+                                    scheme: .light, tab: .projects)
+            log("window screenshots complete")
+            return
+        }
 
         // The menu-bar experience as one cohesive image: a slice of the
         // macOS menu bar with Pacer's readout, and the click-down popover
@@ -227,15 +249,11 @@ enum ScreenshotMode {
         }
         // The integrated Projects tab: collection filter bar + per-row
         // membership chips (the "not a separate tab" model).
-        await capture("projects-collections", width: 1060, height: 900, scheme: .light,
-                      card: true, chrome: true, title: "Projects", container: container) {
-            ProjectsView()
-        }
+        await captureRealWindow("projects-collections", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects)
         // Scoped into a nested collection — shows the composition breakdown.
-        await capture("projects-collections-scoped", width: 1060, height: 940, scheme: .light,
-                      card: true, chrome: true, title: "Projects", container: container) {
-            ProjectsView(initialScope: "client")
-        }
+        await captureRealWindow("projects-collections-scoped", size: CGSize(width: 1280, height: 992),
+                                scheme: .light, tab: .projects, projectsScope: "client")
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
@@ -997,10 +1015,6 @@ enum ScreenshotMode {
         scheme: ColorScheme,
         card: Bool,
         cornerRadius: CGFloat = 14,
-        chrome: Bool = false,
-        title: String = "",
-        /// What `navigationSubtitle` shows: the scoped account's 5h/7d.
-        subtitle: String = "",
         container: ModelContainer,
         @ViewBuilder _ content: () -> some View
     ) async {
@@ -1013,28 +1027,13 @@ enum ScreenshotMode {
         let host = screenshotEngine.map {
             EngineHost(container: container, preseeded: [.allAccounts: $0])
         }
-        // The same string `navigationSubtitle` shows, from the same helper —
-        // the scoped account's 5h/7d, or the active login on a default scope.
-        let subtitle = chrome ? Self.windowSubtitle(container: container) : ""
         let inner = content()
             .modelContainer(container)
             .environment(\.usageEngine, screenshotEngine)
             .environment(\.usageEngines, host)
             .frame(width: width, height: height)
 
-        // Optional macOS window chrome — a titlebar with traffic-light
-        // buttons above the content, so window scenes read like a real
-        // app-window screenshot.
-        let framed: AnyView = chrome
-            ? AnyView(VStack(spacing: 0) {
-                MacWindowChrome(title: title, subtitle: subtitle) {
-                    AccountScopeControl()
-                    ToolbarFreshness()
-                }
-                .modelContainer(container)
-                inner
-            })
-            : AnyView(inner)
+        let framed = AnyView(inner)
 
         let decorated: AnyView
         if card {
@@ -1115,6 +1114,176 @@ enum ScreenshotMode {
             log("⚠️ write failed for \(name): \(error)")
         }
         window.orderOut(nil)
+    }
+
+    // MARK: - Real-window scenes (#128)
+
+    /// The app's dashboard window, kept by `captureAll` for the window scenes.
+    @MainActor private static var sceneWindow: NSWindow?
+
+    /// The collection the Projects tab opens scoped to — nil except while the
+    /// `projects-collections-scoped` scene renders. A static, not an
+    /// environment value, because the real window's environment is `PacerApp`'s
+    /// rather than the harness's; `ContentView` reads it when it builds the tab.
+    @MainActor static var projectsInitialScope: String?
+
+    /// Where `bin/pacer-screenshot-capture.swift` listens for requests. Set by
+    /// `make screenshots`, which starts it; without it there is nothing to
+    /// capture a window with, and the window scenes fail.
+    private static var captureDirectory: URL? {
+        guard let dir = ProcessInfo.processInfo.environment["PACER_SCREENSHOT_CAPTURE_DIR"],
+              !dir.isEmpty else { return nil }
+        return URL(fileURLWithPath: dir, isDirectory: true)
+    }
+
+    /// Render a window scene in the app's **real** window and have the capture
+    /// helper photograph it through the window server.
+    ///
+    /// This replaces `MacWindowChrome`, a hand-drawn title bar that drifted
+    /// from the real one six times (see #128) and could not draw what macOS
+    /// composites — the toolbar capsules, vibrant label colours, the shadow.
+    /// Everything in the frame is now the shipped window: `ContentView` inside
+    /// `Window("Pacer", id: "main")`, over this run's fixture container.
+    @MainActor
+    private static func captureRealWindow(
+        _ name: String, size: CGSize, scheme: ColorScheme,
+        tab: ContentView.Destination, projectsScope: String? = nil
+    ) async {
+        guard let window = sceneWindow else { note("capture \(name): the app made no scene window"); return }
+        guard let dir = captureDirectory else {
+            note("capture \(name): no capture helper — run through `make screenshots`")
+            return
+        }
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        guard await place(window, size: size, captureDirectory: dir) else {
+            note("capture \(name): could not place the window where it can be captured unseen")
+            return
+        }
+        // Leave the tab and come back, always, once the window is on screen.
+        // Projects reads its scope when the tab is built; and SwiftUI attaches
+        // the toolbar and navigation title on an update after the window's
+        // first appearance — the first scene, already on its tab, had none and
+        // captured a bare "Pacer" title bar with no toolbar.
+        projectsInitialScope = projectsScope
+        let away: ContentView.Destination = tab == .settings ? .dashboard : .settings
+        NotificationCenter.default.post(name: .pacerSelectDestination, object: away)
+        await settle(seconds: 0.3)
+        NotificationCenter.default.post(name: .pacerSelectDestination, object: tab)
+        // SwiftUI attaches the toolbar and the navigation title when the window
+        // is ordered in — but not on the first order-in after launch, since the
+        // run orders the scene window out while SwiftUI is still setting it up.
+        // Neither a tab switch nor an appearance change brings it; ordering out
+        // and back in does. Without this the first scene of every run captured
+        // a bare "Pacer" title bar with no toolbar.
+        if window.toolbar == nil {
+            window.orderOut(nil)
+            await settle(seconds: 0.3)
+            guard await place(window, size: size, captureDirectory: dir) else {
+                note("capture \(name): could not re-place the window")
+                return
+            }
+        }
+        let attachDeadline = Date().addingTimeInterval(5)
+        while Date() < attachDeadline, window.toolbar == nil || window.title == "Pacer" {
+            await settle(seconds: 0.1)
+        }
+        // As long as the view-snapshot path waits: SwiftUI mounts, @Query
+        // fetches land, caches refresh, Charts lay out, the engine answers.
+        await settle(seconds: 3.6)
+
+        log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
+        let png = outputDirectory.appendingPathComponent("\(name).png")
+        let failed = dir.appendingPathComponent("\(name).failed")
+        try? FileManager.default.removeItem(at: png)
+        try? FileManager.default.removeItem(at: failed)
+        let request: [String: Any] = ["windowID": window.windowNumber,
+                                      "scale": window.backingScaleFactor,
+                                      "png": png.path]
+        if let data = try? JSONSerialization.data(withJSONObject: request) {
+            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline,
+              !FileManager.default.fileExists(atPath: png.path),
+              !FileManager.default.fileExists(atPath: failed.path) {
+            await settle(seconds: 0.1)
+        }
+        if FileManager.default.fileExists(atPath: png.path) {
+            log("✓ \(name).png (real window, @\(Int(window.backingScaleFactor))×)")
+        } else {
+            let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "timed out"
+            note("capture \(name): \(why)")
+        }
+        window.orderOut(nil)
+    }
+
+    /// Put the window somewhere it can be captured without anyone seeing it.
+    ///
+    /// - **CI**, where the helper made a 2× virtual display: there, frontmost
+    ///   and key, so the traffic lights are in colour. The runner has nobody
+    ///   whose focus this could take.
+    /// - **A person's Mac** (`make screenshots APPROVED=1`, for previews):
+    ///   a level beneath the desktop picture, never activated. The wallpaper
+    ///   covers it on every display, so nothing appears; ScreenCaptureKit
+    ///   still captures a covered window. It is shown only once the window
+    ///   server confirms the wallpaper is above it — AppKit will otherwise
+    ///   happily keep a window on screen where it was not meant to be.
+    ///   Traffic lights are grey here: only the key window has colour.
+    @MainActor
+    private static func place(_ window: NSWindow, size: CGSize, captureDirectory dir: URL) async -> Bool {
+        let displayFile = dir.appendingPathComponent("display")
+        if let raw = try? String(contentsOf: displayFile, encoding: .utf8),
+           let id = CGDirectDisplayID(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+           let screen = NSScreen.screens.first(where: {
+               ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id }) {
+            window.level = .normal
+            window.alphaValue = 1
+            window.setFrame(NSRect(x: screen.frame.minX + 60, y: screen.frame.maxY - size.height - 60,
+                                   width: size.width, height: size.height), display: true)
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return true
+        }
+
+        guard ProcessInfo.processInfo.environment["PACER_SCREENSHOT_LOCAL_APPROVED"] == "1" else { return false }
+        // A display the whole window fits on: on a smaller one AppKit shrinks
+        // it, and the scene renders at the wrong size.
+        let fits = NSScreen.screens.filter {
+            $0.visibleFrame.width >= size.width && $0.visibleFrame.height >= size.height }
+        guard let screen = fits.max(by: { $0.backingScaleFactor < $1.backingScaleFactor }) else {
+            log("⚠️ no display is \(Int(size.width))×\(Int(size.height)) pt or larger")
+            return false
+        }
+        let desktopLevel = Int(CGWindowLevelForKey(.desktopWindow))
+        // The wallpaper sits at desktop − 1 and each display's backstop at
+        // desktop − 3; between them is covered everywhere and still composited.
+        window.level = NSWindow.Level(rawValue: desktopLevel - 2)
+        window.alphaValue = 0.001
+        let frame = NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.midY - size.height / 2,
+                           width: size.width, height: size.height)
+        window.setFrame(frame, display: false)
+        window.orderFrontRegardless()
+        await settle(seconds: 0.3)   // the order-in reaches the window server on a run-loop turn
+
+        let mainHeight = NSScreen.screens.first?.frame.height ?? 0
+        let mine = CGRect(x: window.frame.minX, y: mainHeight - window.frame.maxY,
+                          width: window.frame.width, height: window.frame.height)
+        let above = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], CGWindowID(window.windowNumber))
+            as? [[String: Any]] ?? []
+        let covered = above.contains { info in
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer <= desktopLevel,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds) else { return false }
+            return rect.contains(mine)
+        }
+        guard covered else {
+            window.orderOut(nil)
+            log("⚠️ the window was not under the wallpaper — withdrawn before it was shown")
+            return false
+        }
+        window.alphaValue = 1
+        return true
     }
 
     /// Yield to the main run loop for `seconds` without blocking it, so
@@ -1433,15 +1602,6 @@ extension ScreenshotMode {
     /// Names are fictional and obviously so. Rate-limit and usage rows stay
     /// attributed as they were: the scope defaults to "all accounts", so the
     /// numbers on screen are unchanged, and only the account surfaces appear.
-    /// The active account's 5h/7d, formatted by `ContentView` itself.
-    @MainActor
-    private static func windowSubtitle(container: ModelContainer) -> String {
-        let ctx = ModelContext(container)
-        let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
-        return ContentView.windowSubtitle(
-            for: accounts.first { $0.isActive } ?? accounts.first)
-    }
-
     /// Rate-limit history for the account that is *not* signed in.
     ///
     /// "All accounts" draws a pace column set per account, and without this the
@@ -1847,102 +2007,6 @@ private struct CollectionEditorShowcase: View {
             otherCollections: [("side", "Side Projects")],
             onSave: { _ in }
         )
-    }
-}
-
-/// A stand-in for the title bar, because the app does not own one.
-///
-/// `.navigationTitle`, `.navigationSubtitle` and `.toolbar { }` are
-/// instructions to AppKit, which draws the bar in a real window's frame view.
-/// There is no app-side code to reuse here — only a bar to approximate — and
-/// an approximation drifts: this one centred the title, omitted the subtitle
-/// and drew "All accounts" beside a glyph the real toolbar shows alone.
-///
-/// It was measured, not assumed. A titled `NSWindow` hosting `ContentView`
-/// off-screen *does* get the real thing — `title=Dashboard`,
-/// `subtitle=5h 32% • 7d 62%`, a live `NSToolbar` with four items — and its
-/// frame view captures without ever going on screen. Two things stopped it
-/// replacing this outright: the traffic lights render grey because the window
-/// never becomes key, and making it key means activating the app, which
-/// AGENTS.md forbids; and `.primaryAction` items do not take their trailing
-/// placement in a hand-built window. Tracked as a follow-up.
-///
-/// So: everything the app *does* own is the real thing — the toolbar items are
-/// the live views, and the subtitle comes from `ContentView.windowSubtitle`.
-/// Only what AppKit would draw is approximated here.
-///
-/// It also carries the **toolbar**, which is the only way those controls reach
-/// a screenshot at all: the scenes render a SwiftUI view into an offscreen
-/// `NSHostingView`, and a `.toolbar { }` modifier needs a real window's toolbar
-/// to attach to. There isn't one, so every trailing toolbar item — the account
-/// switcher and the freshness pill both — silently rendered nowhere. The
-/// screenshots were not showing a different app; they were showing this app
-/// with its title bar amputated.
-///
-/// Hosting the real views here rather than drawing a mock-up of them keeps the
-/// image honest: if `AccountScopeControl` changes, so does the screenshot.
-private struct MacWindowChrome<Trailing: View>: View {
-    let title: String
-    let subtitle: String
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        HStack(spacing: 10) {
-            dot(Color(red: 1.00, green: 0.37, blue: 0.34))   // close
-            dot(Color(red: 1.00, green: 0.74, blue: 0.18))   // minimize
-            dot(Color(red: 0.16, green: 0.80, blue: 0.27))   // zoom
-
-            // The split-view toggle AppKit puts beside the lights.
-            Image(systemName: "sidebar.leading")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 6)
-
-            // Title and subtitle are LEADING and stacked — a
-            // `NavigationSplitView` detail title is not centred, and the
-            // subtitle under it is where `navigationSubtitle` puts the
-            // active account's 5h/7d. Centring it and dropping the subtitle
-            // made these screenshots visibly not the app.
-            if !title.isEmpty {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .semibold))
-                    if !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.leading, 8)
-            }
-
-            Spacer(minLength: 12)
-
-            // `.iconOnly` because that is what a real macOS toolbar does to a
-            // `Label`, and outside one SwiftUI defaults to title-and-icon. The
-            // first version of this let that default stand and drew "All
-            // accounts" beside the glyph — text the actual title bar never
-            // shows. A screenshot has to be the app, not a more legible
-            // version of it.
-            //
-            // `fixedSize` because a `Menu` in a plain HStack takes all the
-            // width it is offered; without it the control spanned the bar.
-            trailing
-                .labelStyle(.iconOnly)
-                .pacerDenseControl()
-                .fixedSize()
-        }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity)
-        .frame(height: 52)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
-        }
-    }
-
-    private func dot(_ color: Color) -> some View {
-        Circle().fill(color).frame(width: 12, height: 12)
     }
 }
 

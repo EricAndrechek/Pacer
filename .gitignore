@@ -86,3 +86,5 @@ Vendor/DuckDB.xcframework.zip
 # under screenshots/ is diagnostic and never committed; the README set is
 # generated from fake data by `make screenshots`.
 screenshots/live*/
+screenshots/preview/
+screenshots/recordings/
