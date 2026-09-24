@@ -95,7 +95,6 @@ struct Request: Decodable {
     var png: String?
     var rect: [Double]?
     var click: [Double]?
-    var pid: Int32?
     var dark: Bool?
     var done: String?
 }
@@ -138,29 +137,10 @@ func captureMenuBar(_ request: Request) async throws {
         // under the bar, the item's pressed highlight. Posting input is for
         // the disposable CI runner only (guarded above); never on a person's Mac.
         let point = CGPoint(x: c[0], y: c[1])
-        // Pressed through Accessibility by System Events, which GitHub's
-        // runners grant Accessibility to — a click posted from this freshly
-        // built binary was silently dropped (it holds no such grant). AXPress
-        // on the status item is what a click does: macOS opens the menu natively.
-        if let pid = request.pid {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            p.arguments = ["-e", """
-                tell application "System Events" to tell (first process whose unix id is \(pid)) \
-                to click menu bar item 1 of menu bar 2
-                """]
-            let err = Pipe(); p.standardError = err
-            try p.run()
-            // Not waited on: the press does not return until the menu closes.
-            try await Task.sleep(for: .milliseconds(300))
-            log("AXPress sent (osascript running: \(p.isRunning))")
-        } else {
-            for type in [CGEventType.leftMouseDown, .leftMouseUp] {
-                CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
-                    .post(tap: .cghidEventTap)
-                try await Task.sleep(for: .milliseconds(60))
-            }
-            log("click posted (post-event access: \(CGPreflightPostEventAccess()))")
+        for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+            CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
+                .post(tap: .cghidEventTap)
+            try await Task.sleep(for: .milliseconds(60))
         }
         try await Task.sleep(for: .milliseconds(1200))   // open + animation
         // Crop to the menu the click opened — found by its window level, since
