@@ -209,18 +209,17 @@ extension ReadmeShotWidget {
         let (kind, family) = WidgetFixtures.readmeShots[Self.index]
         // `ReadmeShot.<kind>`: its own kind (a bundle's kinds must differ), a
         // stable one for `_XCWidgetKind` to name; the one family the README
-        // shows it in.
+        // shows it in. No display name: WidgetKit trapped (on the CI runner,
+        // while listing the bundle) on an interpolated one, and nothing
+        // shows it here.
         return StaticConfiguration(kind: "ReadmeShot.\(kind)", provider: ReadmeShotProvider()) { _ in
             ReadmeShotView(kind: kind)
         }
-        .configurationDisplayName("README · \(kind)")
         .supportedFamilies([family])
         .contentMarginsDisabled()
     }
 }
 
-// One concrete type per shot, not one generic type: the extension trapped
-// while WidgetKit listed a bundle of `ReadmeShotWidget<Slot>` specializations.
 struct ReadmeShot0: ReadmeShotWidget { static let index = 0 }
 struct ReadmeShot1: ReadmeShotWidget { static let index = 1 }
 struct ReadmeShot2: ReadmeShotWidget { static let index = 2 }
