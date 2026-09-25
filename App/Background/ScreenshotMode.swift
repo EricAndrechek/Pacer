@@ -1260,10 +1260,10 @@ enum ScreenshotMode {
                 return (w, d)
             }
             NotificationCenter.default.post(name: .pacerScreenshotCollections, object: sheet)
-            let sheetDeadline = Date().addingTimeInterval(5)
+            let sheetDeadline = Date().addingTimeInterval(10)
             while Date() < sheetDeadline, topSheet().depth < depth { await settle(seconds: 0.1) }
             guard topSheet().depth >= depth else {
-                note("capture \(name): the \(sheet) sheet did not open (depth \(topSheet().depth)); windows: "
+                note("capture \(name): the \(sheet) sheet did not open (depth \(topSheet().depth)); modal=\(NSApp.modalWindow.map { "\($0)" } ?? "-") active=\(NSApp.isActive) main=\(NSApp.mainWindow?.title ?? "-") key=\(NSApp.keyWindow?.title ?? "-") windows: "
                      + NSApp.windows.map { "\(type(of: $0)) \"\($0.title)\" visible=\($0.isVisible) sheet=\($0.isSheet) parent=\($0.sheetParent.map { "\(type(of: $0))" } ?? "-") \($0.frame)" }
                         .joined(separator: " | "))
                 await closeCollectionsSheets(on: window)

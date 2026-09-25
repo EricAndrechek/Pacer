@@ -132,6 +132,7 @@ struct ProjectsView: View {
         }
         .sheet(isPresented: $showingCollectionsManager) {
             CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
+                .onAppear { if ScreenshotMode.isActive { Log.write("Screenshots", "collections manager content appeared") } }   // DIAGNOSIS
         }
         .pacerModalNavigation(root: $modalRoot)
         .onAppear {
@@ -147,7 +148,10 @@ struct ProjectsView: View {
             }
             collectionsManagerStartNew = false
             editingCollectionID = request.hasPrefix("edit:") ? String(request.dropFirst(5)) : nil
-            showingCollectionsManager = true
+            DispatchQueue.main.async {
+                showingCollectionsManager = true
+                Log.write("Screenshots", "showingCollectionsManager = \(showingCollectionsManager)")   // DIAGNOSIS
+            }
         }
     }
 
