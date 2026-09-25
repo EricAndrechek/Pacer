@@ -35,8 +35,12 @@ later overnight loops, so don't put durable knowledge there.
    ```
    Read left-to-right through the cycle. `fast=N/M` shows how many
    dirty pairs took the daily recomputer's incremental fast path vs
-   full recompute — large gaps signal pollution (recovery /
-   cost-version bump / migration).
+   full recompute; `hFast=`, `pFast=` and `sFast=` give the same ratio
+   for the hourly, project and session rollups. Occasional gaps are
+   pollution (recovery / cost-version bump / migration / the 10-minute
+   live rebuild). A ratio that stays near `0/M` cycle after cycle is a
+   fast path that has silently stopped applying — `sFast` sat there for
+   months, costing 1–2 s a cycle, because only the daily ratio was logged.
 2. **`make perf-snapshot`.** One-shot CLI: 10 s `sample(1)` CPU
    profile, 5× `top` snapshots, last 500 log lines distilled into
    P50/P90/P99 + per-phase median, sqlite row counts. Output:
