@@ -17,7 +17,7 @@ on:
   pull_request:
     types: [ready_for_review]
   workflow_dispatch:
-  push:  # TEMPORARY — verifying the WidgetKit Simulator widget shots
+  push:  # TEMPORARY — one clean verification run
     branches: [feat/widgetkit-sim-shots]
 
 permissions:
@@ -52,9 +52,6 @@ jobs:
       # through an xcconfig xcodebuild applies over every target, so no build
       # that ships can show fake numbers.
       - name: Render screenshots
-        continue-on-error: true  # TEMPORARY — keep the debug captures
-        env:
-          PACER_WIDGETSIM_DEBUG: "1"  # TEMPORARY
         run: |
           printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) PACER_WIDGET_FIXTURES\n' \
               > "$RUNNER_TEMP/widget-fixtures.xcconfig"

@@ -91,33 +91,6 @@ shots=(
     daily-chart   DailyChartWidget   medium
     top-projects  TopProjectsWidget  medium
 )
-# DIAGNOSIS — temporary: which of (the bundle, the environment) breaks loading.
-if [[ -n $DEBUG_DIR ]]; then
-    for variant in none kind both; do
-        quit_simulator
-        defaults delete com.apple.widgetkit.simulator 2>/dev/null
-        defaults write com.apple.widgetkit.simulator ApplePersistenceIgnoreState -bool YES
-        envs=()
-        [[ $variant != none ]] && envs+=(--env _XCWidgetKind=ReadmeShot.TodayCostWidget)
-        [[ $variant == both ]] && envs+=(--env _XCWidgetFamily=small)
-        prepare
-        open -n $envs -a "$SIM" "$APPEX"
-        request "diag-$variant" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/diag-$variant.png\",\"debug\":\"$DEBUG_DIR/diag-$variant-window.png\"}" \
-            && log "diag $variant: loaded" || log "diag $variant: failed"
-    done
-    ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i pacer | sed 's/^/[widgets] crash: /'
-    for f in ~/Library/Logs/DiagnosticReports/PacerWidgets*(N); do python3 -c "
-import json,sys
-t=open(sys.argv[1]).read(); body=json.loads(t[t.index(chr(10))+1:])
-imgs=body.get('usedImages',[])
-for fr in body['threads'][body.get('faultingThread',0)]['frames'][:25]:
-    im=imgs[fr['imageIndex']] if fr['imageIndex']<len(imgs) else {}
-    print(im.get('name','?'), fr.get('symbol',''), fr.get('imageOffset'))
-print('asi:', body.get('asi'))" "$f" 2>&1 | sed 's/^/[widgets] crashlog: /'; done
-    /usr/bin/log show --last 5m --style compact --predicate 'process == "PacerWidgets" OR (process == "WidgetKit Simulator" AND NOT eventMessage CONTAINS "file:///System") OR (process == "chronod" AND eventMessage CONTAINS[c] "pacer")' 2>/dev/null \
-        | grep -vE 'MobileGestalt|XPCErrors|stateCapture' | grep -iE 'fail|error|descriptor|pacer|kind|family|crash|exception' | head -60 | sed 's/^/[widgets] diaglog: /'
-fi
-
 failed=0
 for name kind family in $shots; do
     quit_simulator
@@ -135,9 +108,6 @@ for name kind family in $shots; do
         log "✓ $name ($kind, $family)"
     else
         failed=1
-        [[ -n $DEBUG_DIR ]] && /usr/bin/log show --last 1m --style compact \
-            --predicate 'process == "WidgetKit Simulator" OR (process == "chronod" AND eventMessage CONTAINS "pacer")' 2>/dev/null \
-            | grep -iE 'fail|error|descriptor|pacer' | head -25 | sed "s/^/[widgets] $name log: /"   # DIAGNOSIS — temporary
     fi
 done
 quit_simulator

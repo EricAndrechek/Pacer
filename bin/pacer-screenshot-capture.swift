@@ -355,8 +355,13 @@ func captureWidgetSim(_ request: Request) async throws {
                 // darkness is the shadow's opacity. Kept as that — a black
                 // shadow on transparency — rather than the page's white, which
                 // would sit as a white box on a dark README.
+                // The margin stops short of where the shadow does, so it is
+                // faded out over the crop's outer 4 pt: cut off instead, it
+                // leaves a faint hard-edged box round each widget in the gallery.
                 out.data[oi] = 0; out.data[oi + 1] = 0; out.data[oi + 2] = 0
-                out.data[oi + 3] = UInt8(max(0, 255 - src.luma(x, y)))
+                let edge = min(x - x0, x1 - x, y - y0, y1 - y)
+                let fade = min(1, Double(edge) / max(1, 4 * scale))
+                out.data[oi + 3] = UInt8(Double(max(0, 255 - src.luma(x, y))) * fade)
             }
         }
     }
