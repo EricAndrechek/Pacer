@@ -164,6 +164,109 @@ struct EngineScopeTests {
         #expect(!surfaces.isEmpty)
         #expect(surfaces.allSatisfy { $0.hasSuffix("#work") })
     }
+
+    /// Scoreboard rows no refit can re-derive, because their rollups are long
+    /// gone, for three scopes plus an account whose id starts with another's.
+    @MainActor
+    private static func seedArchivalScoreboard(_ container: ModelContainer) {
+        let context = ModelContext(container)
+        func rows(_ surface: String, periods: Int, month: Int) {
+            for day in 1...periods {
+                context.insert(EngineEvalOutcome(
+                    surface: surface, method: "archival", bucket: "cut=0.75|all",
+                    periodKey: String(format: "2020-%02d-%02d", month, day),
+                    predicted: 90, truth: 100))
+            }
+        }
+        rows("eod", periods: 3, month: 1)
+        rows("eod#work", periods: 5, month: 2)
+        rows("eod#personal", periods: 2, month: 3)
+        rows("eod#workshop", periods: 7, month: 4)   // contains "#work"
+        try? context.save()
+    }
+
+    private static func archivalPeriods(_ engine: UsageIntelligenceEngine) async -> Int? {
+        await engine.selfEvalAccuracy()?.methods.first { $0.method == "archival" }?.periods
+    }
+
+    /// The scoreboard read is narrowed to the engine's own scope. It has to
+    /// keep every one of that scope's rows (including ones only the store
+    /// still has) and none of another's, including an account whose id merely
+    /// starts with this one's.
+    @Test func anEngineReadsItsWholeScoreboardAndNoOtherScope() async throws {
+        let container = try Self.makeContainer()
+        let now = Date()
+        await MainActor.run {
+            Self.seed(container, now: now)
+            Self.seedArchivalScoreboard(container)
+        }
+
+        let work = UsageIntelligenceEngine(modelContainer: container)
+        await work.adopt(scope: .account("work"))
+        await work.recompute(now: now)
+        #expect(await Self.archivalPeriods(work) == 5)
+
+        let all = UsageIntelligenceEngine(modelContainer: container)
+        await all.recompute(now: now)
+        #expect(await Self.archivalPeriods(all) == 3)
+    }
+
+    /// After its first refit an engine answers from the scoreboard it holds in
+    /// memory. That has to stay exactly what a fresh read of the store would
+    /// give, including after new periods complete and are scored, and those
+    /// new rows have to reach the store.
+    @Test func aHeldScoreboardMatchesAFreshRead() async throws {
+        let container = try Self.makeContainer()
+        let now = Date()
+        await MainActor.run { Self.seed(container, now: now) }
+
+        let held = UsageIntelligenceEngine(modelContainer: container)
+        await held.adopt(scope: .account("work"))
+        await held.recompute(now: now)
+
+        // A day later: today completes, so there is a new period to score.
+        let dayLater = now.addingTimeInterval(86_400)
+        let outcomesBefore = try await MainActor.run {
+            let context = ModelContext(container)
+            let today = TokenSample.formatDate(now)
+            context.insert(AccountDailyAggregate(
+                accountId: "work", date: today, model: "m",
+                inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0, totalCostUSD: 12))
+            for hour in 9...12 {
+                context.insert(AccountHourlyAggregate(
+                    accountId: "work", date: today, hour: hour, model: "m",
+                    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                    cacheCreation5mTokens: 0, cacheCreation1hTokens: 0, totalCostUSD: 3))
+            }
+            try context.save()
+            return try context.fetchCount(FetchDescriptor<EngineEvalOutcome>())
+        }
+        await held.recompute(now: dayLater)
+        let afterHeld = try await MainActor.run {
+            try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>())
+        }
+        #expect(afterHeld > outcomesBefore, "the new day was scored and saved")
+
+        let fresh = UsageIntelligenceEngine(modelContainer: container)
+        await fresh.adopt(scope: .account("work"))
+        await fresh.recompute(now: dayLater)
+        let afterFresh = try await MainActor.run {
+            try ModelContext(container).fetchCount(FetchDescriptor<EngineEvalOutcome>())
+        }
+        #expect(afterFresh == afterHeld, "nothing left unsaved for a fresh engine to score")
+
+        func sorted(_ a: EngineSelfEval.Accuracy?) -> [EngineSelfEval.Accuracy.MethodStat]? {
+            a?.methods.sorted { $0.method < $1.method }
+        }
+        let heldAccuracy = await held.selfEvalAccuracy()
+        let freshAccuracy = await fresh.selfEvalAccuracy()
+        #expect(heldAccuracy != nil)
+        #expect(sorted(heldAccuracy) == sorted(freshAccuracy))
+        let heldRecord = await held.eveningTrackRecord()
+        let freshRecord = await fresh.eveningTrackRecord()
+        #expect(heldRecord == freshRecord)
+    }
 }
 
 /// The diurnal model learns its accrual *shape* from completed cycles. With

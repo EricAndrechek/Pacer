@@ -80,7 +80,27 @@ public actor UsageIntelligenceEngine {
     /// (the screenshot harness, tests) keeps today's behaviour untouched.
     public private(set) var scope: EngineScope = .allAccounts
 
-    public func adopt(scope: EngineScope) { self.scope = scope }
+    public func adopt(scope: EngineScope) {
+        self.scope = scope
+        evalRowsCache = nil
+    }
+
+    /// One scoreboard row, as the refit slices them.
+    typealias EvalRow = (key: String, surface: String, record: EngineSelfEval.Record)
+
+    /// This scope's scoreboard: read from the store on the first refit, then
+    /// kept current in memory as the refit persists new outcomes.
+    ///
+    /// Re-reading it every refit was the refit's largest phase. Every scope
+    /// engine fetched the WHOLE table (29,944 rows on a three-account store,
+    /// growing ~650 a day) and discarded all but its own scope's rows; one
+    /// scope kept 263. The scopes refit together, so each refit loaded ~120k
+    /// objects while the UI waited on the same store, and under load that
+    /// phase alone went from 0.5 s to 6 s per scope (#152).
+    ///
+    /// Safe to hold because nothing else writes these rows: the engine is the
+    /// only writer, and `EngineHost` keeps one engine per scope.
+    private var evalRowsCache: [EvalRow]?
 
     /// The most recent feature snapshot, or nil before the first recompute.
     private var features: EngineFeatures?
@@ -172,11 +192,12 @@ public actor UsageIntelligenceEngine {
         // accumulated per-user track record — not a value recomputed cold each
         // launch. Empty store ⇒ no records ⇒ safe defaults.
         //
-        // The eval table is fetched ONCE per refit and sliced in memory —
-        // it holds thousands of rows, and the previous five separate fetches
-        // (existing-keys ×2 + per-surface records ×3) were a measured ~0.4s
-        // of every refit.
-        var allRows = timed("evalRows") { fetchAllEvalRows() }
+        // The scope's rows are read from the store once, on the first refit,
+        // and held from then on (`evalRowsCache`); every refit slices them in
+        // memory. Five separate fetches a refit (existing-keys ×2 +
+        // per-surface records ×3) were a measured ~0.4 s, and one whole-table
+        // fetch a refit later grew to 0.5–6 s per scope.
+        var allRows = timed("evalRows") { evalRowsCache ?? fetchEvalRows() }
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
@@ -186,6 +207,7 @@ public actor UsageIntelligenceEngine {
             (key: EngineEvalOutcome.makeKey(surface: $0.surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey),
              surface: $0.surface, record: EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted, truth: $0.truth))
         })
+        evalRowsCache = allRows
         let bySurface = Dictionary(grouping: allRows, by: { $0.surface })
         func records(_ surface: String) -> [EngineSelfEval.Record] {
             (bySurface[surface] ?? []).map { $0.record }
@@ -1428,8 +1450,18 @@ public actor UsageIntelligenceEngine {
     /// Scoping happens at exactly two points — here on the way in and in
     /// `persist` on the way out — so everything between them works in base
     /// surface ids and needs no notion of accounts at all.
-    private func fetchAllEvalRows() -> [(key: String, surface: String, record: EngineSelfEval.Record)] {
-        let rows = (try? modelContext.fetch(FetchDescriptor<EngineEvalOutcome>())) ?? []
+    private func fetchEvalRows() -> [EvalRow] {
+        // Only this scope's rows reach memory. A scoped surface id ends in
+        // `#<account>` and a global one has no `#` (`EngineScope.suffix`), so
+        // `contains` narrows the fetch; `unqualify` below still makes the
+        // exact call.
+        let suffix = scope.suffix
+        let descriptor = suffix.isEmpty
+            ? FetchDescriptor<EngineEvalOutcome>(
+                predicate: #Predicate { !$0.surface.contains("#") })
+            : FetchDescriptor<EngineEvalOutcome>(
+                predicate: #Predicate { $0.surface.contains(suffix) })
+        let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.compactMap { row in
             guard let base = scope.unqualify(row.surface) else { return nil }
             // The *base* key, not the persisted one. `existing` is compared
