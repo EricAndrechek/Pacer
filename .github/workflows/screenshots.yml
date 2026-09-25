@@ -65,6 +65,22 @@ jobs:
           oxipng --quiet -o 4 --strip safe docs/screenshots/*.png
           du -ch docs/screenshots/*.png | tail -1
 
+      # A render re-encodes every image, so one whose pixels did not change
+      # still comes out byte-different. Committing it adds a review item and
+      # another copy in history for nothing (#154). Put those back. Exact
+      # pixels, no threshold: a real one-label change is as small as the noise.
+      - name: Keep the committed copy of images whose pixels are unchanged
+        run: |
+          set -euo pipefail
+          swiftc -O -o "$RUNNER_TEMP/png-pixels-equal" bin/png-pixels-equal.swift
+          for f in $(git diff --name-only -- 'docs/screenshots/*.png'); do
+            git show "HEAD:$f" > "$RUNNER_TEMP/committed.png"
+            if "$RUNNER_TEMP/png-pixels-equal" "$RUNNER_TEMP/committed.png" "$f"; then
+              git checkout -- "$f"
+              echo "pixels unchanged: $f"
+            fi
+          done
+
       - name: Commit the images to the branch
         env:
           BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
