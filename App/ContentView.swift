@@ -541,7 +541,9 @@ struct ToolbarFreshness: View {
     @State private var tokens: [TokenSample] = []
     @State private var rateLimits: [RateLimitSample] = []
     @State private var sessionRows: [SessionRow] = []
-    @State private var scanMeta: [ClaudeCodeMeta] = []
+    /// `lastIncrementalScanAt` as stored. See `refresh`.
+    @State private var lastScanAt: String?
+    @State private var scanReadInFlight = false
     @State private var scope = UsageScope.shared
     @Environment(\.modelContext) private var modelContext
 
@@ -555,11 +557,22 @@ struct ToolbarFreshness: View {
     /// clock moves — so this reads the one cheap unpredicated row and rebuilds
     /// the display; everything account-predicated is loaded on the write
     /// signal instead. See `refreshScopedProbes`.
+    ///
+    /// The one row is read off the main thread, like `NowStrip`'s probes: a
+    /// cheap read still waits its turn for the store, and on the main thread
+    /// at 1 Hz that turned every tick of an engine refit into a stall (#152).
     @MainActor
-    private func refresh() {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        scanMeta = (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))) ?? []
+    private func refresh() async {
+        if !scanReadInFlight {
+            scanReadInFlight = true
+            defer { scanReadInFlight = false }
+            let container = modelContext.container
+            lastScanAt = await Task.detached(priority: .userInitiated) {
+                let key = ClaudeCodeMetaKey.lastIncrementalScanAt
+                return (try? ModelContext(container).fetch(FetchDescriptor<ClaudeCodeMeta>(
+                    predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })))?.first?.value
+            }.value
+        }
         display = Display(state: freshness, label: label, tooltip: tooltip)
     }
 
@@ -658,7 +671,7 @@ struct ToolbarFreshness: View {
     }()
 
     private func parseScanMeta() -> Date? {
-        guard let raw = scanMeta.first?.value else { return nil }
+        guard let raw = lastScanAt else { return nil }
         return Self.fractionalParser.date(from: raw) ?? Self.plainParser.date(from: raw)
     }
 
@@ -735,14 +748,14 @@ struct ToolbarFreshness: View {
             .onChange(of: scope.accountId) { _, _ in refreshScopedProbes() }
             .task {
                 refreshScopedProbes()
-                refresh()
+                await refresh()
                 // `Task.sleep` rather than a `Timer` publisher so the loop is
                 // owned by the view's lifetime — it stops when the window
                 // closes instead of ticking against a dead view.
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(Self.refreshInterval))
                     if Task.isCancelled { break }
-                    refresh()
+                    await refresh()
                 }
             }
     }
