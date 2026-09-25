@@ -557,7 +557,12 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // SwiftUI's default spot on the owner's screen for seconds at
                 // every local launch. On CI there is nobody to see it; locally
                 // it is only ever allowed beneath the desktop picture.
-                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                // Its sheets too (the Collections manager and editor are
+                // photographed as sheets), under the same rule: on a person's
+                // Mac a sheet not beneath the desktop picture is hidden.
+                var root = window
+                while let parent = root.sheetParent { root = parent }
+                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(root) {
                     if !ScreenshotMode.activatesForCapture, !ScreenshotMode.isBeneathWallpaper(window) {
                         window.orderOut(nil)
                     }
