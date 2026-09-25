@@ -44,7 +44,14 @@ check() { # name expected actual
 # disagree. (That bit me once — a 157k "shortfall" that was just drift.)
 SNAP="$(mktemp -t pacer-verify).sqlite"
 trap 'rm -f "$SNAP" "$SNAP"-wal "$SNAP"-shm' EXIT
-sqlite3 "file:${STORE}?mode=ro" ".backup '$SNAP'" 2>/dev/null
+# Say why when this fails. It used to exit silently, which read like a crash
+# of the check itself. The usual cause is macOS guarding another app's group
+# container ("authorization denied"): the terminal running this needs Full
+# Disk Access.
+if ! err="$(sqlite3 "file:${STORE}?mode=ro" ".backup '$SNAP'" 2>&1)"; then
+  echo "can't read the store: ${err:-sqlite3 failed}" >&2
+  exit 1
+fi
 
 q() { sqlite3 -noheader -list -batch -init /dev/null "$SNAP" "$1" 2>/dev/null; }
 
