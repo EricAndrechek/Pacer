@@ -562,11 +562,17 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Mac a sheet not beneath the desktop picture is hidden.
                 var root = window
                 while let parent = root.sheetParent { root = parent }
-                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(root) {
+                // `isSheet` as well: a sheet's first occlusion change can come
+                // before it is attached, while `sheetParent` is still nil.
+                if ScreenshotMode.capturesRealWindow,
+                   MainWindowPlacement.isDashboard(root) || window.isSheet {
                     if !ScreenshotMode.activatesForCapture, !ScreenshotMode.isBeneathWallpaper(window) {
                         window.orderOut(nil)
                     }
                     return
+                }
+                if ScreenshotMode.isActive {
+                    Log.write("Screenshots", "closing \(type(of: window)) \"\(window.title)\" sheet=\(window.isSheet) \(window.frame)")
                 }
                 window.close()
             }
