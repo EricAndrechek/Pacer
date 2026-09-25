@@ -318,6 +318,12 @@ Rules that follow from it:
   and any local fix-ups from polluting `main`, and let the installed
   `/Applications` app come from exactly one branch at a time.
 
+  A fresh worktree has no `Vendor/DuckDB.xcframework` (80 MB, gitignored).
+  `make verify` / `make app` / `make install` run `make vendor` first, which
+  APFS-clones it from another worktree (instant, no extra disk) or builds it.
+  Don't copy it in by hand after a failed build: Xcode caches the missing
+  framework in `Build/`, and `make vendor` also clears that stale state.
+
 - **Verify before merging — build *and* run it.** `make test` +
   `make verify` is the floor; `make install` and watch `make logs` is the
   bar. Two classes of bug only show up when you actually run the branch:
