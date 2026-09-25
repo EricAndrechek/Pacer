@@ -1706,7 +1706,7 @@ public actor OAuthPoller: TokenPoolTesting {
             // Now every account writes here and reads filter by `accountId`.
             // The archive keeps its second job — cold storage past
             // `liveWindowDays` — and `evictStaleLiveRows` still fills it.
-            var wroteActiveWindow = false
+            var wroteRows = false
             if let window = captured.fiveHour {
                 Self.logIfUsageWentDown(
                     windowName: RateLimitWindowName.fiveHour,
@@ -1723,7 +1723,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     source: source,
                     accountId: key
                 ))
-                wroteActiveWindow = wroteActiveWindow || isActive
+                wroteRows = true
             }
             if let window = captured.sevenDay {
                 Self.logIfUsageWentDown(
@@ -1741,7 +1741,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     source: source,
                     accountId: key
                 ))
-                wroteActiveWindow = wroteActiveWindow || isActive
+                wroteRows = true
             }
             // Extra-usage is account-level (not per-window); write at
             // most one row per snapshot when present. nil means the
@@ -1754,7 +1754,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     source: source,
                     accountId: key
                 ))
-                wroteActiveWindow = wroteActiveWindow || isActive
+                wroteRows = true
             }
             // The scoped `limits[]` representation (per-model weekly
             // windows, severity, binding flag). One generic row per item,
@@ -1771,7 +1771,7 @@ public actor OAuthPoller: TokenPoolTesting {
                     source: source,
                     accountId: key
                 ))
-                wroteActiveWindow = wroteActiveWindow || isActive
+                wroteRows = true
             }
             if Self.evictionIsDue(now: captured.sampledAt) {
                 let moved = Self.evictStaleLiveRows(context: context, accountId: key)
@@ -1786,8 +1786,14 @@ public actor OAuthPoller: TokenPoolTesting {
                 // chart and menu draw all of them. See `RateLimitWriteSignal`.
                 let written = captured.sampledAt
                 Task { @MainActor in RateLimitWriteSignal.shared.note(written) }
-                if wroteActiveWindow {
-                    postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
+                // For every account, carrying which one. Posting only for the
+                // active login left a widget scoped to the other account, and
+                // that account's engine, stale until something else wrote
+                // (#142). The throttles downstream (per widget kind, the refit
+                // floor) make the extra posts cheap.
+                if wroteRows {
+                    postScanCycleSummary(ScanCycleSummary(
+                        rateLimitsChanged: true, rateLimitAccountId: key))
                 }
             } catch {
                 Log.write("OAuthPoller", "persist failed: \(error)")
@@ -2103,7 +2109,7 @@ public actor OAuthPoller: TokenPoolTesting {
         // the signal is a generation rather than a newest-timestamp.
         let newestFolded = archived.map(\.sampledAt).max()
         Task { @MainActor in
-            RateLimitWriteSignal.shared.note(newestFolded)
+            RateLimitWriteSignal.shared.noteHistoryRewritten(newestFolded)
             postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
         }
     }

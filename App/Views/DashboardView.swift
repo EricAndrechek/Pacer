@@ -135,12 +135,27 @@ struct RateLimitSourceChip: View {
     /// appeared, on any scope, from the moment this stopped being a `@Query`
     /// and became `@State` + a keyed fetch. An `HStack` is a real view with a
     /// real (zero-sized) identity, so its modifiers fire.
+    ///
+    /// Reloads on the rate-limit write signal, read here in `body` so the view
+    /// depends on it. It used to reload on scan cycles, which are posted only
+    /// when the active login wrote: a chip scoped to the other account, or a
+    /// stalled poller (the case the warning is for), never reloaded (#142).
+    ///
+    /// The age is clock-driven, so the content re-runs every 30 s as well.
+    /// Otherwise "3m ago" and the 15-minute warning froze until the next
+    /// write, and a stall never turned the chip yellow.
     var body: some View {
-        HStack(spacing: 0) { content }
-            .task(id: limitAccountId) { refresh() }
-            .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
-                refresh()
-            }
+        let key = RefreshKey(account: limitAccountId,
+                             generation: RateLimitWriteSignal.shared.generation)
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            HStack(spacing: 0) { content }
+        }
+        .task(id: key) { refresh() }
+    }
+
+    private struct RefreshKey: Equatable {
+        let account: String?
+        let generation: UInt64
     }
 
     @MainActor
@@ -173,8 +188,28 @@ struct RateLimitSourceChip: View {
             }
             .foregroundStyle(isStaleOAuth ? Color.yellow : .secondary)
             .help(isStaleOAuth
-                ? "Pacer hasn't received fresh data in \(pacerRelative(latest.sampledAt)). The OAuth token may have expired — try launching or quitting/reopening Claude Code to refresh it. See ~/Library/Logs/Pacer/Pacer.err.log for the poller's last outcome."
+                ? "No fresh data since \(pacerRelative(latest.sampledAt)). \(stallReason())"
                 : pacerRelativeExact(latest.sampledAt))
         }
+    }
+
+    /// Why the feed stalled, from the poller's own token state rather than a
+    /// guess. This always blamed an expired token; more often the usage
+    /// endpoint was answering 429 and the poller was backing off (#142).
+    private func stallReason() -> String {
+        let now = Date()
+        let lanes = TokenPoolStatus.shared.lanes.filter {
+            limitAccountId == nil || $0.accountKey == limitAccountId
+        }
+        if let retry = lanes.compactMap(\.cooldownUntil).filter({ $0 > now }).min() {
+            return "Polls are backing off after failed requests, usually Anthropic rate-limiting its usage endpoint. Next try \(retry.formatted(date: .omitted, time: .shortened))."
+        }
+        if lanes.isEmpty {
+            return "Pacer has no token for this account."
+        }
+        if lanes.allSatisfy({ ($0.expiresAt ?? .distantFuture) <= now }) {
+            return "The OAuth token has expired. Open or restart Claude Code to refresh it."
+        }
+        return "Recent polls failed. Details: ~/Library/Logs/Pacer/Pacer.err.log"
     }
 }
