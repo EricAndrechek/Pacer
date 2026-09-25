@@ -421,6 +421,10 @@ public final class ScanCoordinator {
     /// re-reads from a fresh disk state.
     private var cursorsCache: [String: JSONLScanner.CursorState]?
 
+    /// Outlives each cycle's `SessionInfoRecomputer` so its fast path works
+    /// on long, multi-model, multi-account sessions — see `SessionRollupCache`.
+    private let sessionRollupCache = SessionRollupCache()
+
     /// Last time we ran the auto-aliaser pass. Under heavy Claude
     /// Code activity the per-cycle SwiftData fetches inside
     /// `ProjectGitRootAutoAliaser.run` started landing in 1500-2000ms
@@ -546,7 +550,8 @@ public final class ScanCoordinator {
         let projectStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates)
         let sessionRecomputer = SessionInfoRecomputer(
-            container: container, context: context, mode: configuration.costMode)
+            container: container, context: context, mode: configuration.costMode,
+            cache: sessionRollupCache)
         let sessionStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds)
         try writeMeta(Self.aliasesFingerprintMetaKey, value: aliasesFingerprint)
@@ -634,6 +639,7 @@ public final class ScanCoordinator {
             log("startup: \(formatReport(report))")
         } catch {
             log("startup scan failed: \(error)")
+            sessionRollupCache.forgetAll()
         }
         await watcher.start(roots: resolvedRoots)
         // Apply whatever visibility state we already have at startup —
@@ -668,6 +674,9 @@ public final class ScanCoordinator {
                 logIfInteresting(report)
             } catch {
                 log("incremental scan failed: \(error)")
+                // A cycle that died part-way may have advanced the cache
+                // past what the store holds; start every session afresh.
+                sessionRollupCache.forgetAll()
             }
         }
     }
@@ -1467,7 +1476,8 @@ public final class ScanCoordinator {
         let sessionRecomputer = SessionInfoRecomputer(
             container: container,
             context: context,
-            mode: configuration.costMode
+            mode: configuration.costMode,
+            cache: sessionRollupCache
         )
         let sessionRecomputeStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds,
