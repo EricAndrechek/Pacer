@@ -293,37 +293,54 @@ public final class SessionRollupCache {
     }
 
     private var entries: [String: Values] = [:]
-    /// When each entry was last built from the session's samples (the full
-    /// path), as opposed to advanced by the fast path. Drives the rotation in
-    /// `oldestRebuilt(among:)`.
-    private var rebuiltAt: [String: Date] = [:]
+    /// When each entry stops being trusted. Set only when the entry is built
+    /// from the session's samples (the full path); the fast path advancing it
+    /// does not extend it.
+    private var expiresAt: [String: Date] = [:]
+
+    /// The longest a cached entry is advanced by deltas before the session is
+    /// rebuilt from its samples again: a hard bound on how long any drift in a
+    /// cached total can last, the same on every machine whatever the number
+    /// of active sessions. Price changes, rewritten samples and failed cycles
+    /// already reset entries immediately; this bounds whatever has no name.
+    ///
+    /// Expiry, not a sweep. A sweep (every active session rebuilt each
+    /// ten-minute pass) measured a 3.3-4.3 s scan every ten minutes on a real
+    /// store. A one-session rotation fixed the cost but made the bound depend
+    /// on how many sessions were active. An entry that expires is simply not
+    /// used, so the session takes the full path on its next turn: at most
+    /// one rebuild per session per `maxAge`, at the moment it is touched.
+    static let maxAge: TimeInterval = 30 * 60
+    /// Each entry's age is spread over ±`maxAgeJitter` so sessions first seen
+    /// together (every active session right after launch) don't all expire in
+    /// the same scan and bring the sweep's burst back.
+    static let maxAgeJitter: TimeInterval = 5 * 60
 
     public nonisolated init() {}
 
-    func values(for sessionId: String) -> Values? { entries[sessionId] }
-    /// `rebuiltAt` is non-nil when `values` came from the samples themselves.
+    /// The cached values, or nil when there are none or they have expired.
+    func values(for sessionId: String, now: Date = Date()) -> Values? {
+        guard let expiry = expiresAt[sessionId], now < expiry else { return nil }
+        return entries[sessionId]
+    }
+    /// `rebuiltAt` is non-nil when `values` came from the samples themselves
+    /// (the full path), which starts a new expiry window.
     func store(_ values: Values, for sessionId: String, rebuiltAt: Date? = nil) {
         entries[sessionId] = values
-        if let rebuiltAt { self.rebuiltAt[sessionId] = rebuiltAt }
+        if let rebuiltAt {
+            let jitter = Double.random(in: -Self.maxAgeJitter...Self.maxAgeJitter)
+            expiresAt[sessionId] = rebuiltAt.addingTimeInterval(Self.maxAge + jitter)
+        }
     }
     func forget(_ sessionIds: Set<String>) {
         for sid in sessionIds {
             entries[sid] = nil
-            rebuiltAt[sid] = nil
+            expiresAt[sid] = nil
         }
     }
     func forgetAll() {
         entries.removeAll()
-        rebuiltAt.removeAll()
-    }
-
-    /// Of `sessionIds`, the cached one rebuilt from samples longest ago — the
-    /// one the live pass re-checks next. Uncached ids are skipped: their next
-    /// touch takes the full path anyway.
-    func oldestRebuilt(among sessionIds: Set<String>) -> String? {
-        sessionIds
-            .compactMap { sid in rebuiltAt[sid].map { (sid, $0) } }
-            .min { $0.1 < $1.1 }?.0
+        expiresAt.removeAll()
     }
 
     /// The `SampleCostCache.generation` the entries were priced under.
@@ -341,7 +358,7 @@ public final class SessionRollupCache {
         pricingGeneration = generation
         let hadEntries = !entries.isEmpty
         entries.removeAll()
-        rebuiltAt.removeAll()
+        expiresAt.removeAll()
         return hadEntries
     }
 

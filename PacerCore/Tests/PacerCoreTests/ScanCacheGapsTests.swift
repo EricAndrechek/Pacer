@@ -7,94 +7,42 @@ import Testing
 /// columns (#146).
 @Suite struct ScanCacheGapsTests {
 
-    /// The live rebuild re-checks ONE active session per pass — the cached one
-    /// rebuilt from samples longest ago. A quiet session (outside the window)
-    /// is never picked however stale, and forcing every active session each
-    /// pass cost a 3-4 s scan every ten minutes on a real store.
+    /// A cached entry is trusted for `maxAge` (± jitter) after it was built
+    /// from samples, never longer — whatever the fast path does in between —
+    /// and an entry that never came from the full path is never trusted.
     @ScanActor
-    @Test func liveRebuildFoldsInOnlyRecentlyActiveSessions() async throws {
-        let container = try makeGapsContainer()
-        let context = ModelContext(container)
-        let now = Date()
-        let calendar = Calendar.current
-        let windowStart = try #require(
-            calendar.dateInterval(of: .hour, for: now.addingTimeInterval(-3600))).start
-        context.insert(SessionInfo(
-            sessionId: "quiet", firstSeenAt: now.addingTimeInterval(-6 * 3600),
-            lastSeenAt: now.addingTimeInterval(-5 * 3600), projectPath: "/p"))
-        context.insert(SessionInfo(
-            sessionId: "active", firstSeenAt: now.addingTimeInterval(-3600),
-            lastSeenAt: now.addingTimeInterval(-600), projectPath: "/p"))
-        context.insert(SessionInfo(
-            sessionId: "edge", firstSeenAt: windowStart.addingTimeInterval(-60),
-            lastSeenAt: windowStart, projectPath: "/p"))
-        context.insert(SessionInfo(
-            sessionId: "just-before", firstSeenAt: windowStart.addingTimeInterval(-120),
-            lastSeenAt: windowStart.addingTimeInterval(-1), projectPath: "/p"))
-        try context.save()
-
-        let root = try makeGapsFixtureRoot(lines: [])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let coordinator = makeCoordinator(container: container, root: root)
-        let persister = try SamplePersister(context: context)
-
-        let values = SessionRollupCache.Values(global: SessionRollupValues(), byAccount: [:])
-        let cache = coordinator.sessionRollupCache
-        cache.store(values, for: "quiet", rebuiltAt: now.addingTimeInterval(-9 * 3600))
-        cache.store(values, for: "active", rebuiltAt: now.addingTimeInterval(-3600))
-        cache.store(values, for: "edge", rebuiltAt: now.addingTimeInterval(-60))
-        // "just-before" is outside the window; uncached ids are never picked.
-
-        // No DailyAggregate rows at all: sessions must not hide behind the
-        // bucket rebuild's "nothing open today" early return.
-        try coordinator.rebuildLiveBuckets(persister: persister, now: now)
-
-        #expect(persister.dirtySessionIds == ["active"])
-        #expect(persister.pollutedSessionIds == ["active"],
-                "polluted is what forces the full path and re-seeds the cache")
-    }
-
-    /// Fast-path writes don't count as a rebuild: rotation order follows when
-    /// each entry was last built from samples, and forgetting clears it.
-    @ScanActor
-    @Test func rotationFollowsFullPathRebuildsOnly() {
+    @Test func sessionCacheEntriesExpireAfterMaxAge() {
         let cache = SessionRollupCache()
         let values = SessionRollupCache.Values(global: SessionRollupValues(), byAccount: [:])
         let t0 = Date(timeIntervalSince1970: 1_756_800_000)
-        cache.store(values, for: "a", rebuiltAt: t0)
-        cache.store(values, for: "b", rebuiltAt: t0.addingTimeInterval(60))
-        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
-        cache.store(values, for: "a")                         // fast path
-        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
-        cache.store(values, for: "a", rebuiltAt: t0.addingTimeInterval(120))
-        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "b")
-        cache.forget(["b"])
-        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
-        #expect(cache.oldestRebuilt(among: ["zzz"]) == nil)
+        let earliest = SessionRollupCache.maxAge - SessionRollupCache.maxAgeJitter
+        let latest = SessionRollupCache.maxAge + SessionRollupCache.maxAgeJitter
+
+        cache.store(values, for: "s", rebuiltAt: t0)
+        #expect(cache.values(for: "s", now: t0.addingTimeInterval(earliest - 1)) != nil)
+        cache.store(values, for: "s")                    // fast path: no extension
+        #expect(cache.values(for: "s", now: t0.addingTimeInterval(latest)) == nil)
+
+        cache.store(values, for: "s", rebuiltAt: t0.addingTimeInterval(latest))  // full path
+        #expect(cache.values(for: "s", now: t0.addingTimeInterval(latest + earliest - 1)) != nil)
+
+        cache.store(values, for: "never-rebuilt")
+        #expect(cache.values(for: "never-rebuilt", now: t0) == nil)
+
+        cache.forget(["s"])
+        #expect(cache.values(for: "s", now: t0.addingTimeInterval(latest + 1)) == nil)
     }
 
-    /// A burst of sessions can't turn the ten-minute rebuild into a full
-    /// session rebuild — the fetch is capped, newest first.
+    /// Sessions first seen together must not all expire in the same scan.
     @ScanActor
-    @Test func liveRebuildIsBounded() async throws {
-        let container = try makeGapsContainer()
-        let context = ModelContext(container)
-        let now = Date()
-        let limit = ScanCoordinator.liveSessionRebuildLimit
-        for i in 0..<(limit + 10) {
-            context.insert(SessionInfo(
-                sessionId: "s\(i)", firstSeenAt: now.addingTimeInterval(-1800),
-                lastSeenAt: now.addingTimeInterval(-Double(i)), projectPath: "/p"))
-        }
-        try context.save()
-        let root = try makeGapsFixtureRoot(lines: [])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let coordinator = makeCoordinator(container: container, root: root)
-
-        let ids = try coordinator.liveSessionIds(now: now)
-        #expect(ids.count == limit)
-        #expect(ids.contains("s0"))
-        #expect(!ids.contains("s\(limit + 9)"))
+    @Test func sessionCacheExpiriesAreSpread() {
+        let cache = SessionRollupCache()
+        let values = SessionRollupCache.Values(global: SessionRollupValues(), byAccount: [:])
+        let t0 = Date(timeIntervalSince1970: 1_756_800_000)
+        for i in 0..<50 { cache.store(values, for: "s\(i)", rebuiltAt: t0) }
+        let probe = t0.addingTimeInterval(SessionRollupCache.maxAge)
+        let alive = (0..<50).filter { cache.values(for: "s\($0)", now: probe) != nil }.count
+        #expect(alive > 0 && alive < 50)
     }
 
     /// Cached session values bake in the prices they were built under; a

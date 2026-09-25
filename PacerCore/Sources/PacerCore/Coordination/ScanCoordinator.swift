@@ -1800,27 +1800,6 @@ public final class ScanCoordinator {
         }
     }
 
-    /// Most sessions the live rebuild folds in per pass. A backstop, not a
-    /// budget: the window is two hours, and even a busy fan-out rarely has
-    /// more than a handful of sessions writing in it. Most-recent first, so a
-    /// burst drops the sessions that have gone quiet.
-    static let liveSessionRebuildLimit = 48
-
-    /// Sessions whose last turn falls in the live window — the start of the
-    /// previous hour onward, the same span the hourly buckets rebuilt above
-    /// cover. Id-only, predicate-scoped on the indexed `lastSeenAt`.
-    func liveSessionIds(now: Date = Date()) throws -> Set<String> {
-        let calendar = Calendar.current
-        let cutoff = calendar.dateInterval(of: .hour, for: now.addingTimeInterval(-3600))?.start
-            ?? now.addingTimeInterval(-3600)
-        var descriptor = FetchDescriptor<SessionInfo>(
-            predicate: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoff },
-            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
-        descriptor.propertiesToFetch = [\.sessionId]
-        descriptor.fetchLimit = Self.liveSessionRebuildLimit
-        return Set(try context.fetch(descriptor).map(\.sessionId))
-    }
-
     /// Fold the still-open rollup buckets into the dirty+polluted sets, so
     /// they get rebuilt from the samples they contain instead of from their
     /// own running totals.
@@ -1829,24 +1808,11 @@ public final class ScanCoordinator {
     /// recomputers' incremental path must not touch, which is what forces
     /// the from-scratch rebuild.
     ///
-    /// Sessions ride along (#144). The session fast path advances its
-    /// cached `SessionRollupValues` and never re-derives them, so a drifted
-    /// session would stay drifted for as long as it stays active — the same
-    /// class of bug as a drifted open bucket. Polluting it forces a full
-    /// recompute, which also re-seeds the cache from the samples.
+    /// Sessions are not in here: their cached totals expire on their own —
+    /// see `SessionRollupCache.maxAge`.
     func rebuildLiveBuckets(persister: SamplePersister, now: Date = Date()) throws {
         let calendar = Calendar.current
 
-        // One active session per pass, the one whose cached totals were built
-        // from its samples longest ago — a rotation, not a sweep. Forcing
-        // every active session onto the full path each pass cost a 3.3-4.3 s
-        // scan every ten minutes on a real store (7 long sessions), holding
-        // the store the UI reads from: the contention this cache exists to
-        // remove. Price changes already reset the whole cache; this is
-        // insurance against drift nobody has named, so bounded is enough.
-        if let stalest = sessionRollupCache.oldestRebuilt(among: try liveSessionIds(now: now)) {
-            persister.addDirtySessionIds([stalest])
-        }
         var pairs: Set<DateModelPair> = []
         var triples: Set<DateHourModelTriple> = []
         var projects: Set<ProjectDatePair> = []
