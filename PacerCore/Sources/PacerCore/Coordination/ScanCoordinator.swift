@@ -534,6 +534,21 @@ public final class ScanCoordinator {
                 durationSeconds: Date().timeIntervalSince(started)
             )
         }
+        do {
+            return try await applyAliasMigration(
+                aliases: aliases, fingerprint: aliasesFingerprint, started: started)
+        } catch {
+            // Same reasoning as the scan loop's catch sites: a migration that
+            // died part-way may have advanced the cache past what the store
+            // holds; start every session afresh.
+            sessionRollupCache.forgetAll()
+            throw error
+        }
+    }
+
+    private func applyAliasMigration(
+        aliases: [String: String], fingerprint aliasesFingerprint: String, started: Date
+    ) async throws -> AliasMigrationReport {
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
         activePersister.clearDirtyPairs()
@@ -549,6 +564,7 @@ public final class ScanCoordinator {
             container: container, context: context, mode: configuration.costMode)
         let projectStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates)
+        forgetSessionRollupsIfPricingChanged()
         let sessionRecomputer = SessionInfoRecomputer(
             container: container, context: context, mode: configuration.costMode,
             cache: sessionRollupCache)
@@ -1473,6 +1489,7 @@ public final class ScanCoordinator {
             didAssignColors = false
         }
 
+        forgetSessionRollupsIfPricingChanged()
         let sessionRecomputer = SessionInfoRecomputer(
             container: container,
             context: context,
@@ -1773,6 +1790,37 @@ public final class ScanCoordinator {
         return Date().timeIntervalSince1970 - at >= Self.liveBucketRebuildInterval
     }
 
+    /// Drop every `SessionRollupCache` entry if prices changed since the
+    /// last check (see `SessionRollupCache.forgetAllIfPricingChanged`).
+    /// Called right before each session recompute, so the recompute's own
+    /// `SampleCostCache.current()` read is as close to it as it can be.
+    private func forgetSessionRollupsIfPricingChanged() {
+        if sessionRollupCache.forgetAllIfPricingChanged(generation: SampleCostCache.generation) {
+            log("pricing: prices changed — session rollups take the full path on next touch")
+        }
+    }
+
+    /// Most sessions the live rebuild folds in per pass. A backstop, not a
+    /// budget: the window is two hours, and even a busy fan-out rarely has
+    /// more than a handful of sessions writing in it. Most-recent first, so a
+    /// burst drops the sessions that have gone quiet.
+    static let liveSessionRebuildLimit = 48
+
+    /// Sessions whose last turn falls in the live window — the start of the
+    /// previous hour onward, the same span the hourly buckets rebuilt above
+    /// cover. Id-only, predicate-scoped on the indexed `lastSeenAt`.
+    func liveSessionIds(now: Date = Date()) throws -> Set<String> {
+        let calendar = Calendar.current
+        let cutoff = calendar.dateInterval(of: .hour, for: now.addingTimeInterval(-3600))?.start
+            ?? now.addingTimeInterval(-3600)
+        var descriptor = FetchDescriptor<SessionInfo>(
+            predicate: #Predicate<SessionInfo> { $0.lastSeenAt >= cutoff },
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
+        descriptor.propertiesToFetch = [\.sessionId]
+        descriptor.fetchLimit = Self.liveSessionRebuildLimit
+        return Set(try context.fetch(descriptor).map(\.sessionId))
+    }
+
     /// Fold the still-open rollup buckets into the dirty+polluted sets, so
     /// they get rebuilt from the samples they contain instead of from their
     /// own running totals.
@@ -1780,9 +1828,17 @@ public final class ScanCoordinator {
     /// Polluting is the point: `addDirty*` marks each bucket as one the
     /// recomputers' incremental path must not touch, which is what forces
     /// the from-scratch rebuild.
-    private func rebuildLiveBuckets(persister: SamplePersister) throws {
-        let now = Date()
+    ///
+    /// Sessions ride along (#144). The session fast path advances its
+    /// cached `SessionRollupValues` and never re-derives them, so a drifted
+    /// session would stay drifted for as long as it stays active — the same
+    /// class of bug as a drifted open bucket. Polluting it forces a full
+    /// recompute, which also re-seeds the cache from the samples.
+    func rebuildLiveBuckets(persister: SamplePersister, now: Date = Date()) throws {
         let calendar = Calendar.current
+
+        let sessions = try liveSessionIds(now: now)
+        if !sessions.isEmpty { persister.addDirtySessionIds(sessions) }
         var pairs: Set<DateModelPair> = []
         var triples: Set<DateHourModelTriple> = []
         var projects: Set<ProjectDatePair> = []
@@ -2191,15 +2247,19 @@ public final class ScanCoordinator {
     /// debuggable post-hoc — without it the log only tells you the
     /// total. Phases are in execution order so reading left-to-right
     /// follows the cycle.
-    private func formatReport(_ r: ScanReport) -> String {
+    func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
-        // `fast=N/M` shows fast-path-applied / pairs-recomputed for the
-        // daily rollup. The same ratio holds approximately for hourly
-        // (most active hour buckets have the same dirtying pattern as
-        // their parent (date, model) pair) so one column is enough.
+        // `fast=N/M` is fast-path-applied / recomputed for the daily rollup;
+        // `hFast=`, `pFast=` and `sFast=` are the same ratio for the hourly,
+        // project and session rollups. Each has its own pollution sources
+        // (the session one alone depends on `SessionRollupCache` being warm),
+        // so the daily ratio stopped being a proxy for the rest (#146).
+        // `fast=` keeps its name and position so existing log greps still parse.
         let dailyFast = r.recomputeStats.fastPathApplied
         let dailyPairs = r.recomputeStats.pairsRecomputed
-        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) ms=\(Int(r.durationSeconds * 1000))"
+        let h = r.hourlyRecomputeStats, pj = r.projectRecomputeStats, ss = r.sessionRecomputeStats
+        let otherFast = "hFast=\(h.fastPathApplied)/\(h.bucketsRecomputed) pFast=\(pj.fastPathApplied)/\(pj.pairsRecomputed) sFast=\(ss.fastPathApplied)/\(ss.sessionsRecomputed)"
+        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) \(otherFast) ms=\(Int(r.durationSeconds * 1000))"
         let p = r.phaseTimings
         let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) consume=\(Self.fmtMs(p.consumeChangedPathsMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
         return "\(base) \(phases)"

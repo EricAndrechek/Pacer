@@ -301,6 +301,26 @@ public final class SessionRollupCache {
         for sid in sessionIds { entries[sid] = nil }
     }
     func forgetAll() { entries.removeAll() }
+
+    /// The `SampleCostCache.generation` the entries were priced under.
+    private var pricingGeneration: UInt64?
+
+    /// Forget every entry if prices changed since the last call. Each cached
+    /// `totalCostUSD` bakes in the snapshot it was built from, and the fast
+    /// path only ever adds to it, so a price change would otherwise never
+    /// reach a session that stays active. Forgetting (rather than rebuilding)
+    /// keeps it cheap: each session takes the full path on its next touch.
+    /// Returns whether anything was forgotten.
+    @discardableResult
+    func forgetAllIfPricingChanged(generation: UInt64) -> Bool {
+        guard pricingGeneration != generation else { return false }
+        pricingGeneration = generation
+        let hadEntries = !entries.isEmpty
+        entries.removeAll()
+        return hadEntries
+    }
+
+    var count: Int { entries.count }
 }
 
 extension SessionRollupValues {

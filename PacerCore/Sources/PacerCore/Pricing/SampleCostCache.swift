@@ -47,15 +47,33 @@ public enum SampleCostCache {
         !snapshotStorage.pricingByModel.isEmpty
     }
 
+    nonisolated(unsafe) private static var generationStorage: UInt64 = 0
+
+    /// Bumped every time the snapshot's prices actually change — not on
+    /// every `reload()`, which runs on each cost-mode flip and pricing
+    /// refresh and usually installs identical prices. Anything that caches
+    /// a cost computed from `current()` compares this to know its cached
+    /// cost is stale: `ScanCoordinator` forgets `SessionRollupCache` on a
+    /// change, since those cached values bake the old prices into
+    /// `totalCostUSD` and the fast path would keep adding to them.
+    public static nonisolated var generation: UInt64 { generationStorage }
+
     /// Load (if needed) and atomically refresh the snapshot. Call
     /// from `applicationDidFinishLaunching` and on cost-mode change.
     public static func reload(_ table: PricingTable = .shared) async {
         try? await table.ensureLoaded()
-        let snap = await table.snapshot()
+        install(await table.snapshot())
+    }
+
+    /// Replace the snapshot, bumping `generation` only if prices changed.
+    /// Comparing ~2,700 entries is cheap next to how rarely this runs.
+    static func install(_ snap: PricingTable.Snapshot) {
         // `nonisolated(unsafe)` storage above lets readers from any
         // actor get the value sync; the write is single-threaded
-        // because reload() itself is @MainActor-isolated.
+        // because this is @MainActor-isolated.
+        guard snap.pricingByModel != snapshotStorage.pricingByModel else { return }
         snapshotStorage = snap
+        generationStorage &+= 1
     }
 }
 
