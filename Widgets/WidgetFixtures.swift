@@ -199,14 +199,17 @@ enum WidgetFixtures {
 /// screenshot workflow sets (an xcconfig over the whole build), so no build
 /// that ships contains it — a stray setting on somebody's Mac can never put
 /// fake numbers on their desktop.
-struct ReadmeShotWidget<Slot: ReadmeShotSlot>: Widget {
-    // Generic over a slot type rather than taking an index: `Widget` requires
-    // a bare `init()`.
+protocol ReadmeShotWidget: Widget {
+    /// Index into `WidgetFixtures.readmeShots`.
+    static var index: Int { get }
+}
+
+extension ReadmeShotWidget {
     var body: some WidgetConfiguration {
-        let (kind, family) = WidgetFixtures.readmeShots[Slot.index]
+        let (kind, family) = WidgetFixtures.readmeShots[Self.index]
         // `ReadmeShot.<kind>`: its own kind (a bundle's kinds must differ), a
-        // stable one, so a widget placed by kind in Notification Center finds
-        // it; the one family the README shows it in.
+        // stable one for `_XCWidgetKind` to name; the one family the README
+        // shows it in.
         return StaticConfiguration(kind: "ReadmeShot.\(kind)", provider: ReadmeShotProvider()) { _ in
             ReadmeShotView(kind: kind)
         }
@@ -216,13 +219,13 @@ struct ReadmeShotWidget<Slot: ReadmeShotSlot>: Widget {
     }
 }
 
-/// Which of `WidgetFixtures.readmeShots` a `ReadmeShotWidget` shows.
-protocol ReadmeShotSlot { static var index: Int { get } }
-enum ReadmeShot0: ReadmeShotSlot { static let index = 0 }
-enum ReadmeShot1: ReadmeShotSlot { static let index = 1 }
-enum ReadmeShot2: ReadmeShotSlot { static let index = 2 }
-enum ReadmeShot3: ReadmeShotSlot { static let index = 3 }
-enum ReadmeShot4: ReadmeShotSlot { static let index = 4 }
+// One concrete type per shot, not one generic type: the extension trapped
+// while WidgetKit listed a bundle of `ReadmeShotWidget<Slot>` specializations.
+struct ReadmeShot0: ReadmeShotWidget { static let index = 0 }
+struct ReadmeShot1: ReadmeShotWidget { static let index = 1 }
+struct ReadmeShot2: ReadmeShotWidget { static let index = 2 }
+struct ReadmeShot3: ReadmeShotWidget { static let index = 3 }
+struct ReadmeShot4: ReadmeShotWidget { static let index = 4 }
 
 struct ReadmeShotEntry: TimelineEntry { let date: Date }
 

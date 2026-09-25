@@ -103,7 +103,14 @@ if [[ -n $DEBUG_DIR ]]; then
             && log "diag $variant: loaded" || log "diag $variant: failed"
     done
     ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i pacer | sed 's/^/[widgets] crash: /'
-    for f in ~/Library/Logs/DiagnosticReports/PacerWidgets*(N); do head -c 3000 "$f" | sed 's/^/[widgets] crashlog: /'; done
+    for f in ~/Library/Logs/DiagnosticReports/PacerWidgets*(N); do python3 -c "
+import json,sys
+t=open(sys.argv[1]).read(); body=json.loads(t[t.index(chr(10))+1:])
+imgs=body.get('usedImages',[])
+for fr in body['threads'][body.get('faultingThread',0)]['frames'][:25]:
+    im=imgs[fr['imageIndex']] if fr['imageIndex']<len(imgs) else {}
+    print(im.get('name','?'), fr.get('symbol',''), fr.get('imageOffset'))
+print('asi:', body.get('asi'))" "$f" 2>&1 | sed 's/^/[widgets] crashlog: /'; done
     /usr/bin/log show --last 5m --style compact --predicate 'process == "PacerWidgets" OR (process == "WidgetKit Simulator" AND NOT eventMessage CONTAINS "file:///System") OR (process == "chronod" AND eventMessage CONTAINS[c] "pacer")' 2>/dev/null \
         | grep -vE 'MobileGestalt|XPCErrors|stateCapture' | grep -iE 'fail|error|descriptor|pacer|kind|family|crash|exception' | head -60 | sed 's/^/[widgets] diaglog: /'
 fi
