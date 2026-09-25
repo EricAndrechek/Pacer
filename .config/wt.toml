@@ -1,0 +1,9 @@
+# Project hooks for worktrunk (`wt`). Personal settings (where worktrees go,
+# aliases) live in ~/.config/worktrunk/config.toml.
+
+# A new worktree gets the gitignored DuckDB framework before anything builds
+# (#148): only what .worktreeinclude names, reflinked, in about a second.
+# pre-start rather than post-start so a build started straight after
+# `wt switch --create` can't race the copy. `make vendor` is still the fallback
+# for worktrees `wt` didn't create (Claude Code's own, plain `git worktree`).
+pre-start = "wt step copy-ignored"

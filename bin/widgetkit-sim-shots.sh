@@ -95,8 +95,10 @@ shots=(
     pace-chart-scoped   large
     pace-gauges-scoped  large
 )
-failed=0
-for name family in $shots; do
+# One attempt at one widget, from nothing: the simulator quit, a fresh
+# document, a new build number registered, then a capture.
+shoot() {
+    local name=$1 family=$2 debug=
     quit_simulator
     # A fresh document per shot, never the last one restored.
     defaults delete com.apple.widgetkit.simulator 2>/dev/null
@@ -105,10 +107,18 @@ for name family in $shots; do
     prepare
     open -n --env "_XCWidgetKind=ReadmeShot.$name" --env "_XCWidgetFamily=$family" \
          --env _XCWidgetDefaultView=timeline -a "$SIM" "$APPEX" \
-        || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
-    debug=
+        || { log "⚠️ $name: cannot open $SIM"; return 1; }
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
-    if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
+    request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"
+}
+
+failed=0
+for name family in $shots; do
+    # The simulator now and then never shows a widget's timeline within the
+    # capture's 45 s: on #156 it hit a different widget on each of two runs,
+    # and every other widget rendered (#157). So give that one widget a second
+    # attempt from a fresh launch before failing the whole run over it.
+    if shoot $name $family || { log "retrying $name from a fresh launch"; shoot $name $family; }; then
         log "✓ $name ($family)"
     else
         failed=1

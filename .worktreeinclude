@@ -1,0 +1,10 @@
+# Gitignored files a new worktree should start with, read by
+# `wt step copy-ignored` (the pre-start hook in .config/wt.toml) and by
+# Claude Code desktop's worktrees. Copies are APFS reflinks: instant, and no
+# extra disk until one side writes.
+#
+# Deliberately just the DuckDB framework (#148). Build/ and PacerCore/.build
+# hold absolute paths to the checkout they were built in, so a copy is no
+# faster than a clean build and can confuse Xcode. keys/ holds release
+# credentials and must never be fanned out across worktrees.
+Vendor/DuckDB.xcframework/
