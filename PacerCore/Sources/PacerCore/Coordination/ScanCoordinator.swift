@@ -2224,6 +2224,7 @@ public final class ScanCoordinator {
     func formatReport(_ r: ScanReport) -> String {
         let kind = r.wasFullScan ? "full" : "incremental"
         // `fast=N/M` is fast-path-applied / recomputed for the daily rollup;
+        // `sMiss=p/e/u` says why sessions missed: polluted / expired / uncached.
         // `hFast=`, `pFast=` and `sFast=` are the same ratio for the hourly,
         // project and session rollups. Each has its own pollution sources
         // (the session one alone depends on `SessionRollupCache` being warm),
@@ -2232,8 +2233,8 @@ public final class ScanCoordinator {
         let dailyFast = r.recomputeStats.fastPathApplied
         let dailyPairs = r.recomputeStats.pairsRecomputed
         let h = r.hourlyRecomputeStats, pj = r.projectRecomputeStats, ss = r.sessionRecomputeStats
-        let otherFast = "hFast=\(h.fastPathApplied)/\(h.bucketsRecomputed) pFast=\(pj.fastPathApplied)/\(pj.pairsRecomputed) sFast=\(ss.fastPathApplied)/\(ss.sessionsRecomputed)"
-        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) \(otherFast) ms=\(Int(r.durationSeconds * 1000))"
+        let otherFast = "hFast=\(h.fastPathApplied)/\(h.bucketsRecomputed) pFast=\(pj.fastPathApplied)/\(pj.pairsRecomputed) sFast=\(ss.fastPathApplied)/\(ss.sessionsRecomputed) sMiss=\(ss.missPolluted)/\(ss.missExpired)/\(ss.missUncached)"
+        let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) upg=\(r.persisterStats.upgradedFromPartial) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) \(otherFast) ms=\(Int(r.durationSeconds * 1000))"
         let p = r.phaseTimings
         let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) consume=\(Self.fmtMs(p.consumeChangedPathsMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
         return "\(base) \(phases)"

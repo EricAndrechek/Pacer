@@ -41,6 +41,9 @@ later overnight loops, so don't put durable knowledge there.
    live rebuild). A ratio that stays near `0/M` cycle after cycle is a
    fast path that has silently stopped applying — `sFast` sat there for
    months, costing 1–2 s a cycle, because only the daily ratio was logged.
+   `sMiss=p/e/u` says why sessions missed: polluted (samples rewritten
+   underneath, e.g. a streamed message upgraded — `upg=` counts those),
+   expired (`SessionRollupCache.maxAge`), or uncached (first touch).
 2. **`make perf-snapshot`.** One-shot CLI: 10 s `sample(1)` CPU
    profile, 5× `top` snapshots, last 500 log lines distilled into
    P50/P90/P99 + per-phase median, sqlite row counts. Output:

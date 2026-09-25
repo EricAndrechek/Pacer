@@ -101,7 +101,7 @@ import Testing
         }
         // Adjacent, daily first: `fast=N/M` is still followed by a space, so
         // a grep anchored on it keeps matching.
-        #expect(line.range(of: #" fast=\d+/\d+ hFast=\d+/\d+ pFast=\d+/\d+ sFast=\d+/\d+ ms="#,
+        #expect(line.range(of: #" fast=\d+/\d+ hFast=\d+/\d+ pFast=\d+/\d+ sFast=\d+/\d+ sMiss=\d+/\d+/\d+ ms="#,
                            options: .regularExpression) != nil, "\(line)")
     }
 }

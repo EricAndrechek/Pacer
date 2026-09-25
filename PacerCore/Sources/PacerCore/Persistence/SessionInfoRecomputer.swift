@@ -41,6 +41,13 @@ public final class SessionInfoRecomputer {
         public var sessionsRecomputed: Int
         public var sessionsUpserted: Int
         public var sessionsDeleted: Int
+        /// Why sessions missed the fast path, for the scan log's `sMiss=`:
+        /// marked polluted (samples rewritten underneath — #149), cache entry
+        /// expired (`SessionRollupCache.maxAge`), or nothing usable cached
+        /// (first touch since launch, or dirtied with no pending samples).
+        public var missPolluted: Int = 0
+        public var missExpired: Int = 0
+        public var missUncached: Int = 0
         /// Mirror of `AggregateRecomputer.Stats.fastPathApplied` — see
         /// that doc for the diagnostic intent.
         public var fastPathApplied: Int = 0
@@ -94,6 +101,9 @@ public final class SessionInfoRecomputer {
                                  snapshot: snapshot, stats: &stats) {
                 continue
             }
+            if isPolluted { stats.missPolluted += 1 }
+            else if cache.hasExpiredEntry(for: sid) { stats.missExpired += 1 }
+            else { stats.missUncached += 1 }
             try recomputeOne(sessionId: sid, snapshot: snapshot, stats: &stats)
         }
         return stats
@@ -317,6 +327,12 @@ public final class SessionRollupCache {
     static let maxAgeJitter: TimeInterval = 5 * 60
 
     public nonisolated init() {}
+
+    /// An entry exists but is past its expiry (or was never built from
+    /// samples). For the scan log's miss reasons only.
+    func hasExpiredEntry(for sessionId: String, now: Date = Date()) -> Bool {
+        entries[sessionId] != nil && values(for: sessionId, now: now) == nil
+    }
 
     /// The cached values, or nil when there are none or they have expired.
     func values(for sessionId: String, now: Date = Date()) -> Values? {
