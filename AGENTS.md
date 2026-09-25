@@ -28,6 +28,11 @@ See `docs/design.md` for the full v1 design.
      §7). Pacer is deliberately higher here. If a ccusage comparison
      shows us reporting *more* output than ccusage, that is the fix
      working — do not "correct" it back.
+- **`AGENTS.md` → "SwiftUI state and data flow"** (below) — read before
+  adding any `@State`, binding, sheet, modal, cached value, reload signal or
+  `ModelContext` use. A view updates only on what its own `body` read;
+  anything that updates because *something else* redrew is a bug that
+  removing redraw work will expose.
 - **`AGENTS.md` → "Performance — invariants and patterns"** (below) —
   read before adding ANY `@Query`, `FetchDescriptor`, computed view
   property, widget provider, or new rollup table. Codifies hard-won
@@ -765,6 +770,123 @@ relearn:
    refactor the API to return values (or stream via `AsyncStream`).
    We may want to give `JSONLScanner` an `AsyncThrowingStream` API in
    addition to the callback form so consumers can iterate naturally.
+
+## SwiftUI state and data flow — how updates actually happen
+
+Read before adding any `@State`, binding, sheet, modal, cached value, reload
+signal or `ModelContext` use. Sources and the evidence for each rule are in
+`docs/research/swiftui-state-apple-guidance.md`.
+
+**Why this section exists.** Clicking a project or a History day set the
+page's `@State modalRoot`, and the detail appeared only when something
+unrelated redrew the page. For months that was a second or two, because
+scans and saves redrew most of the app constantly, so it read as "lag". When
+the 2026-09 perf work removed the incidental redrawing it became 45 s. An
+audit then found about twenty more places that only worked because something
+else redrew them. **Anything that only updates because something else happens
+to redraw is a bug, and removing redraw work is what exposes it.**
+
+### The rule Apple documents: a view updates only on what its own `body` read
+
+SwiftUI records a dependency when a view's `body` *executes a getter* — reads
+the value. Declaring, holding or passing a value records nothing. Passing
+`$x` down records nothing either. A write marks only recorded dependents
+dirty. If nothing read the value, the write schedules nothing, and the new
+value shows up the next time something unrelated re-runs that `body`.
+
+- **State that must change what is on screen is read, by value, in its
+  owner's `body`.** Don't rely on a read inside a `ViewModifier`'s body
+  reached through a `Binding`. The first modal fix did exactly that, and the
+  modal still took 43 s. Apple has filed bugs of this shape. The pattern that
+  works is `.pacerModalNavigation(modalRoot, root: $modalRoot)`: the page
+  reads the value and passes it in as a plain input, and the binding is only
+  for writes.
+- **A read belongs to whichever `body` executes it.** A read inside an
+  escaping content closure that another view stores and calls later
+  (`PageScaffold`'s content, `List` / `LazyVStack` rows, sheet and overlay
+  content) makes *that* inner view depend on the value, not the page.
+  History and Projects put their whole body inside `PageScaffold`'s closure.
+- **A `ViewModifier` is not a safe place to be the only reader** of state
+  its caller owns. Pass the value in.
+
+### Every cached value needs an explicit trigger for every input
+
+`@State cached…` refreshed only by `.onAppear` plus the scan-meta tick is
+stale whenever an input changes without a scan: scope or account switch, cost
+mode, range, day rollover, a poll for a non-active account. List every input
+the cache derives from, and give each one an `.onChange` or a `.task(id:)`
+key. `DailyCostChartCard` and `ProjectsView` show the scope case. An idle
+machine is the test: switch scope with Claude Code quiet, and see whether
+every card follows.
+
+### Reload signals change on every write
+
+A signal a view keys a reload on must change on *every* relevant write.
+Increment a generation counter. A max timestamp misses rows older than the
+newest (archive folds, restamps). Truncating it to whole seconds collapses
+two writes in the same second. A notification posted only for the active
+account misses the others. `RateLimitWriteSignal` is the rate-limit one; the
+view must read it in `body`.
+
+### Identity
+
+- `if` / `else` / `switch` branches are distinct identities, including a
+  branch around a modifier. Toggling resets `@State` below it and cancels
+  in-flight interactions. Prefer changing a modifier's value
+  (`.opacity(c ? 0.5 : 1)`) over branching the view.
+- `.id(x)` tears the subtree down when `x` changes. Know what that closes:
+  `ContentView`'s `.id(dayKey)` closes an open modal and clears the Projects
+  search at midnight.
+- No `AnyView` in `ForEach` / `List` rows. It forces every row to be built.
+- `.equatable()`: `==` must cover every input that changes the output,
+  or the view silently stops updating.
+
+### Reference types, sheets, and mutation
+
+- A plain (non-`@Observable`) class held in `@State` and mutated in place
+  **never** updates the view. The only acceptable use is a render-time memo
+  that nothing displays. `FirstRenderMemo` is one, and says so.
+- Don't mutate state while `body` runs. Defer it to an action, `.task` or
+  `.onChange`.
+- **Sheets:** `.sheet(item:)` with one `Identifiable` request that carries
+  every input. Not `isPresented` plus separate `@State` inputs, which the
+  sheet closure captures stale.
+- `@Observable` models and singletons that views read are `@MainActor`, and
+  are only mutated on the main actor.
+
+### SwiftData facts that shape the architecture
+
+- **`@Query` re-fetches on every save of its context**, whatever changed.
+  Apple DTS has confirmed it. That is why always-mounted surfaces (menu bar,
+  toolbar, `NowStrip`, `NotificationsHost`) must not hold `@Query`s as
+  change signals. Use `RateLimitWriteSignal` or the scan notification.
+- **Nothing documents that a save in one `ModelContext` reaches another
+  context's `@Query`.** Forum reports are inconsistent and OS-dependent.
+  Don't rely on it: refresh explicitly from the notification the writer posts
+  *after* its save.
+- **`propertiesToFetch` may be a no-op.** Two independent SQL-level checks
+  found SwiftData still selects every column. This is not yet verified in
+  Pacer (run with `-com.apple.CoreData.SQLDebug 1` to check). Until then,
+  the dependable levers are a tight predicate and `fetchLimit`.
+- `ModelContext` is not `Sendable`. A `Task.detached` has no actor, so
+  create its own `ModelContext(container)` inside and return Sendable values.
+  A detached task is **not cancelled** with the task that spawned it.
+  Coalesce, or check `Task.isCancelled` between batches.
+
+### Proving an interaction fix
+
+An off-screen harness is not proof for a missed-update bug. A self-test that
+hosted the real `ContentView` off-screen opened the modal instantly **on the
+broken build too**. What does prove it:
+
+- the always-on `[Click]`, `[Navigation]` and `[Modal]` log lines (each
+  click's delivery lag, whether its action ran, when the modal opened);
+- an `xcrun xctrace record --template 'Time Profiler' --attach <pid>` trace
+  across the repro, to see whether the main thread was busy or idle;
+- the owner's repro.
+
+Never call an interaction bug fixed on reasoning alone. That happened once
+in this incident, and the fix did nothing.
 
 ## Performance — invariants and patterns
 
