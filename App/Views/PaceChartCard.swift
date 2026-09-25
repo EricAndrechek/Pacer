@@ -186,7 +186,7 @@ struct PaceChartCard: View {
     /// for a reload. Deliberately **unscoped**: it decides *when* to reload,
     /// not what to show, and any account's poll is a fine reason to top up;
     /// the top-up itself is scoped. See `RateLimitWriteSignal`.
-    private var reloadSignal: Date? { RateLimitWriteSignal.shared.newest }
+    private var reloadSignal: UInt64 { RateLimitWriteSignal.shared.generation }
 
     /// Load the two 8-day series. Called on appear and whenever a new
     /// rate-limit sample lands — not on every context change.

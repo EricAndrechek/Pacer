@@ -2099,9 +2099,11 @@ public actor OAuthPoller: TokenPoolTesting {
                     + "\(Int(Date().timeIntervalSince(started) * 1000))ms"
                     + (leftover > 0 ? " — \(leftover) recent row(s) still archived" : ""))
 
+        // Folded and adopted rows are older than the live ones, which is why
+        // the signal is a generation rather than a newest-timestamp.
         let newestFolded = archived.map(\.sampledAt).max()
         Task { @MainActor in
-            if let newestFolded { RateLimitWriteSignal.shared.note(newestFolded) }
+            RateLimitWriteSignal.shared.note(newestFolded)
             postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
         }
     }

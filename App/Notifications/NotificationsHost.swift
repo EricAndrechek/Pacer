@@ -138,7 +138,7 @@ struct NotificationsHost: View {
     /// Newest rate-limit write — the trigger for a reload. See
     /// `RateLimitWriteSignal`.
     private var reloadKey: String {
-        "\(Int(RateLimitWriteSignal.shared.newest?.timeIntervalSinceReferenceDate ?? 0))"
+        "\(RateLimitWriteSignal.shared.generation)"
     }
 
     /// Every account's windows, not just the active login's.

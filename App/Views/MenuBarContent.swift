@@ -140,8 +140,7 @@ struct MenuBarLabel: View {
     @Environment(\.modelContext) private var menuModelContext
 
     var reloadKey: String {
-        let newest = RateLimitWriteSignal.shared.newest?.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(newest)):"
+        return "\(RateLimitWriteSignal.shared.generation):"
             + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
@@ -612,8 +611,7 @@ struct MenuStatusContent: View {
     @State private var perAccount: [AccountWindows] = []
 
     var reloadKey: String {
-        let newest = RateLimitWriteSignal.shared.newest?.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(newest)):"
+        return "\(RateLimitWriteSignal.shared.generation):"
             + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 

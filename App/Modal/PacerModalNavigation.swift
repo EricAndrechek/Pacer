@@ -170,8 +170,8 @@ struct PacerModalRouter: View {
 
 extension View {
     /// Attach the unified modal navigation surface to a page. The
-    /// page owns the binding to the root destination; the modifier
-    /// owns the stack and the push/back environment values.
+    /// page owns the root destination; `PacerModalStackHost` owns the
+    /// drill-down stack and the push/back environment values.
     ///
     /// `presented` is the page's own `@State` value, passed separately from
     /// the binding on purpose: `.pacerModalNavigation(modalRoot, root: $modalRoot)`.
@@ -194,74 +194,90 @@ private struct PacerModalNavigationModifier: ViewModifier {
     /// `root`'s value as the page saw it — the input that makes this modifier
     /// re-run when a click sets or clears it.
     let presented: PacerModalDestination?
-    /// Manual stack — the modifier swaps which entry is rendered, so
-    /// only one detail view exists in the SwiftUI hierarchy at any
-    /// time and there's no inner NavigationStack to fight with the
-    /// outer NavigationSplitView.
-    @State private var stack: [PacerModalDestination] = []
 
     func body(content: Content) -> some View {
         content
             .dismissibleModal(item: $root) { rootDest in
-                let current = stack.last ?? rootDest
-                let canGoBack = !stack.isEmpty
-                let pop: () -> Void = {
-                    if !stack.isEmpty { stack.removeLast() }
-                }
-                // `id(current.id)` forces SwiftUI to treat each
-                // destination as its own subtree — without it, the
-                // @Query bindings inside ProjectDetailView /
-                // DayDetailView would persist across pushes (a click
-                // into Project A's detail then a back-and-into
-                // Project B would show A's data briefly).
-                PacerModalRouter(destination: current)
-                    .id(current.id)
-                    .environment(
-                        \.pacerModalPush,
-                        PacerModalPushAction { dest in
-                            stack.append(dest)
-                        }
-                    )
-                    .environment(
-                        \.pacerModalBack,
-                        canGoBack ? PacerModalBackAction(pop: pop) : nil
-                    )
-                    // Native back keyboard shortcuts mirror Safari /
-                    // Finder. Hidden Buttons attached as backgrounds —
-                    // .keyboardShortcut binds to a single view, so we
-                    // stack one per shortcut. `.disabled` gates them
-                    // when there's nothing to pop so the shortcut
-                    // falls through to whatever else might handle it.
-                    .background {
-                        Button("Back") { pop() }
-                            .keyboardShortcut("[", modifiers: .command)
-                            .opacity(0)
-                            .frame(width: 0, height: 0)
-                            .disabled(!canGoBack)
-                    }
-                    .background {
-                        Button("Back") { pop() }
-                            .keyboardShortcut(.leftArrow, modifiers: .command)
-                            .opacity(0)
-                            .frame(width: 0, height: 0)
-                            .disabled(!canGoBack)
-                    }
-                    // Two-finger trackpad swipe-back. Installs a
-                    // window-scoped NSEvent monitor while the modal
-                    // is on-screen and the stack is non-empty.
-                    .background {
-                        SwipeBackGestureHost(canGoBack: canGoBack, onBack: pop)
-                    }
+                // One stack per presentation: `.id` gives a new root a fresh
+                // host, and closing the modal discards it, so there is no
+                // stack to reset.
+                PacerModalStackHost(root: rootDest)
+                    .id(rootDest.id)
             }
-            // Reset the stack whenever the root flips back to nil —
-            // otherwise a closed-and-reopened modal would still have
-            // the previous drill-in pushed onto it.
             .onChange(of: presented == nil) { _, isNil in
                 // With `Click` and `Navigation`, says whether a click that
                 // "did nothing" opened the modal and something closed it.
                 Log.write("Modal", isNil ? "closed" : "opened")
-                if isNil { stack.removeAll() }
             }
+    }
+}
+
+/// The drill-down stack of one open modal, and the destination on top of it.
+///
+/// A `View` that owns its stack as `@State` and reads it in its own `body`, on
+/// purpose. It used to be `@State` on the modifier above, read only inside the
+/// content closure `dismissibleModal` calls — the same shape as the page-level
+/// bug in `pacerModalNavigation`, where a write re-rendered nothing until an
+/// unrelated redraw. A push (day → project) or Back could keep showing the old
+/// screen. State a view owns and reads in its own body is the pattern that
+/// reliably re-renders (AGENTS.md, "SwiftUI state and data flow").
+private struct PacerModalStackHost: View {
+    let root: PacerModalDestination
+    /// Manual stack — only one detail view exists in the hierarchy at a time,
+    /// and there's no inner NavigationStack to fight with the outer
+    /// NavigationSplitView.
+    @State private var stack: [PacerModalDestination] = []
+
+    var body: some View {
+        let current = stack.last ?? root
+        let canGoBack = !stack.isEmpty
+        // `id(current.id)` forces SwiftUI to treat each destination as its own
+        // subtree — without it, the @Query bindings inside ProjectDetailView /
+        // DayDetailView would persist across pushes (a click into Project A's
+        // detail then a back-and-into Project B would show A's data briefly).
+        PacerModalRouter(destination: current)
+            .id(current.id)
+            .environment(
+                \.pacerModalPush,
+                PacerModalPushAction { dest in
+                    Log.write("Navigation", "modal push")
+                    stack.append(dest)
+                }
+            )
+            .environment(
+                \.pacerModalBack,
+                canGoBack ? PacerModalBackAction(pop: pop) : nil
+            )
+            // Native back keyboard shortcuts mirror Safari / Finder. Hidden
+            // Buttons attached as backgrounds — .keyboardShortcut binds to a
+            // single view, so we stack one per shortcut. `.disabled` gates them
+            // when there's nothing to pop so the shortcut falls through to
+            // whatever else might handle it.
+            .background {
+                Button("Back") { pop() }
+                    .keyboardShortcut("[", modifiers: .command)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .disabled(!canGoBack)
+            }
+            .background {
+                Button("Back") { pop() }
+                    .keyboardShortcut(.leftArrow, modifiers: .command)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .disabled(!canGoBack)
+            }
+            // Two-finger trackpad swipe-back. Installs a window-scoped NSEvent
+            // monitor while the modal is on-screen and the stack is non-empty.
+            .background {
+                SwipeBackGestureHost(canGoBack: canGoBack, onBack: pop)
+            }
+    }
+
+    private func pop() {
+        guard !stack.isEmpty else { return }
+        Log.write("Navigation", "modal back")
+        stack.removeLast()
     }
 }
 

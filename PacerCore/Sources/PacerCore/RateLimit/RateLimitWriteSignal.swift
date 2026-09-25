@@ -21,15 +21,26 @@ public final class RateLimitWriteSignal {
 
     public static let shared = RateLimitWriteSignal()
 
+    /// Bumped on **every** write — the value views key their reloads on.
+    ///
+    /// A generation, not a timestamp, because a timestamp misses writes: rows
+    /// folded back from the archive or adopted as the active account are older
+    /// than the newest live row, a poll for account B can be saved after A's
+    /// later capture, and two accounts written in the same second collapse to
+    /// one key once rounded. A counter changes every time, and a spurious
+    /// reload is cheap where a missed one is a stale screen.
+    public private(set) var generation: UInt64 = 0
+
+    /// The newest `sampledAt` seen. Informational; never a reload key.
     public private(set) var newest: Date?
 
     private init() {}
 
-    /// Record a write. Never moves backwards, so an archive fold of old rows
-    /// finishing after a fresh poll does not un-signal the poll.
-    public func note(_ sampledAt: Date) {
-        if let newest, newest >= sampledAt { return }
-        newest = sampledAt
+    /// Record a write of rate-limit rows. `sampledAt` is the newest row in the
+    /// write, when there is one.
+    public func note(_ sampledAt: Date? = nil) {
+        generation &+= 1
+        if let sampledAt, newest.map({ sampledAt > $0 }) ?? true { newest = sampledAt }
     }
 
     /// The newest row already in the store, so the first reload after launch
@@ -41,7 +52,7 @@ public final class RateLimitWriteSignal {
         var scoped = FetchDescriptor<UsageLimitSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
         scoped.fetchLimit = 1
-        if let at = (try? context.fetch(fixed))?.first?.sampledAt { note(at) }
-        if let at = (try? context.fetch(scoped))?.first?.sampledAt { note(at) }
+        note((try? context.fetch(fixed))?.first?.sampledAt)
+        note((try? context.fetch(scoped))?.first?.sampledAt)
     }
 }

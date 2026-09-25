@@ -85,8 +85,15 @@ struct ProjectDetailView: View {
     /// derivations. Empty / one-element when there's no drill-down
     /// to show.
     @State private var cachedSubprojects: [SubprojectRow] = []
-    /// The in-flight Subprojects load, cancelled when a newer one starts.
-    @State private var subprojectsTask: Task<Void, Never>?
+    /// One Subprojects load at a time; a trigger that lands while one is
+    /// running sets `subprojectsRerun` and gets one more load afterwards.
+    /// Cancelling is not an option: the load is a detached task, which is not
+    /// cancelled with its parent, so "cancel and restart" left every
+    /// superseded fetch running — overlapping raw-sample reads on a busy
+    /// project, all competing with the scan for the store.
+    @State private var subprojectsLoading = false
+    @State private var subprojectsRerun = false
+    @State private var subprojectsClosed = false
     /// Cost mode. Reactive @AppStorage so the Subprojects card
     /// re-buckets immediately when the user toggles modes in
     /// Settings (same pattern NowStrip uses).
@@ -98,6 +105,10 @@ struct ProjectDetailView: View {
     /// because the predicate is path-keyed unique.
     @Query private var budgetRows: [ProjectBudget]
 
+    /// The account the modal is scoped to, when it is — the Subprojects load
+    /// filters by it like every other card here.
+    private let scopeAccountId: String?
+
     init(
         projectPath: String, displayName: String, since: Date?,
         scopeAccountId: String? = nil
@@ -105,6 +116,7 @@ struct ProjectDetailView: View {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
+        self.scopeAccountId = scopeAccountId
         let path = projectPath
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         _budgetRows = Query(
@@ -289,23 +301,35 @@ struct ProjectDetailView: View {
     /// second, then lands with every queued click behind it) and again on
     /// every scan cycle while the modal stayed open.
     private func refreshSubprojects() {
-        subprojectsTask?.cancel()
+        guard !subprojectsClosed else { return }
+        guard !subprojectsLoading else {
+            subprojectsRerun = true
+            return
+        }
+        subprojectsLoading = true
         let container = modelContext.container
         let path = projectPath
         let since = since
+        let account = scope.isAll ? nil : scopeAccountId
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
-        subprojectsTask = Task {
+        Task {
             let rows = await Task.detached(priority: .userInitiated) {
                 Self.loadSubprojects(container: container, projectPath: path,
-                                     since: since, mode: mode)
+                                     since: since, accountId: account, mode: mode)
             }.value
-            guard !Task.isCancelled else { return }
+            subprojectsLoading = false
+            guard !subprojectsClosed else { return }
             cachedSubprojects = rows
+            if subprojectsRerun {
+                subprojectsRerun = false
+                refreshSubprojects()
+            }
         }
     }
 
     private nonisolated static func loadSubprojects(
-        container: ModelContainer, projectPath: String, since: Date?, mode: CostMode
+        container: ModelContainer, projectPath: String, since: Date?,
+        accountId: String?, mode: CostMode
     ) -> [SubprojectRow] {
         struct Acc {
             var tokens: Int64 = 0
@@ -315,16 +339,20 @@ struct ProjectDetailView: View {
         let context = ModelContext(container)
         let path = projectPath
         var sampleDesc: FetchDescriptor<TokenSample>
-        if let cutoffDate = since {
-            let cutoffString = TokenSample.formatDate(cutoffDate)
+        // No cutoff means every date; `""` sorts before any "yyyy-MM-dd".
+        let cutoffString = since.map(TokenSample.formatDate) ?? ""
+        if let acct = accountId {
             sampleDesc = FetchDescriptor<TokenSample>(
                 predicate: #Predicate<TokenSample> {
                     $0.projectPath == path && $0.date >= cutoffString
+                        && $0.accountId == acct
                 }
             )
         } else {
             sampleDesc = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.projectPath == path }
+                predicate: #Predicate<TokenSample> {
+                    $0.projectPath == path && $0.date >= cutoffString
+                }
             )
         }
         sampleDesc.propertiesToFetch = [
@@ -479,7 +507,7 @@ struct ProjectDetailView: View {
         // Subprojects card — `effectiveCostUSD(mode:)` flips between
         // stored / calculated / auto fallbacks.
         .onChange(of: costModeRaw) { _, _ in refreshSubprojects() }
-        .onDisappear { subprojectsTask?.cancel() }
+        .onDisappear { subprojectsClosed = true }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
                 knownPaths: knownProjectPathsForBulkMerge,
