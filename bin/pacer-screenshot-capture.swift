@@ -94,6 +94,9 @@ struct Request: Decodable {
     var scale: Double?
     var png: String?
     var rect: [Double]?
+    /// "window": crop to this rectangle of the window (points, top-left) —
+    /// one card of the real window.
+    var crop: [Double]?
     var dark: Bool?
     var done: String?
     // "widgetsim" / "gallery" (widgets.png — see captureWidgetSim).
@@ -159,6 +162,7 @@ func capture(_ request: Request) async throws {
     guard let windowID = request.windowID, let requestedScale = request.scale, let pngPath = request.png else {
         throw fail("window: windowID, scale and png required")
     }
+    let crop = request.crop
     let request = (windowID: windowID, scale: requestedScale, png: pngPath)
     // The window list is fetched per request: the window did not exist when
     // this process started, and ScreenCaptureKit only captures what it lists.
@@ -173,16 +177,30 @@ func capture(_ request: Request) async throws {
     // Sized from the filter, not the window frame: with the shadow included the
     // content is larger than the window, and a frame-sized capture squeezed it.
     let scale = max(Double(filter.pointPixelScale), request.scale)
-    config.width = Int((filter.contentRect.width * scale).rounded())
-    config.height = Int((filter.contentRect.height * scale).rounded())
     config.showsCursor = false
     config.captureResolution = .best
-    // The window's real shadow, on a transparent margin — what a macOS window
-    // screenshot looks like, and what the README's images have always had.
-    config.ignoreShadowsSingleWindow = false
+    if crop == nil {
+        config.width = Int((filter.contentRect.width * scale).rounded())
+        config.height = Int((filter.contentRect.height * scale).rounded())
+        // The window's real shadow, on a transparent margin — what a macOS window
+        // screenshot looks like, and what the README's images have always had.
+        config.ignoreShadowsSingleWindow = false
+    } else {
+        // No shadow, so the image is exactly the window's frame and the crop,
+        // in window points, maps straight onto it.
+        config.width = Int((window.frame.width * scale).rounded())
+        config.height = Int((window.frame.height * scale).rounded())
+        config.ignoreShadowsSingleWindow = true
+    }
     log("capturing \(window.frame) level \(window.windowLayer) onScreen \(window.isOnScreen)")
-    let image = try await SCScreenshotManager.captureImage(
+    var image = try await SCScreenshotManager.captureImage(
         contentFilter: filter, configuration: config)
+    if let c = crop, c.count == 4 {
+        let px = Double(image.width) / window.frame.width
+        let rect = CGRect(x: c[0] * px, y: c[1] * px, width: c[2] * px, height: c[3] * px).integral
+        guard let cropped = image.cropping(to: rect) else { throw fail("window: crop \(rect) outside \(image.width)×\(image.height)") }
+        image = cropped
+    }
     guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
         throw NSError(domain: "capture", code: 2, userInfo: [NSLocalizedDescriptionKey: "PNG encoding failed"])
     }

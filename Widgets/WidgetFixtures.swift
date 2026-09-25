@@ -11,17 +11,21 @@ import PacerUI
 /// One source of truth for two consumers: the app's screenshot mode renders
 /// the views with them directly (the widget-picker and scoped mockups), and
 /// `ReadmeShotWidget` — compiled into the extension only for the CI screenshot
-/// build — serves them to Notification Center for `docs/screenshots/widgets.png`
-/// (bin/nc-widget-shots.sh).
+/// build — serves them to WidgetKit Simulator for `docs/screenshots/widgets.png`
+/// and `scoped-firstclass-widget.png` (bin/widgetkit-sim-shots.sh).
 enum WidgetFixtures {
-    /// The widgets `widgets.png` shows, each in the one family it is
-    /// photographed in — in the gallery's order.
-    static let readmeShots: [(kind: String, family: WidgetFamily)] = [
-        (WidgetKinds.todayCost, .systemSmall),
-        (WidgetKinds.paceGauges, .systemMedium),
-        (WidgetKinds.liveSession, .systemMedium),
-        (WidgetKinds.dailyChart, .systemMedium),
-        (WidgetKinds.topProjects, .systemMedium),
+    /// Every widget the README screenshots photograph, each in the one family
+    /// it is shown at. `id` is the stand-in's kind suffix (`ReadmeShot.<id>`),
+    /// which bin/widgetkit-sim-shots.sh names; keep the two in step.
+    static let readmeShots: [(id: String, family: WidgetFamily)] = [
+        ("today", .systemSmall),
+        ("pace-gauges", .systemMedium),
+        ("live-session", .systemMedium),
+        ("daily-chart", .systemMedium),
+        ("top-projects", .systemMedium),
+        // scoped-firstclass-widget.png: per-model windows, first-class.
+        ("pace-chart-scoped", .systemLarge),
+        ("pace-gauges-scoped", .systemLarge),
     ]
 
     private static let now = Date()
@@ -184,8 +188,8 @@ enum WidgetFixtures {
 #if PACER_WIDGET_FIXTURES
 // MARK: - README screenshot widget (CI screenshot builds only)
 
-/// The README's widgets, as Notification Center photographs them for
-/// `widgets.png` (bin/nc-widget-shots.sh).
+/// The README's widgets, as WidgetKit Simulator photographs them
+/// (bin/widgetkit-sim-shots.sh).
 ///
 /// Why stand-ins rather than the real widget types: each README shot needs one
 /// widget in one family over fixture data, and the fixture build must not
@@ -206,14 +210,14 @@ protocol ReadmeShotWidget: Widget {
 
 extension ReadmeShotWidget {
     var body: some WidgetConfiguration {
-        let (kind, family) = WidgetFixtures.readmeShots[Self.index]
-        // `ReadmeShot.<kind>`: its own kind (a bundle's kinds must differ), a
+        let (id, family) = WidgetFixtures.readmeShots[Self.index]
+        // `ReadmeShot.<id>`: its own kind (a bundle's kinds must differ), a
         // stable one for `_XCWidgetKind` to name; the one family the README
         // shows it in. No display name: WidgetKit trapped (on the CI runner,
         // while listing the bundle) on an interpolated one, and nothing
         // shows it here.
-        return StaticConfiguration(kind: "ReadmeShot.\(kind)", provider: ReadmeShotProvider()) { _ in
-            ReadmeShotView(kind: kind)
+        return StaticConfiguration(kind: "ReadmeShot.\(id)", provider: ReadmeShotProvider()) { _ in
+            ReadmeShotView(id: id)
         }
         .supportedFamilies([family])
         .contentMarginsDisabled()
@@ -225,6 +229,8 @@ struct ReadmeShot1: ReadmeShotWidget { static let index = 1 }
 struct ReadmeShot2: ReadmeShotWidget { static let index = 2 }
 struct ReadmeShot3: ReadmeShotWidget { static let index = 3 }
 struct ReadmeShot4: ReadmeShotWidget { static let index = 4 }
+struct ReadmeShot5: ReadmeShotWidget { static let index = 5 }
+struct ReadmeShot6: ReadmeShotWidget { static let index = 6 }
 
 struct ReadmeShotEntry: TimelineEntry { let date: Date }
 
@@ -238,17 +244,20 @@ struct ReadmeShotProvider: TimelineProvider {
     }
 }
 
-/// The real widget view for `kind`, over its fixture entry.
+/// The real widget view for shot `id`, over its fixture entry. The family is
+/// the one WidgetKit renders it in, as on a desktop — never forced.
 struct ReadmeShotView: View {
-    let kind: String
+    let id: String
     var body: some View {
-        switch kind {
-        case WidgetKinds.todayCost: TodayCostWidgetView(entry: WidgetFixtures.todayCost)
-        case WidgetKinds.paceGauges: PaceGaugesWidgetView(entry: WidgetFixtures.paceGauges)
-        case WidgetKinds.liveSession: LiveSessionWidgetView(entry: WidgetFixtures.liveSession)
-        case WidgetKinds.dailyChart: DailyChartWidgetView(entry: WidgetFixtures.dailyChart)
-        case WidgetKinds.topProjects: TopProjectsWidgetView(entry: WidgetFixtures.topProjects)
-        default: Text(kind)
+        switch id {
+        case "today": TodayCostWidgetView(entry: WidgetFixtures.todayCost)
+        case "pace-gauges": PaceGaugesWidgetView(entry: WidgetFixtures.paceGauges)
+        case "live-session": LiveSessionWidgetView(entry: WidgetFixtures.liveSession)
+        case "daily-chart": DailyChartWidgetView(entry: WidgetFixtures.dailyChart)
+        case "top-projects": TopProjectsWidgetView(entry: WidgetFixtures.topProjects)
+        case "pace-chart-scoped": PaceChartWidgetView(entry: WidgetFixtures.paceChartScopedLarge)
+        case "pace-gauges-scoped": PaceGaugesWidgetView(entry: WidgetFixtures.paceGaugesScopedLarge)
+        default: Text(id)
         }
     }
 }

@@ -19,7 +19,18 @@ struct LayoutShiftProbe: ViewModifier {
     @State private var lastChangeAt: Date?
 
     func body(content: Content) -> some View {
-        content.onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+        content
+        // The README screenshot run crops the real window to a named card
+        // (`scoped-firstclass-dashboard`), so it needs to know where the card
+        // is. Only mounted in that run.
+        .background {
+            if ScreenshotMode.recordsViewFrames {
+                Color.clear.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    ScreenshotMode.viewFrames[name] = frame
+                }
+            }
+        }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
             defer { last = size }
             guard let last, abs(last.width - size.width) < 1,
                   abs(last.height - size.height) >= 1 else { return }

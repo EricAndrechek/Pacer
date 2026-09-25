@@ -84,28 +84,32 @@ prepare() {
     sleep 1
 }
 
+# name (= the stand-in's `ReadmeShot.<id>` kind, WidgetFixtures.readmeShots)
+# and the family to open it at.
 shots=(
-    today         TodayCostWidget    small
-    pace-gauges   PaceGaugesWidget   medium
-    live-session  LiveSessionWidget  medium
-    daily-chart   DailyChartWidget   medium
-    top-projects  TopProjectsWidget  medium
+    today               small
+    pace-gauges         medium
+    live-session        medium
+    daily-chart         medium
+    top-projects        medium
+    pace-chart-scoped   large
+    pace-gauges-scoped  large
 )
 failed=0
-for name kind family in $shots; do
+for name family in $shots; do
     quit_simulator
     # A fresh document per shot, never the last one restored.
     defaults delete com.apple.widgetkit.simulator 2>/dev/null
     defaults write com.apple.widgetkit.simulator ApplePersistenceIgnoreState -bool YES
     defaults write com.apple.widgetkit.simulator NSQuitAlwaysKeepsWindows -bool NO
     prepare
-    open -n --env "_XCWidgetKind=ReadmeShot.$kind" --env "_XCWidgetFamily=$family" \
+    open -n --env "_XCWidgetKind=ReadmeShot.$name" --env "_XCWidgetFamily=$family" \
          --env _XCWidgetDefaultView=timeline -a "$SIM" "$APPEX" \
         || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
     debug=
     [[ -n $DEBUG_DIR ]] && debug=",\"debug\":\"$DEBUG_DIR/$name-window.png\""
     if request "widget-$name" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/$name.png\"$debug}"; then
-        log "✓ $name ($kind, $family)"
+        log "✓ $name ($family)"
     else
         failed=1
     fi
@@ -114,6 +118,7 @@ quit_simulator
 (( failed )) && { log "not composing widgets.png: a widget failed"; exit 1; }
 
 request widget-gallery "{\"kind\":\"gallery\",\"png\":\"$OUT/widgets.png\",\"rows\":[[\"$WORK/today.png\",\"$WORK/pace-gauges.png\"],[\"$WORK/live-session.png\",\"$WORK/daily-chart.png\"],[\"$WORK/top-projects.png\"]]}" || exit 1
+request widget-gallery-scoped "{\"kind\":\"gallery\",\"png\":\"$OUT/scoped-firstclass-widget.png\",\"rows\":[[\"$WORK/pace-chart-scoped.png\",\"$WORK/pace-gauges-scoped.png\"]]}" || exit 1
 [[ -n $DEBUG_DIR ]] && cp "$WORK"/*.png "$DEBUG_DIR/"
 rm -rf "$WORK"
-log "✓ widgets.png"
+log "✓ widgets.png, scoped-firstclass-widget.png"

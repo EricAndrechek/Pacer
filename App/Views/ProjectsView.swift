@@ -137,6 +137,17 @@ struct ProjectsView: View {
         .onAppear {
             if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
         }
+        // Only ever posted by the README screenshot run: the real sheets,
+        // opened the way their buttons open them.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotCollections)) { note in
+            guard let request = note.object as? String else {
+                showingCollectionsManager = false
+                return
+            }
+            collectionsManagerStartNew = false
+            editingCollectionID = request.hasPrefix("edit:") ? String(request.dropFirst(5)) : nil
+            showingCollectionsManager = true
+        }
     }
 
     /// Tab-level controls in the page header: the alias-manager entry

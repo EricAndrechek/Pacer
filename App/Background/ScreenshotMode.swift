@@ -42,6 +42,11 @@ enum ScreenshotMode {
         ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MODE"] == "1"
     }
 
+    /// `LayoutShiftProbe` records each named view's frame (window points,
+    /// top-left) here, in a screenshot run only, for crops of the real window.
+    static let recordsViewFrames = isActive
+    @MainActor static var viewFrames: [String: CGRect] = [:]
+
     /// Output directory for the PNGs. `PACER_SCREENSHOT_DIR` (the make
     /// target passes an absolute path) or `./screenshots` relative to
     /// the launch CWD as a fallback.
@@ -227,6 +232,22 @@ enum ScreenshotMode {
         // Scoped into a nested collection — shows the composition breakdown.
         await captureRealWindow("projects-collections-scoped", size: CGSize(width: 1280, height: 992),
                                 scheme: .light, tab: .projects, projectsScope: "client", sidebarHidden: true)
+        // Scoped windows as first-class pace items — the dashboard's pace card
+        // with 5h + 7d + per-model windows, cropped from the real window (light
+        // + dark). The large widgets showing the same set are WidgetKit
+        // Simulator's (`scoped-firstclass-widget.png`, bin/widgetkit-sim-shots.sh).
+        await captureRealWindow("scoped-firstclass-dashboard", size: CGSize(width: 1280, height: 1100),
+                                scheme: .light, tab: .dashboard, sidebarHidden: true, crop: "pace")
+        await captureRealWindow("scoped-firstclass-dashboard-dark", size: CGSize(width: 1280, height: 1100),
+                                scheme: .dark, tab: .dashboard, sidebarHidden: true, crop: "pace")
+
+        // Projects ▸ Collections — the real manager sheet, and its real editor
+        // on a seeded collection, each opened the way its button opens it.
+        await captureRealWindow("collections-manager", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects, sheet: "manager")
+        await captureRealWindow("collections-editor", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects, sheet: "edit:acme")
+
         if windowsOnly {
             log("window screenshots complete")
             return
@@ -238,32 +259,6 @@ enum ScreenshotMode {
         // are the real extension, rendered by WidgetKit Simulator over
         // `WidgetFixtures` after this process exits (bin/widgetkit-sim-shots.sh,
         // CI only).
-
-        // Scoped windows as first-class pace items — the dashboard pace card
-        // with 5h + 7d + several per-model windows in the responsive N-column
-        // grid (light + dark), and the large widget families showing the same
-        // set. Captured for docs/mockups (run with PACER_SCREENSHOT_DIR pointed
-        // there); design polish pending sign-off.
-        await capture("scoped-firstclass-dashboard", width: 1180, height: nil, scheme: .light,
-                      card: true, container: container) { PaceChartCard() }
-        await capture("scoped-firstclass-dashboard-dark", width: 1180, height: nil, scheme: .dark,
-                      card: true, container: container) { PaceChartCard() }
-        await capture("scoped-firstclass-widget", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { ScopedFirstClassWidgetGallery() }
-
-        // Projects ▸ Collections — the manager, the editor, and the
-        // integrated Projects tab. Synthetic collections over synthetic
-        // project rollups (see `seedCollections`).
-        await capture("collections-manager", width: nil, height: nil, scheme: .light,
-                      card: true, backdrop: .windowBackgroundColor, container: container) {
-            CollectionsManager()
-        }
-        await capture("collections-editor", width: nil, height: nil, scheme: .light,
-                      card: true, backdrop: .windowBackgroundColor, container: container) {
-            CollectionEditorShowcase()
-        }
-        // The integrated Projects tab: collection filter bar + per-row
-        // membership chips (the "not a separate tab" model).
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
@@ -1189,7 +1184,14 @@ enum ScreenshotMode {
         /// A README that only ever shows the sidebar open hides that it can be
         /// closed. (Narrowing was tried: the sidebar's minimum is its widest
         /// label, so a "narrow" one looked the same as a normal one.)
-        sidebarHidden: Bool = false
+        sidebarHidden: Bool = false,
+        /// Open one of the Projects tab's Collections sheets first (`"manager"`
+        /// or `"edit:<id>"`) and capture that sheet — the top-most one — rather
+        /// than the window under it.
+        sheet: String? = nil,
+        /// Crop the window to the view `LayoutShiftProbe` names this (plus a
+        /// margin of the window around it) — one card, still the real window.
+        crop: String? = nil
     ) async {
         guard let window = sceneWindow else { note("capture \(name): the app made no scene window"); return }
         guard let dir = captureDirectory else {
@@ -1241,13 +1243,46 @@ enum ScreenshotMode {
         await settle(seconds: 3.6)
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
+        var target = window
+        if let sheet {
+            // The manager is a sheet on the window; its editor, a sheet on the
+            // manager.
+            let depth = sheet.hasPrefix("edit:") ? 2 : 1
+            func topSheet() -> (window: NSWindow, depth: Int) {
+                var w = window, d = 0
+                while let next = w.attachedSheet { w = next; d += 1 }
+                return (w, d)
+            }
+            NotificationCenter.default.post(name: .pacerScreenshotCollections, object: sheet)
+            let sheetDeadline = Date().addingTimeInterval(5)
+            while Date() < sheetDeadline, topSheet().depth < depth { await settle(seconds: 0.1) }
+            guard topSheet().depth >= depth else {
+                note("capture \(name): the \(sheet) sheet did not open")
+                await closeCollectionsSheets(on: window)
+                window.orderOut(nil)
+                return
+            }
+            await settle(seconds: 1.5)   // the sheet's slide-in, and its content
+            target = topSheet().window
+        }
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
         try? FileManager.default.removeItem(at: png)
         try? FileManager.default.removeItem(at: failed)
-        let request: [String: Any] = ["windowID": window.windowNumber,
-                                      "scale": window.backingScaleFactor,
+        var request: [String: Any] = ["windowID": target.windowNumber,
+                                      "scale": target.backingScaleFactor,
                                       "png": png.path]
+        if let crop {
+            guard let frame = viewFrames[crop] else {
+                note("capture \(name): no frame recorded for \(crop)")
+                window.orderOut(nil)
+                return
+            }
+            let bounds = CGRect(origin: .zero, size: window.frame.size)
+            let r = frame.insetBy(dx: -16, dy: -16).intersection(bounds).integral
+            log("\(name): crop \(crop) \(frame) → \(r) of \(bounds)")
+            request["crop"] = [r.minX, r.minY, r.width, r.height]
+        }
         if let data = try? JSONSerialization.data(withJSONObject: request) {
             try? data.write(to: dir.appendingPathComponent("\(name).request"))
         }
@@ -1263,7 +1298,15 @@ enum ScreenshotMode {
             let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "timed out"
             note("capture \(name): \(why)")
         }
+        if sheet != nil { await closeCollectionsSheets(on: window) }
         window.orderOut(nil)
+    }
+
+    @MainActor private static func closeCollectionsSheets(on window: NSWindow) async {
+        NotificationCenter.default.post(name: .pacerScreenshotCollections, object: nil)
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, window.attachedSheet != nil { await settle(seconds: 0.1) }
+        if window.attachedSheet != nil { note("collections sheets did not close") }
     }
 
     /// The menu bar with Pacer's real menu open, photographed by the helper.
@@ -2198,32 +2241,6 @@ extension ScreenshotMode {
     }
 }
 
-/// Renders the redesigned collection editor with representative data so
-/// `make screenshots` shows the rule live-preview, the disambiguated
-/// member rows, and the color picker.
-private struct CollectionEditorShowcase: View {
-    var body: some View {
-        let home = NSHomeDirectory()
-        let known = [
-            "\(home)/Code/work/acme-corp/api",
-            "\(home)/Code/work/acme-corp/firmware",
-            "\(home)/Code/work/acme-corp/web-dashboard",
-            "\(home)/Code/work/acme-corp/cloud-infra",
-            "\(home)/Code/personal/notes-app",
-            "\(home)/Code/oss/pacer",
-        ]
-        var draft = CollectionEditorDraft()
-        draft.name = "Acme Corp"
-        draft.rules = ["\(home)/Code/work/acme-corp"]
-        draft.includePaths = ["\(home)/Code/oss/pacer"]
-        return CollectionEditorSheet(
-            draft: draft,
-            knownPaths: known,
-            otherCollections: [("side", "Side Projects")],
-            onSave: { _ in }
-        )
-    }
-}
 
 /// The whole menu-bar experience in one image: a slice of the macOS menu
 /// bar carrying Pacer's readout (`MenuBarLabel`), with the click-down
@@ -2328,40 +2345,3 @@ private struct MenuBarSettingsMock: View {
     }
 }
 
-/// The two large widget families showing scoped per-model windows as
-/// first-class rows / gauges alongside 5h and 7d — the widget half of the
-/// "scoped windows are treated identically to 5h/7d" story. Hand-built entries
-/// (the widget provider reads the real store, which is empty here).
-private struct ScopedFirstClassWidgetGallery: View {
-    var body: some View {
-        HStack(alignment: .top, spacing: 24) {
-            tile(w: 340, h: 384) {
-                PaceChartWidgetView(entry: WidgetFixtures.paceChartScopedLarge,
-                                    forcedFamily: .systemLarge)
-            }
-            // Shorter, because with one row of rings it has no use for the
-            // pace tile's height and a card two-thirds empty reads as one that
-            // failed to load. The widget itself is unchanged — a real
-            // `systemLarge` is whatever size the OS gives it; this is the
-            // mockup showing the card at the size its content wants.
-            tile(w: 340, h: 206) {
-                PaceGaugesWidgetView(entry: WidgetFixtures.paceGaugesScopedLarge,
-                                     forcedFamily: .systemLarge)
-            }
-        }
-        .padding(28)
-    }
-
-    @ViewBuilder
-    private func tile(w: CGFloat, h: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
-        content()
-            .frame(width: w, height: h)
-            .background(PacerDesign.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
-    }
-}

@@ -34,6 +34,8 @@ struct PacerWidgetsBundle: WidgetBundle {
         ReadmeShot2()
         ReadmeShot3()
         ReadmeShot4()
+        ReadmeShot5()
+        ReadmeShot6()
         #else
         TodayCostWidget()
         PaceGaugesWidget()
