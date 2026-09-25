@@ -43,7 +43,7 @@ struct NowStrip: View {
     // profiling put `NowStrip.body` at the top of the process once
     // `ToolbarFreshness` was fixed the same way.
     //
-    // Building the date-pinned predicates in `refresh()` rather than `init`
+    // Building the date-pinned predicates in each read rather than `init`
     // also fixes them following the clock: they used to capture "today" and
     // the current hour at view-construction time and keep them, so the strip
     // silently read the wrong hour bucket after an hour rolled over.
@@ -68,8 +68,14 @@ struct NowStrip: View {
     @State private var latestSampleModel: String?
     /// Most-recently-touched session, for the Now tile's session line.
     @State private var latestSessions: [SessionRow] = []
-    @State private var extraUsages: [ExtraUsageSample] = []
-    @State private var scanMeta: [ClaudeCodeMeta] = []
+    /// The newest extra-usage reading's spend, and when the scan last ran:
+    /// the strip reads one field of each probe's row.
+    @State private var extraUsageUSD: Double?
+    @State private var lastScanAt: String?
+    /// Which scope the last applied read was for (`scopeKey`), nil before the
+    /// first. See `apply`.
+    @State private var appliedScope: String?
+    @State private var refreshInFlight = false
 
     @Environment(\.usageEngines) private var engines
 
@@ -78,24 +84,84 @@ struct NowStrip: View {
         self.onSessionTap = onSessionTap
     }
 
-    /// Re-read every probe. All are capped or keyed to today, so this is a
-    /// handful of index seeks; the problem was never one refresh's cost, it
-    /// was doing it on every save forever.
+    /// Everything one refresh reads, as plain values, so the reading can
+    /// happen off the main thread.
+    private struct Snapshot: Sendable {
+        var todayAggregates: [DailyRow] = []
+        var recentHourlyRows: [HourlyRow] = []
+        var latestSampleAt: Date?
+        var latestSampleModel: String?
+        var latestSessions: [SessionRow] = []
+        var extraUsageUSD: Double?
+        var lastScanAt: String?
+    }
+
+    private nonisolated static func scopeKey(_ account: String?) -> String { account ?? "" }
+
+    /// Re-read every probe, off the main thread. All are capped or keyed to
+    /// today, so this is a handful of index seeks; the problem was never one
+    /// refresh's cost, it was doing it on every save forever.
+    ///
+    /// Off the main thread because each of those seeks waits its turn for the
+    /// store. On the main context, once a second, the strip was the main
+    /// thread's largest Pacer cost in an 8-minute `sample` (1.3 s), and when
+    /// an engine refit or a big scan held the store it made every tick a
+    /// stall: 1–4 s, about once a second, for the length of the refit (#152).
     @MainActor
-    private func refresh() {
-        let now = Date()
+    private func refresh() async {
+        // A read still in flight will land; the next tick picks up anything
+        // it missed.
+        guard !refreshInFlight else { return }
+        refreshInFlight = true
+        defer { refreshInFlight = false }
+        let container = modelContext.container
+        let account = scope.accountId
+        let limitAccount = scope.limitAccountId
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            Self.read(container: container, account: account,
+                      limitAccount: limitAccount, now: Date())
+        }.value
+        apply(snapshot, account: account)
+    }
+
+    @MainActor
+    private func apply(_ s: Snapshot, account: String?) {
+        // Read for a scope the user has since left: drop it rather than show
+        // one account's numbers under another's name. The `.onChange` below
+        // has already asked for the new scope's read.
+        guard account == scope.accountId else { return }
+        todayAggregates = s.todayAggregates
+        recentHourlyRows = s.recentHourlyRows
+        latestSampleAt = s.latestSampleAt
+        latestSampleModel = s.latestSampleModel
+        latestSessions = s.latestSessions
+        extraUsageUSD = s.extraUsageUSD
+        lastScanAt = s.lastScanAt
+        // `cached` is otherwise rebuilt only when a scan lands, so a scope
+        // switch has to rebuild it here, once the new scope's rows are in.
+        let key = Self.scopeKey(account)
+        if appliedScope != key {
+            appliedScope = key
+            refreshFacts()
+        }
+    }
+
+    private nonisolated static func read(
+        container: ModelContainer, account acct: String?, limitAccount: String?, now: Date
+    ) -> Snapshot {
+        let modelContext = ModelContext(container)
+        var s = Snapshot()
         let cal = Calendar.current
         let todayString = TokenSample.formatDate(now)
 
-        let acct = scope.accountId
         if let acct {
-            todayAggregates = ((try? modelContext.fetch(
+            s.todayAggregates = ((try? modelContext.fetch(
                 FetchDescriptor<AccountDailyAggregate>(
                     predicate: #Predicate<AccountDailyAggregate> {
                         $0.date == todayString && $0.accountId == acct
                     }))) ?? []).map(\.dailyRow)
         } else {
-            todayAggregates = ((try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
+            s.todayAggregates = ((try? modelContext.fetch(FetchDescriptor<DailyAggregate>(
                 predicate: #Predicate<DailyAggregate> { $0.date == todayString }))) ?? [])
                 .map(\.dailyRow)
         }
@@ -124,11 +190,11 @@ struct NowStrip: View {
                     && ($0.date == todayString
                         || ($0.date == yesterdayString && $0.hour >= lowestHour))
                   }
-            recentHourlyRows = ((try? modelContext.fetch(
+            s.recentHourlyRows = ((try? modelContext.fetch(
                 FetchDescriptor<AccountHourlyAggregate>(predicate: scopedHourly))) ?? [])
                 .map(\.hourlyRow)
         } else {
-            recentHourlyRows = ((try? modelContext.fetch(
+            s.recentHourlyRows = ((try? modelContext.fetch(
                 FetchDescriptor<HourlyAggregate>(predicate: hourly))) ?? [])
                 .map(\.hourlyRow)
         }
@@ -141,20 +207,22 @@ struct NowStrip: View {
         // Same class as the rate-limit reads — no crash, no empty state, just
         // someone else's number.
         let latest = (try? modelContext.fetch(Self.latestSampleProbe(account: acct)))?.first
-        latestSampleAt = latest?.sampledAt
-        latestSampleModel = latest?.model
+        s.latestSampleAt = latest?.sampledAt
+        s.latestSampleModel = latest?.model
         if let acct {
-            latestSessions = ((try? modelContext.fetch(
+            s.latestSessions = ((try? modelContext.fetch(
                 Self.latestAccountSessionProbe(account: acct))) ?? []).map(\.sessionRow)
         } else {
-            latestSessions = ((try? modelContext.fetch(Self.latestSessionProbe)) ?? [])
+            s.latestSessions = ((try? modelContext.fetch(Self.latestSessionProbe())) ?? [])
                 .map(\.sessionRow)
         }
-        extraUsages = (try? modelContext.fetch(LimitScope.extraUsage(account: scope.limitAccountId, limit: 1))) ?? []
-        scanMeta = (try? modelContext.fetch(Self.scanMetaProbe)) ?? []
+        s.extraUsageUSD = ((try? modelContext.fetch(
+            LimitScope.extraUsage(account: limitAccount, limit: 1))) ?? []).first?.amountUSD
+        s.lastScanAt = ((try? modelContext.fetch(Self.scanMetaProbe())) ?? []).first?.value
+        return s
     }
 
-    private static func latestSampleProbe(account: String?) -> FetchDescriptor<TokenSample> {
+    private nonisolated static func latestSampleProbe(account: String?) -> FetchDescriptor<TokenSample> {
         var d = FetchDescriptor<TokenSample>(
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)]
         )
@@ -165,7 +233,7 @@ struct NowStrip: View {
         return d
     }
 
-    private static func latestAccountSessionProbe(
+    private nonisolated static func latestAccountSessionProbe(
         account: String
     ) -> FetchDescriptor<AccountSessionInfo> {
         var d = FetchDescriptor<AccountSessionInfo>(
@@ -176,20 +244,20 @@ struct NowStrip: View {
         return d
     }
 
-    private static let latestSessionProbe: FetchDescriptor<SessionInfo> = {
+    private nonisolated static func latestSessionProbe() -> FetchDescriptor<SessionInfo> {
         var d = FetchDescriptor<SessionInfo>(
             sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)]
         )
         d.fetchLimit = 1
         return d
-    }()
+    }
 
-    private static let scanMetaProbe: FetchDescriptor<ClaudeCodeMeta> = {
+    private nonisolated static func scanMetaProbe() -> FetchDescriptor<ClaudeCodeMeta> {
         let key = ClaudeCodeMetaKey.lastIncrementalScanAt
         return FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
         )
-    }()
+    }
 
     // MARK: - Caches
 
@@ -213,9 +281,7 @@ struct NowStrip: View {
         next.todayTokens = todayAggregates.reduce(0) {
             $0 + $1.inputTokens + $1.outputTokens
         }
-        if let latest = extraUsages.first {
-            next.extraUsageUSD = latest.amountUSD
-        }
+        next.extraUsageUSD = extraUsageUSD
         cached = next
     }
 
@@ -271,24 +337,24 @@ struct NowStrip: View {
             costTile
         }
         .task {
-            refresh()
+            await refresh()
             // Owned by the view's lifetime, so it stops when the Dashboard
             // closes rather than ticking against a dead view.
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.refreshInterval))
                 if Task.isCancelled { break }
-                refresh()
+                await refresh()
             }
         }
         .onAppear { refreshFacts() }
-        .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
+        .onChange(of: lastScanAt) { _, _ in refreshFacts() }
         // The scope is a refresh trigger. `refresh()` re-reads the scoped rows
         // on its own second-by-second tick, but the tile renders `cached`, and
         // that was only rebuilt on a scan cycle — so the numbers stayed the
         // previous account's until an unrelated write happened to land.
+        // `apply` rebuilds `cached` once the new scope's rows arrive.
         .onChange(of: scope.accountId) { _, _ in
-            refresh()
-            refreshFacts()
+            Task { await refresh() }
             Task { await refreshEngine() }
         }
         .onChange(of: costModeRaw) { _, _ in
