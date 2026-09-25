@@ -336,6 +336,44 @@ import Testing
         #expect(after.misclassifiedLaneCount == 0)
     }
 
+    /// The poller fixing its own active account was not enough: the
+    /// attribution trail kept the stale config's account, so every turn went
+    /// to an account serving no requests. The keychain's account has to reach
+    /// the trail too — and only the token the keychain holds *now* speaks for
+    /// it, not any other lane.
+    @Test("the keychain token's account is published for the attribution trail")
+    func keychainAccountIsPublished() async throws {
+        let container = try Self.makeContainer()
+        let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
+        ))
+        let transport: OAuthClient.Transport = { request in
+            let token = request.value(forHTTPHeaderField: "Authorization") ?? ""
+            let org = token.hasSuffix("tokA") ? "orgA" : "orgB"
+            return try HTTPOutcome.success(
+                jsonBody: #"{"five_hour":{"utilization":10}}"#,
+                headers: ["anthropic-organization-id": org]).materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport,
+                                 desktopEnabled: { false }, heldStore: held)
+        let monitor = SignedInCredentialMonitor()
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock(),
+                                 signedInCredential: monitor)
+
+        _ = await poller.runOnce()
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokB"))   // the other account
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokA"))
+        #expect(monitor.current?.accountKey == "orgA")
+
+        // A forced re-read keeps the run going rather than restarting it.
+        let since = monitor.current?.since
+        await poller.refreshSignedInCredential()
+        #expect(monitor.current?.accountKey == "orgA")
+        #expect(monitor.current?.since == since)
+    }
+
     /// The restart case, which is where this went wrong in the field.
     ///
     /// Lane classification is restored from persisted meta, and so is

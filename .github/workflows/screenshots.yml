@@ -44,8 +44,26 @@ jobs:
 
       # Builds (make verify), starts the capture helper on a 2× virtual
       # display, renders every scene. CI=true, set by the runner, selects it.
+      #
+      # PACER_WIDGET_FIXTURES: the widget extension serves fixture entries,
+      # for widgets.png (bin/widgetkit-sim-shots.sh). Compiled in only here,
+      # through an xcconfig xcodebuild applies over every target, so no build
+      # that ships can show fake numbers.
       - name: Render screenshots
-        run: make screenshots
+        run: |
+          printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) PACER_WIDGET_FIXTURES\n' \
+              > "$RUNNER_TEMP/widget-fixtures.xcconfig"
+          XCODE_XCCONFIG_FILE="$RUNNER_TEMP/widget-fixtures.xcconfig" make screenshots
+
+      # Lossless: pixels are untouched, only the encoding is tightened. The
+      # images are committed on every UI PR and git keeps each version, so
+      # their size is the repo's size.
+      - name: Compress the images (lossless)
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --quiet oxipng
+          du -ch docs/screenshots/*.png | tail -1
+          oxipng --quiet -o 4 --strip safe docs/screenshots/*.png
+          du -ch docs/screenshots/*.png | tail -1
 
       - name: Commit the images to the branch
         env:

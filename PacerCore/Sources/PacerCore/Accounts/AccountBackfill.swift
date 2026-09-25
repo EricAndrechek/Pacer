@@ -103,6 +103,41 @@ public enum AccountBackfill {
         )
     }
 
+    /// Apply trail corrections to turns already stored: every sample carrying
+    /// a correction's refuted account inside its range moves to the account
+    /// the corrected trail names. Returns the moved samples so the caller can
+    /// rebuild the rollups they feed.
+    ///
+    /// Only rows carrying the refuted account are touched, so turns that were
+    /// already right stay put, and only where the corrected trail now names
+    /// the right account for the default login — so a stretch the trail still
+    /// gives to someone else (a manual range, say) is never moved by a
+    /// correction whose range happens to cover it. A turn that a pinned profile bound to that same
+    /// account could have written is left alone: samples do not record their
+    /// root, and moving a pinned session's usage would be a new error.
+    public static func restamp(
+        _ corrections: [AccountTrailRecorder.Correction],
+        trail: AccountTrail,
+        context: ModelContext
+    ) throws -> [TokenSample] {
+        var moved: [TokenSample] = []
+        for correction in corrections {
+            let wrong: String? = correction.wrongAccount
+            let from = correction.from
+            let to = correction.to ?? .distantFuture
+            let descriptor = FetchDescriptor<TokenSample>(predicate: #Predicate {
+                $0.accountId == wrong && $0.sampledAt >= from && $0.sampledAt < to
+            })
+            for sample in try context.fetch(descriptor) {
+                if trail.isPinned(correction.wrongAccount, at: sample.sampledAt) { continue }
+                guard trail.accountId(at: sample.sampledAt) == correction.rightAccount else { continue }
+                sample.accountId = correction.rightAccount
+                moved.append(sample)
+            }
+        }
+        return moved
+    }
+
     /// How many turns still have no account, and the range they span —
     /// what a "you have unattributed history" prompt needs to say
     /// something true.

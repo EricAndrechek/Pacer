@@ -365,7 +365,8 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // `make screenshots` stops instead.
                     guard ScreenshotMode.validateFixture(container) else { exit(3) }
                     await ScreenshotMode.captureAll(container: container,
-                                                    sceneEngines: self.backgroundService.engines)
+                                                    sceneEngines: self.backgroundService.engines,
+                                                    installStatusItem: { self.installStatusItemForScreenshots() })
                     // Again afterwards: scenes that build their own series
                     // report through `ScreenshotMode.note` while rendering, and
                     // those problems only exist once the render has run.
@@ -556,11 +557,22 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // SwiftUI's default spot on the owner's screen for seconds at
                 // every local launch. On CI there is nobody to see it; locally
                 // it is only ever allowed beneath the desktop picture.
-                if ScreenshotMode.capturesRealWindow, MainWindowPlacement.isDashboard(window) {
+                // Its sheets too (the Collections manager and editor are
+                // photographed as sheets), under the same rule: on a person's
+                // Mac a sheet not beneath the desktop picture is hidden.
+                var root = window
+                while let parent = root.sheetParent { root = parent }
+                // `isSheet` as well: a sheet's first occlusion change can come
+                // before it is attached, while `sheetParent` is still nil.
+                if ScreenshotMode.capturesRealWindow,
+                   MainWindowPlacement.isDashboard(root) || window.isSheet {
                     if !ScreenshotMode.activatesForCapture, !ScreenshotMode.isBeneathWallpaper(window) {
                         window.orderOut(nil)
                     }
                     return
+                }
+                if ScreenshotMode.isActive {
+                    Log.write("Screenshots", "closing \(type(of: window)) \"\(window.title)\" sheet=\(window.isSheet) \(window.frame)")
                 }
                 window.close()
             }
@@ -867,6 +879,13 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // collapses to the system-default ~38pt and clips any chips
         // beyond a single icon.
         let item = NSStatusBar.system.statusItem(withLength: 30)
+        // A stable autosave name so macOS remembers where the user dragged
+        // the item in the menu bar. Without one, macOS 26 (Tahoe) clears the
+        // item's saved "Preferred Position" — and Pacer tears the item down
+        // and rebuilds it (a fresh NSStatusItem, no autosave identity)
+        // whenever the chip list toggles empty/non-empty, which is exactly
+        // the kind of churn that loses an unnamed item's position.
+        item.autosaveName = "com.ericandrechek.pacer.status"
         guard let button = item.button else {
             return
         }
@@ -941,6 +960,14 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         statusItem = item
         statusMenu = menu
+    }
+
+    /// The README screenshot run's status item — the app's own, built the
+    /// way the running app builds it, over the fixture container. CI only:
+    /// see `ScreenshotMode.captureRealMenuBar`.
+    func installStatusItemForScreenshots() -> NSStatusItem? {
+        if statusItem == nil { buildStatusItem() }
+        return statusItem
     }
 
     private func teardownMenuBar() {
@@ -1032,6 +1059,19 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             keyEquivalent: "q"
         )
         menu.addItem(quitItem)
+
+        // No icons on these three, in principle: a deliberate, consistent
+        // choice rather than whatever each OS defaults to, matching macOS
+        // 27's own default (and this machine). macOS 27 adds
+        // `NSMenuItem.preferredImageVisibility` to say that explicitly, but
+        // it isn't in the AppKit headers of the SDK CI's `macos-26` runner
+        // builds against — confirmed by a compile failure there
+        // ("value of type 'NSMenuItem' has no member 'preferredImageVisibility'",
+        // 2026-09-24) even though it exists in a newer local Xcode. Skipped
+        // rather than worked around, per the SDK check this was gated on.
+        // Revisit once CI's default Xcode carries the macOS 27 SDK — until
+        // then macOS 26 also has no opt-out and adds its own SF Symbol to
+        // `terminate:` (Quit) regardless.
 
         return menu
     }

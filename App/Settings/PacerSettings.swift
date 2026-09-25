@@ -113,7 +113,10 @@ public enum PacerSettings {
 
     nonisolated(unsafe) public static let defaults: [String: Any] = [
         Key.menuBarStyle:          MenuBarStyle.iconAndPercent.rawValue,
-        Key.menuBarIconStyle:      MenuBarIconStyle.gaugeNeedle.rawValue,
+        // Activity rings: one ring per window reads at a glance what the gauge
+        // needle could only show for one. A default, so it applies to new
+        // installs; anyone who picked a style keeps it.
+        Key.menuBarIconStyle:      MenuBarIconStyle.activityRings.rawValue,
         // Explicit default: the 5-hour window paints the icon. (A legacy stored
         // "" — the old "Auto" — still resolves to 5-hour via resolveDriver.)
         Key.menuBarIconDriver:     MenuBarWindows.defaultDriverKey,

@@ -251,6 +251,15 @@ public actor OAuthPoller: TokenPoolTesting {
     /// successful poll (or a restore from persisted `Account.isActive`).
     private var activeAccountKey: String?
     private var lastDiscoveryAt: Date?
+    /// Where the signed-in credential's account is published for the
+    /// attribution trail. nil in tests that do not exercise attribution.
+    private let signedInCredential: SignedInCredentialMonitor?
+    /// The token the Claude Code keychain held at the last discovery, and
+    /// when that read happened. Tracked separately from `Lane.source`
+    /// because a lane keeps its `.keychain` label after the keychain has
+    /// moved on to another account's token; only this says what is live.
+    private var liveKeychainToken: String?
+    private var liveKeychainReadAt: Date?
     /// Most recent activity time seen by the loop, cached so status
     /// publishes can report active/idle without another probe.
     private var lastActivityAt: Date?
@@ -296,8 +305,10 @@ public actor OAuthPoller: TokenPoolTesting {
         /// the same seam every other machine-touching source here has.
         switcherCache: @escaping @Sendable () -> [SwitcherUsageCache.Reading]
             = { SwitcherUsageCache.readings(at: SwitcherUsageCache.defaultURL()) },
-        random: @escaping RandomSource = { Double.random(in: 0..<1) }
+        random: @escaping RandomSource = { Double.random(in: 0..<1) },
+        signedInCredential: SignedInCredentialMonitor? = nil
     ) {
+        self.signedInCredential = signedInCredential
         self.client = client
         self.container = container
         self.configuration = configuration
@@ -505,6 +516,36 @@ public actor OAuthPoller: TokenPoolTesting {
         poolStore.saveAll(confirmed.map { StoredToken(credential: $0.credential, source: $0.source) })
         await saveAllLaneMeta()   // prune the removed lane's metadata
         await publishStatus()
+    }
+
+    /// Re-read the Claude Code keychain now rather than on the rediscover
+    /// interval, and publish what it holds.
+    ///
+    /// Called by the scan loop when `~/.claude.json` names an account the last
+    /// keychain read disagrees with: the only way to know whether that is a
+    /// real switch or a stale config write is to look at the credential
+    /// again. Cheap (a silent keychain read) and throttled by the caller.
+    public func refreshSignedInCredential() async {
+        // Persisted lane metadata first: it is what says whose a known token
+        // is. Without it a launch-time re-read would publish the signed-in
+        // token as unresolved, and an unresolved token cannot veto anything.
+        await loadPersistedMetaIfNeeded()
+        lastDiscoveryAt = nil
+        ensureLanes()
+    }
+
+    /// Publish the account of the token the keychain holds, if a keychain
+    /// read has happened. A token not yet resolved publishes as unknown,
+    /// which is what makes a real switch visible before its first poll.
+    private func publishSignedInCredential(resolvedKey: String? = nil) {
+        guard let signedInCredential, let token = liveKeychainToken,
+              let readAt = liveKeychainReadAt else { return }
+        let lane = lanes.first { $0.credential.accessToken == token }
+        let key: String? = resolvedKey ?? lane.flatMap { lane in
+            guard lane.state.account != .unknown, let org = lane.resolvedOrg else { return nil }
+            return Account.key(forOrg: org)
+        }
+        signedInCredential.publish(accountKey: key, readAt: readAt)
     }
 
     /// Make `id` the active account. Swaps the live sample timeline to that
@@ -1054,8 +1095,16 @@ public actor OAuthPoller: TokenPoolTesting {
             // Hand the client our Desktop-origin tokens so its layered read
             // can decide whether it even needs to touch Claude Desktop.
             let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
-            mergeCandidates(client.candidateCredentials(cachedDesktopTokens: cachedDesktop))
+            let candidates = client.candidateCredentials(cachedDesktopTokens: cachedDesktop)
+            mergeCandidates(candidates)
             lastDiscoveryAt = now
+            // Remember what the keychain holds *now*, so the attribution trail
+            // can tell a real switch (the keychain changed) from a stale
+            // `oauthAccount` written by some other Claude Code process (it
+            // did not).
+            liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
+            liveKeychainReadAt = liveKeychainToken == nil ? nil : now
+            publishSignedInCredential()
         }
         // Drop lanes whose token has expired locally (server would 401).
         lanes.removeAll { lane in
@@ -1253,6 +1302,12 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
+            // The lane's classification is set further down, so name the
+            // account directly: this response just said whose token it is.
+            if lanes[idx].credential.accessToken == liveKeychainToken,
+               let resolved = lanes[idx].resolvedOrg {
+                publishSignedInCredential(resolvedKey: Account.key(forOrg: resolved))
+            }
             let accountKey = isActive ? (activeAccountKey ?? Account.key(forOrg: org)) : Account.key(forOrg: org)
             let sub = lanes[idx].credential.subscriptionType
             let tier = lanes[idx].credential.rateLimitTier

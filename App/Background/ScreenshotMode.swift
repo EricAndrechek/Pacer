@@ -42,6 +42,11 @@ enum ScreenshotMode {
         ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MODE"] == "1"
     }
 
+    /// `LayoutShiftProbe` records each named view's frame (window points,
+    /// top-left) here, in a screenshot run only, for crops of the real window.
+    static let recordsViewFrames = isActive
+    @MainActor static var viewFrames: [String: CGRect] = [:]
+
     /// Output directory for the PNGs. `PACER_SCREENSHOT_DIR` (the make
     /// target passes an absolute path) or `./screenshots` relative to
     /// the launch CWD as a fallback.
@@ -61,7 +66,12 @@ enum ScreenshotMode {
     /// window — passed in because `NSApp.delegate` is SwiftUI's adaptor, not
     /// `PacerAppDelegate`, and the cast to reach it failed silently, so the
     /// real window's engines were never warmed.
-    static func captureAll(container: ModelContainer, sceneEngines: EngineHost? = nil) async {
+    static func captureAll(
+        container: ModelContainer, sceneEngines: EngineHost? = nil,
+        /// The app's real status item, built by `PacerAppDelegate` — for the
+        /// menu-bar scenes, which photograph it rather than draw a copy.
+        installStatusItem: @MainActor () -> NSStatusItem? = { nil }
+    ) async {
         let outDir = outputDirectory
         try? FileManager.default.createDirectory(
             at: outDir, withIntermediateDirectories: true
@@ -173,6 +183,7 @@ enum ScreenshotMode {
         // container. Kept for the window scenes (see `captureRealWindow`);
         // every other window SwiftUI made is ordered out so nothing flashes.
         sceneWindow = NSApp.windows.first { MainWindowPlacement.isDashboard($0) }
+        sceneContainer = container
         for window in NSApp.windows { window.orderOut(nil) }
         log(sceneWindow == nil ? "⚠️ no scene window — window scenes will fail"
                                : "scene window: \(sceneWindow!.identifier?.rawValue ?? "-")")
@@ -222,53 +233,42 @@ enum ScreenshotMode {
         // Scoped into a nested collection — shows the composition breakdown.
         await captureRealWindow("projects-collections-scoped", size: CGSize(width: 1280, height: 992),
                                 scheme: .light, tab: .projects, projectsScope: "client", sidebarHidden: true)
+        // Scoped windows as first-class pace items — the dashboard's pace card
+        // with 5h + 7d + per-model windows, cropped from the real window (light
+        // + dark). The large widgets showing the same set are WidgetKit
+        // Simulator's (`scoped-firstclass-widget.png`, bin/widgetkit-sim-shots.sh).
+        await captureRealWindow("scoped-firstclass-dashboard", size: CGSize(width: 1280, height: 1100),
+                                scheme: .light, tab: .dashboard, sidebarHidden: true, crop: "pace")
+        await captureRealWindow("scoped-firstclass-dashboard-dark", size: CGSize(width: 1280, height: 1100),
+                                scheme: .dark, tab: .dashboard, sidebarHidden: true, crop: "pace")
+
+        // Projects ▸ Collections — the real manager, and its real editor on a
+        // seeded collection, as sheets on the real window (see
+        // `presentCollectionsSheets` for why not through SwiftUI's `.sheet`).
+        await captureRealWindow("collections-manager", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects, sheet: .manager)
+        await captureRealWindow("collections-editor", size: CGSize(width: 1280, height: 952),
+                                scheme: .light, tab: .projects, sheet: .editor(collectionID: "acme"))
+
         if windowsOnly {
             log("window screenshots complete")
             return
         }
         sceneWindow?.orderOut(nil)
 
-        // The menu-bar experience as one cohesive image: a slice of the
-        // macOS menu bar with Pacer's readout, and the click-down popover
-        // hanging beneath it. Self-decorated on a transparent canvas.
-        await capture("menubar", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { MenuBarExperience() }
-        await capture("menubar-dark", width: nil, height: nil, scheme: .dark,
-                      card: false, container: container) { MenuBarExperience() }
 
-        // The home-screen widget family.
-        await capture("widgets", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { WidgetGallery() }
-
-        // Scoped windows as first-class pace items — the dashboard pace card
-        // with 5h + 7d + several per-model windows in the responsive N-column
-        // grid (light + dark), and the large widget families showing the same
-        // set. Captured for docs/mockups (run with PACER_SCREENSHOT_DIR pointed
-        // there); design polish pending sign-off.
-        await capture("scoped-firstclass-dashboard", width: 1180, height: nil, scheme: .light,
-                      card: true, container: container) { PaceChartCard() }
-        await capture("scoped-firstclass-dashboard-dark", width: 1180, height: nil, scheme: .dark,
-                      card: true, container: container) { PaceChartCard() }
-        await capture("scoped-firstclass-widget", width: nil, height: nil, scheme: .light,
-                      card: false, container: container) { ScopedFirstClassWidgetGallery() }
-
-        // Projects ▸ Collections — the manager, the editor, and the
-        // integrated Projects tab. Synthetic collections over synthetic
-        // project rollups (see `seedCollections`).
-        await capture("collections-manager", width: nil, height: nil, scheme: .light,
-                      card: true, backdrop: .windowBackgroundColor, container: container) {
-            CollectionsManager()
-        }
-        await capture("collections-editor", width: nil, height: nil, scheme: .light,
-                      card: true, backdrop: .windowBackgroundColor, container: container) {
-            CollectionEditorShowcase()
-        }
-        // The integrated Projects tab: collection filter bar + per-row
-        // membership chips (the "not a separate tab" model).
+        // The home-screen widgets (`widgets.png`) are not rendered here: they
+        // are the real extension, rendered by WidgetKit Simulator over
+        // `WidgetFixtures` after this process exits (bin/widgetkit-sim-shots.sh,
+        // CI only).
 
         // The share-image export — the exact ImageRenderer output the
         // in-app "Share…" action produces, for the README's share showcase.
         captureShareCard(container: container)
+
+        // Last: the dark one switches the whole system to dark mode.
+        await captureRealMenuBar("menubar", dark: false, installStatusItem: installStatusItem)
+        await captureRealMenuBar("menubar-dark", dark: true, installStatusItem: installStatusItem)
 
         log("screenshots complete")
     }
@@ -923,21 +923,21 @@ enum ScreenshotMode {
     private static func captureWidgetPickerScenes() async {
         await captureWidgetTile("widget-picker-small-scoped", w: 158, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: ScreenshotEntries.fableKey, secondaryKey: "seven_day"),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: WidgetFixtures.fableKey, secondaryKey: "seven_day"),
                 forcedFamily: .systemSmall)
         }
         await captureWidgetTile("widget-picker-medium-5h-7d", w: 348, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: "five_hour", secondaryKey: "seven_day"),
                 forcedFamily: .systemMedium)
         }
         await captureWidgetTile("widget-picker-medium-5h-fable", w: 348, h: 158) {
             PaceChartWidgetView(
-                entry: ScreenshotEntries.paceChartPicker(primaryKey: "five_hour", secondaryKey: ScreenshotEntries.fableKey),
+                entry: WidgetFixtures.paceChartPicker(primaryKey: "five_hour", secondaryKey: WidgetFixtures.fableKey),
                 forcedFamily: .systemMedium)
         }
         await captureWidgetTile("widget-picker-large", w: 340, h: 384) {
-            PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge, forcedFamily: .systemLarge)
+            PaceChartWidgetView(entry: WidgetFixtures.paceChartScopedLarge, forcedFamily: .systemLarge)
         }
     }
 
@@ -1137,6 +1137,8 @@ enum ScreenshotMode {
 
     /// The app's dashboard window, kept by `captureAll` for the window scenes.
     @MainActor private static var sceneWindow: NSWindow?
+    /// The fixture store the scene window shows, for views the run hosts itself.
+    @MainActor private static var sceneContainer: ModelContainer?
 
     /// The collection the Projects tab opens scoped to — nil except while the
     /// `projects-collections-scoped` scene renders. A static, not an
@@ -1186,7 +1188,13 @@ enum ScreenshotMode {
         /// A README that only ever shows the sidebar open hides that it can be
         /// closed. (Narrowing was tried: the sidebar's minimum is its widest
         /// label, so a "narrow" one looked the same as a normal one.)
-        sidebarHidden: Bool = false
+        sidebarHidden: Bool = false,
+        /// Put one of the Projects tab's Collections sheets on the window first;
+        /// the capture is the window with it attached.
+        sheet: CollectionsSheet? = nil,
+        /// Crop the window to the view `LayoutShiftProbe` names this (plus a
+        /// margin of the window around it) — one card, still the real window.
+        crop: String? = nil
     ) async {
         guard let window = sceneWindow else { note("capture \(name): the app made no scene window"); return }
         guard let dir = captureDirectory else {
@@ -1238,13 +1246,39 @@ enum ScreenshotMode {
         await settle(seconds: 3.6)
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
+        var sheets: [NSWindow] = []
+        if let sheet {
+            guard let container = sceneContainer else {
+                note("capture \(name): no scene container"); window.orderOut(nil); return
+            }
+            sheets = presentCollectionsSheets(sheet, on: window, container: container)
+            await settle(seconds: 1.5)   // the sheet's slide-in, and its content
+            // The capture is still the window, not the sheet: the window server
+            // captures a window with its attached sheets, and asked for the
+            // sheet it returned that same composite squeezed to the sheet's size.
+            guard let top = sheets.last, top.isSheet, top.sheetParent != nil else {
+                note("capture \(name): the sheet did not attach")
+                closeSheets(sheets); window.orderOut(nil); return
+            }
+        }
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
         try? FileManager.default.removeItem(at: png)
         try? FileManager.default.removeItem(at: failed)
-        let request: [String: Any] = ["windowID": window.windowNumber,
+        var request: [String: Any] = ["windowID": window.windowNumber,
                                       "scale": window.backingScaleFactor,
                                       "png": png.path]
+        if let crop {
+            guard let frame = viewFrames[crop] else {
+                note("capture \(name): no frame recorded for \(crop)")
+                window.orderOut(nil)
+                return
+            }
+            let bounds = CGRect(origin: .zero, size: window.frame.size)
+            let r = frame.insetBy(dx: -16, dy: -16).intersection(bounds).integral
+            log("\(name): crop \(crop) \(frame) → \(r) of \(bounds)")
+            request["crop"] = [r.minX, r.minY, r.width, r.height]
+        }
         if let data = try? JSONSerialization.data(withJSONObject: request) {
             try? data.write(to: dir.appendingPathComponent("\(name).request"))
         }
@@ -1260,7 +1294,216 @@ enum ScreenshotMode {
             let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "timed out"
             note("capture \(name): \(why)")
         }
+        closeSheets(sheets)
         window.orderOut(nil)
+    }
+
+    enum CollectionsSheet {
+        case manager
+        /// The manager with its editor on top, open on this collection — as
+        /// "Edit collection" opens it.
+        case editor(collectionID: String)
+    }
+
+    /// The real Collections views, as real sheets on the real window.
+    ///
+    /// Why not SwiftUI's `.sheet`, which is how the app opens them: on the
+    /// runner, flipping `ProjectsView`'s `showingCollectionsManager` (the state
+    /// the "Manage…" button sets) left SwiftUI never even building the sheet's
+    /// content — app active, window key, no modal, 10 s. The run moves the
+    /// window in and out with AppKit calls, which SwiftUI does not follow. A
+    /// SwiftUI sheet on macOS *is* its view in a hosting controller, attached
+    /// with `beginSheet`, so this is that, done directly: the same views over
+    /// the same store, in the system's own sheet chrome.
+    @MainActor private static func presentCollectionsSheets(
+        _ sheet: CollectionsSheet, on window: NSWindow, container: ModelContainer
+    ) -> [NSWindow] {
+        func attach(_ view: some View, to parent: NSWindow) -> NSWindow {
+            let host = NSHostingController(rootView: view.modelContainer(container))
+            let sheetWindow = NSWindow(contentViewController: host)
+            parent.beginSheet(sheetWindow)
+            return sheetWindow
+        }
+        let manager = attach(CollectionsManager(), to: window)
+        guard case .editor(let id) = sheet else { return [manager] }
+        let context = container.mainContext
+        let collections = (try? context.fetch(FetchDescriptor<ProjectCollection>())) ?? []
+        guard let collection = collections.first(where: { $0.id == id }) else {
+            note("no collection \(id) to edit")
+            return [manager]
+        }
+        // What `CollectionsManager` hands its editor.
+        let paths = Set(((try? context.fetch(FetchDescriptor<ProjectDailyAggregate>())) ?? [])
+            .map(\.projectPath)
+            .filter { $0 != ProjectDailyAggregate.unknownProjectPath })
+        let editor = attach(CollectionEditorSheet(
+            draft: CollectionEditorDraft(from: collection),
+            knownPaths: paths.sorted(),
+            otherCollections: collections.filter { $0.id != id }
+                .sorted { $0.sortOrder > $1.sortOrder }
+                .map { ($0.id, $0.name) },
+            onSave: { _ in }
+        ), to: manager)
+        return [manager, editor]
+    }
+
+    @MainActor private static func closeSheets(_ sheets: [NSWindow]) {
+        for sheet in sheets.reversed() {
+            sheet.sheetParent?.endSheet(sheet)
+            sheet.orderOut(nil)
+        }
+    }
+
+    /// The menu bar with Pacer's real menu open, photographed by the helper.
+    ///
+    /// Replaces `MenuBarExperience` for the README: a hand-drawn strip of menu
+    /// bar with a hand-drawn popover under it — which was not even the right
+    /// control. Pacer's dropdown is an `NSMenu` (native chrome, and native
+    /// Open / Settings / Quit items the drawing left out), and this opens the
+    /// real one on the real status item, over the fixture.
+    ///
+    /// CI only. It needs the app active — a menu will not open for an inactive
+    /// app — and it needs the system menu bar, which cannot be captured without
+    /// being on screen. A local preview skips it.
+    @MainActor
+    private static func captureRealMenuBar(
+        _ name: String, dark: Bool, installStatusItem: @MainActor () -> NSStatusItem?
+    ) async {
+        guard activatesForCapture, let dir = captureDirectory else {
+            log("skipping \(name) — the menu bar is captured in CI only")
+            return
+        }
+        // The menu bar follows the *system* appearance, not the app's.
+        if dark, !(await helperRequest(dir, "appearance", ["dark": true], timeout: 20)) {
+            note("capture \(name): could not switch the system to dark mode")
+            return
+        }
+        NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        guard let item = installStatusItem(), let button = item.button, let menu = item.menu else {
+            note("capture \(name): the app made no status item")
+            return
+        }
+        // The menu's content was just built and asked a cold engine once, like
+        // the window's cards at launch ("Outlook —" in the first capture).
+        NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        // Let the label lay out and its @Query fetches and engine answers land.
+        await settle(seconds: 3.5)
+        // One open and close first. The menu refreshes its content as it
+        // opens, so the very first open shows what it had before — the light
+        // image read "Outlook —" where the dark one, taken on a second open,
+        // had the projection.
+        if !menuWarmed {
+            let warm = Timer(timeInterval: 0.6, repeats: false) { _ in menu.cancelTracking() }
+            RunLoop.main.add(warm, forMode: .common)
+            RunLoop.main.add(warm, forMode: .eventTracking)
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+            menuWarmed = true
+            await settle(seconds: 2)
+        }
+
+        let png = outputDirectory.appendingPathComponent("\(name).png")
+        let failed = dir.appendingPathComponent("\(name).failed")
+        try? FileManager.default.removeItem(at: png)
+        try? FileManager.default.removeItem(at: failed)
+        // The rectangle to photograph, in the window server's top-left points:
+        // from a margin left of the status item to the display's right edge,
+        // and from the top of the screen to a margin under the menu, which
+        // drops from the item's left edge. Worked out here rather than found
+        // by the helper: on macOS 26 the status item and menu windows are not
+        // listed under the app's process, so searching for them failed.
+        guard let itemFrame = button.window?.frame, let screen = button.window?.screen else {
+            note("capture \(name): the status item has no window")
+            return
+        }
+        // Tight around what the scene is about: the status item and the menu
+        // that drops from its left edge, a margin of menu bar and wallpaper
+        // around them, and the gap macOS leaves under the bar.
+        let mainHeight = NSScreen.screens.first?.frame.height ?? screen.frame.maxY
+        let margin: CGFloat = 20
+        let left = max(screen.frame.minX, itemFrame.minX - margin)
+        let right = min(screen.frame.maxX, max(itemFrame.maxX, itemFrame.minX + menu.size.width) + margin)
+        let barTop = mainHeight - screen.frame.maxY
+        let height = (screen.frame.maxY - itemFrame.minY) + 12 + menu.size.height + margin
+        let request: [String: Any] = ["kind": "menubar",
+                                      "rect": [left, barTop, right - left, height],
+                                      "png": png.path]
+        if let data = try? JSONSerialization.data(withJSONObject: request) {
+            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        }
+        // Opening the menu runs a tracking loop that does not return until it
+        // closes, so the close is scheduled inside that loop: as soon as the
+        // helper has the picture, or after a deadline.
+        let deadline = Date().addingTimeInterval(25)
+        let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
+            if FileManager.default.fileExists(atPath: png.path)
+                || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
+                menu.cancelTracking()
+                timer.invalidate()
+            }
+        }
+        RunLoop.main.add(closer, forMode: .common)
+        RunLoop.main.add(closer, forMode: .eventTracking)
+        log("\(name): active \(NSApp.isActive), item window \(button.window.map { "\($0.frame) level \($0.level.rawValue)" } ?? "none")")
+        // The status item's own menu presentation — placement (the gap under
+        // the bar) and the item's highlight exactly as a click gives them.
+        // `popUpStatusItemMenu:` is deprecated, and the modern replacement
+        // other menu-bar projects converged on for exactly this ("the click
+        // highlights the item but no menu appears") is a real `performClick`
+        // (tauri tray-icon 0.25.1, tauri-apps/tao#1324). It was tried here
+        // three times on 2026-09-24, each confirmed against the actual CI
+        // images rather than just "did a PNG land":
+        //   1. `button.performClick(nil)` alone never opened the menu
+        //      (`NSMenuDidBeginTrackingNotification` never fired for it).
+        //   2. Falling back to `popUpStatusItemMenu:` right after — even
+        //      with the button un-highlighted and a 0.3s pause first — came
+        //      back with a PNG of an *empty* menu bar: the failed click
+        //      hadn't just done nothing, it had left the item unable to
+        //      present its menu again.
+        //   3. Rebuilding the status item from scratch after the failed
+        //      click (a brand new NSStatusItem/NSMenu, carrying no state
+        //      from the old one) made no difference either — same empty
+        //      result. Whatever `performClick` breaks isn't per-object.
+        // So a synthesized `performClick` isn't attempted at all here — on
+        // this runner, trying it doesn't just fail to open the menu, it
+        // costs the one mechanism that does. `NSMenu.popUp` under the
+        // button is the other fallback, if the selector is ever removed,
+        // but it puts the menu flush against the bar rather than in the
+        // native spot with its gap.
+        let statusPopUp = NSSelectorFromString("popUpStatusItemMenu:")
+        if item.responds(to: statusPopUp) {
+            _ = item.perform(statusPopUp, with: menu)
+        } else {
+            _ = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
+        closer.invalidate()
+        if FileManager.default.fileExists(atPath: png.path) {
+            log("✓ \(name).png (real menu bar and menu)")
+        } else {
+            let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "the menu did not open"
+            note("capture \(name): \(why)")
+        }
+    }
+
+    @MainActor private static var menuWarmed = false
+
+    /// Ask the capture helper for something and wait for it to be done.
+    @MainActor
+    private static func helperRequest(
+        _ dir: URL, _ kind: String, _ payload: [String: Any], timeout: TimeInterval
+    ) async -> Bool {
+        let name = "\(kind)-\(UUID().uuidString.prefix(8))"
+        var body = payload
+        body["kind"] = kind
+        body["done"] = dir.appendingPathComponent("\(name).done").path
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).done").path) { return true }
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).failed").path) { return false }
+            await settle(seconds: 0.1)
+        }
+        return false
     }
 
     /// Put the window somewhere it can be captured without anyone seeing it.
@@ -2043,32 +2286,6 @@ extension ScreenshotMode {
     }
 }
 
-/// Renders the redesigned collection editor with representative data so
-/// `make screenshots` shows the rule live-preview, the disambiguated
-/// member rows, and the color picker.
-private struct CollectionEditorShowcase: View {
-    var body: some View {
-        let home = NSHomeDirectory()
-        let known = [
-            "\(home)/Code/work/acme-corp/api",
-            "\(home)/Code/work/acme-corp/firmware",
-            "\(home)/Code/work/acme-corp/web-dashboard",
-            "\(home)/Code/work/acme-corp/cloud-infra",
-            "\(home)/Code/personal/notes-app",
-            "\(home)/Code/oss/pacer",
-        ]
-        var draft = CollectionEditorDraft()
-        draft.name = "Acme Corp"
-        draft.rules = ["\(home)/Code/work/acme-corp"]
-        draft.includePaths = ["\(home)/Code/oss/pacer"]
-        return CollectionEditorSheet(
-            draft: draft,
-            knownPaths: known,
-            otherCollections: [("side", "Side Projects")],
-            onSave: { _ in }
-        )
-    }
-}
 
 /// The whole menu-bar experience in one image: a slice of the macOS menu
 /// bar carrying Pacer's readout (`MenuBarLabel`), with the click-down
@@ -2173,246 +2390,3 @@ private struct MenuBarSettingsMock: View {
     }
 }
 
-/// A single composite image of the home-screen widget family — the real
-/// widget views, fed fake `TimelineEntry` values, each framed at its
-/// native size with the rounded corners + shadow widgets get on the
-/// desktop. One image keeps the README compact while still showing the
-/// range of widget options.
-private struct WidgetGallery: View {
-    private let small = CGSize(width: 158, height: 158)
-    private let medium = CGSize(width: 348, height: 158)
-
-    var body: some View {
-        VStack(spacing: 22) {
-            HStack(alignment: .top, spacing: 22) {
-                tile(small) { TodayCostWidgetView(entry: ScreenshotEntries.todayCost) }
-                tile(medium) { PaceGaugesWidgetView(entry: ScreenshotEntries.paceGauges) }
-            }
-            HStack(alignment: .top, spacing: 22) {
-                tile(medium) { LiveSessionWidgetView(entry: ScreenshotEntries.liveSession) }
-                tile(medium) { DailyChartWidgetView(entry: ScreenshotEntries.dailyChart) }
-            }
-            HStack(alignment: .top, spacing: 22) {
-                tile(medium) { TopProjectsWidgetView(entry: ScreenshotEntries.topProjects) }
-            }
-        }
-        .padding(28)
-    }
-
-    @ViewBuilder
-    private func tile(
-        _ size: CGSize,
-        @ViewBuilder _ content: () -> some View
-    ) -> some View {
-        content()
-            .frame(width: size.width, height: size.height)
-            // `.containerBackground(for: .widget)` is a no-op outside a
-            // real widget, so paint the card fill ourselves.
-            .background(PacerDesign.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
-    }
-}
-
-/// The two large widget families showing scoped per-model windows as
-/// first-class rows / gauges alongside 5h and 7d — the widget half of the
-/// "scoped windows are treated identically to 5h/7d" story. Hand-built entries
-/// (the widget provider reads the real store, which is empty here).
-private struct ScopedFirstClassWidgetGallery: View {
-    var body: some View {
-        HStack(alignment: .top, spacing: 24) {
-            tile(w: 340, h: 384) {
-                PaceChartWidgetView(entry: ScreenshotEntries.paceChartScopedLarge,
-                                    forcedFamily: .systemLarge)
-            }
-            // Shorter, because with one row of rings it has no use for the
-            // pace tile's height and a card two-thirds empty reads as one that
-            // failed to load. The widget itself is unchanged — a real
-            // `systemLarge` is whatever size the OS gives it; this is the
-            // mockup showing the card at the size its content wants.
-            tile(w: 340, h: 206) {
-                PaceGaugesWidgetView(entry: ScreenshotEntries.paceGaugesScopedLarge,
-                                     forcedFamily: .systemLarge)
-            }
-        }
-        .padding(28)
-    }
-
-    @ViewBuilder
-    private func tile(w: CGFloat, h: CGFloat, @ViewBuilder _ content: () -> some View) -> some View {
-        content()
-            .frame(width: w, height: h)
-            .background(PacerDesign.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.20), radius: 14, x: 0, y: 7)
-    }
-}
-
-/// Deterministic fake `TimelineEntry` values for the widget gallery —
-/// kept consistent with the dashboard seed (Opus-heavy, cache-dominated,
-/// 5h ≈32% / 7d ≈62%, ~$124 today).
-private enum ScreenshotEntries {
-    private static let now = Date()
-    static let opus = "claude-opus-4-7"
-
-    static var todayCost: TodayCostEntry {
-        TodayCostEntry(date: now, costUSD: 124.0, tokens: 540_000, modelCount: 3, isFresh: true)
-    }
-
-    static var paceGauges: PaceGaugesEntry {
-        PaceGaugesEntry(
-            date: now,
-            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// Synthetic identity for the "Fable" scoped weekly window used by the
-    /// widget-picker mockups — the stable key a config-stored selection uses.
-    static let fableKey = "weekly_scoped|Fable|"
-
-    /// Large pace-chart widget with scoped per-model windows as first-class
-    /// rows below 5h/7d.
-    static var paceChartScopedLarge: PaceChartEntry {
-        PaceChartEntry(
-            date: now,
-            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
-            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
-            // Fable only. Anthropic reports exactly one per-model window
-            // today, so caps for Haiku/Opus/Sonnet beside it advertised a
-            // product nobody has. The grid is built for N of these; a
-            // committed screenshot is a claim about what you get.
-            scoped: [
-                .init(key: fableKey, label: "Fable",
-                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71),
-                      isActive: true),
-            ],
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// A pace-chart entry with 5h, 7d, and a scoped "Fable" weekly window, for
-    /// the widget-picker mockups. `primaryKey`/`secondaryKey` pick which windows
-    /// the small/medium canvases render — exactly what the Edit-Widget sheet
-    /// stores. (Large ignores them and shows every window.)
-    static func paceChartPicker(primaryKey: String, secondaryKey: String) -> PaceChartEntry {
-        PaceChartEntry(
-            date: now,
-            fiveHour: chartWindow(duration: 5 * 3600, usedPct: 32, projectTo: 46),
-            sevenDay: chartWindow(duration: 7 * 86_400, usedPct: 62, projectTo: 88),
-            scoped: [
-                .init(key: fableKey, label: "Fable",
-                      state: chartWindow(duration: 7 * 86_400, usedPct: 49, projectTo: 71), isActive: true),
-            ],
-            primaryKey: primaryKey, secondaryKey: secondaryKey)
-    }
-
-    /// Large gauges widget with scoped per-model windows as ring gauges.
-    static var paceGaugesScopedLarge: PaceGaugesEntry {
-        let weeklyReset = now.addingTimeInterval(2 * 86_400 + 4 * 3600)
-        let weeklyDur: TimeInterval = 7 * 86_400
-        return PaceGaugesEntry(
-            date: now,
-            fiveHour: .init(usedPct: 32, resetsAt: now.addingTimeInterval(2 * 3600)),
-            sevenDay: .init(usedPct: 62, resetsAt: now.addingTimeInterval(3 * 86_400)),
-            // See `paceChartScopedLarge`: one real per-model window, not four
-            // invented ones.
-            scoped: [
-                .init(key: fableKey, label: "Fable", usedPct: 49,
-                      resetsAt: weeklyReset, durationSeconds: weeklyDur, isActive: true),
-            ],
-            primaryKey: "five_hour", secondaryKey: "seven_day"
-        )
-    }
-
-    /// A climbing actual line with a dashed linear projection to `projectTo` at
-    /// reset — the shape a real window shows. `~62%` elapsed so the dashed
-    /// segment is visible.
-    private static func chartWindow(duration: TimeInterval, usedPct: Double, projectTo: Double) -> PaceChartEntry.WindowState {
-        let resets = now.addingTimeInterval(duration * 0.38)
-        let cycleStart = resets.addingTimeInterval(-duration)
-        let elapsed = now.timeIntervalSince(cycleStart)
-        let n = 12
-        let points = (0..<n).map { i -> PaceChartView.Data.Point in
-            let f = Double(i) / Double(n - 1)
-            return .init(time: cycleStart.addingTimeInterval(elapsed * f),
-                         value: usedPct * (f * (1.06 - 0.06 * f)))
-        }
-        let steps = 6
-        let projection = (0...steps).map { i -> PaceChartView.Data.Point in
-            let f = Double(i) / Double(steps)
-            return .init(time: now.addingTimeInterval(resets.timeIntervalSince(now) * f),
-                         value: min(100, usedPct + (projectTo - usedPct) * f))
-        }
-        let crossing: Date? = (projectTo > usedPct && projectTo >= 100)
-            ? now.addingTimeInterval(resets.timeIntervalSince(now) * ((100 - usedPct) / (projectTo - usedPct)))
-            : nil
-        return PaceChartEntry.WindowState(
-            chart: PaceChartView.Data(
-                cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
-                points: points, usedPct: usedPct,
-                projection: projection, projectionCrossesFullAt: crossing),
-            resetsAt: resets)
-    }
-
-    static var liveSession: LiveSessionEntry {
-        LiveSessionEntry(
-            date: now,
-            session: .init(
-                projectDisplayName: "atlas-api",
-                totalTokens: 9_400_000,
-                costUSD: 142.0,
-                topModel: opus,
-                firstSeenAt: now.addingTimeInterval(-6.5 * 3600),
-                lastSeenAt: now.addingTimeInterval(-30)
-            )
-        )
-    }
-
-    static var dailyChart: DailyChartEntry {
-        // Weekday-driven with weekend dips and a spike — same shape as the
-        // dashboard's 30-day chart.
-        let cal = Calendar.current
-        let days = (0..<14).map { i -> DailyChartEntry.DayCost in
-            let day = cal.date(byAdding: .day, value: -(13 - i), to: now) ?? now
-            let wd = cal.component(.weekday, from: day)
-            let weekend = (wd == 1 || wd == 7)
-            var cost = weekend ? 34.0 : 120.0
-            cost *= 0.7 + 0.7 * Double((i * 7 + 3) % 11) / 11.0
-            if i == 9 { cost *= 2.6 }          // a spike day
-            return DailyChartEntry.DayCost(date: TokenSample.formatDate(day), cost: cost)
-        }
-        let total = days.reduce(0) { $0 + $1.cost }
-        return DailyChartEntry(
-            date: now, days: days,
-            totalCostUSD: total,
-            avgCostUSD: total / Double(days.count),
-            todayCostUSD: days.last?.cost ?? 0,
-            isFresh: true, range: .days14
-        )
-    }
-
-    static var topProjects: TopProjectsEntry {
-        let rows = [
-            TopProjectsEntry.Row(displayName: "atlas-api", costUSD: 1_284.0),
-            TopProjectsEntry.Row(displayName: "ml-pipeline", costUSD: 892.0),
-            TopProjectsEntry.Row(displayName: "payments-svc", costUSD: 613.0),
-            TopProjectsEntry.Row(displayName: "web-dashboard", costUSD: 421.0),
-        ]
-        return TopProjectsEntry(
-            date: now, range: .days7,
-            totalCostUSD: rows.reduce(0) { $0 + $1.costUSD } + 340,
-            projectCount: 12,
-            rows: rows, focus: nil
-        )
-    }
-}
