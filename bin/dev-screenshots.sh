@@ -70,7 +70,7 @@ rc=$?
 if (( LOCAL )); then
     echo "[widgets] skipping widgets.png — WidgetKit Simulator opens a visible window; captured in CI only"
 else
-    "$ROOT/bin/nc-widget-shots.sh" "${APP:h:h:h}" "$REQ" "$OUT" \
+    "$ROOT/bin/widgetkit-sim-shots.sh" "${APP:h:h:h}" "$REQ" "$OUT" \
         || { echo "ERROR: widget screenshots failed — see the lines above"; exit 1; }
 fi
 echo "Wrote PNGs to $OUT"
