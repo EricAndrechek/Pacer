@@ -134,21 +134,14 @@ struct MenuBarLabel: View {
     /// scans the append-only scoped history.
     @State private var scopedSamples: [ScopedWindowRow] = []
 
-    /// One row each, **unpredicated**. A `@Query` re-executes on every context
-    /// change, so what it costs matters: with no predicate CoreData serves it
-    /// from its row cache, which is why the pre-account versions of these were
-    /// free. These only say "something was written"; the scoped fetch they gate
-    /// is the expensive part, and now runs once per change instead of once per
-    /// body evaluation — a profile put 91 of the 92 main-thread samples in
-    /// `MenuStatusContent.body` inside those two fetches.
-    @Query private var newestSignal: [RateLimitSample]
-    @Query private var newestScopedSignal: [UsageLimitSample]
+    /// "Something was written" — see `RateLimitWriteSignal`. The scoped fetch
+    /// it gates is the expensive part, and runs once per write rather than once
+    /// per body evaluation.
     @Environment(\.modelContext) private var menuModelContext
 
     var reloadKey: String {
-        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(a)):\(Int(b)):"
+        let newest = RateLimitWriteSignal.shared.newest?.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(newest)):"
             + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
@@ -188,16 +181,6 @@ struct MenuBarLabel: View {
 
     init(onTooltipChange: ((String) -> Void)? = nil) {
         self.onTooltipChange = onTooltipChange
-        var signal = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        signal.fetchLimit = 1
-        signal.propertiesToFetch = [\.sampledAt]
-        _newestSignal = Query(signal)
-        var scopedSignal = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedSignal.fetchLimit = 1
-        scopedSignal.propertiesToFetch = [\.sampledAt]
-        _newestScopedSignal = Query(scopedSignal)
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could
@@ -614,15 +597,9 @@ struct MenuStatusContent: View {
     /// rows the dropdown lists beneath 5h / 7d. Bounded to the latest polls.
     @State private var scopedSamples: [ScopedWindowRow] = []
 
-    /// One row each, **unpredicated**. A `@Query` re-executes on every context
-    /// change, so what it costs matters: with no predicate CoreData serves it
-    /// from its row cache, which is why the pre-account versions of these were
-    /// free. These only say "something was written"; the scoped fetch they gate
-    /// is the expensive part, and now runs once per change instead of once per
-    /// body evaluation — a profile put 91 of the 92 main-thread samples in
-    /// `MenuStatusContent.body` inside those two fetches.
-    @Query private var newestSignal: [RateLimitSample]
-    @Query private var newestScopedSignal: [UsageLimitSample]
+    /// "Something was written" — see `RateLimitWriteSignal`. The scoped fetch
+    /// it gates is the expensive part, and runs once per write rather than once
+    /// per body evaluation.
     @Environment(\.modelContext) private var menuModelContext
 
     /// One account's windows, for the concurrent case. Empty otherwise.
@@ -635,9 +612,8 @@ struct MenuStatusContent: View {
     @State private var perAccount: [AccountWindows] = []
 
     var reloadKey: String {
-        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(a)):\(Int(b)):"
+        let newest = RateLimitWriteSignal.shared.newest?.timeIntervalSinceReferenceDate ?? 0
+        return "\(Int(newest)):"
             + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
     }
 
@@ -715,16 +691,6 @@ struct MenuStatusContent: View {
     }
 
     init() {
-        var signal = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        signal.fetchLimit = 1
-        signal.propertiesToFetch = [\.sampledAt]
-        _newestSignal = Query(signal)
-        var scopedSignal = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedSignal.fetchLimit = 1
-        scopedSignal.propertiesToFetch = [\.sampledAt]
-        _newestScopedSignal = Query(scopedSignal)
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could

@@ -118,6 +118,7 @@ final class AppBackgroundService {
 
     func start() {
         guard coordinator == nil else { return }
+        RateLimitWriteSignal.shared.seed(from: container.mainContext)
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")

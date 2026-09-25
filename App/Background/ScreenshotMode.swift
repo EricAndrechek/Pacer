@@ -483,6 +483,8 @@ enum ScreenshotMode {
             }
         }
         do { try ctx.save() } catch { log("⚠️ scoped-alerts: seed save failed: \(error)") }
+        // Views already on screen reload off this, not off the save.
+        RateLimitWriteSignal.shared.seed(from: ctx)
 
         // Temporarily present a healthy notification config on the shared store.
         let store = PacerSettings.store
@@ -600,6 +602,8 @@ enum ScreenshotMode {
                 accountId: fixtureLimitAccount))
         }
         do { try ctx.save() } catch { log("⚠️ at-limit: seed save failed: \(error)") }
+        // Views already on screen reload off this, not off the save.
+        RateLimitWriteSignal.shared.seed(from: ctx)
 
         let engine = UsageIntelligenceEngine(modelContainer: container)
         await engine.recompute(now: now)
@@ -812,6 +816,8 @@ enum ScreenshotMode {
         seedRateLimits(ctx, now: now)
         seedLayoutScoped(ctx, now: now, scoped: scoped)
         do { try ctx.save() } catch { log("⚠️ \(name): seed save failed: \(error)") }
+        // Views already on screen reload off this, not off the save.
+        RateLimitWriteSignal.shared.seed(from: ctx)
 
         let engine = UsageIntelligenceEngine(modelContainer: container)
         await engine.recompute(now: now)
@@ -848,6 +854,8 @@ enum ScreenshotMode {
         seedRateLimits(ctx, now: now)
         seedRealisticScoped(ctx, now: now)
         do { try ctx.save() } catch { log("⚠️ \(name): seed save failed: \(error)") }
+        // Views already on screen reload off this, not off the save.
+        RateLimitWriteSignal.shared.seed(from: ctx)
 
         let engine = UsageIntelligenceEngine(modelContainer: container)
         await engine.recompute(now: now)
@@ -1657,6 +1665,7 @@ extension ScreenshotMode {
 
         do {
             try ctx.save()
+            RateLimitWriteSignal.shared.seed(from: ctx)
             log("seeded synthetic usage")
         } catch {
             log("⚠️ seed save failed: \(error)")

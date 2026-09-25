@@ -44,10 +44,12 @@ struct ProjectDetailView: View {
     /// under the modal subtitle. Scoped via `init` so SwiftData
     /// only fetches the one row we care about (path-keyed unique).
     @Query private var probesForThisProject: [ProjectPathProbe]
-    /// Every project path Pacer has seen — drives the "Merge this
-    /// into…" submenu. Light because we only fetch `projectPath`
-    /// from the rollup, not the wide aggregate columns.
-    @Query private var allProjectAggregates: [ProjectDailyAggregate]
+    /// Every project path Pacer has seen, bar `(unknown)` — drives the
+    /// "Merge this into…" submenu and the bulk-merge sheet. Fetched on
+    /// appear and when project attribution changes, not as a `@Query`: that
+    /// re-read every project-day row on each store save while the modal
+    /// was open, and the menu rebuilt its list from it on every render.
+    @State private var knownProjectPathsForBulkMerge: [String] = []
 
     /// Pending source→canonical pair waiting on the user's confirm
     /// click after picking a target from the "Merge this into…"
@@ -162,12 +164,6 @@ struct ProjectDetailView: View {
                 order: .reverse
             )
         }
-        // The "all project paths" query for the merge submenu: only
-        // need projectPath. Without `propertiesToFetch` SwiftData
-        // would materialize every JSON-blob column on every row.
-        var allDesc = FetchDescriptor<ProjectDailyAggregate>()
-        allDesc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
-        _allProjectAggregates = Query(allDesc)
         // Probe row scoped to this project. Predicate filter keeps
         // SwiftData from materializing the whole probe table on
         // every save — we just need the one row.
@@ -453,7 +449,10 @@ struct ProjectDetailView: View {
             if !modelSlices.isEmpty { modelsCard }
             if !sessionRows.isEmpty { sessionsCard }
         }
-        .onAppear { refreshDerived() }
+        .onAppear {
+            refreshDerived()
+            refreshKnownProjectPaths()
+        }
         // `aggregates.count` ticks on the FIRST sample of a new day
         // for this project; refreshDerived() recomputes
         // dailySeries / modelSlices / totals from the @Query result
@@ -474,6 +473,7 @@ struct ProjectDetailView: View {
             if summary.samplesChanged || summary.projectAttributionChanged {
                 refreshSubprojects()
             }
+            if summary.projectAttributionChanged { refreshKnownProjectPaths() }
         }
         // Cost-mode toggle in Settings must re-bucket the
         // Subprojects card — `effectiveCostUSD(mode:)` flips between
@@ -528,16 +528,19 @@ struct ProjectDetailView: View {
 
     /// Distinct paths the bulk-merge sheet can choose canonicals
     /// from — every project Pacer has seen, excluding `(unknown)`
-    /// (no folder behind it) and the current project (can't merge
-    /// into yourself).
-    private var knownProjectPathsForBulkMerge: [String] {
+    /// (no folder behind it). Only `projectPath` is fetched; without
+    /// `propertiesToFetch` SwiftData would materialize every JSON-blob
+    /// column on every row.
+    private func refreshKnownProjectPaths() {
+        var desc = FetchDescriptor<ProjectDailyAggregate>()
+        desc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
         var set: Set<String> = []
-        for agg in allProjectAggregates {
+        for agg in (try? modelContext.fetch(desc)) ?? [] {
             if agg.projectPath != ProjectDailyAggregate.unknownProjectPath {
                 set.insert(agg.projectPath)
             }
         }
-        return set.sorted()
+        knownProjectPathsForBulkMerge = set.sorted()
     }
 
     /// Other-project picker for the "Merge this into…" submenu.
