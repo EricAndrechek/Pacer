@@ -70,6 +70,13 @@ pluginkit -r "$SRC_APP/Contents/PlugIns/PacerWidgets.appex" 2>/dev/null
 # Group entitlement) is not loaded. Ad-hoc, nested first, no --deep. And
 # registered with LaunchServices, or chronod drops the extension ("LS doesn't
 # have a containing bundle").
+# A build number above anything registered before: chronod has already seen
+# (and purged) the build directory's copy at the same version, and only
+# re-reads an extension's widgets for a new one — without it the simulator
+# finds the extension but no widgets (WidgetDocument.Error 3, noDescriptors).
+for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 9001" "$plist"
+done
 codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
 codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
@@ -98,6 +105,9 @@ for name kind family in $shots; do
         log "✓ $name ($kind, $family)"
     else
         failed=1
+        [[ -n $DEBUG_DIR ]] && /usr/bin/log show --last 1m --style compact \
+            --predicate 'process == "WidgetKit Simulator" OR (process == "chronod" AND eventMessage CONTAINS "pacer")' 2>/dev/null \
+            | grep -iE 'fail|error|descriptor|pacer' | head -25 | sed "s/^/[widgets] $name log: /"   # DIAGNOSIS — temporary
     fi
 done
 quit_simulator
