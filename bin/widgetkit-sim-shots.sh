@@ -89,6 +89,25 @@ shots=(
     daily-chart   DailyChartWidget   medium
     top-projects  TopProjectsWidget  medium
 )
+# DIAGNOSIS — temporary: which of (the bundle, the environment) breaks loading.
+if [[ -n $DEBUG_DIR ]]; then
+    for variant in none kind both; do
+        quit_simulator
+        defaults delete com.apple.widgetkit.simulator 2>/dev/null
+        defaults write com.apple.widgetkit.simulator ApplePersistenceIgnoreState -bool YES
+        envs=()
+        [[ $variant != none ]] && envs+=(--env _XCWidgetKind=ReadmeShot.TodayCostWidget)
+        [[ $variant == both ]] && envs+=(--env _XCWidgetFamily=small)
+        open -n $envs -a "$SIM" "$APPEX"
+        request "diag-$variant" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/diag-$variant.png\",\"debug\":\"$DEBUG_DIR/diag-$variant-window.png\"}" \
+            && log "diag $variant: loaded" || log "diag $variant: failed"
+    done
+    ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i pacer | sed 's/^/[widgets] crash: /'
+    for f in ~/Library/Logs/DiagnosticReports/PacerWidgets*(N); do head -c 3000 "$f" | sed 's/^/[widgets] crashlog: /'; done
+    /usr/bin/log show --last 5m --style compact --predicate 'process == "PacerWidgets" OR (process == "WidgetKit Simulator" AND NOT eventMessage CONTAINS "file:///System") OR (process == "chronod" AND eventMessage CONTAINS[c] "pacer")' 2>/dev/null \
+        | grep -vE 'MobileGestalt|XPCErrors|stateCapture' | grep -iE 'fail|error|descriptor|pacer|kind|family|crash|exception' | head -60 | sed 's/^/[widgets] diaglog: /'
+fi
+
 failed=0
 for name kind family in $shots; do
     quit_simulator
