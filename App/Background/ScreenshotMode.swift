@@ -183,6 +183,7 @@ enum ScreenshotMode {
         // container. Kept for the window scenes (see `captureRealWindow`);
         // every other window SwiftUI made is ordered out so nothing flashes.
         sceneWindow = NSApp.windows.first { MainWindowPlacement.isDashboard($0) }
+        sceneContainer = container
         for window in NSApp.windows { window.orderOut(nil) }
         log(sceneWindow == nil ? "⚠️ no scene window — window scenes will fail"
                                : "scene window: \(sceneWindow!.identifier?.rawValue ?? "-")")
@@ -241,12 +242,13 @@ enum ScreenshotMode {
         await captureRealWindow("scoped-firstclass-dashboard-dark", size: CGSize(width: 1280, height: 1100),
                                 scheme: .dark, tab: .dashboard, sidebarHidden: true, crop: "pace")
 
-        // Projects ▸ Collections — the real manager sheet, and its real editor
-        // on a seeded collection, each opened the way its button opens it.
+        // Projects ▸ Collections — the real manager, and its real editor on a
+        // seeded collection, as sheets on the real window (see
+        // `presentCollectionsSheets` for why not through SwiftUI's `.sheet`).
         await captureRealWindow("collections-manager", size: CGSize(width: 1280, height: 952),
-                                scheme: .light, tab: .projects, sheet: "manager")
+                                scheme: .light, tab: .projects, sheet: .manager)
         await captureRealWindow("collections-editor", size: CGSize(width: 1280, height: 952),
-                                scheme: .light, tab: .projects, sheet: "edit:acme")
+                                scheme: .light, tab: .projects, sheet: .editor(collectionID: "acme"))
 
         if windowsOnly {
             log("window screenshots complete")
@@ -1135,6 +1137,8 @@ enum ScreenshotMode {
 
     /// The app's dashboard window, kept by `captureAll` for the window scenes.
     @MainActor private static var sceneWindow: NSWindow?
+    /// The fixture store the scene window shows, for views the run hosts itself.
+    @MainActor private static var sceneContainer: ModelContainer?
 
     /// The collection the Projects tab opens scoped to — nil except while the
     /// `projects-collections-scoped` scene renders. A static, not an
@@ -1185,10 +1189,9 @@ enum ScreenshotMode {
         /// closed. (Narrowing was tried: the sidebar's minimum is its widest
         /// label, so a "narrow" one looked the same as a normal one.)
         sidebarHidden: Bool = false,
-        /// Open one of the Projects tab's Collections sheets first (`"manager"`
-        /// or `"edit:<id>"`) and capture that sheet — the top-most one — rather
-        /// than the window under it.
-        sheet: String? = nil,
+        /// Put one of the Projects tab's Collections sheets on the window first
+        /// and capture that sheet — the top-most one — rather than the window.
+        sheet: CollectionsSheet? = nil,
         /// Crop the window to the view `LayoutShiftProbe` names this (plus a
         /// margin of the window around it) — one card, still the real window.
         crop: String? = nil
@@ -1244,34 +1247,18 @@ enum ScreenshotMode {
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
         var target = window
+        var sheets: [NSWindow] = []
         if let sheet {
-            // The manager is a sheet on the window; its editor, a sheet on the
-            // manager.
-            let depth = sheet.hasPrefix("edit:") ? 2 : 1
-            // A sheet is `attachedSheet` of its parent; failing that (SwiftUI
-            // has presented some as plain child windows), the newest visible
-            // window whose `sheetParent` chain reaches this one.
-            func topSheet() -> (window: NSWindow, depth: Int) {
-                var w = window, d = 0
-                while let next = w.attachedSheet
-                        ?? NSApp.windows.last(where: { $0.sheetParent === w && $0.isVisible }) {
-                    w = next; d += 1
-                }
-                return (w, d)
+            guard let container = sceneContainer else {
+                note("capture \(name): no scene container"); window.orderOut(nil); return
             }
-            NotificationCenter.default.post(name: .pacerScreenshotCollections, object: sheet)
-            let sheetDeadline = Date().addingTimeInterval(10)
-            while Date() < sheetDeadline, topSheet().depth < depth { await settle(seconds: 0.1) }
-            guard topSheet().depth >= depth else {
-                note("capture \(name): the \(sheet) sheet did not open (depth \(topSheet().depth)); modal=\(NSApp.modalWindow.map { "\($0)" } ?? "-") active=\(NSApp.isActive) main=\(NSApp.mainWindow?.title ?? "-") key=\(NSApp.keyWindow?.title ?? "-") windows: "
-                     + NSApp.windows.map { "\(type(of: $0)) \"\($0.title)\" visible=\($0.isVisible) sheet=\($0.isSheet) parent=\($0.sheetParent.map { "\(type(of: $0))" } ?? "-") \($0.frame)" }
-                        .joined(separator: " | "))
-                await closeCollectionsSheets(on: window)
-                window.orderOut(nil)
-                return
-            }
+            sheets = presentCollectionsSheets(sheet, on: window, container: container)
             await settle(seconds: 1.5)   // the sheet's slide-in, and its content
-            target = topSheet().window
+            guard let top = sheets.last, top.isSheet, top.sheetParent != nil else {
+                note("capture \(name): the sheet did not attach")
+                closeSheets(sheets); window.orderOut(nil); return
+            }
+            target = top
         }
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
@@ -1306,15 +1293,64 @@ enum ScreenshotMode {
             let why = (try? String(contentsOf: failed, encoding: .utf8)) ?? "timed out"
             note("capture \(name): \(why)")
         }
-        if sheet != nil { await closeCollectionsSheets(on: window) }
+        closeSheets(sheets)
         window.orderOut(nil)
     }
 
-    @MainActor private static func closeCollectionsSheets(on window: NSWindow) async {
-        NotificationCenter.default.post(name: .pacerScreenshotCollections, object: nil)
-        let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline, window.attachedSheet != nil { await settle(seconds: 0.1) }
-        if window.attachedSheet != nil { note("collections sheets did not close") }
+    enum CollectionsSheet {
+        case manager
+        /// The manager with its editor on top, open on this collection — as
+        /// "Edit collection" opens it.
+        case editor(collectionID: String)
+    }
+
+    /// The real Collections views, as real sheets on the real window.
+    ///
+    /// Why not SwiftUI's `.sheet`, which is how the app opens them: on the
+    /// runner, flipping `ProjectsView`'s `showingCollectionsManager` (the state
+    /// the "Manage…" button sets) left SwiftUI never even building the sheet's
+    /// content — app active, window key, no modal, 10 s. The run moves the
+    /// window in and out with AppKit calls, which SwiftUI does not follow. A
+    /// SwiftUI sheet on macOS *is* its view in a hosting controller, attached
+    /// with `beginSheet`, so this is that, done directly: the same views over
+    /// the same store, in the system's own sheet chrome.
+    @MainActor private static func presentCollectionsSheets(
+        _ sheet: CollectionsSheet, on window: NSWindow, container: ModelContainer
+    ) -> [NSWindow] {
+        func attach(_ view: some View, to parent: NSWindow) -> NSWindow {
+            let host = NSHostingController(rootView: view.modelContainer(container))
+            let sheetWindow = NSWindow(contentViewController: host)
+            parent.beginSheet(sheetWindow)
+            return sheetWindow
+        }
+        let manager = attach(CollectionsManager(), to: window)
+        guard case .editor(let id) = sheet else { return [manager] }
+        let context = container.mainContext
+        let collections = (try? context.fetch(FetchDescriptor<ProjectCollection>())) ?? []
+        guard let collection = collections.first(where: { $0.id == id }) else {
+            note("no collection \(id) to edit")
+            return [manager]
+        }
+        // What `CollectionsManager` hands its editor.
+        let paths = Set(((try? context.fetch(FetchDescriptor<ProjectDailyAggregate>())) ?? [])
+            .map(\.projectPath)
+            .filter { $0 != ProjectDailyAggregate.unknownProjectPath })
+        let editor = attach(CollectionEditorSheet(
+            draft: CollectionEditorDraft(from: collection),
+            knownPaths: paths.sorted(),
+            otherCollections: collections.filter { $0.id != id }
+                .sorted { $0.sortOrder > $1.sortOrder }
+                .map { ($0.id, $0.name) },
+            onSave: { _ in }
+        ), to: manager)
+        return [manager, editor]
+    }
+
+    @MainActor private static func closeSheets(_ sheets: [NSWindow]) {
+        for sheet in sheets.reversed() {
+            sheet.sheetParent?.endSheet(sheet)
+            sheet.orderOut(nil)
+        }
     }
 
     /// The menu bar with Pacer's real menu open, photographed by the helper.

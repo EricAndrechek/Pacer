@@ -819,9 +819,6 @@ extension Notification.Name {
 
     /// README screenshot run: hide the sidebar (object `true`) or show it.
     static let pacerScreenshotSidebar = Notification.Name("PacerScreenshotSidebar")
-    /// README screenshot run only: open the Collections manager (`"manager"`),
-    /// or its editor on one collection (`"edit:<id>"`); `nil` closes them.
-    static let pacerScreenshotCollections = Notification.Name("PacerScreenshotCollections")
 
     /// Distributed twin of `pacerSelectDestination`, for tooling outside the
     /// process. Object: a `Destination` raw value ("history", "projects", …).

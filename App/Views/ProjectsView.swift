@@ -132,26 +132,10 @@ struct ProjectsView: View {
         }
         .sheet(isPresented: $showingCollectionsManager) {
             CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
-                .onAppear { if ScreenshotMode.isActive { Log.write("Screenshots", "collections manager content appeared") } }   // DIAGNOSIS
         }
         .pacerModalNavigation(root: $modalRoot)
         .onAppear {
             if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
-        }
-        // Only ever posted by the README screenshot run: the real sheets,
-        // opened the way their buttons open them.
-        .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotCollections)) { note in
-            Log.write("Screenshots", "collections sheet request: \(note.object as? String ?? "close")")
-            guard let request = note.object as? String else {
-                showingCollectionsManager = false
-                return
-            }
-            collectionsManagerStartNew = false
-            editingCollectionID = request.hasPrefix("edit:") ? String(request.dropFirst(5)) : nil
-            DispatchQueue.main.async {
-                showingCollectionsManager = true
-                Log.write("Screenshots", "showingCollectionsManager = \(showingCollectionsManager)")   // DIAGNOSIS
-            }
         }
     }
 
