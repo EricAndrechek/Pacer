@@ -122,8 +122,40 @@ cmd_wait_ci() {
     sleep 6
   done
   [ -n "${id:-}" ] && [ "$id" != null ] || die "no CI run found for ${sha:0:7} yet"
-  gh run watch "$id" --exit-status >/dev/null && { ok "CI green"; return 0; } || {
-    bad "CI failed — $(gh run view "$id" --json url --jq .url)"; return 1; }
+
+  # Decide on the run's conclusion, not on `watch --exit-status`, which is
+  # non-zero for anything but success. A CANCELLED run is not a failure here:
+  # ci.yml's concurrency group (`cancel-in-progress`) cancels a run the moment
+  # a newer push to the same ref starts one, so the run worth waiting for is
+  # that newer one. Reporting the cancellation as red once sent a release
+  # agent off debugging a run that had been superseded on purpose (#134).
+  local conclusion branch newer hops=0
+  while :; do
+    gh run watch "$id" >/dev/null 2>&1 || true
+    conclusion="$(gh run view "$id" --json conclusion --jq .conclusion 2>/dev/null || true)"
+    case "$conclusion" in
+      success|skipped)
+        ok "CI green"; return 0 ;;
+      cancelled)
+        # Bounded: something cancelling runs over and over is worth a human.
+        [ "$hops" -lt 3 ] || { bad "CI cancelled ${hops} times in a row — $(gh run view "$id" --json url --jq .url)"; return 1; }
+        branch="$(gh run view "$id" --json headBranch --jq .headBranch 2>/dev/null || true)"
+        newer=""
+        for _ in $(seq 1 10); do
+          newer="$(gh run list --workflow=CI --branch "$branch" --limit 1 \
+                   --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)"
+          [ -n "$newer" ] && [ "$newer" != null ] && [ "$newer" != "$id" ] && break
+          newer=""; sleep 6
+        done
+        # Cancelled with nothing newer on the branch: someone cancelled it by
+        # hand, and that is not a green light.
+        [ -n "$newer" ] || { bad "CI cancelled, and no newer run replaced it — $(gh run view "$id" --json url --jq .url)"; return 1; }
+        warn "run ${id} was cancelled by a newer push to ${branch} — following run ${newer}"
+        id="$newer"; hops=$((hops + 1)) ;;
+      *)
+        bad "CI ${conclusion:-failed} — $(gh run view "$id" --json url --jq .url)"; return 1 ;;
+    esac
+  done
 }
 
 cmd_release() {
