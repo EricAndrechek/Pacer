@@ -24,12 +24,25 @@ public extension View {
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
-        self.modifier(DismissibleModalModifier(item: item, modalContent: content))
+        // Read the value *here*, in the caller's body, and hand it to the
+        // modifier as a plain input. A modal that opens from a click was
+        // otherwise missed entirely: when the only reader of the binding was
+        // this modifier's own body, setting it did not re-render anything, so
+        // the modal appeared only when something unrelated redrew the page —
+        // seconds later, or 45 s later once the app stopped redrawing on every
+        // scan. Reading it here makes the caller depend on it, and a changed
+        // `presentedID` makes the modifier re-run.
+        self.modifier(DismissibleModalModifier(
+            item: item, presentedID: item.wrappedValue?.id, modalContent: content))
     }
 }
 
 private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>: ViewModifier {
     @Binding var item: Item?
+    /// The presented item's id, read in the caller's body — see
+    /// `dismissibleModal(item:content:)`. Drives presentation; `item` is
+    /// only written through (dismiss) and read for the content.
+    let presentedID: Item.ID?
     @ViewBuilder let modalContent: (Item) -> ModalContent
 
     func body(content: Content) -> some View {
@@ -47,8 +60,8 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
         //      that.
         ZStack(alignment: .center) {
             content
-                .disabled(item != nil)
-            if item != nil {
+                .disabled(presentedID != nil)
+            if presentedID != nil {
                 modalLayer
             }
         }

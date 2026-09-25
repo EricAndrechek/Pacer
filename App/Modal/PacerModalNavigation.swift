@@ -175,12 +175,17 @@ extension View {
     func pacerModalNavigation(
         root: Binding<PacerModalDestination?>
     ) -> some View {
-        modifier(PacerModalNavigationModifier(root: root))
+        // Read in the page's body, not only inside the modifier: see
+        // `dismissibleModal(item:content:)` for the modal that did not open.
+        modifier(PacerModalNavigationModifier(root: root, presented: root.wrappedValue))
     }
 }
 
 private struct PacerModalNavigationModifier: ViewModifier {
     @Binding var root: PacerModalDestination?
+    /// `root`'s value as the page saw it — the input that makes this modifier
+    /// re-run when a click sets or clears it.
+    let presented: PacerModalDestination?
     /// Manual stack — the modifier swaps which entry is rendered, so
     /// only one detail view exists in the SwiftUI hierarchy at any
     /// time and there's no inner NavigationStack to fight with the
@@ -243,7 +248,7 @@ private struct PacerModalNavigationModifier: ViewModifier {
             // Reset the stack whenever the root flips back to nil —
             // otherwise a closed-and-reopened modal would still have
             // the previous drill-in pushed onto it.
-            .onChange(of: root == nil) { _, isNil in
+            .onChange(of: presented == nil) { _, isNil in
                 // With `Click` and `Navigation`, says whether a click that
                 // "did nothing" opened the modal and something closed it.
                 Log.write("Modal", isNil ? "closed" : "opened")
