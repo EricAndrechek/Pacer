@@ -13,7 +13,7 @@ public final class RateLimitSample {
     // Hot predicates the read path actually uses:
     //   - `sortBy(\.sampledAt, .reverse) + fetchLimit: N` is the
     //     "give me the most recent samples" shape used by HeroStrip,
-    //     MenuBarLabel, MenuStatusContent, NotificationsHost, and all
+    //     MenuBarLabel, MenuStatusContent, AlertMonitor, and all
     //     three pace widgets. Without an index, every refetch was a
     //     full-table sort.
     //   - `predicate: sampledAt >= cutoff` is used by PaceChartCard

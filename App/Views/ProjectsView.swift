@@ -685,8 +685,7 @@ private struct ProjectsContent: View {
     /// Ten `.onChange` modifiers plus the `@Query` macros is past what the type
     /// inferencer will do in reasonable time — adding the scope trigger tipped
     /// it into a hard "unable to type-check" error. Splitting gives it two
-    /// small problems instead of one large one; the same fix `NotificationsHost`
-    /// needed.
+    /// small problems instead of one large one.
     struct RefreshTriggers: ViewModifier {
         let owner: ProjectsContent
         func body(content: Content) -> some View { owner.refreshTriggerModifiers(content) }
