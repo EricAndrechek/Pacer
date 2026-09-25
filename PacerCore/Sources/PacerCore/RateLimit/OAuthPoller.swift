@@ -1782,6 +1782,10 @@ public actor OAuthPoller: TokenPoolTesting {
             }
             do {
                 try context.save()
+                // Every account's rows, not only the active one's: the pace
+                // chart and menu draw all of them. See `RateLimitWriteSignal`.
+                let written = captured.sampledAt
+                Task { @MainActor in RateLimitWriteSignal.shared.note(written) }
                 if wroteActiveWindow {
                     postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
                 }
@@ -2095,7 +2099,11 @@ public actor OAuthPoller: TokenPoolTesting {
                     + "\(Int(Date().timeIntervalSince(started) * 1000))ms"
                     + (leftover > 0 ? " — \(leftover) recent row(s) still archived" : ""))
 
+        // Folded and adopted rows are older than the live ones, which is why
+        // the signal is a generation rather than a newest-timestamp.
+        let newestFolded = archived.map(\.sampledAt).max()
         Task { @MainActor in
+            RateLimitWriteSignal.shared.note(newestFolded)
             postScanCycleSummary(ScanCycleSummary(rateLimitsChanged: true))
         }
     }

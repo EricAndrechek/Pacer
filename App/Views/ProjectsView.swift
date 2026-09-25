@@ -95,6 +95,7 @@ struct ProjectsView: View {
                 overviewMetricBinding: overviewMetricBinding,
                 collectionFilterBinding: $collectionFilter,
                 onSelectProject: { path, displayName, since in
+                    Log.write("Navigation", "open project \(URL(fileURLWithPath: path).lastPathComponent)")
                     modalRoot = .project(path: path, displayName: displayName, since: since)
                 },
                 onNewCollection: {
@@ -133,7 +134,7 @@ struct ProjectsView: View {
         .sheet(isPresented: $showingCollectionsManager) {
             CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
         }
-        .pacerModalNavigation(root: $modalRoot)
+        .pacerModalNavigation(modalRoot, root: $modalRoot)
         .onAppear {
             if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
         }

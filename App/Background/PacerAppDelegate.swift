@@ -446,6 +446,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Bounce it here so widgets pick up the new build's code + data.
         WidgetExtensionRelauncher.bounceIfBundleReplaced()
         MainThreadStallWatchdog.shared.start()
+        ClickLatencyProbe.shared.start()
         backgroundService.start()
         installWindowObservers()
         installMenuBar()

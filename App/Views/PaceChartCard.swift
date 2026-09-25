@@ -42,7 +42,7 @@ struct PaceChartCard: View {
     /// window being open was the entire difference.
     ///
     /// Rate-limit rows only change when the OAuth poller writes, roughly every
-    /// five minutes, so `newestSignal` (one row) decides when to reload.
+    /// five minutes, so `RateLimitWriteSignal` decides when to reload.
     /// One account's loaded series. Usually there is exactly one — a picked
     /// scope, or a machine that runs its accounts one at a time — and then
     /// `label` is nil and nothing is decorated. Under "all accounts" on a
@@ -129,17 +129,6 @@ struct PaceChartCard: View {
     /// long the cycle had been running. The 8-day cutoff bounds it by time
     /// instead, which is the bound that matches what the chart draws.
 
-    /// One row: the newest rate-limit sample. Cheap to re-run on every save —
-    /// which is exactly what `@Query` will do — and its timestamp is the
-    /// signal that the expensive series are stale.
-    @Query private var newestSignal: [RateLimitSample]
-
-    /// The scoped equivalent. Both are watched because a poll can in principle
-    /// write scoped `limits[]` rows without a fixed one, and keying the reload
-    /// on only the fixed series would leave the per-model charts stale until
-    /// the next fixed sample landed. One row each — the cost is nil.
-    @Query private var newestScopedSignal: [UsageLimitSample]
-
     @Environment(\.modelContext) private var modelContext
 
     /// The shared intelligence engine — single source of the forecast
@@ -175,26 +164,6 @@ struct PaceChartCard: View {
     init(limitAccountId: String? = nil, onCompare: ((String, String?) -> Void)? = nil) {
         self.limitAccountId = limitAccountId
         self.onCompare = onCompare
-        // Only the signal is a `@Query`. One row, so re-running it on every
-        // save costs nothing; the series it guards are loaded in `reload()`.
-        //
-        // Deliberately **unscoped**. These decide *when* to reload, not what
-        // to show, and a predicate fixed at init is exactly the wrong thing for
-        // a value that changes: an account-scoped signal goes stale the moment
-        // the scope changes and then never fires again. Any account's poll is a
-        // fine reason to top up, and the top-up itself is scoped.
-        var signal = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        signal.fetchLimit = 1
-        signal.propertiesToFetch = [\.sampledAt]
-        _newestSignal = Query(signal)
-
-        var scopedSignal = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedSignal.fetchLimit = 1
-        scopedSignal.propertiesToFetch = [\.sampledAt]
-        _newestScopedSignal = Query(scopedSignal)
-
         // Seed from what this session already loaded, so the first frame draws
         // the charts rather than "Loading history…" — see
         // `PaceSeriesCache.lastTargets`. `reload()` still runs on appear and
@@ -213,14 +182,11 @@ struct PaceChartCard: View {
         }
     }
 
-    /// Newest timestamp across both sources — the trigger for a reload.
-    private var reloadSignal: Date? {
-        let fixed = newestSignal.first?.sampledAt
-        let scoped = newestScopedSignal.first?.sampledAt
-        guard let fixed else { return scoped }
-        guard let scoped else { return fixed }
-        return max(fixed, scoped)
-    }
+    /// Newest rate-limit write, fixed or scoped, by any account — the trigger
+    /// for a reload. Deliberately **unscoped**: it decides *when* to reload,
+    /// not what to show, and any account's poll is a fine reason to top up;
+    /// the top-up itself is scoped. See `RateLimitWriteSignal`.
+    private var reloadSignal: UInt64 { RateLimitWriteSignal.shared.generation }
 
     /// Load the two 8-day series. Called on appear and whenever a new
     /// rate-limit sample lands — not on every context change.

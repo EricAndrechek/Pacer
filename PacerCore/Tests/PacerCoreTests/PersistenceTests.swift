@@ -800,6 +800,140 @@ private struct AggregateSnapshot: Sendable {
     #expect(try context.fetchCount(FetchDescriptor<SessionInfo>()) == 70)
 }
 
+// MARK: - SessionInfoRecomputer fast path (SessionRollupCache)
+
+/// The app's full schema — the per-account session rows need `Account` and
+/// `AccountSessionInfo`, which the older helper above predates.
+private func makeFullSchemaContainer() throws -> ModelContainer {
+    try ModelContainer(
+        for: Schema(PacerStore.allModelTypes),
+        configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+}
+
+/// Every session and per-account session row, as comparable tuples.
+@ScanActor
+private func sessionRowsSnapshot(_ context: ModelContext) throws -> [String] {
+    let global = try context.fetch(FetchDescriptor<SessionInfo>()).map {
+        "S \($0.sessionId) \($0.firstSeenAt.timeIntervalSince1970) \($0.lastSeenAt.timeIntervalSince1970) "
+            + "\($0.cumulativeInputTokens) \($0.cumulativeOutputTokens) \($0.cumulativeCacheReadTokens) "
+            + "\(($0.cumulativeCostUSD * 1e9).rounded()) \($0.topModel) \($0.projectPath)"
+    }
+    let perAccount = try context.fetch(FetchDescriptor<AccountSessionInfo>()).map {
+        "A \($0.accountSessionKey) \($0.firstSeenAt.timeIntervalSince1970) \($0.lastSeenAt.timeIntervalSince1970) "
+            + "\($0.cumulativeInputTokens) \($0.cumulativeOutputTokens) \($0.cumulativeCacheReadTokens) "
+            + "\(($0.cumulativeCostUSD * 1e9).rounded()) \($0.topModel) \($0.projectPath)"
+    }
+    return (global + perAccount).sorted()
+}
+
+/// One scan-cycle's worth of inserts into `sess-A`, then that cycle's recompute.
+@ScanActor
+private func runSessionCycle(
+    persister: SamplePersister,
+    recomputer: SessionInfoRecomputer,
+    entries: [(ParsedUsageEntry, String?)]
+) async throws -> SessionInfoRecomputer.Stats {
+    persister.clearDirtyPairs()
+    var accountByDedup: [String: String] = [:]
+    for (entry, account) in entries {
+        #expect(try persister.insert(entry))
+        if let account, let key = entry.dedupKey { accountByDedup[key] = account }
+    }
+    // Stand in for the account trail, which stamps samples at insert.
+    for sample in persister.pendingSessionSamples.values.joined() {
+        sample.accountId = sample.dedupKey.flatMap { accountByDedup[$0] }
+    }
+    try persister.flush()
+    return try await recomputer.recompute(
+        sessionIds: persister.dirtySessionIds,
+        pending: persister.pendingSessionSamples,
+        polluted: persister.pollutedSessionIds)
+}
+
+@ScanActor
+@Test func sessionFastPathHandlesANewModelOvertakingAcrossAccounts() async throws {
+    // The shape that made every cycle take the full path on a real install:
+    // three accounts, and a session whose pending turns are a different model
+    // from its top one (a Sonnet subagent inside an Opus session).
+    let container = try makeFullSchemaContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+    for id in ["acct-1", "acct-2", "acct-3"] {
+        context.insert(Account(
+            id: id, organizationId: nil, displayName: id, isActive: id == "acct-1",
+            firstSeenAt: .distantPast, lastSeenAt: .distantPast))
+    }
+    try context.save()
+    let cache = SessionRollupCache()
+    let recomputer = SessionInfoRecomputer(
+        container: container, context: context, cache: cache)
+
+    let t0 = Date(timeIntervalSince1970: 1_756_800_000)
+    let first = try await runSessionCycle(persister: persister, recomputer: recomputer, entries: [
+        (makeEntry(timestamp: t0, model: "claude-opus-4-7", input: 100, output: 100,
+                   storedCost: 0.10, dedup: "a:1", sessionId: "sess-A", projectPath: "/p1"), "acct-1"),
+    ])
+    // First touch since launch: nothing cached, so the full path seeds it.
+    #expect(first.fastPathApplied == 0)
+
+    let second = try await runSessionCycle(persister: persister, recomputer: recomputer, entries: [
+        (makeEntry(timestamp: t0.addingTimeInterval(60), model: "claude-sonnet-4-6",
+                   input: 300, output: 100, storedCost: 0.02, dedup: "b:1",
+                   sessionId: "sess-A", projectPath: "/p1/sub"), "acct-2"),
+        (makeEntry(timestamp: t0.addingTimeInterval(120), model: "claude-sonnet-4-6",
+                   input: 5, output: 5, storedCost: 0.01, dedup: "c:1",
+                   sessionId: "sess-A", projectPath: "/p1"), "acct-1"),
+    ])
+    #expect(second.fastPathApplied == 1)
+    try context.save()
+
+    let global = try #require(try context.fetch(FetchDescriptor<SessionInfo>()).first)
+    #expect(global.topModel == "claude-sonnet-4-6")   // 410 tokens vs 200
+    #expect(global.cumulativeInputTokens == 405)
+    let acct1 = try #require(try context.fetch(FetchDescriptor<AccountSessionInfo>(
+        predicate: #Predicate { $0.accountId == "acct-1" })).first)
+    #expect(acct1.topModel == "claude-opus-4-7")      // 200 vs 10 on this account
+    #expect(acct1.lastSeenAt == t0.addingTimeInterval(120))
+
+    // The fast path must land exactly where a from-scratch rebuild does.
+    let fast = try sessionRowsSnapshot(context)
+    let rebuild = SessionInfoRecomputer(container: container, context: context)
+    let full = try await rebuild.recompute(sessionIds: ["sess-A"])
+    #expect(full.fastPathApplied == 0)
+    try context.save()
+    #expect(try sessionRowsSnapshot(context) == fast)
+    #expect(fast.count == 3)   // global + acct-1 + acct-2
+}
+
+@ScanActor
+@Test func sessionFastPathStepsAsideForPollutedSessions() async throws {
+    let container = try makeFullSchemaContainer()
+    let context = ModelContext(container)
+    let persister = try SamplePersister(context: context)
+    let cache = SessionRollupCache()
+    let recomputer = SessionInfoRecomputer(
+        container: container, context: context, cache: cache)
+    let t0 = Date(timeIntervalSince1970: 1_756_800_000)
+
+    _ = try await runSessionCycle(persister: persister, recomputer: recomputer, entries: [
+        (makeEntry(timestamp: t0, dedup: "a:1", sessionId: "sess-A", projectPath: "/p1"), nil),
+    ])
+    let warm = try await runSessionCycle(persister: persister, recomputer: recomputer, entries: [
+        (makeEntry(timestamp: t0.addingTimeInterval(60), dedup: "b:1",
+                   sessionId: "sess-A", projectPath: "/p1"), nil),
+    ])
+    #expect(warm.fastPathApplied == 1)
+
+    // A re-attribution / upgrade / alias merge arrives as a polluted session.
+    persister.clearDirtyPairs()
+    persister.addDirtySessionIds(["sess-A"])
+    let polluted = try await recomputer.recompute(
+        sessionIds: persister.dirtySessionIds,
+        pending: persister.pendingSessionSamples,
+        polluted: persister.pollutedSessionIds)
+    #expect(polluted.fastPathApplied == 0)
+}
+
 @ScanActor
 @Test func samplePersisterRecoversMissingSessionIds() throws {
     // Backfill case: TokenSamples already exist with sessionIds but

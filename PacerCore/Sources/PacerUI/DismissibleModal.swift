@@ -24,12 +24,22 @@ public extension View {
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
-        self.modifier(DismissibleModalModifier(item: item, modalContent: content))
+        // The modifier presents from `presentedID`, a plain input, rather than
+        // from reading the binding in its own body: a value change then
+        // re-runs it whenever its caller re-renders. The caller must itself
+        // re-render on the change — `pacerModalNavigation` explains why that
+        // means the page reading its own `@State`.
+        self.modifier(DismissibleModalModifier(
+            item: item, presentedID: item.wrappedValue?.id, modalContent: content))
     }
 }
 
 private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>: ViewModifier {
     @Binding var item: Item?
+    /// The presented item's id, read in the caller's body — see
+    /// `dismissibleModal(item:content:)`. Drives presentation; `item` is
+    /// only written through (dismiss) and read for the content.
+    let presentedID: Item.ID?
     @ViewBuilder let modalContent: (Item) -> ModalContent
 
     func body(content: Content) -> some View {
@@ -47,8 +57,8 @@ private struct DismissibleModalModifier<Item: Identifiable, ModalContent: View>:
         //      that.
         ZStack(alignment: .center) {
             content
-                .disabled(item != nil)
-            if item != nil {
+                .disabled(presentedID != nil)
+            if presentedID != nil {
                 modalLayer
             }
         }

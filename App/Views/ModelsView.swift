@@ -90,7 +90,7 @@ struct ModelsView: View {
             )
             .id(range)
         }
-        .pacerModalNavigation(root: $modalRoot)
+        .pacerModalNavigation(modalRoot, root: $modalRoot)
     }
 }
 

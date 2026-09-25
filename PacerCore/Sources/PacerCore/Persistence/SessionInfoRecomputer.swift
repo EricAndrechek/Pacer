@@ -18,23 +18,36 @@ public final class SessionInfoRecomputer {
     private let context: ModelContext
     private let mode: CostMode
     private let pricingTable: PricingTable
+    private let cache: SessionRollupCache
 
+    /// `cache` should outlive the recomputer — `ScanCoordinator` holds one for
+    /// the life of the scan loop. The default (a fresh, empty cache) is
+    /// correct, just slow: every session takes the full path once.
     public init(
         container: ModelContainer,
         context: ModelContext,
         mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared
+        pricingTable: PricingTable = .shared,
+        cache: SessionRollupCache = SessionRollupCache()
     ) {
         self.container = container
         self.context = context
         self.mode = mode
         self.pricingTable = pricingTable
+        self.cache = cache
     }
 
     public struct Stats: Sendable {
         public var sessionsRecomputed: Int
         public var sessionsUpserted: Int
         public var sessionsDeleted: Int
+        /// Why sessions missed the fast path, for the scan log's `sMiss=`:
+        /// marked polluted (samples rewritten underneath — #149), cache entry
+        /// expired (`SessionRollupCache.maxAge`), or nothing usable cached
+        /// (first touch since launch, or dirtied with no pending samples).
+        public var missPolluted: Int = 0
+        public var missExpired: Int = 0
+        public var missUncached: Int = 0
         /// Mirror of `AggregateRecomputer.Stats.fastPathApplied` — see
         /// that doc for the diagnostic intent.
         public var fastPathApplied: Int = 0
@@ -48,12 +61,9 @@ public final class SessionInfoRecomputer {
 
     /// Recompute dirty sessions. `pending` and `polluted` opt the
     /// per-session path into the incremental fast path — see
-    /// `AggregateRecomputer.recompute` for the design. SessionInfo's
-    /// fast path has one extra constraint vs daily/hourly/project:
-    /// `topModel` depends on per-model token totals, which aren't
-    /// stored on the row, so it falls through whenever any pending
-    /// sample's model differs from the existing row's `topModel`.
-    /// Empty defaults preserve legacy "always full-recompute".
+    /// `AggregateRecomputer.recompute` for the design, and `fastPathApply`
+    /// for why this one needs `SessionRollupCache`. Empty defaults preserve
+    /// legacy "always full-recompute".
     @discardableResult
     public func recompute(
         sessionIds: Set<String>,
@@ -71,6 +81,10 @@ public final class SessionInfoRecomputer {
             ? PricingTable.Snapshot(pricingByModel: [:])
             : SampleCostCache.current()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
+            // The bulk worker writes these rows from another context and
+            // does not seed the cache, so what the cache holds for them is
+            // about to be out of date.
+            cache.forget(sessionIds)
             try context.save()
             let worker = SessionInfoBulkWorker(modelContainer: container)
             return try await worker.bulkRecompute(
@@ -81,24 +95,37 @@ public final class SessionInfoRecomputer {
             stats.sessionsRecomputed += 1
             let pendingForSid = pending[sid] ?? []
             let isPolluted = polluted.contains(sid)
+            if isPolluted { cache.forget([sid]) }
             if !isPolluted, !pendingForSid.isEmpty,
                try fastPathApply(sessionId: sid, pending: pendingForSid,
                                  snapshot: snapshot, stats: &stats) {
                 continue
             }
+            if isPolluted { stats.missPolluted += 1 }
+            else if cache.hasExpiredEntry(for: sid) { stats.missExpired += 1 }
+            else { stats.missUncached += 1 }
             try recomputeOne(sessionId: sid, snapshot: snapshot, stats: &stats)
         }
         return stats
     }
 
-    /// Incremental fast path for SessionInfo. Returns `true` only when
-    /// the existing `SessionInfo` row exists AND every pending sample
-    /// has the same model as `existing.topModel` — otherwise the
-    /// per-model token ranking could shift and we can't recompute
-    /// `topModel` from deltas alone (the row doesn't store per-model
-    /// totals). On `false`, caller falls through to the full
-    /// `recomputeOne` path that re-fetches every sample for the
-    /// session.
+    /// Incremental fast path for SessionInfo and its per-account rows.
+    ///
+    /// `topModel` is chosen by comparing per-model totals, which the rows do
+    /// not store, so the rows alone cannot be advanced by a delta: a Sonnet
+    /// subagent's turns inside an Opus session might or might not overtake it.
+    /// This used to fall through to the full path whenever a pending sample's
+    /// model differed from the row's, and — since multi-account — whenever
+    /// more than one account existed at all. Together that meant nearly every
+    /// cycle re-fetched every sample of every active session: 1–2 s per cycle
+    /// on long sessions, holding the store while the UI waited on it.
+    ///
+    /// So the complete `SessionRollupValues` behind each row are kept in
+    /// `SessionRollupCache`, seeded by the full path. Here the pending samples
+    /// are added to those values and the rows rewritten from them — the same
+    /// `SessionRollupValues.add` and the same writers the full path uses, so
+    /// the two paths cannot disagree. No cache entry (first touch since
+    /// launch, or just polluted) means the full path, which seeds one.
     private func fastPathApply(
         sessionId: String,
         pending: [TokenSample],
@@ -106,76 +133,40 @@ public final class SessionInfoRecomputer {
         stats: inout Stats
     ) throws -> Bool {
         let sid = sessionId
+        guard var values = cache.values(for: sid) else { return false }
         let existing = try context.fetch(
             FetchDescriptor<SessionInfo>(
                 predicate: #Predicate<SessionInfo> { $0.sessionId == sid }
             )
         ).first
         guard let existing else { return false }
-        // Empty `topModel` would normally mean the row was never
-        // populated; defer to full recompute to build it correctly.
-        let topModel = existing.topModel
-        guard !topModel.isEmpty else { return false }
-        // If any pending sample uses a different model, fall through —
-        // we can't tell whether the new model overtakes topModel
-        // without the per-model totals the full path computes.
-        for s in pending {
-            if s.model != topModel { return false }
-        }
-
-        // With more than one account, take the full recompute instead.
-        //
-        // The account rows cannot be maintained incrementally the way the
-        // global row can: `topModel` is chosen by comparing per-model totals,
-        // and an account's top model may differ from the session's (one
-        // account ran Opus, the other Sonnet), so the guard above proves
-        // nothing about either account's row. Re-deriving them here from a
-        // fetch was worse — that fetch does not see the cycle's *pending*
-        // inserts, so the account rows sat exactly one batch behind the
-        // global row. `verify-data` caught it at one session and $0.85.
-        //
-        // So the fast path is now conditional on there being one account,
-        // which is almost every install: those keep it, and anyone running
-        // two pays a full session recompute for correctness.
-        if try context.fetchCount(FetchDescriptor<Account>()) > 1 { return false }
 
         for s in pending {
-            existing.cumulativeInputTokens += s.breakdown.inputTokens
-            existing.cumulativeOutputTokens += s.breakdown.outputTokens
-            existing.cumulativeCacheReadTokens += s.breakdown.cacheReadTokens
-            existing.cumulativeCacheCreation5mTokens += s.breakdown.cacheCreation5mTokens
-            existing.cumulativeCacheCreation1hTokens += s.breakdown.cacheCreation1hTokens
-            let breakdown = TokenBreakdown(
-                inputTokens: s.breakdown.inputTokens,
-                outputTokens: s.breakdown.outputTokens,
-                cacheReadTokens: s.breakdown.cacheReadTokens,
-                cacheCreation5mTokens: s.breakdown.cacheCreation5mTokens,
-                cacheCreation1hTokens: s.breakdown.cacheCreation1hTokens
+            values.global.add(s, mode: mode, snapshot: snapshot)
+            let key = s.accountId ?? AccountDailyAggregate.unattributedKey
+            values.byAccount[key, default: SessionRollupValues()]
+                .add(s, mode: mode, snapshot: snapshot)
+        }
+
+        let accountRows = try context.fetch(
+            FetchDescriptor<AccountSessionInfo>(
+                predicate: #Predicate<AccountSessionInfo> { $0.sessionId == sid }
             )
-            existing.cumulativeCostUSD += CostCalculator.cost(
-                storedCostUSD: s.sourceCostUSD,
-                model: s.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            if s.sampledAt < existing.firstSeenAt {
-                existing.firstSeenAt = s.sampledAt
-            }
-            if s.sampledAt > existing.lastSeenAt {
-                existing.lastSeenAt = s.sampledAt
-                // Most-recent sample wins for path + cc version, same
-                // as `applySamples`. Only overwrite when the new
-                // sample actually carries the field — same fallback
-                // rule the full path uses.
-                if let path = s.projectPath {
-                    existing.projectPath = path
-                }
-                if let ccVersion = s.ccVersion {
-                    existing.ccVersion = ccVersion
-                }
+        )
+        var rowsByAccount: [String: AccountSessionInfo] = [:]
+        for row in accountRows { rowsByAccount[row.accountId] = row }
+        let touched = Set(pending.map { $0.accountId ?? AccountDailyAggregate.unattributedKey })
+        for key in touched {
+            guard let accountValues = values.byAccount[key] else { continue }
+            if let row = rowsByAccount[key] {
+                accountValues.write(to: row)
+            } else {
+                context.insert(accountValues.makeAccountRow(accountId: key, sessionId: sid))
             }
         }
+        values.global.write(to: existing)
+        cache.store(values, for: sid)
+
         stats.sessionsUpserted += 1
         stats.fastPathApplied += 1
         return true
@@ -197,10 +188,10 @@ public final class SessionInfoRecomputer {
                 predicate: #Predicate<SessionInfo> { $0.sessionId == sid }
             )
         ).first
-        try syncAccountSessionRows(
+        let byAccount = try syncAccountSessionRows(
             context: context, sessionId: sid, samples: samples,
             mode: mode, snapshot: snapshot)
-        Self.applySamples(
+        let global = Self.applySamples(
             sessionId: sid,
             samples: samples,
             existing: existing,
@@ -210,8 +201,17 @@ public final class SessionInfoRecomputer {
             delete: { context.delete($0) },
             stats: &stats
         )
+        if let global {
+            cache.store(SessionRollupCache.Values(global: global, byAccount: byAccount),
+                        for: sid, rebuiltAt: Date())
+        } else {
+            cache.forget([sid])
+        }
     }
 
+    /// Returns the values the row was written from, or nil when the session
+    /// has no samples (and its row, if any, was deleted).
+    @discardableResult
     fileprivate nonisolated static func applySamples<S: AggregatableSample>(
         sessionId: String,
         samples: [S],
@@ -221,48 +221,25 @@ public final class SessionInfoRecomputer {
         insert: (SessionInfo) -> Void,
         delete: (SessionInfo) -> Void,
         stats: inout Stats
-    ) {
+    ) -> SessionRollupValues? {
         if samples.isEmpty {
             if let existing {
                 delete(existing)
                 stats.sessionsDeleted += 1
             }
-            return
+            return nil
         }
 
         var values = SessionRollupValues()
         for sample in samples { values.add(sample, mode: mode, snapshot: snapshot) }
-        let path = values.projectPath ?? ""
 
         if let existing {
-            existing.firstSeenAt = values.firstSeenAt
-            existing.lastSeenAt = values.lastSeenAt
-            existing.projectPath = path
-            existing.ccVersion = values.ccVersion
-            existing.cumulativeCostUSD = values.totalCostUSD
-            existing.cumulativeInputTokens = values.inputTokens
-            existing.cumulativeOutputTokens = values.outputTokens
-            existing.cumulativeCacheReadTokens = values.cacheReadTokens
-            existing.cumulativeCacheCreation5mTokens = values.cacheCreation5mTokens
-            existing.cumulativeCacheCreation1hTokens = values.cacheCreation1hTokens
-            existing.topModel = values.topModel
+            values.write(to: existing)
         } else {
-            insert(SessionInfo(
-                sessionId: sessionId,
-                firstSeenAt: values.firstSeenAt,
-                lastSeenAt: values.lastSeenAt,
-                projectPath: path,
-                ccVersion: values.ccVersion,
-                cumulativeCostUSD: values.totalCostUSD,
-                cumulativeInputTokens: values.inputTokens,
-                cumulativeOutputTokens: values.outputTokens,
-                cumulativeCacheReadTokens: values.cacheReadTokens,
-                cumulativeCacheCreation5mTokens: values.cacheCreation5mTokens,
-                cumulativeCacheCreation1hTokens: values.cacheCreation1hTokens,
-                topModel: values.topModel
-            ))
+            insert(values.makeSessionRow(sessionId: sessionId))
         }
         stats.sessionsUpserted += 1
+        return values
     }
 }
 
@@ -271,13 +248,15 @@ public final class SessionInfoRecomputer {
 /// A conversation that spans an account switch has real usage on both sides,
 /// so this is a split rather than a partition: each row's `firstSeenAt` /
 /// `lastSeenAt` are that account's first and last turns *within* the session.
+/// Returns the per-account values the rows were written from.
+@discardableResult
 func syncAccountSessionRows<S: AggregatableSample>(
     context: ModelContext,
     sessionId: String,
     samples: [S],
     mode: CostMode,
     snapshot: PricingTable.Snapshot
-) throws {
+) throws -> [String: SessionRollupValues] {
     var byAccount: [String: SessionRollupValues] = [:]
     for sample in samples {
         let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
@@ -296,34 +275,170 @@ func syncAccountSessionRows<S: AggregatableSample>(
     for row in existing { rows[row.accountId] = row }
 
     for (accountId, values) in byAccount {
-        let path = values.projectPath ?? ""
         if let row = rows.removeValue(forKey: accountId) {
-            row.firstSeenAt = values.firstSeenAt
-            row.lastSeenAt = values.lastSeenAt
-            row.projectPath = path
-            row.ccVersion = values.ccVersion
-            row.cumulativeCostUSD = values.totalCostUSD
-            row.cumulativeInputTokens = values.inputTokens
-            row.cumulativeOutputTokens = values.outputTokens
-            row.cumulativeCacheReadTokens = values.cacheReadTokens
-            row.cumulativeCacheCreation5mTokens = values.cacheCreation5mTokens
-            row.cumulativeCacheCreation1hTokens = values.cacheCreation1hTokens
-            row.topModel = values.topModel
+            values.write(to: row)
         } else {
-            context.insert(AccountSessionInfo(
-                accountId: accountId, sessionId: sessionId,
-                firstSeenAt: values.firstSeenAt, lastSeenAt: values.lastSeenAt,
-                projectPath: path, ccVersion: values.ccVersion,
-                cumulativeCostUSD: values.totalCostUSD,
-                cumulativeInputTokens: values.inputTokens,
-                cumulativeOutputTokens: values.outputTokens,
-                cumulativeCacheReadTokens: values.cacheReadTokens,
-                cumulativeCacheCreation5mTokens: values.cacheCreation5mTokens,
-                cumulativeCacheCreation1hTokens: values.cacheCreation1hTokens,
-                topModel: values.topModel))
+            context.insert(values.makeAccountRow(accountId: accountId, sessionId: sessionId))
         }
     }
     for orphan in rows.values { context.delete(orphan) }
+    return byAccount
+}
+
+/// The complete `SessionRollupValues` behind recently touched session rows,
+/// so the fast path can advance `topModel` exactly (see
+/// `SessionInfoRecomputer.fastPathApply`).
+///
+/// In memory only, and only ever filled from a full recompute of the session,
+/// so it is exactly what the committed rows were written from. Anything that
+/// changes a session's samples other than a plain insert — a streamed turn's
+/// upgrade, a re-attribution, an alias merge, a cost-mode change — marks the
+/// session polluted, which drops its entry here before the full path runs.
+/// Bounded by the sessions touched since launch; a few hundred small values.
+@ScanActor
+public final class SessionRollupCache {
+    struct Values {
+        var global: SessionRollupValues
+        var byAccount: [String: SessionRollupValues]
+    }
+
+    private var entries: [String: Values] = [:]
+    /// When each entry stops being trusted. Set only when the entry is built
+    /// from the session's samples (the full path); the fast path advancing it
+    /// does not extend it.
+    private var expiresAt: [String: Date] = [:]
+
+    /// The longest a cached entry is advanced by deltas before the session is
+    /// rebuilt from its samples again: a hard bound on how long any drift in a
+    /// cached total can last, the same on every machine whatever the number
+    /// of active sessions. Price changes, rewritten samples and failed cycles
+    /// already reset entries immediately; this bounds whatever has no name.
+    ///
+    /// Expiry, not a sweep. A sweep (every active session rebuilt each
+    /// ten-minute pass) measured a 3.3-4.3 s scan every ten minutes on a real
+    /// store. A one-session rotation fixed the cost but made the bound depend
+    /// on how many sessions were active. An entry that expires is simply not
+    /// used, so the session takes the full path on its next turn: at most
+    /// one rebuild per session per `maxAge`, at the moment it is touched.
+    static let maxAge: TimeInterval = 30 * 60
+    /// Each entry's age is spread over ±`maxAgeJitter` so sessions first seen
+    /// together (every active session right after launch) don't all expire in
+    /// the same scan and bring the sweep's burst back.
+    static let maxAgeJitter: TimeInterval = 5 * 60
+
+    public nonisolated init() {}
+
+    /// An entry exists but is past its expiry (or was never built from
+    /// samples). For the scan log's miss reasons only.
+    func hasExpiredEntry(for sessionId: String, now: Date = Date()) -> Bool {
+        entries[sessionId] != nil && values(for: sessionId, now: now) == nil
+    }
+
+    /// The cached values, or nil when there are none or they have expired.
+    func values(for sessionId: String, now: Date = Date()) -> Values? {
+        guard let expiry = expiresAt[sessionId], now < expiry else { return nil }
+        return entries[sessionId]
+    }
+    /// `rebuiltAt` is non-nil when `values` came from the samples themselves
+    /// (the full path), which starts a new expiry window.
+    func store(_ values: Values, for sessionId: String, rebuiltAt: Date? = nil) {
+        entries[sessionId] = values
+        if let rebuiltAt {
+            let jitter = Double.random(in: -Self.maxAgeJitter...Self.maxAgeJitter)
+            expiresAt[sessionId] = rebuiltAt.addingTimeInterval(Self.maxAge + jitter)
+        }
+    }
+    func forget(_ sessionIds: Set<String>) {
+        for sid in sessionIds {
+            entries[sid] = nil
+            expiresAt[sid] = nil
+        }
+    }
+    func forgetAll() {
+        entries.removeAll()
+        expiresAt.removeAll()
+    }
+
+    /// The `SampleCostCache.generation` the entries were priced under.
+    private var pricingGeneration: UInt64?
+
+    /// Forget every entry if prices changed since the last call. Each cached
+    /// `totalCostUSD` bakes in the snapshot it was built from, and the fast
+    /// path only ever adds to it, so a price change would otherwise never
+    /// reach a session that stays active. Forgetting (rather than rebuilding)
+    /// keeps it cheap: each session takes the full path on its next touch.
+    /// Returns whether anything was forgotten.
+    @discardableResult
+    func forgetAllIfPricingChanged(generation: UInt64) -> Bool {
+        guard pricingGeneration != generation else { return false }
+        pricingGeneration = generation
+        let hadEntries = !entries.isEmpty
+        entries.removeAll()
+        expiresAt.removeAll()
+        return hadEntries
+    }
+
+    var count: Int { entries.count }
+}
+
+extension SessionRollupValues {
+    func write(to row: SessionInfo) {
+        row.firstSeenAt = firstSeenAt
+        row.lastSeenAt = lastSeenAt
+        row.projectPath = projectPath ?? ""
+        row.ccVersion = ccVersion
+        row.cumulativeCostUSD = totalCostUSD
+        row.cumulativeInputTokens = inputTokens
+        row.cumulativeOutputTokens = outputTokens
+        row.cumulativeCacheReadTokens = cacheReadTokens
+        row.cumulativeCacheCreation5mTokens = cacheCreation5mTokens
+        row.cumulativeCacheCreation1hTokens = cacheCreation1hTokens
+        row.topModel = topModel
+    }
+
+    func write(to row: AccountSessionInfo) {
+        row.firstSeenAt = firstSeenAt
+        row.lastSeenAt = lastSeenAt
+        row.projectPath = projectPath ?? ""
+        row.ccVersion = ccVersion
+        row.cumulativeCostUSD = totalCostUSD
+        row.cumulativeInputTokens = inputTokens
+        row.cumulativeOutputTokens = outputTokens
+        row.cumulativeCacheReadTokens = cacheReadTokens
+        row.cumulativeCacheCreation5mTokens = cacheCreation5mTokens
+        row.cumulativeCacheCreation1hTokens = cacheCreation1hTokens
+        row.topModel = topModel
+    }
+
+    func makeSessionRow(sessionId: String) -> SessionInfo {
+        SessionInfo(
+            sessionId: sessionId,
+            firstSeenAt: firstSeenAt,
+            lastSeenAt: lastSeenAt,
+            projectPath: projectPath ?? "",
+            ccVersion: ccVersion,
+            cumulativeCostUSD: totalCostUSD,
+            cumulativeInputTokens: inputTokens,
+            cumulativeOutputTokens: outputTokens,
+            cumulativeCacheReadTokens: cacheReadTokens,
+            cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
+            cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
+            topModel: topModel)
+    }
+
+    func makeAccountRow(accountId: String, sessionId: String) -> AccountSessionInfo {
+        AccountSessionInfo(
+            accountId: accountId, sessionId: sessionId,
+            firstSeenAt: firstSeenAt, lastSeenAt: lastSeenAt,
+            projectPath: projectPath ?? "", ccVersion: ccVersion,
+            cumulativeCostUSD: totalCostUSD,
+            cumulativeInputTokens: inputTokens,
+            cumulativeOutputTokens: outputTokens,
+            cumulativeCacheReadTokens: cacheReadTokens,
+            cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
+            cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
+            topModel: topModel)
+    }
 }
 
 /// Off-main bulk recompute path for SessionInfo. Owns its own

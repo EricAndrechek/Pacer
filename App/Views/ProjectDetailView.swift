@@ -44,10 +44,12 @@ struct ProjectDetailView: View {
     /// under the modal subtitle. Scoped via `init` so SwiftData
     /// only fetches the one row we care about (path-keyed unique).
     @Query private var probesForThisProject: [ProjectPathProbe]
-    /// Every project path Pacer has seen — drives the "Merge this
-    /// into…" submenu. Light because we only fetch `projectPath`
-    /// from the rollup, not the wide aggregate columns.
-    @Query private var allProjectAggregates: [ProjectDailyAggregate]
+    /// Every project path Pacer has seen, bar `(unknown)` — drives the
+    /// "Merge this into…" submenu and the bulk-merge sheet. Fetched on
+    /// appear and when project attribution changes, not as a `@Query`: that
+    /// re-read every project-day row on each store save while the modal
+    /// was open, and the menu rebuilt its list from it on every render.
+    @State private var knownProjectPathsForBulkMerge: [String] = []
 
     /// Pending source→canonical pair waiting on the user's confirm
     /// click after picking a target from the "Merge this into…"
@@ -83,6 +85,15 @@ struct ProjectDetailView: View {
     /// derivations. Empty / one-element when there's no drill-down
     /// to show.
     @State private var cachedSubprojects: [SubprojectRow] = []
+    /// One Subprojects load at a time; a trigger that lands while one is
+    /// running sets `subprojectsRerun` and gets one more load afterwards.
+    /// Cancelling is not an option: the load is a detached task, which is not
+    /// cancelled with its parent, so "cancel and restart" left every
+    /// superseded fetch running — overlapping raw-sample reads on a busy
+    /// project, all competing with the scan for the store.
+    @State private var subprojectsLoading = false
+    @State private var subprojectsRerun = false
+    @State private var subprojectsClosed = false
     /// Cost mode. Reactive @AppStorage so the Subprojects card
     /// re-buckets immediately when the user toggles modes in
     /// Settings (same pattern NowStrip uses).
@@ -94,6 +105,10 @@ struct ProjectDetailView: View {
     /// because the predicate is path-keyed unique.
     @Query private var budgetRows: [ProjectBudget]
 
+    /// The account the modal is scoped to, when it is — the Subprojects load
+    /// filters by it like every other card here.
+    private let scopeAccountId: String?
+
     init(
         projectPath: String, displayName: String, since: Date?,
         scopeAccountId: String? = nil
@@ -101,6 +116,7 @@ struct ProjectDetailView: View {
         self.projectPath = projectPath
         self.displayName = displayName
         self.since = since
+        self.scopeAccountId = scopeAccountId
         let path = projectPath
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         _budgetRows = Query(
@@ -160,12 +176,6 @@ struct ProjectDetailView: View {
                 order: .reverse
             )
         }
-        // The "all project paths" query for the merge submenu: only
-        // need projectPath. Without `propertiesToFetch` SwiftData
-        // would materialize every JSON-blob column on every row.
-        var allDesc = FetchDescriptor<ProjectDailyAggregate>()
-        allDesc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
-        _allProjectAggregates = Query(allDesc)
         // Probe row scoped to this project. Predicate filter keeps
         // SwiftData from materializing the whole probe table on
         // every save — we just need the one row.
@@ -205,7 +215,7 @@ struct ProjectDetailView: View {
     /// `samples` once and grouping on `originalProjectPath` — what
     /// the JSONL's cwd was BEFORE worktree-strip/alias rewriting,
     /// preserved on `TokenSample` exactly so we can drill back down.
-    struct SubprojectRow: Identifiable {
+    struct SubprojectRow: Identifiable, Sendable {
         /// The original cwd verbatim — used to bucket and as the
         /// stable id.
         let originalPath: String
@@ -282,24 +292,67 @@ struct ProjectDetailView: View {
     /// aggregate count changes, the cost-mode setting, and the
     /// `pacerScanCycleDidComplete` notification gives the same live-
     /// update behavior with zero per-render cost.
+    ///
+    /// Off the main actor, in its own `ModelContext`. This is the one read
+    /// in the app that materializes raw samples, and a busy project over
+    /// 90 days is tens of thousands of them: done on the main context it
+    /// was the largest main-thread cost in a `sample` of the live app, run
+    /// once as the modal opened (the click that "does nothing" for a
+    /// second, then lands with every queued click behind it) and again on
+    /// every scan cycle while the modal stayed open.
     private func refreshSubprojects() {
+        guard !subprojectsClosed else { return }
+        guard !subprojectsLoading else {
+            subprojectsRerun = true
+            return
+        }
+        subprojectsLoading = true
+        let container = modelContext.container
+        let path = projectPath
+        let since = since
+        let account = scope.isAll ? nil : scopeAccountId
+        let mode = CostMode(rawValue: costModeRaw) ?? .auto
+        Task {
+            let rows = await Task.detached(priority: .userInitiated) {
+                Self.loadSubprojects(container: container, projectPath: path,
+                                     since: since, accountId: account, mode: mode)
+            }.value
+            subprojectsLoading = false
+            guard !subprojectsClosed else { return }
+            cachedSubprojects = rows
+            if subprojectsRerun {
+                subprojectsRerun = false
+                refreshSubprojects()
+            }
+        }
+    }
+
+    private nonisolated static func loadSubprojects(
+        container: ModelContainer, projectPath: String, since: Date?,
+        accountId: String?, mode: CostMode
+    ) -> [SubprojectRow] {
         struct Acc {
             var tokens: Int64 = 0
             var cost: Double = 0
             var sessions: Set<String> = []
         }
+        let context = ModelContext(container)
         let path = projectPath
         var sampleDesc: FetchDescriptor<TokenSample>
-        if let cutoffDate = since {
-            let cutoffString = TokenSample.formatDate(cutoffDate)
+        // No cutoff means every date; `""` sorts before any "yyyy-MM-dd".
+        let cutoffString = since.map(TokenSample.formatDate) ?? ""
+        if let acct = accountId {
             sampleDesc = FetchDescriptor<TokenSample>(
                 predicate: #Predicate<TokenSample> {
                     $0.projectPath == path && $0.date >= cutoffString
+                        && $0.accountId == acct
                 }
             )
         } else {
             sampleDesc = FetchDescriptor<TokenSample>(
-                predicate: #Predicate<TokenSample> { $0.projectPath == path }
+                predicate: #Predicate<TokenSample> {
+                    $0.projectPath == path && $0.date >= cutoffString
+                }
             )
         }
         sampleDesc.propertiesToFetch = [
@@ -314,8 +367,10 @@ struct ProjectDetailView: View {
             \.sourceCostUSD,
             \.sessionId,
         ]
-        let samples = (try? modelContext.fetch(sampleDesc)) ?? []
-        let mode = CostMode(rawValue: costModeRaw) ?? .auto
+        let samples = (try? context.fetch(sampleDesc)) ?? []
+        // What `TokenSample.effectiveCostUSD(mode:)` computes, which is
+        // main-actor only; the snapshot it reads is not, so read it once.
+        let pricing = SampleCostCache.current()
         var byPath: [String: Acc] = [:]
         for s in samples {
             // Fall back to the canonical when originalProjectPath
@@ -326,16 +381,24 @@ struct ProjectDetailView: View {
             let key = s.originalProjectPath ?? projectPath
             var a = byPath[key] ?? Acc()
             a.tokens += s.inputTokens + s.outputTokens
-            a.cost += s.effectiveCostUSD(mode: mode)
+            a.cost += CostCalculator.cost(
+                storedCostUSD: s.sourceCostUSD,
+                model: s.model,
+                breakdown: TokenBreakdown(
+                    inputTokens: s.inputTokens,
+                    outputTokens: s.outputTokens,
+                    cacheReadTokens: s.cacheReadTokens,
+                    cacheCreation5mTokens: s.cacheCreation5mTokens,
+                    cacheCreation1hTokens: s.cacheCreation1hTokens),
+                mode: mode,
+                snapshot: pricing)
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             byPath[key] = a
         }
-        let canonicalPrefix = projectPath
         let rows: [SubprojectRow] = byPath.map { (key, a) in
-            let rel = relativeSubpath(canonical: canonicalPrefix, from: key)
-            return SubprojectRow(
+            SubprojectRow(
                 originalPath: key,
-                relativeSubpath: rel,
+                relativeSubpath: relativeSubpath(canonical: projectPath, from: key),
                 totalTokens: a.tokens,
                 cost: a.cost,
                 sessionCount: a.sessions.count
@@ -344,7 +407,7 @@ struct ProjectDetailView: View {
         // Highest-cost subdir first — matches the natural "what did
         // I spend my budget on" reading order. Stable tiebreaker on
         // path so a re-derivation doesn't shuffle equal-cost rows.
-        cachedSubprojects = rows.sorted { lhs, rhs in
+        return rows.sorted { lhs, rhs in
             if lhs.cost != rhs.cost { return lhs.cost > rhs.cost }
             if lhs.totalTokens != rhs.totalTokens { return lhs.totalTokens > rhs.totalTokens }
             return lhs.originalPath < rhs.originalPath
@@ -356,7 +419,7 @@ struct ProjectDetailView: View {
     /// when called with canonical `/Users/.../support-infra`. Empty
     /// string when the paths are equal (sample was taken at repo
     /// root, not a subdir).
-    private func relativeSubpath(canonical: String, from descendant: String) -> String {
+    private nonisolated static func relativeSubpath(canonical: String, from descendant: String) -> String {
         guard canonical != descendant else { return "" }
         let normalizedCanon = canonical.hasSuffix("/") ? String(canonical.dropLast()) : canonical
         let prefix = normalizedCanon + "/"
@@ -414,7 +477,10 @@ struct ProjectDetailView: View {
             if !modelSlices.isEmpty { modelsCard }
             if !sessionRows.isEmpty { sessionsCard }
         }
-        .onAppear { refreshDerived() }
+        .onAppear {
+            refreshDerived()
+            refreshKnownProjectPaths()
+        }
         // `aggregates.count` ticks on the FIRST sample of a new day
         // for this project; refreshDerived() recomputes
         // dailySeries / modelSlices / totals from the @Query result
@@ -435,11 +501,13 @@ struct ProjectDetailView: View {
             if summary.samplesChanged || summary.projectAttributionChanged {
                 refreshSubprojects()
             }
+            if summary.projectAttributionChanged { refreshKnownProjectPaths() }
         }
         // Cost-mode toggle in Settings must re-bucket the
         // Subprojects card — `effectiveCostUSD(mode:)` flips between
         // stored / calculated / auto fallbacks.
         .onChange(of: costModeRaw) { _, _ in refreshSubprojects() }
+        .onDisappear { subprojectsClosed = true }
         .sheet(item: $bulkMergeDraft) { draft in
             BulkMergeSheet(
                 knownPaths: knownProjectPathsForBulkMerge,
@@ -488,16 +556,19 @@ struct ProjectDetailView: View {
 
     /// Distinct paths the bulk-merge sheet can choose canonicals
     /// from — every project Pacer has seen, excluding `(unknown)`
-    /// (no folder behind it) and the current project (can't merge
-    /// into yourself).
-    private var knownProjectPathsForBulkMerge: [String] {
+    /// (no folder behind it). Only `projectPath` is fetched; without
+    /// `propertiesToFetch` SwiftData would materialize every JSON-blob
+    /// column on every row.
+    private func refreshKnownProjectPaths() {
+        var desc = FetchDescriptor<ProjectDailyAggregate>()
+        desc.propertiesToFetch = [\ProjectDailyAggregate.projectPath]
         var set: Set<String> = []
-        for agg in allProjectAggregates {
+        for agg in (try? modelContext.fetch(desc)) ?? [] {
             if agg.projectPath != ProjectDailyAggregate.unknownProjectPath {
                 set.insert(agg.projectPath)
             }
         }
-        return set.sorted()
+        knownProjectPathsForBulkMerge = set.sorted()
     }
 
     /// Other-project picker for the "Merge this into…" submenu.

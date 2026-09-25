@@ -40,10 +40,6 @@ struct NotificationsHost: View {
     /// unpredicated query is the cheap kind. Used both to enumerate what to
     /// watch and to decide whether a banner should name its account at all.
     @Query private var accounts: [Account]
-    /// One row, unpredicated — cheap enough to re-run on every save, which is
-    /// the point: it is what tells the two loads above that anything changed.
-    @Query private var newestSignal: [RateLimitSample]
-    @Query private var newestScopedSignal: [UsageLimitSample]
 
     @Query private var todayAggregates: [DailyAggregate]
     /// Per-project rollups for the last 7 days — covers both the
@@ -137,23 +133,12 @@ struct NotificationsHost: View {
                 $0.date >= weekAgo && $0.date <= today
             }
         )
-        var signal = FetchDescriptor<RateLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        signal.fetchLimit = 1
-        signal.propertiesToFetch = [\.sampledAt]
-        _newestSignal = Query(signal)
-        var scopedSignal = FetchDescriptor<UsageLimitSample>(
-            sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        scopedSignal.fetchLimit = 1
-        scopedSignal.propertiesToFetch = [\.sampledAt]
-        _newestScopedSignal = Query(scopedSignal)
     }
 
-    /// Newest timestamps across both tables — the trigger for a reload.
+    /// Newest rate-limit write — the trigger for a reload. See
+    /// `RateLimitWriteSignal`.
     private var reloadKey: String {
-        let a = newestSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        let b = newestScopedSignal.first?.sampledAt.timeIntervalSinceReferenceDate ?? 0
-        return "\(Int(a)):\(Int(b))"
+        "\(RateLimitWriteSignal.shared.generation)"
     }
 
     /// Every account's windows, not just the active login's.
