@@ -35,6 +35,9 @@ has colour, and a preview never takes focus.
 | `projects-collections*.png` | Projects tab, unscoped and scoped to a collection | real window |
 | `menubar.png` / `menubar-dark.png` | Menu bar with Pacer's menu open | the real status item and its real `NSMenu` (native Open / Settings / Quit items) in the real menu bar, captured in CI with the system in light, then dark, mode; local previews skip it |
 | `widgets.png` | Widget gallery | the real widget extension, drawn by Apple's WidgetKit Simulator in CI over fixture data — Today at small, pace gauges / live session / daily cost / top projects at medium — each cropped to its card with its shadow as transparency; local previews skip it. See below |
+| `scoped-firstclass-dashboard.png` / `-dark.png` | Per-model windows on the pace card | the real window, cropped to the pace card (`LayoutShiftProbe` records named frames in a screenshot run only); light + dark |
+| `scoped-firstclass-widget.png` | The same windows in the large widgets | WidgetKit Simulator: pace chart and pace gauges at large |
+| `collections-manager.png` / `collections-editor.png` | Projects ▸ Collections | the real window with the real `CollectionsManager` (and on it, the real editor on a seeded collection) attached as sheets — with `beginSheet`, since SwiftUI's `.sheet` never presented in the run |
 | `share-card.png` / `share-card-dark.png` | Share-image export (`App/Share`) | the branded 7-day pace card from the in-app "Share…" action, via the same `ImageRenderer` path; light + dark |
 
 All are rendered at 2× (Retina) with transparent margins, rounded corners, and a
