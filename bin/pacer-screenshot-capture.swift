@@ -96,6 +96,9 @@ struct Request: Decodable {
     var rect: [Double]?
     var dark: Bool?
     var done: String?
+    // "widgetsim" / "gallery" (widgets.png — see captureWidgetSim).
+    var debug: String?
+    var rows: [[String]]?
 }
 
 func fail(_ s: String) -> NSError { NSError(domain: "capture", code: 1, userInfo: [NSLocalizedDescriptionKey: s]) }
@@ -105,6 +108,8 @@ func handle(_ request: Request) async throws {
     case "window": try await capture(request)
     case "menubar": try await captureMenuBar(request)
     case "appearance": try setDarkMode(request.dark ?? false)
+    case "widgetsim": try await captureWidgetSim(request)
+    case "gallery": try composeGallery(request)
     default: throw fail("unknown request kind \(request.kind ?? "-")")
     }
     if let done = request.done { FileManager.default.createFile(atPath: done, contents: nil) }
@@ -183,6 +188,219 @@ func capture(_ request: Request) async throws {
     }
     try png.write(to: URL(fileURLWithPath: request.png))
     log("✓ \(URL(fileURLWithPath: request.png).lastPathComponent) (\(image.width)×\(image.height))")
+}
+
+// MARK: - Widgets (widgets.png), from WidgetKit Simulator
+
+// The home-screen widgets are the real PacerWidgets extension, rendered by
+// Apple's WidgetKit Simulator (bin/widgetkit-sim-shots.sh opens it on one
+// widget kind at a time). `widgetsim` photographs the simulator's document
+// window, finds the widget card in it, and writes just the card: the system's
+// own rendering — corner mask, background, content margins and shadow — with
+// the simulator's white page turned transparent. `gallery` lays those crops
+// out in rows. Nothing here draws any part of a widget.
+
+/// RGBA8, premultiplied, sRGB — one pixel is four bytes at `(y * width + x) * 4`.
+struct Bitmap {
+    let width: Int, height: Int
+    var data: [UInt8]
+    init(_ image: CGImage) {
+        width = image.width; height = image.height
+        data = [UInt8](repeating: 0, count: width * height * 4)
+        data.withUnsafeMutableBytes { buf in
+            let ctx = CGContext(data: buf.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+    init(width: Int, height: Int) {
+        self.width = width; self.height = height
+        data = [UInt8](repeating: 0, count: width * height * 4)
+    }
+    func luma(_ x: Int, _ y: Int) -> Int {
+        let i = (y * width + x) * 4
+        return (Int(data[i]) * 299 + Int(data[i + 1]) * 587 + Int(data[i + 2]) * 114) / 1000
+    }
+    func cgImage() -> CGImage {
+        let provider = CGDataProvider(data: Data(data) as CFData)!
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    }
+}
+
+func writePNG(_ image: CGImage, to path: String) throws {
+    guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+        throw fail("PNG encoding failed")
+    }
+    try png.write(to: URL(fileURLWithPath: path))
+}
+
+/// The card in the simulator's page: the widget's white background, fenced
+/// off from the white page around it by the card's own shadow. `spans[row]`
+/// is the card's horizontal extent on that row — its real, rounded outline.
+struct Card: Equatable {
+    var minX: Int, minY: Int, maxX: Int, maxY: Int
+    var spans: [Int: ClosedRange<Int>]
+    var size: (Int, Int) { (maxX - minX + 1, maxY - minY + 1) }
+    static func == (a: Card, b: Card) -> Bool {
+        a.minX == b.minX && a.minY == b.minY && a.maxX == b.maxX && a.maxY == b.maxY
+    }
+}
+
+func findCard(in bmp: Bitmap, scale: Double) -> Card? {
+    let w = bmp.width, h = bmp.height
+    // Near-white, as the page and a light-mode widget both are; the shadow
+    // ring between them is darker than this all the way round.
+    var white = [Bool](repeating: false, count: w * h)
+    for y in 0..<h { for x in 0..<w where bmp.luma(x, y) >= 251 { white[y * w + x] = true } }
+    var label = [Int32](repeating: -1, count: w * h)
+    var best: (card: Card, area: Int)?
+    var stack: [Int] = []
+    var next: Int32 = 0
+    for start in 0..<(w * h) where white[start] && label[start] < 0 {
+        var minX = w, minY = h, maxX = 0, maxY = 0, count = 0, touchesEdge = false
+        var spans: [Int: ClosedRange<Int>] = [:]
+        stack.append(start); label[start] = next
+        while let i = stack.popLast() {
+            let x = i % w, y = i / w
+            count += 1
+            minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+            if let s = spans[y] { spans[y] = min(s.lowerBound, x)...max(s.upperBound, x) } else { spans[y] = x...x }
+            if x == 0 || y == 0 || x == w - 1 || y == h - 1 { touchesEdge = true }
+            for j in [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]
+            where j >= 0 && white[j] && label[j] < 0 {
+                label[j] = next; stack.append(j)
+            }
+        }
+        next += 1
+        // The page itself reaches the window's edge; a widget is between a
+        // small (~158 pt) and a medium (~364 pt) — large is not photographed.
+        let bw = Double(maxX - minX + 1) / scale, bh = Double(maxY - minY + 1) / scale
+        guard !touchesEdge, (120...420).contains(bw), (120...420).contains(bh),
+              Double(count) / (Double(maxX - minX + 1) * Double(maxY - minY + 1)) > 0.3 else { continue }
+        let area = (maxX - minX + 1) * (maxY - minY + 1)
+        if area > (best?.area ?? 0) {
+            best = (Card(minX: minX, minY: minY, maxX: maxX, maxY: maxY, spans: spans), area)
+        }
+    }
+    return best?.card
+}
+
+func simulatorDocumentWindow() async throws -> SCWindow? {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    return content.windows
+        .filter { $0.owningApplication?.bundleIdentifier == "com.apple.widgetkit.simulator"
+            && $0.windowLayer == 0 && $0.frame.width > 400 && $0.frame.height > 300 }
+        .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+}
+
+func captureWidgetSim(_ request: Request) async throws {
+    guard ProcessInfo.processInfo.environment["CI"] == "true" else { throw fail("widgetsim: CI only") }
+    guard let png = request.png else { throw fail("widgetsim: png required") }
+    let name = URL(fileURLWithPath: png).lastPathComponent
+    // The simulator launches, loads the extension and asks it for a timeline:
+    // seconds on a cold runner. Wait for the same card in two frames running.
+    var last: Card?
+    var image: CGImage?
+    var scale = 1.0
+    var windowFrame = CGRect.zero
+    let deadline = Date().addingTimeInterval(45)
+    while Date() < deadline {
+        try await Task.sleep(for: .milliseconds(800))
+        guard let window = try await simulatorDocumentWindow() else { continue }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        scale = Double(filter.pointPixelScale)
+        let config = SCStreamConfiguration()
+        config.width = Int((filter.contentRect.width * scale).rounded())
+        config.height = Int((filter.contentRect.height * scale).rounded())
+        config.showsCursor = false
+        config.captureResolution = .best
+        config.ignoreShadowsSingleWindow = true
+        let shot = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        image = shot; windowFrame = window.frame
+        let card = findCard(in: Bitmap(shot), scale: scale)
+        if let card, card == last { break }
+        last = card
+    }
+    if let debug = request.debug, let image { try writePNG(image, to: debug) }
+    guard let image else { throw fail("widgetsim \(name): no WidgetKit Simulator document window") }
+    guard let card = last else { throw fail("widgetsim \(name): no widget card found in the window") }
+    log("\(name): window \(windowFrame) @\(scale)×, card \(card.size.0)×\(card.size.1) px at (\(card.minX), \(card.minY))")
+
+    // A margin wide enough for most of the shadow — but short of the entry's
+    // date label beneath the card in the Timeline tab: text is darker than
+    // any of the shadow, so the margin stops a row above the first text.
+    // The same margin all round, so the card sits centred in its crop.
+    let src = Bitmap(image)
+    var m = Int((8 * scale).rounded())
+    for y in (card.maxY + 1)...min(src.height - 1, card.maxY + m)
+    where (card.minX...card.maxX).contains(where: { src.luma($0, y) < 190 }) {
+        m = max(0, y - card.maxY - 2); break
+    }
+    let x0 = max(0, card.minX - m), y0 = max(0, card.minY - m)
+    let x1 = min(src.width - 1, card.maxX + m), y1 = min(src.height - 1, card.maxY + m)
+    var out = Bitmap(width: x1 - x0 + 1, height: y1 - y0 + 1)
+    for y in y0...y1 {
+        for x in x0...x1 {
+            let si = (y * src.width + x) * 4, oi = ((y - y0) * out.width + (x - x0)) * 4
+            if let span = card.spans[y], span.contains(x) {
+                // The card: exactly as the system drew it.
+                for c in 0..<4 { out.data[oi + c] = src.data[si + c] }
+                out.data[oi + 3] = 255
+            } else {
+                // The page around it: white under a black shadow, so a pixel's
+                // darkness is the shadow's opacity. Kept as that — a black
+                // shadow on transparency — rather than the page's white, which
+                // would sit as a white box on a dark README.
+                // The margin stops short of where the shadow does, so it is
+                // faded out over the crop's outer 4 pt: cut off instead, it
+                // leaves a faint hard-edged box round each widget in the gallery.
+                out.data[oi] = 0; out.data[oi + 1] = 0; out.data[oi + 2] = 0
+                let edge = min(x - x0, x1 - x, y - y0, y1 - y)
+                let fade = min(1, Double(edge) / max(1, 4 * scale))
+                out.data[oi + 3] = UInt8(Double(max(0, 255 - src.luma(x, y))) * fade)
+            }
+        }
+    }
+    try writePNG(out.cgImage(), to: png)
+    log("✓ \(name) (\(out.width)×\(out.height), WidgetKit Simulator)")
+}
+
+/// Rows of crops, centred, on transparency — the README's widget gallery.
+func composeGallery(_ request: Request) throws {
+    guard let rows = request.rows, let png = request.png else { throw fail("gallery: rows and png required") }
+    let images: [[CGImage]] = try rows.map { row in
+        try row.map { path in
+            guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+                  let image = CGImageSourceCreateImageAtIndex(src, 0, nil) else { throw fail("gallery: cannot read \(path)") }
+            return image
+        }
+    }
+    // Pixels at 2×. Each crop carries a few points of its shadow, so 14 pt
+    // between crops reads as the old gallery's ~22 pt between cards.
+    let gap = 28, pad = 40
+    let rowWidths = images.map { $0.reduce(0) { $0 + $1.width } + gap * max(0, $0.count - 1) }
+    let rowHeights = images.map { $0.map(\.height).max() ?? 0 }
+    let width = (rowWidths.max() ?? 0) + 2 * pad
+    let height = rowHeights.reduce(0, +) + gap * max(0, images.count - 1) + 2 * pad
+    let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    var top = pad
+    for (r, row) in images.enumerated() {
+        var x = (width - rowWidths[r]) / 2
+        for image in row {
+            // CoreGraphics is bottom-up; rows are laid out top-down.
+            ctx.draw(image, in: CGRect(x: x, y: height - top - image.height, width: image.width, height: image.height))
+            x += image.width + gap
+        }
+        top += rowHeights[r] + gap
+    }
+    try writePNG(ctx.makeImage()!, to: png)
+    log("✓ \(URL(fileURLWithPath: png).lastPathComponent) (\(width)×\(height), \(images.joined().count) widgets)")
 }
 
 // Pay ScreenCaptureKit's slow first query up front, then say so: the app waits

@@ -25,11 +25,22 @@ import SwiftUI
 @main
 struct PacerWidgetsBundle: WidgetBundle {
     var body: some Widget {
+        #if PACER_WIDGET_FIXTURES
+        // CI README screenshot builds only: the README's widgets, each the
+        // real widget view over fixture data at its real size, and nothing
+        // else — see `ReadmeShotWidget`. Never in a build that ships.
+        ReadmeShot0()
+        ReadmeShot1()
+        ReadmeShot2()
+        ReadmeShot3()
+        ReadmeShot4()
+        #else
         TodayCostWidget()
         PaceGaugesWidget()
         PaceChartWidget()
         DailyChartWidget()
         LiveSessionWidget()
         TopProjectsWidget()
+        #endif
     }
 }

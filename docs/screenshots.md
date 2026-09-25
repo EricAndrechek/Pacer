@@ -34,7 +34,7 @@ has colour, and a preview never takes focus.
 | `history.png` / `models.png` | History, Models tabs | real window |
 | `projects-collections*.png` | Projects tab, unscoped and scoped to a collection | real window |
 | `menubar.png` / `menubar-dark.png` | Menu bar with Pacer's menu open | the real status item and its real `NSMenu` (native Open / Settings / Quit items) in the real menu bar, captured in CI with the system in light, then dark, mode; local previews skip it |
-| `widgets.png` | Widget gallery | one composite of the real widget views (Today, pace gauges, live session, daily cost, top projects) |
+| `widgets.png` | Widget gallery | the real widget extension, drawn by Apple's WidgetKit Simulator in CI over fixture data — Today at small, pace gauges / live session / daily cost / top projects at medium — each cropped to its card with its shadow as transparency; local previews skip it. See below |
 | `share-card.png` / `share-card-dark.png` | Share-image export (`App/Share`) | the branded 7-day pace card from the in-app "Share…" action, via the same `ImageRenderer` path; light + dark |
 
 All are rendered at 2× (Retina) with transparent margins, rounded corners, and a
@@ -147,3 +147,36 @@ that commit with the rest of the change. For a UI change that went in without
 them, run the workflow by hand. It's also
 a step in the [release checklist](releasing.md) — the published README and any
 store assets should match the version being shipped.
+
+## Widgets (`bin/widgetkit-sim-shots.sh`)
+
+The widgets are photographed in WidgetKit Simulator (it ships with macOS, in
+`/System/Library/CoreServices`), which renders the extension exactly as the
+desktop does. What makes it scriptable:
+
+- **Which widget, at which size**: the simulator reads the environment Xcode
+  sets when you run a widget extension's scheme — `_XCWidgetKind`,
+  `_XCWidgetFamily` (`small` / `medium` / `large`), `_XCWidgetDefaultView` — and
+  `open --env` sets it. Launched without them it shows the first widget, small.
+- **Fixture data, never in a shipping build**: the workflow compiles with
+  `PACER_WIDGET_FIXTURES` (an xcconfig over the whole build), and then the
+  extension contains only `ReadmeShotWidget` stand-ins — one per README shot,
+  each the real widget view over `WidgetFixtures`, in the one family it is
+  shown at.
+- **Registration**: before each launch the copy in `/Applications` gets a build
+  number above anything registered before, is signed ad-hoc (an unsigned
+  extension is not loaded), and is registered with `pluginkit -a`. chronod only
+  re-reads an extension's widgets for a new version. Not `lsregister -f`: it
+  unregistered the extension a second later.
+
+When the simulator shows *Failed to load widget … WidgetDocument.Error error N*,
+the cases in order are `getPlaceholder`, `getTimeline`, `getDescriptors`,
+`noDescriptors` (3 — the extension listed no widgets, e.g. it crashed doing it:
+check `~/Library/Logs/DiagnosticReports/PacerWidgets*`), `notSupported`,
+`noExtension` (5 — not registered, or an unsigned copy registered instead).
+`PACER_WIDGETSIM_DEBUG=1` also writes each simulator window under
+`docs/screenshots/debug-widgets/` — for a diagnosis run only; don't commit them.
+
+Notification Center, which also renders any size, is not an option on a hosted
+runner: the image ships it disabled, and neither re-enabling nor bootstrapping
+it (as the user or root) starts it there.

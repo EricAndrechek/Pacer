@@ -63,4 +63,14 @@ PACER_SCREENSHOT_LOCAL_APPROVED=$LOCAL \
     "$APP"
 rc=$?
 (( rc == 0 )) || { echo "ERROR: screenshot run failed (exit $rc) — see the lines above"; exit $rc; }
+
+# widgets.png: the real widget extension, rendered by WidgetKit Simulator over
+# fixture data (the build must have PACER_WIDGET_FIXTURES — the workflow sets
+# it). The simulator opens a visible window, so a local preview skips it.
+if (( LOCAL )); then
+    echo "[widgets] skipping widgets.png — WidgetKit Simulator opens a visible window; captured in CI only"
+else
+    "$ROOT/bin/widgetkit-sim-shots.sh" "${APP:h:h:h}" "$REQ" "$OUT" \
+        || { echo "ERROR: widget screenshots failed — see the lines above"; exit 1; }
+fi
 echo "Wrote PNGs to $OUT"
