@@ -1,3 +1,9 @@
+# Worktrees. `wt` puts them in .worktrees/<branch> (AGENTS.md, "Worktree
+# lifecycle"); Claude Code puts its own in .claude/worktrees/. Each carries a
+# full checkout plus gigabytes of build output.
+.worktrees/
+.claude/worktrees/
+
 # Xcode
 build/
 Build/
