@@ -1189,8 +1189,8 @@ enum ScreenshotMode {
         /// closed. (Narrowing was tried: the sidebar's minimum is its widest
         /// label, so a "narrow" one looked the same as a normal one.)
         sidebarHidden: Bool = false,
-        /// Put one of the Projects tab's Collections sheets on the window first
-        /// and capture that sheet — the top-most one — rather than the window.
+        /// Put one of the Projects tab's Collections sheets on the window first;
+        /// the capture is the window with it attached.
         sheet: CollectionsSheet? = nil,
         /// Crop the window to the view `LayoutShiftProbe` names this (plus a
         /// margin of the window around it) — one card, still the real window.
@@ -1246,7 +1246,6 @@ enum ScreenshotMode {
         await settle(seconds: 3.6)
 
         log("\(name): title=\"\(window.title)\" subtitle=\"\(window.subtitle)\" toolbar=\(window.toolbar.map { "\($0.items.count) item(s), visible \($0.isVisible)" } ?? "none") style=\(window.toolbarStyle.rawValue) key=\(window.isKeyWindow) policy=\(NSApp.activationPolicy().rawValue)")
-        var target = window
         var sheets: [NSWindow] = []
         if let sheet {
             guard let container = sceneContainer else {
@@ -1254,18 +1253,20 @@ enum ScreenshotMode {
             }
             sheets = presentCollectionsSheets(sheet, on: window, container: container)
             await settle(seconds: 1.5)   // the sheet's slide-in, and its content
+            // The capture is still the window, not the sheet: the window server
+            // captures a window with its attached sheets, and asked for the
+            // sheet it returned that same composite squeezed to the sheet's size.
             guard let top = sheets.last, top.isSheet, top.sheetParent != nil else {
                 note("capture \(name): the sheet did not attach")
                 closeSheets(sheets); window.orderOut(nil); return
             }
-            target = top
         }
         let png = outputDirectory.appendingPathComponent("\(name).png")
         let failed = dir.appendingPathComponent("\(name).failed")
         try? FileManager.default.removeItem(at: png)
         try? FileManager.default.removeItem(at: failed)
-        var request: [String: Any] = ["windowID": target.windowNumber,
-                                      "scale": target.backingScaleFactor,
+        var request: [String: Any] = ["windowID": window.windowNumber,
+                                      "scale": window.backingScaleFactor,
                                       "png": png.path]
         if let crop {
             guard let frame = viewFrames[crop] else {
