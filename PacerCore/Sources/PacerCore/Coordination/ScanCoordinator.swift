@@ -425,6 +425,41 @@ public final class ScanCoordinator {
     /// on long, multi-model, multi-account sessions — see `SessionRollupCache`.
     let sessionRollupCache = SessionRollupCache()
 
+    /// Test seam: runs once the cycle has marked its buckets and inserted its
+    /// samples, before any rollup is rebuilt — the window in which a merge
+    /// used to wipe the marks, and in which a failure used to lose them.
+    /// Tests hold the cycle open here, or throw. `nil` in the app.
+    var beforeRecomputeHook: (@ScanActor () async throws -> Void)?
+
+    /// Whether a scan cycle or an alias migration currently owns the
+    /// persister's dirty sets, and who is queued behind it.
+    private var markPassInFlight = false
+    private var markPassWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Run `body` with the persister's dirty sets to itself.
+    ///
+    /// Both passes that use those sets — the scan cycle and the alias
+    /// migration a project merge triggers — are on this actor, and both
+    /// suspend part-way (the scan, the bulk rollup workers). Actor isolation
+    /// doesn't stop the other one running in that gap, and it did: a merge
+    /// landing while a cold-start cycle was suspended reset the cycle's
+    /// marks, and the cycle went on to record its cost and path migrations
+    /// as done. Those rollups stayed wrong permanently. So each pass waits
+    /// for the one in flight rather than interleaving with it.
+    private func withMarksToItself<T>(
+        _ body: @ScanActor () async throws -> T
+    ) async rethrows -> T {
+        while markPassInFlight {
+            await withCheckedContinuation { markPassWaiters.append($0) }
+        }
+        markPassInFlight = true
+        defer {
+            markPassInFlight = false
+            if !markPassWaiters.isEmpty { markPassWaiters.removeFirst().resume() }
+        }
+        return try await body()
+    }
+
     /// Last time we ran the auto-aliaser pass. Under heavy Claude
     /// Code activity the per-cycle SwiftData fetches inside
     /// `ProjectGitRootAutoAliaser.run` started landing in 1500-2000ms
@@ -519,6 +554,12 @@ public final class ScanCoordinator {
     /// scan-cycle block we used to pay.
     @discardableResult
     public func runAliasMigrationOnly() async throws -> AliasMigrationReport {
+        // Includes the fingerprint check: a cycle in flight may itself migrate
+        // this alias, and then there is nothing left to do here.
+        try await withMarksToItself { try await runAliasMigrationUnserialized() }
+    }
+
+    private func runAliasMigrationUnserialized() async throws -> AliasMigrationReport {
         let started = Date()
         let aliases = try loadAliases()
         let aliasesFingerprint = Self.fingerprint(aliases: aliases)
@@ -551,7 +592,7 @@ public final class ScanCoordinator {
     ) async throws -> AliasMigrationReport {
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
-        activePersister.clearDirtyPairs()
+        logCarriedOverMarks(activePersister.carryOverUnfinishedMarks())
         let changed = try activePersister.canonicalizeAffectedSamples(aliases: aliases)
         // `canonicalizeAffectedSamples` already folds every re-mapped
         // sample's session id into `dirtySessionIds`, so the SessionInfo
@@ -574,6 +615,7 @@ public final class ScanCoordinator {
         if context.hasChanges {
             try context.save()
         }
+        activePersister.clearDirtyProjectAndSessionMarks()
         // Project-attribution shifted (samples re-bucketed under new
         // project paths) — kick widgets whose display keys off project
         // (TopProjects, LiveSession's project name). No new samples,
@@ -813,6 +855,18 @@ public final class ScanCoordinator {
     // MARK: - Internal
 
     private func runScanCycle() async throws -> ScanReport {
+        try await withMarksToItself { try await runScanCycleUnserialized() }
+    }
+
+    /// A pass that finds marks nobody committed means one died before its
+    /// save. Worth a line: it's otherwise invisible, and it's the only sign
+    /// a rebuild is happening for that reason.
+    private func logCarriedOverMarks(_ carried: Int) {
+        guard carried > 0 else { return }
+        log("integrity: \(carried) rollup mark(s) left by a pass that didn't finish - rebuilding from samples")
+    }
+
+    private func runScanCycleUnserialized() async throws -> ScanReport {
         scanInFlight = true
         defer { scanInFlight = false }
         let started = Date()
@@ -1050,10 +1104,14 @@ public final class ScanCoordinator {
                           value: Self.currentAccountBackfillVersion)
         }
 
-        // Each cycle starts with a clean dirty-pairs slate so the
-        // recomputers only touch buckets the cycle actually changed.
-        activePersister.clearDirtyPairs()
-        // After the clear, so the rebuild the re-stamp needs is not wiped.
+        // The recomputers should only touch buckets this cycle changed, so a
+        // cycle normally opens with the dirty sets empty — the last one
+        // cleared them after its save. Anything still marked was left by a
+        // pass that died first. It is rebuilt, not dropped: those samples are
+        // already in the context and the dedup set, so no later scan would
+        // re-read them and mark their buckets again.
+        logCarriedOverMarks(activePersister.carryOverUnfinishedMarks())
+        // After the carry-over, so its count is only what a dead pass left.
         if !trailCorrections.isEmpty {
             let moved = try restampAccounts(
                 trailCorrections, trail: recorder.trail(), persister: activePersister)
@@ -1394,6 +1452,8 @@ public final class ScanCoordinator {
             Task { @MainActor in AccountTotalsStatus.shared.publish(totals) }
         }
 
+        if let beforeRecomputeHook { try await beforeRecomputeHook() }
+
         let recomputer = AggregateRecomputer(
             container: container, context: context, mode: configuration.costMode)
         // Pass the persister's cycle-local pending-sample dicts so the
@@ -1590,6 +1650,9 @@ public final class ScanCoordinator {
         if context.hasChanges {
             try context.save()
         }
+        // Only now: the rebuilt rollups are committed, so the marks are spent.
+        // A throw anywhere above leaves them for the next cycle.
+        activePersister.clearDirtyPairs()
         // saveMs covers the (up to five) `writeMeta` upserts plus the
         // terminal `context.save()`. The save is what fans @Query
         // refreshes out to every visible view — when this number is

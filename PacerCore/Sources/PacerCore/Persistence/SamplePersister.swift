@@ -614,8 +614,8 @@ public final class SamplePersister {
         pendingInsertCount = 0
     }
 
-    /// Reset the dirty-pair tracking after a recompute pass. Doesn't
-    /// touch `seenDedupKeys` — those persist across the persister's
+    /// Reset the dirty-pair tracking once a recompute pass has COMMITTED.
+    /// Doesn't touch `seenDedupKeys` — those persist across the persister's
     /// lifetime so subsequent inserts in the same session stay
     /// idempotent.
     ///
@@ -623,7 +623,13 @@ public final class SamplePersister {
     /// polluted-pair shadow sets. The recomputers read these during
     /// the cycle's tail to decide between the incremental fast path
     /// and a full recompute; once the cycle's terminal save lands,
-    /// they've served their purpose and a new cycle starts fresh.
+    /// they've served their purpose.
+    ///
+    /// Call it only after that save. Clearing at the START of a pass is what
+    /// used to lose marks: a cycle that died before its save left buckets
+    /// marked and unbuilt, and the next cycle's opening clear threw the
+    /// marks away with nothing left to rebuild those buckets, ever. See
+    /// `carryOverUnfinishedMarks`, which is what a pass opens with instead.
     public func clearDirtyPairs() {
         dirtyPairs.removeAll()
         dirtyProjectDates.removeAll()
@@ -637,6 +643,47 @@ public final class SamplePersister {
         pollutedHourBuckets.removeAll()
         pollutedProjectPairs.removeAll()
         pollutedSessionIds.removeAll()
+    }
+
+    /// The alias migration's half of `clearDirtyPairs`: it rebuilds only the
+    /// project and session rollups (re-canonicalizing never moves a sample's
+    /// date, hour or model), so those are the only marks it may clear. Any
+    /// daily or hourly marks a failed cycle left behind stay for the next
+    /// cycle to rebuild.
+    public func clearDirtyProjectAndSessionMarks() {
+        dirtyProjectDates.removeAll()
+        dirtySessionIds.removeAll()
+        pendingProjectSamples.removeAll()
+        pendingSessionSamples.removeAll()
+        pollutedProjectPairs.removeAll()
+        pollutedSessionIds.removeAll()
+    }
+
+    /// Open a pass over the dirty sets (a scan cycle or an alias migration).
+    ///
+    /// Marks are cleared only once the pass that rebuilt them has committed,
+    /// so anything still marked here was left by a pass that died before its
+    /// save landed. Those buckets are kept, and polluted: the dead pass may
+    /// already have added its pending samples to a rollup row in the unsaved
+    /// context, so the incremental path would count them twice. Only a
+    /// rebuild from the samples is safe. The pending lists go for the same
+    /// reason.
+    ///
+    /// Returns how many marks were carried over, for the scan log.
+    @discardableResult
+    public func carryOverUnfinishedMarks() -> Int {
+        let carried = dirtyPairs.count + dirtyHourBuckets.count
+            + dirtyProjectDates.count + dirtySessionIds.count
+        guard carried > 0 else { return 0 }
+        pollutedDailyPairs.formUnion(dirtyPairs)
+        pollutedHourBuckets.formUnion(dirtyHourBuckets)
+        pollutedProjectPairs.formUnion(dirtyProjectDates)
+        pollutedSessionIds.formUnion(dirtySessionIds)
+        pendingPairSamples.removeAll()
+        pendingHourSamples.removeAll()
+        pendingProjectSamples.removeAll()
+        pendingSessionSamples.removeAll()
+        return carried
     }
 
     /// Drain and return the (date, model) pairs that have TokenSamples
