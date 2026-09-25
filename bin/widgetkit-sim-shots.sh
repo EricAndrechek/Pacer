@@ -66,21 +66,23 @@ request widget-appearance '{"kind":"appearance","dark":false}' || exit 1
 # Error error 5"), so that copy is unregistered.
 pluginkit -r "$SRC_APP/Contents/PlugIns/PacerWidgets.appex" 2>/dev/null
 
-# Signed once, after the copy: an extension without a signature (and its App
-# Group entitlement) is not loaded. Ad-hoc, nested first, no --deep. And
-# registered with LaunchServices, or chronod drops the extension ("LS doesn't
-# have a containing bundle").
-# A build number above anything registered before: chronod has already seen
-# (and purged) the build directory's copy at the same version, and only
-# re-reads an extension's widgets for a new one — without it the simulator
-# finds the extension but no widgets (WidgetDocument.Error 3, noDescriptors).
-for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 9001" "$plist"
-done
-codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
-codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
-pluginkit -a "$APPEX"
+# Before each launch: a build number above anything registered before, signed,
+# registered. chronod only re-reads an extension's widgets for a new version
+# (the build directory's copy was seen, then purged, at the same one), and an
+# extension without a signature (and its App Group entitlement) is not
+# loaded. Ad-hoc, nested first, no --deep. Not `lsregister -f`: the extension
+# was registered, then removed within a second, and the simulator found none.
+build=9000
+prepare() {
+    build=$((build + 1))
+    for plist in "$APPEX/Contents/Info.plist" "$APP/Contents/Info.plist"; do
+        /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build" "$plist"
+    done
+    codesign --force -s - --entitlements "$ROOT/Widgets/PacerWidgets.entitlements" "$APPEX" 2>&1 | grep -v "replacing existing signature"
+    codesign --force -s - --entitlements "$ROOT/App/Pacer.entitlements" "$APP" 2>&1 | grep -v "replacing existing signature"
+    pluginkit -a "$APPEX"
+    sleep 1
+}
 
 shots=(
     today         TodayCostWidget    small
@@ -98,6 +100,7 @@ if [[ -n $DEBUG_DIR ]]; then
         envs=()
         [[ $variant != none ]] && envs+=(--env _XCWidgetKind=ReadmeShot.TodayCostWidget)
         [[ $variant == both ]] && envs+=(--env _XCWidgetFamily=small)
+        prepare
         open -n $envs -a "$SIM" "$APPEX"
         request "diag-$variant" "{\"kind\":\"widgetsim\",\"png\":\"$WORK/diag-$variant.png\",\"debug\":\"$DEBUG_DIR/diag-$variant-window.png\"}" \
             && log "diag $variant: loaded" || log "diag $variant: failed"
@@ -122,6 +125,7 @@ for name kind family in $shots; do
     defaults delete com.apple.widgetkit.simulator 2>/dev/null
     defaults write com.apple.widgetkit.simulator ApplePersistenceIgnoreState -bool YES
     defaults write com.apple.widgetkit.simulator NSQuitAlwaysKeepsWindows -bool NO
+    prepare
     open -n --env "_XCWidgetKind=ReadmeShot.$kind" --env "_XCWidgetFamily=$family" \
          --env _XCWidgetDefaultView=timeline -a "$SIM" "$APPEX" \
         || { log "⚠️ $name: cannot open $SIM"; failed=1; continue; }
