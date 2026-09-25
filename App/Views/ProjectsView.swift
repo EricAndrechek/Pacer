@@ -140,6 +140,7 @@ struct ProjectsView: View {
         // Only ever posted by the README screenshot run: the real sheets,
         // opened the way their buttons open them.
         .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotCollections)) { note in
+            Log.write("Screenshots", "collections sheet request: \(note.object as? String ?? "close")")
             guard let request = note.object as? String else {
                 showingCollectionsManager = false
                 return

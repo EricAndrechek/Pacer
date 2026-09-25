@@ -1248,16 +1248,24 @@ enum ScreenshotMode {
             // The manager is a sheet on the window; its editor, a sheet on the
             // manager.
             let depth = sheet.hasPrefix("edit:") ? 2 : 1
+            // A sheet is `attachedSheet` of its parent; failing that (SwiftUI
+            // has presented some as plain child windows), the newest visible
+            // window whose `sheetParent` chain reaches this one.
             func topSheet() -> (window: NSWindow, depth: Int) {
                 var w = window, d = 0
-                while let next = w.attachedSheet { w = next; d += 1 }
+                while let next = w.attachedSheet
+                        ?? NSApp.windows.last(where: { $0.sheetParent === w && $0.isVisible }) {
+                    w = next; d += 1
+                }
                 return (w, d)
             }
             NotificationCenter.default.post(name: .pacerScreenshotCollections, object: sheet)
             let sheetDeadline = Date().addingTimeInterval(5)
             while Date() < sheetDeadline, topSheet().depth < depth { await settle(seconds: 0.1) }
             guard topSheet().depth >= depth else {
-                note("capture \(name): the \(sheet) sheet did not open")
+                note("capture \(name): the \(sheet) sheet did not open (depth \(topSheet().depth)); windows: "
+                     + NSApp.windows.map { "\(type(of: $0)) \"\($0.title)\" visible=\($0.isVisible) sheet=\($0.isSheet) parent=\($0.sheetParent.map { "\(type(of: $0))" } ?? "-") \($0.frame)" }
+                        .joined(separator: " | "))
                 await closeCollectionsSheets(on: window)
                 window.orderOut(nil)
                 return
