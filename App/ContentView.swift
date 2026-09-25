@@ -203,6 +203,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerScreenshotSidebar)) { note in
             columnVisibility = (note.object as? Bool) == true ? .detailOnly : .all
         }
+        // Paired with `Click` lines: which tab a click landed on, and when a
+        // tab switch (a full rebuild of the new tab) was in flight.
+        .onChange(of: selectionRaw) { _, new in Log.write("Navigation", "tab → \(new)") }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
             selectionRaw = Destination.settings.rawValue
         }

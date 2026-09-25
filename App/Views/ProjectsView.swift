@@ -95,6 +95,7 @@ struct ProjectsView: View {
                 overviewMetricBinding: overviewMetricBinding,
                 collectionFilterBinding: $collectionFilter,
                 onSelectProject: { path, displayName, since in
+                    Log.write("Navigation", "open project \(URL(fileURLWithPath: path).lastPathComponent)")
                     modalRoot = .project(path: path, displayName: displayName, since: since)
                 },
                 onNewCollection: {

@@ -244,6 +244,9 @@ private struct PacerModalNavigationModifier: ViewModifier {
             // otherwise a closed-and-reopened modal would still have
             // the previous drill-in pushed onto it.
             .onChange(of: root == nil) { _, isNil in
+                // With `Click` and `Navigation`, says whether a click that
+                // "did nothing" opened the modal and something closed it.
+                Log.write("Modal", isNil ? "closed" : "opened")
                 if isNil { stack.removeAll() }
             }
     }
