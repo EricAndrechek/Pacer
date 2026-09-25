@@ -318,11 +318,21 @@ Rules that follow from it:
   and any local fix-ups from polluting `main`, and let the installed
   `/Applications` app come from exactly one branch at a time.
 
-  A fresh worktree has no `Vendor/DuckDB.xcframework` (80 MB, gitignored).
-  `make verify` / `make app` / `make install` run `make vendor` first, which
-  APFS-clones it from another worktree (instant, no extra disk) or builds it.
-  Don't copy it in by hand after a failed build: Xcode caches the missing
-  framework in `Build/`, and `make vendor` also clears that stale state.
+  **Worktree lifecycle.** Create with `wt` and remove when done:
+  - **Create:** `wt switch --create <branch>` or `wt switch pr:N`. The project
+    hook (`.config/wt.toml`) copies the gitignored DuckDB framework in first,
+    only what `.worktreeinclude` names, reflinked (no extra disk). If a
+    worktree didn't come from `wt` (Claude Code's own, a plain `git worktree
+    add`), `make verify` / `make app` / `make install` run `make vendor`, which
+    clones or builds it. Don't copy it in by hand after a failed build: Xcode
+    caches the missing framework in `Build/`, and `make vendor` clears that.
+  - **Remove:** a worktree that has built is ~1–2 GB (`Build/` plus
+    `PacerCore/.build`). When its PR is squash-merged, `wt remove <branch>`.
+    `make prune` sweeps every worktree and branch already merged into `main`
+    (squash merges included, older than a day).
+  - **Subagents** get `wt` worktrees too, not the Agent tool's
+    `isolation: "worktree"`. Claude Code only cleans those up when the agent
+    changed nothing, which is how 14 stale ones built up.
 
 - **Verify before merging — build *and* run it.** `make test` +
   `make verify` is the floor; `make install` and watch `make logs` is the

@@ -70,7 +70,9 @@ Commit it all, then open the PR.
 - `bin/ship.sh wait-ci <branch>` — **background it**. On failure: pull the logs
   (a Haiku subagent can summarize), **fix recursively yourself**, re-push,
   re-wait. No gating.
-- Squash-merge to main; `git checkout main && git pull`.
+- Squash-merge to main (`gh pr merge --squash --delete-branch`); if the branch
+  has a worktree, `wt remove <branch>` (a built worktree is ~1–2 GB); then
+  `git checkout main && git pull`.
 - Converge any other session branches the same way; if a merge changes rendered
   output, regenerate screenshots/docs onto main.
 - `bin/ship.sh wait-ci main` (backgrounded) — main must be green before tagging.

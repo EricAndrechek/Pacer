@@ -34,7 +34,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
-.PHONY: help build vendor verify test app install uninstall reinstall \
+.PHONY: help build vendor prune verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
         verify-archive \
         assign-accounts reassign-account \
@@ -57,6 +57,9 @@ help:  ## Show this help.
 
 vendor:  ## Make sure Vendor/DuckDB.xcframework is here: cloned from another worktree, else built. Every build target runs it first.
 	@$(REPO_ROOT)/bin/dev-vendor.sh
+
+prune:  ## Remove worktrees + branches already merged into main (squash merges included), older than a day. A built worktree is ~1–2 GB.
+	@wt step prune --foreground
 
 verify: vendor  ## Verification build (no signing, no install) — fastest sanity check.
 	@xcodegen generate
