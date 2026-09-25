@@ -50,14 +50,16 @@ struct HistoryView: View {
         ) {
             LifetimeSummaryCard(range: range)
             HeatmapCard(scopeAccountId: scope.accountId) { dayKey in
+                Log.write("Navigation", "open day \(dayKey)")
                 modalRoot = .day(date: dayKey)
             }
             MonthlyChartCard(scopeAccountId: scope.accountId)
             TopDaysCard(range: range) { dayKey in
+                Log.write("Navigation", "open day \(dayKey)")
                 modalRoot = .day(date: dayKey)
             }
         }
-        .pacerModalNavigation(root: $modalRoot)
+        .pacerModalNavigation(modalRoot, root: $modalRoot)
     }
 }
 

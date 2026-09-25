@@ -172,12 +172,20 @@ extension View {
     /// Attach the unified modal navigation surface to a page. The
     /// page owns the binding to the root destination; the modifier
     /// owns the stack and the push/back environment values.
+    ///
+    /// `presented` is the page's own `@State` value, passed separately from
+    /// the binding on purpose: `.pacerModalNavigation(modalRoot, root: $modalRoot)`.
+    /// A click that set the state did not open the modal until something
+    /// unrelated redrew the page (seconds, or 45 s once the app stopped
+    /// redrawing on every scan) — nothing that re-renders on a change read
+    /// it. Reading it through the binding, in here or in the modifier, was
+    /// tried and did not help; the page reading its own `@State` in its body
+    /// did. So the page reads it and hands the value in.
     func pacerModalNavigation(
+        _ presented: PacerModalDestination?,
         root: Binding<PacerModalDestination?>
     ) -> some View {
-        // Read in the page's body, not only inside the modifier: see
-        // `dismissibleModal(item:content:)` for the modal that did not open.
-        modifier(PacerModalNavigationModifier(root: root, presented: root.wrappedValue))
+        modifier(PacerModalNavigationModifier(root: root, presented: presented))
     }
 }
 

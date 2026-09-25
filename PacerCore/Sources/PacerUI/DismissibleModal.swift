@@ -24,14 +24,11 @@ public extension View {
         item: Binding<Item?>,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
-        // Read the value *here*, in the caller's body, and hand it to the
-        // modifier as a plain input. A modal that opens from a click was
-        // otherwise missed entirely: when the only reader of the binding was
-        // this modifier's own body, setting it did not re-render anything, so
-        // the modal appeared only when something unrelated redrew the page —
-        // seconds later, or 45 s later once the app stopped redrawing on every
-        // scan. Reading it here makes the caller depend on it, and a changed
-        // `presentedID` makes the modifier re-run.
+        // The modifier presents from `presentedID`, a plain input, rather than
+        // from reading the binding in its own body: a value change then
+        // re-runs it whenever its caller re-renders. The caller must itself
+        // re-render on the change — `pacerModalNavigation` explains why that
+        // means the page reading its own `@State`.
         self.modifier(DismissibleModalModifier(
             item: item, presentedID: item.wrappedValue?.id, modalContent: content))
     }

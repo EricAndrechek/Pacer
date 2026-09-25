@@ -80,7 +80,7 @@ struct DashboardView: View {
             MonthOutlookCard(scopeAccountId: scope.accountId)
                 .layoutShiftProbe("month-outlook")
         }
-        .pacerModalNavigation(root: $modalRoot)
+        .pacerModalNavigation(modalRoot, root: $modalRoot)
     }
 
     /// Open today's day-detail modal. Pinned to the user's local
