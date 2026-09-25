@@ -34,7 +34,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 
 # Mark targets that don't produce a file as PHONY so make doesn't
 # get confused if a file with the same name appears.
-.PHONY: help build verify test app install uninstall reinstall \
+.PHONY: help build vendor verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
         verify-archive \
         assign-accounts reassign-account \
@@ -55,7 +55,10 @@ help:  ## Show this help.
 # Build / test
 # ------------------------------------------------------------------
 
-verify:  ## Verification build (no signing, no install) — fastest sanity check.
+vendor:  ## Make sure Vendor/DuckDB.xcframework is here: cloned from another worktree, else built. Every build target runs it first.
+	@$(REPO_ROOT)/bin/dev-vendor.sh
+
+verify: vendor  ## Verification build (no signing, no install) — fastest sanity check.
 	@xcodegen generate
 	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
@@ -106,7 +109,7 @@ pricing-snapshot:  ## Refresh the embedded pricing snapshot (LiteLLM main + mode
 screenshots: verify  ## README screenshots: real window, synthetic data. CI → docs/screenshots; locally APPROVED=1 → screenshots/preview (captures the screen invisibly — see bin/dev-screenshots.sh).
 	@bin/dev-screenshots.sh $(if $(APPROVED),--owner-approved,)
 
-app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
+app: vendor  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate
 	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
@@ -118,7 +121,7 @@ app:  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pac
 # Install / uninstall
 # ------------------------------------------------------------------
 
-install:  ## Build + sign + notarize + copy to /Applications. Cleans up legacy daemon registration. Quits and re-opens Pacer.app if it was running. Idempotent.
+install: vendor  ## Build + sign + notarize + copy to /Applications. Cleans up legacy daemon registration. Quits and re-opens Pacer.app if it was running. Idempotent.
 	@$(REPO_ROOT)/bin/dev-install.sh
 
 uninstall:  ## Quit GUI + remove /Applications/Pacer.app + clean up legacy daemon plist. Preserves SwiftData and logs.
