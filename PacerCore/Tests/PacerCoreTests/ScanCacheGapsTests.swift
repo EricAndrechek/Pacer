@@ -7,9 +7,10 @@ import Testing
 /// columns (#146).
 @Suite struct ScanCacheGapsTests {
 
-    /// The live rebuild re-derives active sessions, not every session: one
-    /// that went quiet hours ago is settled and must not be rebuilt every ten
-    /// minutes, while one inside the window is forced onto the full path.
+    /// The live rebuild re-checks ONE active session per pass — the cached one
+    /// rebuilt from samples longest ago. A quiet session (outside the window)
+    /// is never picked however stale, and forcing every active session each
+    /// pass cost a 3-4 s scan every ten minutes on a real store.
     @ScanActor
     @Test func liveRebuildFoldsInOnlyRecentlyActiveSessions() async throws {
         let container = try makeGapsContainer()
@@ -37,13 +38,39 @@ import Testing
         let coordinator = makeCoordinator(container: container, root: root)
         let persister = try SamplePersister(context: context)
 
+        let values = SessionRollupCache.Values(global: SessionRollupValues(), byAccount: [:])
+        let cache = coordinator.sessionRollupCache
+        cache.store(values, for: "quiet", rebuiltAt: now.addingTimeInterval(-9 * 3600))
+        cache.store(values, for: "active", rebuiltAt: now.addingTimeInterval(-3600))
+        cache.store(values, for: "edge", rebuiltAt: now.addingTimeInterval(-60))
+        // "just-before" is outside the window; uncached ids are never picked.
+
         // No DailyAggregate rows at all: sessions must not hide behind the
         // bucket rebuild's "nothing open today" early return.
         try coordinator.rebuildLiveBuckets(persister: persister, now: now)
 
-        #expect(persister.dirtySessionIds == ["active", "edge"])
-        #expect(persister.pollutedSessionIds == ["active", "edge"],
+        #expect(persister.dirtySessionIds == ["active"])
+        #expect(persister.pollutedSessionIds == ["active"],
                 "polluted is what forces the full path and re-seeds the cache")
+    }
+
+    /// Fast-path writes don't count as a rebuild: rotation order follows when
+    /// each entry was last built from samples, and forgetting clears it.
+    @ScanActor
+    @Test func rotationFollowsFullPathRebuildsOnly() {
+        let cache = SessionRollupCache()
+        let values = SessionRollupCache.Values(global: SessionRollupValues(), byAccount: [:])
+        let t0 = Date(timeIntervalSince1970: 1_756_800_000)
+        cache.store(values, for: "a", rebuiltAt: t0)
+        cache.store(values, for: "b", rebuiltAt: t0.addingTimeInterval(60))
+        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
+        cache.store(values, for: "a")                         // fast path
+        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
+        cache.store(values, for: "a", rebuiltAt: t0.addingTimeInterval(120))
+        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "b")
+        cache.forget(["b"])
+        #expect(cache.oldestRebuilt(among: ["a", "b"]) == "a")
+        #expect(cache.oldestRebuilt(among: ["zzz"]) == nil)
     }
 
     /// A burst of sessions can't turn the ten-minute rebuild into a full

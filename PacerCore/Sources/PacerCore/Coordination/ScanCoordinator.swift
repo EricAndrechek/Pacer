@@ -423,7 +423,7 @@ public final class ScanCoordinator {
 
     /// Outlives each cycle's `SessionInfoRecomputer` so its fast path works
     /// on long, multi-model, multi-account sessions — see `SessionRollupCache`.
-    private let sessionRollupCache = SessionRollupCache()
+    let sessionRollupCache = SessionRollupCache()
 
     /// Last time we ran the auto-aliaser pass. Under heavy Claude
     /// Code activity the per-cycle SwiftData fetches inside
@@ -1837,8 +1837,16 @@ public final class ScanCoordinator {
     func rebuildLiveBuckets(persister: SamplePersister, now: Date = Date()) throws {
         let calendar = Calendar.current
 
-        let sessions = try liveSessionIds(now: now)
-        if !sessions.isEmpty { persister.addDirtySessionIds(sessions) }
+        // One active session per pass, the one whose cached totals were built
+        // from its samples longest ago — a rotation, not a sweep. Forcing
+        // every active session onto the full path each pass cost a 3.3-4.3 s
+        // scan every ten minutes on a real store (7 long sessions), holding
+        // the store the UI reads from: the contention this cache exists to
+        // remove. Price changes already reset the whole cache; this is
+        // insurance against drift nobody has named, so bounded is enough.
+        if let stalest = sessionRollupCache.oldestRebuilt(among: try liveSessionIds(now: now)) {
+            persister.addDirtySessionIds([stalest])
+        }
         var pairs: Set<DateModelPair> = []
         var triples: Set<DateHourModelTriple> = []
         var projects: Set<ProjectDatePair> = []

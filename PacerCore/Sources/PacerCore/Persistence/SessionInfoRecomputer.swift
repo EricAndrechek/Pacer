@@ -192,7 +192,8 @@ public final class SessionInfoRecomputer {
             stats: &stats
         )
         if let global {
-            cache.store(SessionRollupCache.Values(global: global, byAccount: byAccount), for: sid)
+            cache.store(SessionRollupCache.Values(global: global, byAccount: byAccount),
+                        for: sid, rebuiltAt: Date())
         } else {
             cache.forget([sid])
         }
@@ -292,15 +293,38 @@ public final class SessionRollupCache {
     }
 
     private var entries: [String: Values] = [:]
+    /// When each entry was last built from the session's samples (the full
+    /// path), as opposed to advanced by the fast path. Drives the rotation in
+    /// `oldestRebuilt(among:)`.
+    private var rebuiltAt: [String: Date] = [:]
 
     public nonisolated init() {}
 
     func values(for sessionId: String) -> Values? { entries[sessionId] }
-    func store(_ values: Values, for sessionId: String) { entries[sessionId] = values }
-    func forget(_ sessionIds: Set<String>) {
-        for sid in sessionIds { entries[sid] = nil }
+    /// `rebuiltAt` is non-nil when `values` came from the samples themselves.
+    func store(_ values: Values, for sessionId: String, rebuiltAt: Date? = nil) {
+        entries[sessionId] = values
+        if let rebuiltAt { self.rebuiltAt[sessionId] = rebuiltAt }
     }
-    func forgetAll() { entries.removeAll() }
+    func forget(_ sessionIds: Set<String>) {
+        for sid in sessionIds {
+            entries[sid] = nil
+            rebuiltAt[sid] = nil
+        }
+    }
+    func forgetAll() {
+        entries.removeAll()
+        rebuiltAt.removeAll()
+    }
+
+    /// Of `sessionIds`, the cached one rebuilt from samples longest ago — the
+    /// one the live pass re-checks next. Uncached ids are skipped: their next
+    /// touch takes the full path anyway.
+    func oldestRebuilt(among sessionIds: Set<String>) -> String? {
+        sessionIds
+            .compactMap { sid in rebuiltAt[sid].map { (sid, $0) } }
+            .min { $0.1 < $1.1 }?.0
+    }
 
     /// The `SampleCostCache.generation` the entries were priced under.
     private var pricingGeneration: UInt64?
@@ -317,6 +341,7 @@ public final class SessionRollupCache {
         pricingGeneration = generation
         let hadEntries = !entries.isEmpty
         entries.removeAll()
+        rebuiltAt.removeAll()
         return hadEntries
     }
 
