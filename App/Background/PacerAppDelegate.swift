@@ -448,6 +448,9 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         MainThreadStallWatchdog.shared.start()
         ClickLatencyProbe.shared.start()
         backgroundService.start()
+        // Logs the login-item status every launch and restores a registration
+        // macOS dropped against the user's recorded choice.
+        LoginItemController.reconcileAtLaunch()
         installWindowObservers()
         installMenuBar()
         installGlobalHotkey()
