@@ -27,7 +27,6 @@ struct CollectionsManager: View {
     var editCollectionID: String? = nil
 
     @State private var editor: CollectionEditorDraft?
-    @State private var didAutoStart = false
 
     private var knownProjectPaths: [String] {
         var set: Set<String> = []
@@ -45,12 +44,46 @@ struct CollectionsManager: View {
         )
     }
 
+    /// Opened for one collection ("Edit") or a new one: the draft the editor
+    /// opens on, or nil for the plain list ("Manage…").
+    private var directDraft: CollectionEditorDraft? {
+        if startNew { return CollectionEditorDraft() }
+        if let id = editCollectionID, let c = collections.first(where: { $0.id == id }) {
+            return CollectionEditorDraft(from: c)
+        }
+        return nil
+    }
+
     var body: some View {
         // Presentation state, read here so setting it redraws this view and
         // what it presents opens at once. Passed only as a binding, nothing
         // read it: the collections sheet opened only after an unrelated
         // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
         let _ = editor?.id
+        // "Edit collection" and "New collection" are the editor alone, as this
+        // sheet. They used to open this list and then stack the editor on top
+        // as a second sheet from `onAppear`, two modals for one action (#140).
+        if let draft = directDraft {
+            editorSheet(for: draft) { if save($0) { dismiss() } }
+        } else {
+            list
+        }
+    }
+
+    private func editorSheet(
+        for draft: CollectionEditorDraft, onSave: @escaping (CollectionEditorDraft) -> Void
+    ) -> some View {
+        CollectionEditorSheet(
+            draft: draft,
+            knownPaths: knownProjectPaths,
+            otherCollections: collections
+                .filter { $0.id != draft.editingID }
+                .map { ($0.id, $0.name) },
+            onSave: onSave
+        )
+    }
+
+    private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -59,25 +92,8 @@ struct CollectionsManager: View {
             }
         }
         .frame(width: 640, height: 600)
-        .onAppear {
-            guard !didAutoStart else { return }
-            didAutoStart = true
-            if startNew {
-                editor = CollectionEditorDraft()
-            } else if let id = editCollectionID,
-                      let c = collections.first(where: { $0.id == id }) {
-                editor = CollectionEditorDraft(from: c)
-            }
-        }
         .sheet(item: $editor) { draft in
-            CollectionEditorSheet(
-                draft: draft,
-                knownPaths: knownProjectPaths,
-                otherCollections: collections
-                    .filter { $0.id != draft.editingID }
-                    .map { ($0.id, $0.name) },
-                onSave: save
-            )
+            editorSheet(for: draft) { save($0) }
         }
     }
 
@@ -143,9 +159,11 @@ struct CollectionsManager: View {
 
     // MARK: Mutation
 
-    private func save(_ draft: CollectionEditorDraft) {
+    /// Whether it saved: an empty name is refused, and the editor stays open.
+    @discardableResult
+    private func save(_ draft: CollectionEditorDraft) -> Bool {
         let trimmedName = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return }
+        guard !trimmedName.isEmpty else { return false }
         let rules = draft.rules
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -171,6 +189,7 @@ struct CollectionsManager: View {
         }
         try? modelContext.save()
         editor = nil
+        return true
     }
 
     private func delete(_ collection: ProjectCollection) {
