@@ -54,6 +54,11 @@ struct SessionDetailView: View {
     private var session: SessionRow? { sessions.first }
 
     var body: some View {
+        // Found after the modal is on screen and read only inside
+        // `PacerModalContent`'s stored `trailing` closure, so read here too:
+        // the transcript buttons could otherwise wait for an unrelated redraw
+        // (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = transcriptURL
         PacerModalContent(
             title: chromeTitle,
             subtitle: chromeSubtitle,

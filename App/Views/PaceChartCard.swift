@@ -213,6 +213,15 @@ struct PaceChartCard: View {
     /// no-op — and keeps doing so for whatever else joins the key later.
     @State private var loadedScopeKey: String?
 
+    /// Minutes since the card appeared, read in `body`.
+    ///
+    /// Everything this card draws is judged against `Date()`: where "now"
+    /// sits in each cycle, the pace target, the on-pace verdict, "resets in",
+    /// "read 3m ago", and the roll into "awaiting a new cycle". The body
+    /// re-ran only on data, which on an idle machine is one poll every ten
+    /// minutes, and never when polling has stopped (#140).
+    @State private var minute = 0
+
     /// The `RateLimitWriteSignal.historyGeneration` `series` was read at. A
     /// fold or adoption adds rows older than the loaded tail, which a top-up
     /// cannot fetch, so a changed value means read the whole window again.
@@ -246,7 +255,8 @@ struct PaceChartCard: View {
         let container = modelContext.container
         // Before the first `await`, so a `scopeKey` change caused by this call
         // itself cannot race ahead of it. See `loadedScopeKey`.
-        loadedScopeKey = scopeKey
+        let key = scopeKey
+        loadedScopeKey = key
         let history = RateLimitWriteSignal.shared.historyGeneration
         let historyRewritten = history != loadedHistory
         loadedHistory = history
@@ -325,6 +335,11 @@ struct PaceChartCard: View {
             next.append(entry)
         }
 
+        // A reload for a scope the user has since left finishes whenever its
+        // fetch does. A cold read of the old account landing after the new
+        // one's put its charts under the new label, with nothing to correct
+        // it until the next write. The per-account cache above is still right.
+        guard loadedScopeKey == key else { return }
         isLoading = false
         series = next
         PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
@@ -836,6 +851,10 @@ struct PaceChartCard: View {
     // MARK: - Body
 
     var body: some View {
+        // Filled in after the card is on screen and read inside `PacerCard`'s
+        // stored closure, so read here too (#140; AGENTS.md, "SwiftUI state
+        // and data flow"). `minute` is the clock.
+        let _ = (projections, outlooks, endEstimates, isLoading, minute)
         let t0 = Date()
         let now = Date()
         let cols = columns(now: now)
@@ -957,6 +976,13 @@ struct PaceChartCard: View {
         .task(id: windowKey) { await runProjectionRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             scheduleProjectionRefresh()
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                if Task.isCancelled { break }
+                minute += 1
+            }
         }
     }
 

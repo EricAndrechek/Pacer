@@ -365,6 +365,11 @@ private struct ProjectsContent: View {
         }
         self.rangeSince = since
         self.searchText = searchText
+        // Starts from the search the page holds. It outlives this view
+        // (`ProjectsPageState`), and `.onChange(of: searchText)` fires only on
+        // a change, so a rebuild (tab switch, range change, midnight) left the
+        // field showing "pacer" over an unfiltered list.
+        _debouncedSearch = State(initialValue: searchText)
         self.sort = sort
         self.descending = descending
         self.overviewMetric = overviewMetric
@@ -722,6 +727,24 @@ private struct ProjectsContent: View {
         func body(content: Content) -> some View { owner.refreshTriggerModifiers(content) }
     }
 
+    /// Changes whenever a collection changes in any way the rows, chips or
+    /// scope header read.
+    private var collectionsFingerprint: Int {
+        var h = Hasher()
+        for c in collections {
+            h.combine(c.id)
+            h.combine(c.name)
+            h.combine(c.colorSeed)
+            h.combine(c.colorHex)
+            h.combine(c.sortOrder)
+            h.combine(c.includePathsJSON)
+            h.combine(c.excludePathsJSON)
+            h.combine(c.rulesJSON)
+            h.combine(c.childCollectionIDsJSON)
+        }
+        return h.finalize()
+    }
+
     @ViewBuilder
     fileprivate func refreshTriggerModifiers(_ base: some View) -> some View {
         base
@@ -732,11 +755,16 @@ private struct ProjectsContent: View {
             // cycle* happens to fire — on an idle machine seven to ten seconds,
             // which looks like a very slow render rather than a stale one.
             .onChange(of: scope.accountId) { _, _ in refreshAllRows() }
-            .onChange(of: rangeSince) { _, _ in refreshAllRows() }
+            // No `rangeSince` trigger: `.id(range)` rebuilds this view when the
+            // range changes, and the cutoff is recomputed from `Date()` on
+            // every init, so as a trigger it re-ran the whole refresh on any
+            // redraw of the page — each search keystroke, each project click.
             .onChange(of: sort) { _, _ in refreshAllRows() }
             .onChange(of: descending) { _, _ in refreshAllRows() }
             .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
-            .onChange(of: collections.count) { _, _ in refreshAllRows() }
+            // Every field the rollups read, not the count: editing a
+            // collection renames, recolours and re-members it in place.
+            .onChange(of: collectionsFingerprint) { _, _ in refreshAllRows() }
             .onChange(of: projectMetas.count) { _, _ in refreshAllRows() }
             // Probe count drives the badge state — picks up the very first
             // probe write, plus churn from a forced re-walk.
@@ -1399,10 +1427,14 @@ private struct ProjectsContent: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .frame(width: 70, alignment: .trailing)
-            Text(pacerRelative(row.lastActive)).help(pacerRelativeExact(row.lastActive))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .trailing)
+            // Judged against the clock, so it needs one: on an idle machine
+            // nothing else redraws the list, and "2 min ago" stayed put.
+            TimelineView(.everyMinute) { _ in
+                Text(pacerRelative(row.lastActive)).help(pacerRelativeExact(row.lastActive))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 90, alignment: .trailing)
             Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .monospacedDigit()

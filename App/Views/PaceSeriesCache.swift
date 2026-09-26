@@ -4,9 +4,9 @@ import PacerCore
 
 /// The pace chart's loaded 8-day series, kept per account across rebuilds.
 ///
-/// The chart card is rebuilt on every scope change (`.id` on the account), so
-/// its `@State` starts empty each time — which is what makes the switch
-/// deterministic, and would otherwise make it slow: on this machine the work
+/// The chart card's `@State` starts empty whenever the card is rebuilt (a tab
+/// switch, midnight) and is cleared when the user picks another scope, which
+/// would otherwise make coming back slow: on this machine the work
 /// account's 8-day window is **31,370 rows and 1,451 ms**, against 1,010 rows
 /// and 59 ms for the personal one. Paying that again every time you flip back
 /// to an account you were just looking at is the difference between a control
@@ -17,8 +17,12 @@ import PacerCore
 /// this was built for — and dropped wholesale when the app quits, which is the
 /// right lifetime for an 8-day window that the incremental path keeps current
 /// anyway.
+///
+/// Not `@Observable`: nothing displays it, it is a store the card reads and
+/// writes. Observable, the card's `init` reading it inside the Dashboard's
+/// body made the whole page redraw on every poll's `store`. That redraw showed
+/// nothing new, and it masked cards that were missing updates of their own.
 @MainActor
-@Observable
 final class PaceSeriesCache {
     static let shared = PaceSeriesCache()
 

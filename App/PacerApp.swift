@@ -93,6 +93,11 @@ struct PacerApp: App {
             // everything in one place.
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
+                    // Queued as well as posted: with the window closed, the
+                    // post can land before the new window's `ContentView`
+                    // subscribes, and it opened on the last tab instead.
+                    // Whichever path handles it clears the queue.
+                    PacerAppDelegate.pendingDestination = .settings
                     openWindow(id: "main")
                     // `NSApp.activate(ignoringOtherApps:)` was neutered
                     // in macOS 14; the no-arg form is what works for

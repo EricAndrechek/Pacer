@@ -22,6 +22,9 @@ struct DashboardView: View {
     @State private var modalRoot: PacerModalDestination?
 
     var body: some View {
+        // Read in this body and captured below, not read inside
+        // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
+        let scopeAccountId = scope.accountId, limitAccountId = scope.limitAccountId
         PageScaffold(
             "Dashboard",
             subtitle: "Realtime view of your Claude Code usage.",
@@ -39,7 +42,7 @@ struct DashboardView: View {
                 // AdvisorBadges owns the whole header strip now — the notices
                 // *and* the data-source chip flow together in one wrapping
                 // layout, so they spill to a tidy second row when several fire.
-                AdvisorBadges(scopeAccountId: scope.accountId)
+                AdvisorBadges(scopeAccountId: scopeAccountId)
                     .layoutShiftProbe("header")
             }
         ) {
@@ -57,7 +60,7 @@ struct DashboardView: View {
             // first-class, identically-treated columns. `window` is the fixed
             // window name or the scoped `limits[]` identity; the projection
             // modal accepts both.
-            PaceChartCard(limitAccountId: scope.limitAccountId, onCompare: { window, account in
+            PaceChartCard(limitAccountId: limitAccountId, onCompare: { window, account in
                 modalRoot = .projection(window: window, accountId: account)
             })
             .layoutShiftProbe("pace")
@@ -65,19 +68,19 @@ struct DashboardView: View {
             // that chart raises the moment a second account exists: whose
             // numbers am I looking at? Renders nothing at all for a
             // single-account user, which is almost everyone.
-            TodayDetailsCard(scopeAccountId: scope.accountId)
+            TodayDetailsCard(scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("today-details")
-            TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scope.accountId)
+            TodayTimelineCard(onTodayTap: openToday, scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("today-timeline")
-            PerModelTodayCard(scopeAccountId: scope.accountId)
+            PerModelTodayCard(scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("per-model")
-            WeeklyComparisonCard(scopeAccountId: scope.accountId)
+            WeeklyComparisonCard(scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("weekly")
-            DailyCostChartCard(scopeAccountId: scope.accountId, onDayTap: { dayKey in
+            DailyCostChartCard(scopeAccountId: scopeAccountId, onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
             .layoutShiftProbe("daily-cost")
-            MonthOutlookCard(scopeAccountId: scope.accountId)
+            MonthOutlookCard(scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("month-outlook")
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
@@ -144,11 +147,16 @@ struct RateLimitSourceChip: View {
     /// The age is clock-driven, so the content re-runs every 30 s as well.
     /// Otherwise "3m ago" and the 15-minute warning froze until the next
     /// write, and a stall never turned the chip yellow.
+    ///
+    /// `latest` and `owner` are read here and handed to the timeline's
+    /// content, rather than read inside the closure `TimelineView` stores and
+    /// re-runs, so the fetch that fills them redraws this view (#140).
     var body: some View {
         let key = RefreshKey(account: limitAccountId,
                              generation: RateLimitWriteSignal.shared.generation)
+        let latest = self.latest, owner = self.owner
         TimelineView(.periodic(from: .now, by: 30)) { _ in
-            HStack(spacing: 0) { content }
+            HStack(spacing: 0) { content(latest: latest, owner: owner) }
         }
         .task(id: key) { refresh() }
     }
@@ -170,7 +178,7 @@ struct RateLimitSourceChip: View {
             : nil
     }
 
-    @ViewBuilder private var content: some View {
+    @ViewBuilder private func content(latest: Sample?, owner: String?) -> some View {
         if let latest {
             // OAuth samples ought to arrive every 5 min; statusline samples
             // are irregular by nature, so the staleness warning is

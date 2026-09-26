@@ -81,7 +81,9 @@ struct CollectionEditorSheet: View {
         // what it presents opens at once. Passed only as a binding, nothing
         // read it: the collections sheet opened only after an unrelated
         // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
-        let _ = showImporter
+        // `childIDs` too: its only readers are the nest rows, which the
+        // grouped form builds lazily below a long members list.
+        let _ = (showImporter, childIDs)
         VStack(spacing: 0) {
             header
             Divider().opacity(0.4)

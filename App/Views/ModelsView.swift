@@ -47,6 +47,10 @@ struct ModelsView: View {
     }
 
     var body: some View {
+        // Read in this body and captured below, not read inside
+        // `PageScaffold`'s stored closures. See `ProjectsView.body` (#140).
+        let range = self.range, scopeAccountId = scope.accountId, sort = self.sort
+        let descending = sortDescending, metric = self.metric, grouping = self.grouping
         PageScaffold(
             "Models",
             subtitle: "How traffic splits across Claude models.",
@@ -75,9 +79,9 @@ struct ModelsView: View {
         ) {
             ModelsContent(
                 range: range,
-                scopeAccountId: scope.accountId,
+                scopeAccountId: scopeAccountId,
                 sort: sort,
-                descending: sortDescending,
+                descending: descending,
                 metric: metric,
                 grouping: grouping,
                 rangeBinding: rangeBinding,

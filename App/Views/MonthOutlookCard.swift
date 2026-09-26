@@ -82,11 +82,18 @@ struct MonthOutlookCard: View {
     private func refreshProjection() async {
         // This card's scope, so the month-end projection is the account the
         // rest of the card is counting.
-        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
-        projection = await askEngine { await engine.ask(.projectedCost(.thisMonth)) }
+        let account = scope.accountId
+        guard let engine = engines?.engine(forAccount: account) else { return }
+        let answer = await askEngine { await engine.ask(.projectedCost(.thisMonth)) }
+        // An ask queues behind a refit and can take seconds. One for a scope
+        // the user has since left must not land over the new scope's answer.
+        guard account == scope.accountId else { return }
+        projection = answer
     }
 
     var body: some View {
+        // Read here as well as inside `PacerCard`'s stored closures (#140).
+        let _ = (cached, projection)
         PacerCard("This month", trailing: {
             Text(monthCaption)
                 .font(.system(size: 11))
@@ -142,7 +149,16 @@ struct MonthOutlookCard: View {
         }
         .onAppear { refreshFacts() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshFacts() }
-        .task { await refreshProjection() }
+        // The scope is an input to the cache like the data is: without this
+        // the card kept the previous account after a switch until a scan
+        // ingested something, which on an idle machine may be never (#141).
+        .onChange(of: scope.accountId) { _, _ in refreshFacts() }
+        // Keyed on the scope for the same reason: the month-end projection
+        // is that account's engine's, and kept the old one's until a refit.
+        .task(id: scope.accountId) {
+            projection = nil
+            await refreshProjection()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refreshProjection() }
         }

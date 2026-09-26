@@ -141,7 +141,8 @@ struct AdvisorBadges: View {
     /// it ranked in the user's top few; today's pace fires only at the
     /// ladder's top rungs (≥85th percentile of their own days).
     private func refreshEngineHints() async {
-        guard let engine = engines?.engine(forAccount: scope.accountId) else { return }
+        let account = scope.accountId
+        guard let engine = engines?.engine(forAccount: account) else { return }
         var next: [EngineHint] = []
 
         // Both notices come from this scope's own fit, so they describe the
@@ -166,6 +167,10 @@ struct AdvisorBadges: View {
                 title: pace.value >= 0.95 ? "Heaviest pace in weeks" : "Heavier day than usual",
                 detail: "Today's projected total sits at the \(Int((pace.value * 100).rounded()))th percentile of your \(dayName)s."))
         }
+        // Asks queue behind refits and are not cancelled, so one started for
+        // a scope the user has since left can finish last. It must not land
+        // over the new scope's hints.
+        guard account == scope.accountId else { return }
         engineHints = next
     }
 

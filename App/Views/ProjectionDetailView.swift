@@ -102,6 +102,10 @@ struct ProjectionCompareModal: View {
     }
 
     var body: some View {
+        // Filled in after the modal is on screen and read inside
+        // `PacerModalContent`'s stored closure, so read here too (#140;
+        // AGENTS.md, "SwiftUI state and data flow").
+        let _ = (trajectories, accuracy, loaded)
         PacerModalContent(
             title: "\(windowTitle) projection",
             subtitle: subtitle,

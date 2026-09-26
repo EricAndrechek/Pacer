@@ -68,14 +68,18 @@ struct NowStrip: View {
     @State private var latestSampleModel: String?
     /// Most-recently-touched session, for the Now tile's session line.
     @State private var latestSessions: [SessionRow] = []
-    /// The newest extra-usage reading's spend, and when the scan last ran:
-    /// the strip reads one field of each probe's row.
+    /// The newest extra-usage reading's spend.
     @State private var extraUsageUSD: Double?
-    @State private var lastScanAt: String?
     /// Which scope the last applied read was for (`scopeKey`), nil before the
     /// first. See `apply`.
     @State private var appliedScope: String?
     @State private var refreshInFlight = false
+    /// The clock, in 30-second steps, read in `body`. The Now tile's "live"
+    /// chip, its running session and "last sample 3m ago" are all judged
+    /// against `Date()`. The 1 Hz refresh writes only data, and data that
+    /// has not changed schedules no redraw, so once Claude Code went quiet the
+    /// tile kept saying "live" until something else moved (#140).
+    @State private var clockStep = 0
 
     @Environment(\.usageEngines) private var engines
 
@@ -93,7 +97,6 @@ struct NowStrip: View {
         var latestSampleModel: String?
         var latestSessions: [SessionRow] = []
         var extraUsageUSD: Double?
-        var lastScanAt: String?
     }
 
     private nonisolated static func scopeKey(_ account: String?) -> String { account ?? "" }
@@ -130,17 +133,23 @@ struct NowStrip: View {
         // one account's numbers under another's name. The `.onChange` below
         // has already asked for the new scope's read.
         guard account == scope.accountId else { return }
+        // `cached` is rebuilt from exactly what it is built from, when that
+        // changes. It used to wait for the scan-meta timestamp to move, which
+        // missed two things: extra-usage readings, which the poller writes
+        // without a scan, and a scan that committed between this read's
+        // aggregate fetch and its timestamp fetch. That left the hero cost a
+        // scan behind with nothing to bring it forward.
+        let factsChanged = s.todayAggregates != todayAggregates
+            || s.extraUsageUSD != extraUsageUSD
         todayAggregates = s.todayAggregates
         recentHourlyRows = s.recentHourlyRows
         latestSampleAt = s.latestSampleAt
         latestSampleModel = s.latestSampleModel
         latestSessions = s.latestSessions
         extraUsageUSD = s.extraUsageUSD
-        lastScanAt = s.lastScanAt
-        // `cached` is otherwise rebuilt only when a scan lands, so a scope
-        // switch has to rebuild it here, once the new scope's rows are in.
+        clockStep = Int(Date().timeIntervalSince1970 / 30)
         let key = Self.scopeKey(account)
-        if appliedScope != key {
+        if appliedScope != key || factsChanged {
             appliedScope = key
             refreshFacts()
         }
@@ -218,7 +227,6 @@ struct NowStrip: View {
         }
         s.extraUsageUSD = ((try? modelContext.fetch(
             LimitScope.extraUsage(account: limitAccount, limit: 1))) ?? []).first?.amountUSD
-        s.lastScanAt = ((try? modelContext.fetch(Self.scanMetaProbe())) ?? []).first?.value
         return s
     }
 
@@ -252,18 +260,11 @@ struct NowStrip: View {
         return d
     }
 
-    private nonisolated static func scanMetaProbe() -> FetchDescriptor<ClaudeCodeMeta> {
-        let key = ClaudeCodeMetaKey.lastIncrementalScanAt
-        return FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }
-        )
-    }
-
     // MARK: - Caches
 
     @State private var cached = TodayFacts()
 
-    private struct TodayFacts {
+    private struct TodayFacts: Equatable {
         var todayCost: Double = 0
         var todayTokens: Int64 = 0
         var extraUsageUSD: Double?
@@ -282,7 +283,7 @@ struct NowStrip: View {
             $0 + $1.inputTokens + $1.outputTokens
         }
         next.extraUsageUSD = extraUsageUSD
-        cached = next
+        if next != cached { cached = next }
     }
 
     /// This view's own engine — fitted to the account on screen, or to every
@@ -332,6 +333,7 @@ struct NowStrip: View {
     // MARK: - Body
 
     var body: some View {
+        let _ = clockStep
         HStack(alignment: .top, spacing: 12) {
             nowTile
             costTile
@@ -347,7 +349,6 @@ struct NowStrip: View {
             }
         }
         .onAppear { refreshFacts() }
-        .onChange(of: lastScanAt) { _, _ in refreshFacts() }
         // The scope is a refresh trigger. `refresh()` re-reads the scoped rows
         // on its own second-by-second tick, but the tile renders `cached`, and
         // that was only rebuilt on a scan cycle — so the numbers stayed the

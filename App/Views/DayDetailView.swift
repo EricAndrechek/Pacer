@@ -232,6 +232,11 @@ struct DayDetailView: View {
     }
 
     var body: some View {
+        // Read here as well as inside `PacerModalContent`'s stored closure,
+        // so a refresh redraws this view (#140; AGENTS.md, "SwiftUI state and
+        // data flow"). The Sessions sort reaches its table only as bindings.
+        let _ = (cached, sortedAggsByCost, hoveredAggAngle)
+        let _ = (sessionsSortRaw, sessionsSortDescending)
         PacerModalContent(
             title: prettyDate,
             subtitle: date,
@@ -245,6 +250,10 @@ struct DayDetailView: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is an input to the cache: without this, switching scope
+        // with a day open left Summary, Models and Projects on the old
+        // account while the live Sessions list moved to the new one (#141).
+        .onChange(of: scope.accountId) { _, _ in refreshCache() }
         // Sort-pref changes need a re-sort but not a re-fetch — the
         // cache's `sortedAggregates`/`sortedProjectRows` are the only
         // affected slices. Reusing `refreshCache()` is fine; it's

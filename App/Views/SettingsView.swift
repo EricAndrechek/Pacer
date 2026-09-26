@@ -22,6 +22,11 @@ import PacerUI
 /// rather than its own visual idiom.
 struct SettingsView: View {
     var body: some View {
+        // Read here, not inside a section's stored closure, so a login switch
+        // redraws this view and the `.id` below rebuilds the alerts card
+        // against the new account (#140; AGENTS.md, "SwiftUI state and data
+        // flow").
+        let activeAccountId = UsageScope.shared.activeAccountId
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 SettingsSection("General") {
@@ -29,7 +34,8 @@ struct SettingsView: View {
                     MenuBarCard()
                 }
                 SettingsSection("Notifications") {
-                    RateLimitAlertsCard()
+                    RateLimitAlertsCard(activeAccountId: activeAccountId)
+                        .id(activeAccountId)
                     BurnRateAlertCard()
                     DailyCostAlertCard()
                     ResetAlertCard()
@@ -152,6 +158,11 @@ private struct StartupCard: View {
             Text("When enabled, Pacer launches at login and runs in the background — no window opens unless you open it explicitly. Data collection (JSONL scan + OAuth poll) starts automatically and continues even when no window is visible.")
         })
         .onAppear { refresh() }
+        // The approval this card asks for happens in System Settings, and a
+        // login item can be removed there too. Re-read on the way back, or
+        // "Approval required." stayed up after the user approved.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
     }
 
     private func refresh() {
@@ -417,6 +428,10 @@ struct MenuBarCard: View {
         .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
             loadWindows()
         }
+        // Which login's windows these are is an input like the data is. A
+        // switch posts no scan, so the picker kept the old login's windows
+        // until the next poll landed.
+        .onChange(of: UsageScope.shared.activeAccountId) { _, _ in loadWindows() }
         // Keep `enabledOrder` in sync if another surface (CLI, another
         // Settings window) writes to the store while we're open.
         .onReceive(NotificationCenter.default.publisher(
@@ -862,9 +877,15 @@ struct RateLimitAlertsCard: View {
     /// active account and never against the window's scope — an alarm a
     /// display filter could silence is a footgun — so the card that configures
     /// them lists the same account's windows the evaluator will see.
-    init() {
+    ///
+    /// The account is an input rather than read from defaults here: `init`
+    /// builds the query once, and a card that read it for itself kept the
+    /// previous login's windows after a switch (the new login's could not be
+    /// configured, and live rules showed as paused) until Settings was left
+    /// and reopened. `SettingsView` keys the card on it.
+    init(activeAccountId: String?) {
         _scopedSamples = Query(
-            LimitScope.usageLimits(account: UsageScope.storedActiveAccountId, limit: 200))
+            LimitScope.usageLimits(account: activeAccountId, limit: 200))
     }
 
     /// The per-model windows present in the latest poll, active-first then
@@ -1897,7 +1918,13 @@ private struct TokensCard: View {
                         Divider().opacity(0.35).padding(.top, 8).padding(.bottom, 4)
                     }
                     columnHeader
-                    groupedLanes
+                    // "just now", "cooling" and the expiry countdown are
+                    // judged against the clock, and the pool publishes only
+                    // around a poll (5–10 minutes apart). The date goes into
+                    // each row, so the rows see a changed input every tick.
+                    TimelineView(.periodic(from: .now, by: 15)) { context in
+                        groupedLanes(now: context.date)
+                    }
                 }
                 addTokenRow
             }
@@ -1987,7 +2014,7 @@ private struct TokensCard: View {
     }
 
     /// Token rows, grouped under their account when more than one exists.
-    @ViewBuilder private var groupedLanes: some View {
+    @ViewBuilder private func groupedLanes(now: Date) -> some View {
         if pool.accounts.count > 1 {
             ForEach(pool.accounts) { account in
                 let rows = lanes(for: account.id)
@@ -1995,7 +2022,7 @@ private struct TokensCard: View {
                     accountGroupLabel(account)
                     ForEach(rows) { lane in
                         Divider().opacity(0.35)
-                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                        TokenLaneRow(lane: lane, highlighted: lane.id == highlightId, now: now)
                     }
                 }
             }
@@ -2004,13 +2031,13 @@ private struct TokensCard: View {
                 groupLabelText("CHECKING…")
                 ForEach(pending) { lane in
                     Divider().opacity(0.35)
-                    TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                    TokenLaneRow(lane: lane, highlighted: lane.id == highlightId, now: now)
                 }
             }
         } else {
             ForEach(pool.lanes) { lane in
                 Divider().opacity(0.35)
-                TokenLaneRow(lane: lane, highlighted: lane.id == highlightId)
+                TokenLaneRow(lane: lane, highlighted: lane.id == highlightId, now: now)
             }
         }
     }
@@ -2176,6 +2203,8 @@ private struct AccountSwitchRow: View {
 private struct TokenLaneRow: View {
     let lane: TokenLaneStatus
     let highlighted: Bool
+    /// The clock the row's relative times and status are judged against.
+    let now: Date
     @State private var removing = false
 
     var body: some View {
@@ -2270,7 +2299,6 @@ private struct TokenLaneRow: View {
     }
 
     private var statusInfo: (String, Color) {
-        let now = Date()
         if let exp = lane.expiresAt, exp < now { return ("expired", .red) }
         if lane.account == .secondary { return ("tracked", .purple) }
         if let cd = lane.cooldownUntil, cd > now { return ("cooling", .orange) }
@@ -2280,14 +2308,14 @@ private struct TokenLaneRow: View {
 
     private var expiresText: String {
         guard let exp = lane.expiresAt else { return "—" }
-        if exp < Date() { return "expired" }
-        return Self.relative.localizedString(for: exp, relativeTo: Date())
+        if exp < now { return "expired" }
+        return Self.relative.localizedString(for: exp, relativeTo: now)
     }
 
     private var updatedText: String {
         guard let last = lane.lastPolledAt else { return "never" }
-        if abs(Date().timeIntervalSince(last)) < 10 { return "just now" }
-        return Self.relative.localizedString(for: last, relativeTo: Date())
+        if abs(now.timeIntervalSince(last)) < 10 { return "just now" }
+        return Self.relative.localizedString(for: last, relativeTo: now)
     }
 
     private static let relative: RelativeDateTimeFormatter = {
@@ -2732,6 +2760,15 @@ private struct ClaudeSkillCard: View {
             }
         })
         .onAppear(perform: refresh)
+        // The launch-time re-sync after an update runs in the background and
+        // can finish after this card appeared, and the file can be edited by
+        // hand while Pacer runs. Either left "Update available" or a stale
+        // "Installed" on screen until Settings was reopened.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerClaudeSkillDidSync)) { _ in
+            refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
     }
 
     private var isInstalled: Bool { status?.isInstalled ?? false }

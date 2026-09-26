@@ -507,7 +507,7 @@ enum ScreenshotMode {
                         .tracking(0.6)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 4)
-                    RateLimitAlertsCard()
+                    RateLimitAlertsCard(activeAccountId: UsageScope.storedActiveAccountId)
                 }
                 .padding(20)
             }
