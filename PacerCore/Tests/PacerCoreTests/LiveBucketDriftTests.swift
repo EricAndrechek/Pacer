@@ -32,8 +32,9 @@ import Testing
 /// samples on a throttle, which closes the whole class.
 @Suite struct LiveBucketDriftTests {
 
-    /// Drift a bucket while it's open, then confirm the next due cycle
-    /// rebuilds it from its samples instead of trusting its running total.
+    /// Drift a bucket while it's open, then confirm a cycle `liveWriteDelay`
+    /// after the write rebuilds it from its samples instead of trusting its
+    /// running total.
     @ScanActor
     @Test func openBucketsAreRebuiltFromTheirSamples() async throws {
         // A sample in the CURRENT hour — the bucket has to be open for this
@@ -56,6 +57,8 @@ import Testing
                                  probeStatsCache: false),
             resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
         )
+        let clock = LiveCheckClock.earlyThisHour()
+        coordinator.liveClock = { clock.now }
         _ = try await coordinator.runOnce()
 
         let hourly = try context.fetch(FetchDescriptor<HourlyAggregate>())
@@ -70,24 +73,12 @@ import Testing
         try #require(daily.first).totalCostUSD = 999.0
         try context.save()
 
-        // Age the throttle so the rebuild is due — the same thing ten
-        // minutes of wall clock would do.
-        // Upsert rather than require, so that a build without the rebuild
-        // fails on the healing assertions below — the actual behaviour under
-        // test — instead of on the throttle's bookkeeping.
-        let key = ClaudeCodeMetaKey.lastLiveBucketRebuildAt
-        let stale = String(Date().timeIntervalSince1970 - 3_600)
-        let meta = try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
-            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))
-        if let existing = meta.first { existing.value = stale }
-        else { context.insert(ClaudeCodeMeta(key: key, value: stale)) }
-        try context.save()
-
+        clock.advance(ScanCoordinator.liveWriteDelay)
         _ = try await coordinator.runOnce()
 
-        // Rebuilt from the sample, not carried forward. Without the live
-        // rebuild both of these stay at 999.0: no new sample lands in the
-        // bucket, so nothing ever marks it dirty.
+        // Rebuilt from the sample, not carried forward. Without the check
+        // both of these stay at 999.0: no new sample lands in the bucket, so
+        // nothing ever marks it dirty.
         let healedHour = try context.fetch(FetchDescriptor<HourlyAggregate>())
         #expect(healedHour.count == 1)
         #expect(try #require(healedHour.first).totalCostUSD == truth)
@@ -261,6 +252,121 @@ import Testing
         #expect(try persister.repairDuplicateSamples() == 0)
     }
 
+    /// A cycle rebuilds a bounded number of day-long buckets, and the next
+    /// cycle picks up the rest (#151). Rebuilding every open project-day at
+    /// once re-read the whole day's samples: 3.8 s for eight busy ones on a
+    /// live store.
+    @ScanActor
+    @Test func dayLongBucketsAreRebuiltAFewPerPass() async throws {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = stamp.string(from: Date())
+        let projects = (1...5).map { "/tmp/pacer-live-\($0)" }
+        let root = try makeDriftFixtureRoot(withLines: projects.enumerated().map { i, cwd in
+            makeDriftAssistantLine(timestamp: now, storedCost: 0.25,
+                                   messageId: "m\(i)", requestId: "r\(i)", cwd: cwd)
+        })
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = try makeDriftContainer()
+        let context = ModelContext(container)
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .display, watcherMode: .manual,
+                                 probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+        )
+        let clock = LiveCheckClock.earlyThisHour()
+        coordinator.liveClock = { clock.now }
+        _ = try await coordinator.runOnce()
+
+        let rows = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+        #expect(rows.count == projects.count)
+        for row in rows { row.totalCostUSD = 999.0 }
+        try context.save()
+
+        func healed() throws -> Int {
+            try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+                .filter { $0.totalCostUSD == 0.25 }.count
+        }
+
+        clock.advance(ScanCoordinator.liveWriteDelay)
+        _ = try await coordinator.runOnce()
+        #expect(try healed() == ScanCoordinator.liveDayLimit)
+
+        _ = try await coordinator.runOnce()
+        #expect(try healed() == projects.count, "the next cycle takes the rest")
+    }
+
+    /// A day that closed while Pacer was not running is still rebuilt once
+    /// after its close: on the next launch, from the persisted watermark.
+    /// Its hours too. The ten-minute pass only ever saw the hour just past,
+    /// and only while running.
+    @ScanActor
+    @Test func bucketsThatClosedWhilePacerWasNotRunningAreRebuiltOnLaunch() async throws {
+        let calendar = Calendar.current
+        let yesterdayNoon = calendar.date(
+            byAdding: .hour, value: -12, to: calendar.startOfDay(for: Date()))!
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let root = try makeDriftFixtureRoot(withLines: [
+            makeDriftAssistantLine(timestamp: stamp.string(from: yesterdayNoon), storedCost: 0.25,
+                                   messageId: "m1", requestId: "r1", cwd: "/tmp/pacer-closed")
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = try makeDriftContainer()
+        let context = ModelContext(container)
+        func launch() -> ScanCoordinator {
+            ScanCoordinator(
+                container: container,
+                configuration: .init(costMode: .display, watcherMode: .manual,
+                                     probeStatsCache: false),
+                resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path]))
+        }
+        func drift() throws {
+            for row in try context.fetch(FetchDescriptor<DailyAggregate>()) { row.totalCostUSD = 999 }
+            for row in try context.fetch(FetchDescriptor<HourlyAggregate>()) { row.totalCostUSD = 999 }
+            for row in try context.fetch(FetchDescriptor<ProjectDailyAggregate>()) { row.totalCostUSD = 999 }
+            try context.save()
+        }
+        // Read through a fresh context: the coordinator writes through its own.
+        func costs() throws -> [Double] {
+            let fresh = ModelContext(container)
+            return try fresh.fetch(FetchDescriptor<DailyAggregate>()).map(\.totalCostUSD)
+                + fresh.fetch(FetchDescriptor<HourlyAggregate>()).map(\.totalCostUSD)
+                + fresh.fetch(FetchDescriptor<ProjectDailyAggregate>()).map(\.totalCostUSD)
+        }
+
+        // First run ever: the watermark starts at this hour, and history is
+        // left alone. That is `make verify-data`'s job, not a launch's.
+        let first = launch()
+        _ = try await first.runOnce()
+        try drift()
+        _ = try await first.runOnce()
+        #expect(try costs() == [999, 999, 999])
+
+        // As if Pacer was last running yesterday at 11:00, and quit before
+        // the noon hour or the day closed.
+        let key = ClaudeCodeMetaKey.liveBucketsSettledThrough
+        let before = yesterdayNoon.addingTimeInterval(-3_600)
+        let meta = try #require(try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })).first)
+        meta.value = String(before.timeIntervalSince1970)
+        try context.save()
+
+        _ = try await launch().runOnce()
+        #expect(try costs() == [0.25, 0.25, 0.25])
+
+        // And the watermark moved up to this hour, so the next launch has
+        // nothing to catch up.
+        let hourStart = try #require(calendar.dateInterval(of: .hour, for: Date())).start
+        let stored = try #require(try ModelContext(container).fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })).first)
+        let settled = try #require(TimeInterval(stored.value))
+        #expect(settled == hourStart.timeIntervalSince1970)
+    }
+
     /// The throttle has to actually throttle — otherwise this trades a
     /// correctness bug for the cost of rebuilding the day's buckets on every
     /// cycle, which is the fast path's whole reason for existing.
@@ -282,13 +388,16 @@ import Testing
                                  probeStatsCache: false),
             resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
         )
+        let clock = LiveCheckClock.earlyThisHour()
+        coordinator.liveClock = { clock.now }
         _ = try await coordinator.runOnce()
 
         let hourly = try context.fetch(FetchDescriptor<HourlyAggregate>())
         try #require(hourly.first).totalCostUSD = 999.0
         try context.save()
 
-        // No throttle ageing this time.
+        // Not yet `liveWriteDelay` since the write.
+        clock.advance(ScanCoordinator.liveWriteDelay - 60)
         _ = try await coordinator.runOnce()
 
         let after = try context.fetch(FetchDescriptor<HourlyAggregate>())
@@ -320,10 +429,27 @@ private func makeDriftFixtureRoot(withLines lines: [String]) throws -> URL {
     return root
 }
 
+/// The live check's clock, moved by hand instead of waiting on the wall.
+private final class LiveCheckClock {
+    var now: Date
+    init(_ now: Date) { self.now = now }
+    func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+
+    /// A minute into the current hour, so a test that moves the clock a few
+    /// minutes never crosses into the next one. Crossing would close the
+    /// fixture's hour, and a closed hour is rebuilt, which is correct, but
+    /// not what those tests are about.
+    static func earlyThisHour() -> LiveCheckClock {
+        let start = Calendar.current.dateInterval(of: .hour, for: Date())!.start
+        return LiveCheckClock(start.addingTimeInterval(60))
+    }
+}
+
 private func makeDriftAssistantLine(
-    timestamp: String, storedCost: Double, messageId: String, requestId: String
+    timestamp: String, storedCost: Double, messageId: String, requestId: String,
+    cwd: String? = nil
 ) -> String {
-    let fields: [String: Any] = [
+    var fields: [String: Any] = [
         "type": "assistant",
         "timestamp": timestamp,
         "requestId": requestId,
@@ -342,5 +468,6 @@ private func makeDriftAssistantLine(
             ],
         ] as [String: Any]
     ]
+    if let cwd { fields["cwd"] = cwd }
     return String(data: try! JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
 }
