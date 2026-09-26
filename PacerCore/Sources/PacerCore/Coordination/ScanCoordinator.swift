@@ -1217,39 +1217,6 @@ public final class ScanCoordinator {
                           value: Self.currentDuplicateRepairVersion)
         }
 
-        // Open buckets drift; settled ones can't.
-        //
-        // The incremental fast path adds a new sample's tokens AND its cost
-        // to the open bucket in one step. If those two ever fall out of step
-        // — a cost computed before pricing finished loading, an upgrade that
-        // reached one rollup and not another, a cycle that died between the
-        // write and the save — the bucket carries the error, and nothing
-        // marks it dirty again. When the hour rolls over, the error freezes
-        // there permanently.
-        //
-        // That isn't hypothetical. Hour 10 of 2026-08-04 held tokens that
-        // matched its 125 samples exactly, to the token, while its cost sat
-        // $0.6971 low against those same tokens at a price vector that
-        // explained every other bucket that day to four decimal places. It
-        // was found by `make verify-data`, not by the app, and it would have
-        // stayed wrong forever.
-        //
-        // So rebuild the still-open buckets from their samples on a
-        // throttle: bounded, predictable work against an unbounded class of
-        // drift. `now - 1h` is included because the bucket that matters most
-        // is the one that just closed — that's the one about to freeze.
-        // Anything older is settled and is only recomputed when a sample
-        // actually lands in it. The day-long buckets are spread across passes
-        // rather than rebuilt together (#151); see `rebuildLiveBuckets`.
-        if try fetchMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt) == nil {
-            try writeMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt,
-                          value: String(Date().timeIntervalSince1970))
-        } else if try liveBucketRebuildIsDue() {
-            try rebuildLiveBuckets(persister: activePersister)
-            try writeMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt,
-                          value: String(Date().timeIntervalSince1970))
-        }
-
         // Path-canonicalization migration. Walks every TokenSample,
         // re-applies the worktree-stripping canonicalizer (plus the
         // user's current alias map) in place, and folds both the old
@@ -1452,6 +1419,30 @@ public final class ScanCoordinator {
             let totals = AccountTotalsStore.shared.snapshot()
             Task { @MainActor in AccountTotalsStatus.shared.publish(totals) }
         }
+
+        // Open buckets drift; settled ones can't.
+        //
+        // The incremental fast path adds a new sample's tokens AND its cost
+        // to the open bucket in one step. If those two ever fall out of step
+        // — a cost computed before pricing finished loading, an upgrade that
+        // reached one rollup and not another, a cycle that died between the
+        // write and the save — the bucket carries the error, and nothing
+        // marks it dirty again. When the hour rolls over, the error freezes
+        // there permanently.
+        //
+        // That isn't hypothetical. Hour 10 of 2026-08-04 held tokens that
+        // matched its 125 samples exactly, to the token, while its cost sat
+        // $0.6971 low against those same tokens at a price vector that
+        // explained every other bucket that day to four decimal places. It
+        // was found by `make verify-data`, not by the app, and it would have
+        // stayed wrong forever.
+        //
+        // So buckets are rebuilt from their samples: soon after a write,
+        // once after they close (including closes while Pacer was not
+        // running), and on a slow sweep. Here, after everything this cycle
+        // marks for recompute is marked, so the writes are known. See
+        // `verifyLiveBuckets`.
+        try verifyLiveBuckets(persister: activePersister, now: liveClock())
 
         if let beforeRecomputeHook { try await beforeRecomputeHook() }
 
@@ -1838,31 +1829,35 @@ public final class ScanCoordinator {
         }
     }
 
-    /// How often the open buckets are rebuilt rather than trusted. Ten
-    /// minutes bounds how long a drifted bucket can stay wrong while it is
-    /// still open, and costs one recompute of the current day's buckets —
-    /// small next to the full-store rebuild a cost-version bump triggers.
-    private static let liveBucketRebuildInterval: TimeInterval = 10 * 60
+    /// How soon after a fast-path write a bucket is rebuilt from its samples,
+    /// and how often every open bucket is, written to or not. The ten-minute
+    /// pass these replaced checked every open bucket together (#151).
+    nonisolated static let liveWriteDelay: TimeInterval = 5 * 60
+    nonisolated static let liveSweepAge: TimeInterval = 30 * 60
+    /// Rebuilds per cycle, per kind. A day-long bucket re-reads a whole day's
+    /// samples (hundreds of ms for a busy project); an hour bucket, an hour's.
+    nonisolated static let liveDayLimit = 3
+    nonisolated static let liveHourLimit = 6
 
-    /// Day-long buckets of each kind one live pass rebuilds. Nine open
-    /// project-days, a busy day on the live store, come round every half hour.
-    nonisolated static let liveRebuildLimit = 3
+    /// See `LiveBucketVerifier`.
+    private var liveDaily = LiveBucketVerifier<DateModelPair>(
+        limit: ScanCoordinator.liveDayLimit, writeDelay: ScanCoordinator.liveWriteDelay,
+        sweepAge: ScanCoordinator.liveSweepAge) { "\($0.date)|\($0.model)" }
+    private var liveProject = LiveBucketVerifier<ProjectDatePair>(
+        limit: ScanCoordinator.liveDayLimit, writeDelay: ScanCoordinator.liveWriteDelay,
+        sweepAge: ScanCoordinator.liveSweepAge) { "\($0.date)|\($0.projectPath)" }
+    private var liveHourly = LiveBucketVerifier<DateHourModelTriple>(
+        limit: ScanCoordinator.liveHourLimit, writeDelay: ScanCoordinator.liveWriteDelay,
+        sweepAge: ScanCoordinator.liveSweepAge) { "\($0.date)|\($0.hour)|\($0.model)" }
+    /// The hour the queued closes run up to, written to the watermark once
+    /// every one of them has been rebuilt. nil when none are queued.
+    private var liveSettlePending: Date?
+    /// When the sweep next reads which buckets are open. Once a minute is
+    /// plenty for a sweep measured in half-hours.
+    private var liveOpenReadAt: Date = .distantPast
 
-    /// Which day-long buckets each live pass rebuilds. See `LiveRebuildPlanner`.
-    private var liveDailyPlanner = LiveRebuildPlanner<DateModelPair>(
-        limit: ScanCoordinator.liveRebuildLimit) { "\($0.date)|\($0.model)" }
-    private var liveProjectPlanner = LiveRebuildPlanner<ProjectDatePair>(
-        limit: ScanCoordinator.liveRebuildLimit) { "\($0.date)|\($0.projectPath)" }
-
-    private func liveBucketRebuildIsDue() throws -> Bool {
-        // Never run: stamp and skip rather than firing. This is an integrity
-        // measure, not a startup one, and cold start is already the most
-        // expensive cycle there is — piling the day's buckets onto it buys
-        // nothing that waiting one interval doesn't.
-        guard let raw = try fetchMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt),
-              let at = TimeInterval(raw) else { return false }
-        return Date().timeIntervalSince1970 - at >= Self.liveBucketRebuildInterval
-    }
+    /// The clock the live verification runs on. Tests move it.
+    var liveClock: () -> Date = { Date() }
 
     /// Drop every `SessionRollupCache` entry if prices changed since the
     /// last check (see `SessionRollupCache.forgetAllIfPricingChanged`).
@@ -1874,72 +1869,139 @@ public final class ScanCoordinator {
         }
     }
 
-    /// Fold the still-open rollup buckets into the dirty+polluted sets, so
-    /// they get rebuilt from the samples they contain instead of from their
-    /// own running totals.
+    /// Mark for a from-scratch rebuild the buckets `LiveBucketVerifier` says
+    /// are due, once this cycle's own marks are in.
     ///
-    /// Polluting is the point: `addDirty*` marks each bucket as one the
-    /// recomputers' incremental path must not touch, which is what forces
-    /// the from-scratch rebuild.
-    ///
-    /// The current and previous hour are rebuilt whole every pass. The
-    /// day-long buckets (per model, per project) are rationed: at most
-    /// `liveRebuildLimit` of each kind per pass, a just-closed day's first,
-    /// then the longest since its last rebuild. Rebuilding them all together
-    /// re-read the whole day's samples every ten minutes (#151). See
-    /// `LiveRebuildPlanner`.
+    /// Marking them polluted as well as dirty (`addDirty*`) is the point: the
+    /// recomputers' incremental path must not touch them, which forces the
+    /// rebuild from samples.
     ///
     /// Sessions are not in here: their cached totals expire on their own —
     /// see `SessionRollupCache.maxAge`.
-    func rebuildLiveBuckets(persister: SamplePersister, now: Date = Date()) throws {
-        let calendar = Calendar.current
-        let today = TokenSample.formatDate(now, timeZone: calendar.timeZone)
+    func verifyLiveBuckets(persister: SamplePersister, now: Date) throws {
+        liveDaily.note(written: persister.dirtyPairs,
+                       rebuilt: persister.pollutedDailyPairs, now: now)
+        liveProject.note(written: persister.dirtyProjectDates,
+                         rebuilt: persister.pollutedProjectPairs, now: now)
+        liveHourly.note(written: persister.dirtyHourBuckets,
+                        rebuilt: persister.pollutedHourBuckets, now: now)
 
-        var openPairs: Set<DateModelPair> = [], closedPairs: Set<DateModelPair> = []
-        var openProjects: Set<ProjectDatePair> = [], closedProjects: Set<ProjectDatePair> = []
-        var triples: Set<DateHourModelTriple> = []
+        try enqueueClosedBuckets(now: now)
 
-        for offset in [TimeInterval(0), -3600] {
-            let at = now.addingTimeInterval(offset)
-            let date = TokenSample.formatDate(at, timeZone: calendar.timeZone)
-            let hour = calendar.component(.hour, from: at)
-            // `now - 1h` on another date means that day closed within the hour.
-            let isToday = date == today
-
-            var models = FetchDescriptor<DailyAggregate>(
-                predicate: #Predicate<DailyAggregate> { $0.date == date })
-            models.propertiesToFetch = [\.model]
-            for model in try context.fetch(models).map(\.model) {
-                let pair = DateModelPair(date: date, model: model)
-                if isToday { openPairs.insert(pair) } else { closedPairs.insert(pair) }
-                triples.insert(DateHourModelTriple(date: date, hour: hour, model: model))
-            }
-
-            var paths = FetchDescriptor<ProjectDailyAggregate>(
-                predicate: #Predicate<ProjectDailyAggregate> { $0.date == date })
-            paths.propertiesToFetch = [\.projectPath]
-            for path in try context.fetch(paths).map(\.projectPath) {
-                let pair = ProjectDatePair(projectPath: path, date: date)
-                if isToday { openProjects.insert(pair) } else { closedProjects.insert(pair) }
-            }
+        var open: (daily: Set<DateModelPair>, project: Set<ProjectDatePair>,
+                   hourly: Set<DateHourModelTriple>)?
+        if now >= liveOpenReadAt {
+            open = try openBuckets(now: now)
+            liveOpenReadAt = now.addingTimeInterval(60)
         }
 
-        let dayStart = calendar.startOfDay(for: now)
-        let pairs = liveDailyPlanner.pick(
-            open: openPairs, justClosed: closedPairs, now: now, dayStart: dayStart)
-        let projects = liveProjectPlanner.pick(
-            open: openProjects, justClosed: closedProjects, now: now, dayStart: dayStart)
-        guard !pairs.isEmpty || !projects.isEmpty || !triples.isEmpty else { return }
+        let pairs = liveDaily.pick(open: open?.daily, now: now)
+        let projects = liveProject.pick(open: open?.project, now: now)
+        let triples = liveHourly.pick(open: open?.hourly, now: now)
+        if !pairs.isEmpty || !projects.isEmpty || !triples.isEmpty {
+            // So `dailyR` / `hourR` / `projR` on this cycle's line can be read
+            // against what was rebuilt from samples on purpose.
+            let queued = liveDaily.closed.count + liveProject.closed.count + liveHourly.closed.count
+            log("verify: rebuilding daily \(pairs.count) project \(projects.count) hourly \(triples.count)"
+                + (queued > 0 ? " · \(queued) closed still queued" : ""))
+            persister.addDirtyPairs(pairs)
+            persister.addDirtyProjectDates(projects)
+            persister.addDirtyHourBuckets(triples)
+        }
 
-        // One line per pass, so `dailyR` / `projR` on the cycle line below it
-        // can be read against how many day-long buckets it rebuilt.
-        let queued = liveDailyPlanner.closing.count + liveProjectPlanner.closing.count
-        log("live rebuild: daily \(pairs.count)/\(openPairs.count + closedPairs.count)"
-            + " project \(projects.count)/\(openProjects.count + closedProjects.count)"
-            + " hourly \(triples.count)" + (queued > 0 ? " · \(queued) closed still queued" : ""))
-        persister.addDirtyPairs(pairs)
-        persister.addDirtyHourBuckets(triples)
-        persister.addDirtyProjectDates(projects)
+        if let settled = liveSettlePending,
+           liveDaily.closed.isEmpty, liveProject.closed.isEmpty, liveHourly.closed.isEmpty {
+            try writeMeta(ClaudeCodeMetaKey.liveBucketsSettledThrough,
+                          value: String(settled.timeIntervalSince1970))
+            liveSettlePending = nil
+        }
+    }
+
+    /// Queue every hour and day bucket that closed since the watermark.
+    ///
+    /// The watermark is the start of the hour up to which every closed bucket
+    /// has been rebuilt after its close. It is persisted, so a close that
+    /// happened while Pacer was not running is caught up on the next launch,
+    /// and it moves only once everything queued from it is done, so quitting
+    /// mid-way loses nothing: the next launch queues the same closes again.
+    private func enqueueClosedBuckets(now: Date) throws {
+        guard liveSettlePending == nil else { return }
+        let calendar = Calendar.current
+        guard let hourStart = calendar.dateInterval(of: .hour, for: now)?.start else { return }
+        guard let raw = try fetchMeta(ClaudeCodeMetaKey.liveBucketsSettledThrough),
+              let seconds = TimeInterval(raw) else {
+            // First run: start from here. Rebuilding all of history is not
+            // this check's job (`make verify-data` and the integrity walk
+            // cover it), and cold start is the most expensive cycle already.
+            try writeMeta(ClaudeCodeMetaKey.liveBucketsSettledThrough,
+                          value: String(hourStart.timeIntervalSince1970))
+            return
+        }
+        let settled = Date(timeIntervalSince1970: seconds)
+        guard settled < hourStart else { return }
+
+        let tz = calendar.timeZone
+        let fromDate = TokenSample.formatDate(settled, timeZone: tz)
+        let fromHour = calendar.component(.hour, from: settled)
+        let toDate = TokenSample.formatDate(hourStart, timeZone: tz)
+        let toHour = calendar.component(.hour, from: hourStart)
+        // (date, hour) in [settled, hourStart): the hours that closed. Local
+        // date strings and hours compare in time order.
+        func closedHour(_ date: String, _ hour: Int) -> Bool {
+            (date, hour) >= (fromDate, fromHour) && (date, hour) < (toDate, toHour)
+        }
+
+        var hours = FetchDescriptor<HourlyAggregate>(predicate: #Predicate<HourlyAggregate> {
+            $0.date >= fromDate && $0.date <= toDate })
+        hours.propertiesToFetch = [\.date, \.hour, \.model]
+        let triples = try context.fetch(hours)
+            .filter { closedHour($0.date, $0.hour) }
+            .map { DateHourModelTriple(date: $0.date, hour: $0.hour, model: $0.model) }
+
+        // A day closed in the range if it began at or after the watermark's
+        // day and is not today.
+        var days = FetchDescriptor<DailyAggregate>(predicate: #Predicate<DailyAggregate> {
+            $0.date >= fromDate && $0.date < toDate })
+        days.propertiesToFetch = [\.date, \.model]
+        let pairs = try context.fetch(days).map { DateModelPair(date: $0.date, model: $0.model) }
+        var projects = FetchDescriptor<ProjectDailyAggregate>(
+            predicate: #Predicate<ProjectDailyAggregate> { $0.date >= fromDate && $0.date < toDate })
+        projects.propertiesToFetch = [\.date, \.projectPath]
+        let projectPairs = try context.fetch(projects)
+            .map { ProjectDatePair(projectPath: $0.projectPath, date: $0.date) }
+
+        liveHourly.enqueueClosed(Set(triples))
+        liveDaily.enqueueClosed(Set(pairs))
+        liveProject.enqueueClosed(Set(projectPairs))
+        liveSettlePending = hourStart
+        if pairs.count + projectPairs.count + triples.count > 0 {
+            log("verify: \(triples.count) hour and \(pairs.count + projectPairs.count) day bucket(s) closed since \(fromDate) \(fromHour):00")
+        }
+    }
+
+    /// Today's day-long buckets and the current hour's, for the sweep.
+    private func openBuckets(now: Date) throws
+        -> (daily: Set<DateModelPair>, project: Set<ProjectDatePair>, hourly: Set<DateHourModelTriple>) {
+        let calendar = Calendar.current
+        let date = TokenSample.formatDate(now, timeZone: calendar.timeZone)
+        let hour = calendar.component(.hour, from: now)
+
+        var models = FetchDescriptor<DailyAggregate>(
+            predicate: #Predicate<DailyAggregate> { $0.date == date })
+        models.propertiesToFetch = [\.model]
+        let modelNames = try context.fetch(models).map(\.model)
+
+        var hourRows = FetchDescriptor<HourlyAggregate>(
+            predicate: #Predicate<HourlyAggregate> { $0.date == date && $0.hour == hour })
+        hourRows.propertiesToFetch = [\.model]
+
+        var paths = FetchDescriptor<ProjectDailyAggregate>(
+            predicate: #Predicate<ProjectDailyAggregate> { $0.date == date })
+        paths.propertiesToFetch = [\.projectPath]
+
+        return (Set(modelNames.map { DateModelPair(date: date, model: $0) }),
+                Set(try context.fetch(paths).map { ProjectDatePair(projectPath: $0.projectPath, date: date) }),
+                Set(try context.fetch(hourRows).map { DateHourModelTriple(date: date, hour: hour, model: $0.model) }))
     }
 
     private func integrityWalkIsDue() throws -> Bool {

@@ -46,9 +46,11 @@ public enum ClaudeCodeMetaKey {
     /// this is what keeps the integrity checks — missing aggregates, stranded
     /// hourly rows — running on a store that ingests nothing for a while.
     public static let lastIntegrityWalkAt = "last_integrity_walk_at"
-    /// When the still-open rollup buckets were last rebuilt from their
-    /// samples rather than trusted. See `ScanCoordinator.rebuildLiveBuckets`.
-    public static let lastLiveBucketRebuildAt = "last_live_bucket_rebuild_at"
+    /// The start of the hour up to which every closed hour and day bucket
+    /// has been rebuilt from its samples after it closed. Persisted so closes
+    /// while Pacer was not running are caught up on the next launch. See
+    /// `ScanCoordinator.enqueueClosedBuckets`.
+    public static let liveBucketsSettledThrough = "live_buckets_settled_through"
     /// Result of the app's own archive-vs-store comparison, written by
     /// `ArchiveSync`. `make verify-data` reads this so it can report on the
     /// archive WITHOUT holding DuckDB's exclusive lock — i.e. without needing
