@@ -48,7 +48,7 @@ fi
 
 # One instant and time zone for every run, so a PR with no UI change produces
 # no screenshot commit (#154). Both come from ScreenshotClock, the only copy;
-# bin/fixed-clock.c pins the app's wall clock to the instant, TZ the zone.
+# bin/fixed-clock.c holds the app's wall clock at the instant, TZ the zone.
 CLOCK_SRC=$ROOT/PacerCore/Sources/PacerCore/Util/PacerClock.swift
 FIXED_NOW=$(sed -n 's/.*fixedNowUnix: TimeInterval = \([0-9_]*\).*/\1/p' "$CLOCK_SRC" | tr -d _)
 FIXED_TZ=$(sed -n 's/.*timeZoneID = "\(.*\)".*/\1/p' "$CLOCK_SRC")
@@ -76,8 +76,20 @@ PACER_SCREENSHOT_MODE=1 \
 PACER_SCREENSHOT_DIR="$OUT" \
 PACER_SCREENSHOT_CAPTURE_DIR="$REQ" \
 PACER_SCREENSHOT_LOCAL_APPROVED=$LOCAL \
-    "$APP"
+    "$APP" & APP_PID=$!
+# A watchdog, because the app's wall clock stands still (fixed-clock.c): its
+# own waits run on the monotonic clock, but anything that waits for a wall
+# time to arrive never would. A hang fails the run in minutes rather than
+# holding a CI runner for the job's whole hour.
+(
+    trap 'kill $NAP 2>/dev/null; exit 0' TERM
+    sleep 900 & NAP=$!
+    wait $NAP
+    kill $APP_PID 2>/dev/null && echo "ERROR: screenshot run hung; killed after 15 min"
+) & WATCHDOG=$!
+wait $APP_PID
 rc=$?
+kill $WATCHDOG 2>/dev/null
 (( rc == 0 )) || { echo "ERROR: screenshot run failed (exit $rc) — see the lines above"; exit $rc; }
 
 # widgets.png: the real widget extension, rendered by WidgetKit Simulator over

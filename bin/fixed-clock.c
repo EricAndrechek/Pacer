@@ -12,9 +12,14 @@
 // because `make verify` builds without signing, so without hardened runtime.
 // Never linked into anything that ships.
 //
-// PACER_FIXED_NOW (Unix seconds) is where the clock starts; from there it
-// advances in real time, so timers, sleeps and timeouts behave normally. The
-// time zone is pinned separately, with TZ.
+// The wall clock reads PACER_FIXED_NOW (Unix seconds) for the whole run. It
+// does not advance: a run that let it advance drew each scene however many
+// seconds after the seed the scene happened to take ("read 11s ago" in one
+// run, "15s ago" in the next), and moved the pace readings and the charts'
+// "now" with it. Timers, sleeps and dispatch deadlines run on the monotonic
+// clocks, which are left alone; waits written against the wall clock would
+// never end, so screenshot mode keeps its deadlines on the monotonic clock.
+// The time zone is pinned separately, with TZ.
 //
 // Build: clang -dynamiclib -O2 -framework CoreFoundation -o libfixedclock.dylib fixed-clock.c
 
@@ -24,10 +29,10 @@
 #include <stdint.h>
 #include <CoreFoundation/CoreFoundation.h>
 
-static double offset_s;   // pinned minus real, fixed at first use
+static double pinned_s;
 static int ready;
 
-// Calls from this image are not interposed, so these reach the real clock.
+// Calls from this image are not interposed, so this reaches the real clock.
 static double real_unix(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -37,10 +42,10 @@ static double real_unix(void) {
 static double pinned_unix(void) {
     if (!ready) {
         const char *v = getenv("PACER_FIXED_NOW");
-        offset_s = v ? atof(v) - real_unix() : 0;
+        pinned_s = v ? atof(v) : real_unix();
         ready = 1;
     }
-    return real_unix() + offset_s;
+    return pinned_s;
 }
 
 static int pinned_gettimeofday(struct timeval *tv, void *tz) {

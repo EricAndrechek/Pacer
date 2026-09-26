@@ -20,7 +20,7 @@ struct ScreenshotClockTests {
     }
 
     @Test func aRunOnThePinnedClockPasses() {
-        // A run advances from the pinned instant in real time.
+        // The check allows the hour a run could take, frozen clock or not.
         let tenMinutesIn = ScreenshotClock.fixedNow.addingTimeInterval(600)
         #expect(ScreenshotClock.problem(now: tenMinutesIn, timeZone: zone) == nil)
     }

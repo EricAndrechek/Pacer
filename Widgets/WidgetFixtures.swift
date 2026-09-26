@@ -265,6 +265,15 @@ struct ReadmeShotProvider: TimelineProvider {
 struct ReadmeShotView: View {
     let id: String
     var body: some View {
+        shot
+            // `Text(date, style: .time)` formats in SwiftUI's environment time
+            // zone, which WidgetKit's host supplies. `pinClock` pins the
+            // process default, which that never reads: the session widget's
+            // start time came out in the runner's UTC (#154).
+            .environment(\.timeZone, TimeZone(identifier: ScreenshotClock.timeZoneID) ?? .current)
+    }
+
+    @ViewBuilder private var shot: some View {
         switch id {
         case "today": TodayCostWidgetView(entry: WidgetFixtures.todayCost)
         case "pace-gauges": PaceGaugesWidgetView(entry: WidgetFixtures.paceGauges)

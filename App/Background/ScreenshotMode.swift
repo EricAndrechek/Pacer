@@ -1255,8 +1255,8 @@ enum ScreenshotMode {
                 return
             }
         }
-        let attachDeadline = Date().addingTimeInterval(5)
-        while Date() < attachDeadline, window.toolbar == nil || window.title == "Pacer" {
+        let attachDeadline = Deadline(seconds: 5)
+        while !attachDeadline.passed, window.toolbar == nil || window.title == "Pacer" {
             await settle(seconds: 0.1)
         }
         // As long as the view-snapshot path waits: SwiftUI mounts, @Query
@@ -1304,8 +1304,8 @@ enum ScreenshotMode {
             // drop the scene.
             try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         }
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline,
+        let deadline = Deadline(seconds: 30)
+        while !deadline.passed,
               !FileManager.default.fileExists(atPath: png.path),
               !FileManager.default.fileExists(atPath: failed.path) {
             await settle(seconds: 0.1)
@@ -1455,10 +1455,10 @@ enum ScreenshotMode {
         // Opening the menu runs a tracking loop that does not return until it
         // closes, so the close is scheduled inside that loop: as soon as the
         // helper has the picture, or after a deadline.
-        let deadline = Date().addingTimeInterval(25)
+        let deadline = Deadline(seconds: 25)
         let closer = Timer(timeInterval: 0.1, repeats: true) { timer in
             if FileManager.default.fileExists(atPath: png.path)
-                || FileManager.default.fileExists(atPath: failed.path) || Date() > deadline {
+                || FileManager.default.fileExists(atPath: failed.path) || deadline.passed {
                 menu.cancelTracking()
                 timer.invalidate()
             }
@@ -1519,8 +1519,8 @@ enum ScreenshotMode {
         body["done"] = dir.appendingPathComponent("\(name).done").path
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
         try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
+        let deadline = Deadline(seconds: timeout)
+        while !deadline.passed {
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).done").path) { return true }
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).failed").path) { return false }
             await settle(seconds: 0.1)
@@ -1610,6 +1610,16 @@ enum ScreenshotMode {
     /// SwiftUI updates and async fetches can make progress.
     private static func settle(seconds: Double) async {
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+
+    /// A timeout on the monotonic clock. The wall clock stands still for the
+    /// whole run (`ScreenshotClock`, #154), so a `Date()` deadline would never
+    /// pass and a capture that never answered would hang the run instead of
+    /// failing it.
+    private struct Deadline {
+        let end: ContinuousClock.Instant
+        init(seconds: Double) { end = .now + .milliseconds(Int(seconds * 1000)) }
+        var passed: Bool { ContinuousClock.now >= end }
     }
 
     private static func log(_ message: String) {

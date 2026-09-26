@@ -36,8 +36,8 @@ public enum ScreenshotClock {
 
     /// Why the running process is not on the pinned clock, or nil when it is.
     ///
-    /// The run advances from the pinned instant in real time (timers need a
-    /// moving clock), so "on it" means within the hour a run takes.
+    /// The app's clock stands still at the instant for the whole run; the
+    /// hour's allowance only keeps this from depending on that.
     public static func problem(now: Date = Date(), timeZone: TimeZone = .current) -> String? {
         if abs(now.timeIntervalSince(fixedNow)) > 3_600 {
             return "the clock is not pinned: it reads \(now), not \(fixedNow)"
