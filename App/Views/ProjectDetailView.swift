@@ -271,7 +271,32 @@ struct ProjectDetailView: View {
         cachedModelSlices = byModel.map { (model, v) in
             ModelSlice(model: model, tokens: v.tokens, cost: v.cost)
         }.sorted { $0.tokens > $1.tokens }
-        refreshSubprojects()
+    }
+
+    /// Changes whenever a row `refreshDerived` reads changes: a new day
+    /// (count), a new turn in today's row (tokens, cost), or a re-priced or
+    /// re-attributed row. The derived cards used to refresh on `count` alone,
+    /// so the header, daily chart and model donut stayed on the modal's
+    /// opening numbers for the rest of the day while Subprojects, refreshed
+    /// every scan, moved on beside them (#145).
+    ///
+    /// Keyed on the rows rather than the scan notification because the rows
+    /// are what `refreshDerived` reads: this fires when they change,
+    /// whenever the query picks the change up.
+    private struct AggregatesFingerprint: Equatable {
+        var count = 0
+        var tokens: Int64 = 0
+        var cost = 0.0
+    }
+
+    private var aggregatesFingerprint: AggregatesFingerprint {
+        var f = AggregatesFingerprint()
+        for r in aggregates {
+            f.count += 1
+            f.tokens += r.inputTokens + r.outputTokens + r.cacheReadTokens
+            f.cost += r.totalCostUSD
+        }
+        return f
     }
 
     /// Bucket `TokenSample`s for this project by `originalProjectPath`
@@ -479,21 +504,25 @@ struct ProjectDetailView: View {
         }
         .onAppear {
             refreshDerived()
+            refreshSubprojects()
             refreshKnownProjectPaths()
         }
-        // `aggregates.count` ticks on the FIRST sample of a new day
-        // for this project; refreshDerived() recomputes
-        // dailySeries / modelSlices / totals from the @Query result
-        // and chains into refreshSubprojects().
-        .onChange(of: aggregates.count) { _, _ in refreshDerived() }
+        // Totals, daily series and model slices follow the rows they are
+        // built from. See `aggregatesFingerprint`.
+        .onChange(of: aggregatesFingerprint) { _, _ in refreshDerived() }
+        // The scope picks which table `aggregates` reads (so the fingerprint
+        // follows it) and filters Subprojects, which needs telling. It only
+        // refreshed on a scope switch because the switch usually changed the
+        // row count and `refreshDerived` used to chain into it.
+        .onChange(of: scope.accountId) { _, _ in refreshSubprojects() }
         // Live updates within an existing day: the scan coordinator
         // posts `pacerScanCycleDidComplete` whenever a cycle actually
         // wrote new data. Filter to cycles that touched samples or
         // re-attributed projects — rate-limit-only cycles don't
-        // change the Subprojects card. The aggregates @Query handles
-        // its own re-fetch; only Subprojects needs the explicit
-        // refresh because its source (raw TokenSample) is no longer
-        // a @Query (see refreshSubprojects).
+        // change the Subprojects card. Subprojects needs this explicit
+        // refresh because its source (raw TokenSample) is not a @Query
+        // (see refreshSubprojects); the rollup-backed cards follow
+        // `aggregatesFingerprint`.
         .onReceive(NotificationCenter.default.publisher(
             for: .pacerScanCycleDidComplete
         )) { note in
