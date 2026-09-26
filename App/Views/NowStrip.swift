@@ -747,16 +747,23 @@ struct StripTile<Header: View, Content: View>: View {
                 )
         )
 
-        if let onTap {
-            Button(action: onTap) {
-                surface.contentShape(Rectangle())
+        Group {
+            if let onTap {
+                Button(action: onTap) {
+                    surface.contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering = $0 }
+                .modifier(OptionalTileHelp(text: tapHelp))
+            } else {
+                surface
             }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .modifier(OptionalTileHelp(text: tapHelp))
-        } else {
-            surface
         }
+        // The Now tile loses its tap when the running session goes stale. If
+        // the pointer was on it then, the `Button` carrying `.onHover` goes
+        // away without an exit, `hovering` stays true, and the next session's
+        // tile came back highlighted with nothing over it (#140).
+        .onChange(of: onTap == nil) { _, noTap in if noTap { hovering = false } }
     }
 }
 

@@ -898,18 +898,20 @@ struct MenuStatusContent: View {
 
             if let pct = window.usedPercentage, let resets = window.resetsAt {
                 let cycle = DisplayCycle.resolve(resetsAt: resets, duration: window.duration)
+                // One gauge for both states, dimmed while awaiting. As two
+                // branches it was a new view at every cycle reset, the one
+                // moment its fill animation is worth seeing (#140).
+                CircularGauge(
+                    percentage: pct,
+                    lineWidth: 3,
+                    labelFont: .system(size: 8, weight: .bold, design: .rounded)
+                )
+                .frame(width: 22, height: 22)
+                .opacity(cycle.isAwaiting ? 0.4 : 1)
                 if cycle.isAwaiting {
                     // Stale cycle (Pacer hasn't polled a fresh one yet).
                     // Show a muted "awaiting" line — no pace math from
                     // prior-cycle numbers.
-                    CircularGauge(
-                        percentage: pct,
-                        lineWidth: 3,
-                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
-                    )
-                    .frame(width: 22, height: 22)
-                    .opacity(0.4)
-
                     Text("—")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.tertiary)
@@ -923,13 +925,6 @@ struct MenuStatusContent: View {
                 } else {
                     let pacePct = cycle.paceFraction * 100
                     let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
-
-                    CircularGauge(
-                        percentage: pct,
-                        lineWidth: 3,
-                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
-                    )
-                    .frame(width: 22, height: 22)
 
                     Text("\(Int(pct.rounded()))%")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
