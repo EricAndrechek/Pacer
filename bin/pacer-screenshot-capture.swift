@@ -144,7 +144,18 @@ func captureMenuBar(_ request: Request) async throws {
     guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
         throw fail("menubar: no display holds \(rect)")
     }
-    let filter = SCContentFilter(display: display, excludingWindows: [])
+    // Only Pacer's own item in the bar. The rest belong to other processes
+    // (Spotlight, Control Center, the system clock) and draw what the
+    // screenshot run's pinned clock cannot reach: the runner's real date,
+    // and the screen-recording dot this very capture turns on, in some runs
+    // and not others (#154). Left out, the bar behind them shows instead.
+    let barBottom = display.frame.minY + NSStatusBar.system.thickness + 1
+    let others = content.windows.filter { window in
+        window.frame.minY >= display.frame.minY && window.frame.maxY <= barBottom
+            && window.windowLayer >= Int(CGWindowLevelForKey(.statusWindow))
+            && window.owningApplication?.bundleIdentifier != "com.ericandrechek.pacer"
+    }
+    let filter = SCContentFilter(display: display, excludingWindows: others)
     let config = SCStreamConfiguration()
     config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
     let scale = Double(filter.pointPixelScale)
