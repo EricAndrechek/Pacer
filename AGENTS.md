@@ -219,6 +219,12 @@ biggest day.
 
 It is **not** `make screenshots`. That one seeds synthetic data because its
 output ships in the README; this one shows what the user is actually seeing.
+`make screenshots` also draws at one pinned instant and time zone
+(`ScreenshotClock`: the app's clock is pinned from outside by
+`bin/fixed-clock.c`, the widget extension's through `PacerClock`), so a PR
+that changes no UI gets no screenshot commit. If one does, something reads
+the clock around the pin: a widget view calling `Date()` instead of
+`PacerClock.now` is the usual way (#154).
 
 This is also the *only* sanctioned way to look at the UI. Rendering off-screen
 is not a convenience over driving the real window — driving the real window is

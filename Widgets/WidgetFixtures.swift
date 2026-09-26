@@ -28,7 +28,23 @@ enum WidgetFixtures {
         ("pace-gauges-scoped", .systemLarge),
     ]
 
-    private static let now = Date()
+    /// The README's pinned instant, not the runner's clock: the fixtures'
+    /// reset times, session start and chart days are drawn from it, so a run
+    /// at any hour draws the same widgets (#154). See `pinClock`.
+    private static let now = ScreenshotClock.fixedNow
+
+    /// Put this process on the README's clock and time zone.
+    ///
+    /// The widget extension is launched by WidgetKit, so the environment the
+    /// app's screenshot run is pinned with never reaches it. The views read
+    /// "now" through `PacerClock` and format in the default time zone, and
+    /// this sets both, once, at launch. Fixture builds only.
+    static func pinClock() {
+        PacerClock.pinned = ScreenshotClock.fixedNow
+        if let zone = TimeZone(identifier: ScreenshotClock.timeZoneID) {
+            NSTimeZone.default = zone
+        }
+    }
     static let opus = "claude-opus-4-7"
 
     static var todayCost: TodayCostEntry {
@@ -235,12 +251,12 @@ struct ReadmeShot6: ReadmeShotWidget { static let index = 6 }
 struct ReadmeShotEntry: TimelineEntry { let date: Date }
 
 struct ReadmeShotProvider: TimelineProvider {
-    func placeholder(in context: Context) -> ReadmeShotEntry { ReadmeShotEntry(date: Date()) }
+    func placeholder(in context: Context) -> ReadmeShotEntry { ReadmeShotEntry(date: ScreenshotClock.fixedNow) }
     func getSnapshot(in context: Context, completion: @escaping (ReadmeShotEntry) -> Void) {
-        completion(ReadmeShotEntry(date: Date()))
+        completion(ReadmeShotEntry(date: ScreenshotClock.fixedNow))
     }
     func getTimeline(in context: Context, completion: @escaping (Timeline<ReadmeShotEntry>) -> Void) {
-        completion(Timeline(entries: [ReadmeShotEntry(date: Date())], policy: .never))
+        completion(Timeline(entries: [ReadmeShotEntry(date: ScreenshotClock.fixedNow)], policy: .never))
     }
 }
 

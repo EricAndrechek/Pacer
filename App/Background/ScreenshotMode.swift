@@ -350,6 +350,11 @@ enum ScreenshotMode {
         let ctx = ModelContext(container)
         var problems: [String] = []
 
+        // The clock is part of the fixture: the seeds and every label are
+        // drawn from it. Off it, the images vary with the hour of the run and
+        // every PR commits a new set that changed nothing (#154).
+        if let clock = ScreenshotClock.problem() { problems.append(clock) }
+
         let accounts = (try? ctx.fetch(FetchDescriptor<Account>())) ?? []
         let active = accounts.filter(\.isActive)
         if accounts.count > 1, active.count != 1 {

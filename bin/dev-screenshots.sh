@@ -46,6 +46,19 @@ if [[ ! -x $HELPER || $ROOT/bin/pacer-screenshot-capture.swift -nt $HELPER ]]; t
         "$ROOT/bin/pacer-screenshot-capture.swift" -o "$HELPER" || exit 1
 fi
 
+# One instant and time zone for every run, so a PR with no UI change produces
+# no screenshot commit (#154). Both come from ScreenshotClock, the only copy;
+# bin/fixed-clock.c pins the app's wall clock to the instant, TZ the zone.
+CLOCK_SRC=$ROOT/PacerCore/Sources/PacerCore/Util/PacerClock.swift
+FIXED_NOW=$(sed -n 's/.*fixedNowUnix: TimeInterval = \([0-9_]*\).*/\1/p' "$CLOCK_SRC" | tr -d _)
+FIXED_TZ=$(sed -n 's/.*timeZoneID = "\(.*\)".*/\1/p' "$CLOCK_SRC")
+[[ -n $FIXED_NOW && -n $FIXED_TZ ]] || { echo "ERROR: could not read ScreenshotClock from $CLOCK_SRC"; exit 1; }
+CLOCK_LIB=$TOOLS/libfixedclock.dylib
+if [[ ! -f $CLOCK_LIB || $ROOT/bin/fixed-clock.c -nt $CLOCK_LIB ]]; then
+    clang -dynamiclib -O2 -framework CoreFoundation \
+        -o "$CLOCK_LIB" "$ROOT/bin/fixed-clock.c" || exit 1
+fi
+
 REQ=$(mktemp -d)
 "$HELPER" "$REQ" ${HELPER_ARGS[@]} & HELPER_PID=$!
 trap 'touch "$REQ/stop"; wait $HELPER_PID 2>/dev/null; rm -rf "$REQ"' EXIT
@@ -56,6 +69,9 @@ for _ in $(seq 1 300); do
 done
 [[ -f $REQ/ready ]] || { echo "ERROR: capture helper never became ready"; exit 1; }
 
+DYLD_INSERT_LIBRARIES="$CLOCK_LIB" \
+PACER_FIXED_NOW="$FIXED_NOW" \
+TZ="$FIXED_TZ" \
 PACER_SCREENSHOT_MODE=1 \
 PACER_SCREENSHOT_DIR="$OUT" \
 PACER_SCREENSHOT_CAPTURE_DIR="$REQ" \

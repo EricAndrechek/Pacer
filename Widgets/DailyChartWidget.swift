@@ -28,7 +28,7 @@ struct DailyChartEntry: TimelineEntry {
         let date: String
         let cost: Double
         var id: String { date }
-        var isToday: Bool { date == TokenSample.formatDate(Date()) }
+        var isToday: Bool { date == TokenSample.formatDate(PacerClock.now) }
     }
 }
 
