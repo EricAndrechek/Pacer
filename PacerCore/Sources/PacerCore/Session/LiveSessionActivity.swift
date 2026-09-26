@@ -21,9 +21,8 @@ public enum LiveSessionActivity: Sendable {
     public static let recentThreshold: TimeInterval = 3600
 
     /// Classify based on the wall-clock age of the last sample. `now`
-    /// is injectable for tests; production callers should pass `Date()`
-    /// or omit (defaults to `Date()`).
-    public static func from(lastSeen: Date, now: Date = Date()) -> LiveSessionActivity {
+    /// is injectable for tests; production callers omit it (`PacerClock`).
+    public static func from(lastSeen: Date, now: Date = PacerClock.now) -> LiveSessionActivity {
         let age = now.timeIntervalSince(lastSeen)
         if age <= activeThreshold { return .active }
         if age <= recentThreshold { return .recent }

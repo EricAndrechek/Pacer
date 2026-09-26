@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 
 /// Locale-aware time formatting helpers used by chart axes and reset
 /// captions across the dashboard, MenuBarExtra, and widgets.
@@ -87,12 +88,13 @@ public func pacerRelative(
     _ date: Date,
     style: RelativeDateTimeFormatter.UnitsStyle = .abbreviated
 ) -> String {
-    let interval = date.timeIntervalSinceNow
+    let now = PacerClock.now
+    let interval = date.timeIntervalSince(now)
     if abs(interval) < 5 {
         return interval >= 0 ? "now" : "just now"
     }
     return Cached.relativeFormatter(for: style)
-        .localizedString(for: date, relativeTo: Date())
+        .localizedString(for: date, relativeTo: now)
 }
 
 /// Absolute timestamp companion to `pacerRelative`, for the `.help(…)`

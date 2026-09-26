@@ -144,7 +144,35 @@ func captureMenuBar(_ request: Request) async throws {
     guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
         throw fail("menubar: no display holds \(rect)")
     }
-    let filter = SCContentFilter(display: display, excludingWindows: [])
+    // Only Pacer's own item in the bar. The rest belong to other processes
+    // (Spotlight, Control Center, the system clock) and draw what the
+    // screenshot run's pinned clock cannot reach: the runner's real date,
+    // and the screen-recording dot this very capture turns on, in some runs
+    // and not others (#154). Left out, the bar behind them shows instead.
+    //
+    // "In the bar" is a thin window at the top of the display. Not
+    // `NSStatusBar.thickness` tall: on macOS 26 the bar is taller than its
+    // items, and a filter sized to the items excluded nothing.
+    let statusLevel = Int(CGWindowLevelForKey(.statusWindow))
+    let inBar = content.windows.filter { window in
+        window.frame.minY >= display.frame.minY - 1
+            && window.frame.minY < display.frame.minY + 60
+            && window.frame.height <= 60
+    }
+    for window in inBar {
+        log("menubar: bar window \(window.owningApplication?.bundleIdentifier ?? "-")"
+            + " '\(window.title ?? "")' layer \(window.windowLayer) \(window.frame)")
+    }
+    // Pacer's item by its window title, not its owner: on macOS 26 Control
+    // Center hosts every status item, Pacer's included, and a filter on the
+    // owning app left Pacer's own item out with the rest.
+    let others = inBar.filter {
+        $0.windowLayer >= statusLevel
+            && $0.owningApplication?.bundleIdentifier != "com.ericandrechek.pacer"
+            && !($0.title ?? "").hasPrefix("com.ericandrechek.pacer")
+    }
+    log("menubar: leaving out \(others.count) of \(inBar.count) bar window(s)")
+    let filter = SCContentFilter(display: display, excludingWindows: others)
     let config = SCStreamConfiguration()
     config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
     let scale = Double(filter.pointPixelScale)
