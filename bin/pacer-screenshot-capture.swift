@@ -163,9 +163,13 @@ func captureMenuBar(_ request: Request) async throws {
         log("menubar: bar window \(window.owningApplication?.bundleIdentifier ?? "-")"
             + " '\(window.title ?? "")' layer \(window.windowLayer) \(window.frame)")
     }
+    // Pacer's item by its window title, not its owner: on macOS 26 Control
+    // Center hosts every status item, Pacer's included, and a filter on the
+    // owning app left Pacer's own item out with the rest.
     let others = inBar.filter {
         $0.windowLayer >= statusLevel
             && $0.owningApplication?.bundleIdentifier != "com.ericandrechek.pacer"
+            && !($0.title ?? "").hasPrefix("com.ericandrechek.pacer")
     }
     log("menubar: leaving out \(others.count) of \(inBar.count) bar window(s)")
     let filter = SCContentFilter(display: display, excludingWindows: others)
