@@ -182,17 +182,25 @@ struct BulkMergeSheet: View {
             refreshPathInfo()
             autoPickCanonicalIfNeeded()
         }
-        // SwiftData @Query collections are arrays; comparing `.count`
-        // is a cheap stable-ish trigger that fires when the scan
-        // committed new data while the sheet is open. Recomputing
-        // pathInfo on `knownPaths` change too — the caller might
-        // hand us a different snapshot if the user filtered or
-        // switched range underneath us.
-        .onChange(of: aggregates.count) { _, _ in refreshPathInfo() }
+        // Keyed on what `pathInfo` is built from, not the row count: a scan
+        // that updates an existing (project, day) row moves "last active"
+        // and the session count without adding a row, and the count-keyed
+        // trigger left both stale while the sheet stayed open. Recomputing
+        // on `knownPaths` too — the caller might hand us a different
+        // snapshot if the user filtered or switched range underneath us.
+        .onChange(of: aggregatesFingerprint) { _, _ in refreshPathInfo() }
         .onChange(of: knownPaths) { _, _ in refreshPathInfo() }
     }
 
     // MARK: - Stats
+
+    /// Changes whenever a row `refreshPathInfo` reads changes: one pass over
+    /// the rows this sheet already holds.
+    private var aggregatesFingerprint: [Double] {
+        [Double(aggregates.count),
+         Double(aggregates.reduce(0) { $0 + $1.sessionCount }),
+         aggregates.map(\.lastActive).max()?.timeIntervalSinceReferenceDate ?? 0]
+    }
 
     /// Bucket `aggregates` by path once, then layer in a filesystem
     /// `fileExists` check per path. The fs check is sync and fast

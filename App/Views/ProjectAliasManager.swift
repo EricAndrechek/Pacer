@@ -73,6 +73,11 @@ struct ProjectAliasManager: View {
     }
 
     var body: some View {
+        // Presentation state, read here so setting it redraws this view and
+        // what it presents opens at once. Passed only as a binding, nothing
+        // read it: the collections sheet opened only after an unrelated
+        // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (showingEditor?.id, bulkMergeDraft?.id)
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().opacity(0.4)
@@ -247,8 +252,15 @@ struct ProjectAliasManager: View {
 
     // MARK: - Auto-suggest
 
+    /// Filtered against the live aliases, not only the set the scan was
+    /// given: suggestions load once per sheet, so one for a path the user has
+    /// since aliased stayed listed, and accepting it silently re-pointed the
+    /// alias they had just made.
     private var suggestionsVisible: [ProjectGitOriginScanner.Suggestion] {
-        suggestions.filter { !dismissedSuggestionKeys.contains($0.id) }
+        let aliased = Set(aliases.map(\.sourcePath))
+        return suggestions.filter {
+            !dismissedSuggestionKeys.contains($0.id) && !aliased.contains($0.suggestedSource)
+        }
     }
 
     private var suggestionList: some View {
@@ -258,7 +270,7 @@ struct ProjectAliasManager: View {
                 SuggestionRow(
                     suggestion: suggestion,
                     onAccept: {
-                        save(
+                        lastError = save(
                             source: suggestion.suggestedSource,
                             canonical: suggestion.suggestedCanonical,
                             replacing: nil
@@ -293,7 +305,14 @@ struct ProjectAliasManager: View {
 
     // MARK: - Mutation
 
-    private func save(source: String, canonical: String, replacing: String?) {
+    /// Save one alias, closing the editor on success.
+    ///
+    /// - Returns: the message to show when it could not be saved. The caller
+    ///   shows it where the user is looking: the editor sheet shows its own,
+    ///   because this sheet's error line sits underneath it, so a rejected
+    ///   Save (a loop with an existing alias) looked like a button that did
+    ///   nothing.
+    private func save(source: String, canonical: String, replacing: String?) -> String? {
         let manager = ProjectPathAliasManager(context: modelContext)
         do {
             if let replacing, replacing != source {
@@ -303,10 +322,11 @@ struct ProjectAliasManager: View {
             lastError = nil
             showingEditor = nil
             NotificationCenter.default.post(name: .pacerRequestImmediateScan, object: nil)
+            return nil
         } catch let error as ProjectPathAliasManager.AliasError {
-            lastError = error.userMessage
+            return error.userMessage
         } catch {
-            lastError = error.localizedDescription
+            return error.localizedDescription
         }
     }
 
@@ -442,11 +462,13 @@ struct AliasDraft: Identifiable {
 struct AliasEditorSheet: View {
     let draft: AliasDraft
     let knownPaths: [String]
-    let onSave: (_ source: String, _ canonical: String) -> Void
+    /// Returns the reason the alias could not be saved, or nil once it has.
+    let onSave: (_ source: String, _ canonical: String) -> String?
     @Environment(\.dismiss) private var dismiss
 
     @State private var sourcePath: String = ""
     @State private var canonicalPath: String = ""
+    @State private var saveError: String?
 
     private var title: String {
         switch draft.mode {
@@ -506,11 +528,16 @@ struct AliasEditorSheet: View {
                     .help("Pick from known projects")
                 }
             }
+            if let saveError {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                 Button("Save") {
-                    onSave(
+                    saveError = onSave(
                         sourcePath.trimmingCharacters(in: .whitespacesAndNewlines),
                         canonicalPath.trimmingCharacters(in: .whitespacesAndNewlines)
                     )

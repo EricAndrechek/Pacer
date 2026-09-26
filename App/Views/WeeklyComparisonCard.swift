@@ -138,6 +138,8 @@ struct WeeklyComparisonCard: View {
     private enum WeekTotalsKeyPath { case thisWeek, lastWeek }
 
     var body: some View {
+        // Read here as well as inside `PacerCard`'s stored closure (#140).
+        let _ = (cachedThisWeek, cachedLastWeek)
         PacerCard("This week") {
             if cachedThisWeek.cost == 0 && cachedLastWeek.cost == 0 {
                 Text("No usage in the last 14 days. Once Pacer has data for both this week and the prior week, comparisons appear here.")
@@ -149,6 +151,10 @@ struct WeeklyComparisonCard: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is an input to the cache like the data is: without this
+        // the card kept the previous account after a switch until a scan
+        // ingested something, which on an idle machine may be never (#141).
+        .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
 
     @ViewBuilder

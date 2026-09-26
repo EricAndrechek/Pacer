@@ -844,6 +844,32 @@ two writes in the same second. A notification posted only for the active
 account misses the others. `RateLimitWriteSignal` is the rate-limit one; the
 view must read it in `body`.
 
+### The clock is an input too
+
+Anything computed from `Date()` in `body` is only as fresh as the last redraw:
+"3m ago", "resets in 2 hr", a "live" chip, the roll into "awaiting a new
+cycle". On an idle machine that can be ten minutes (one poll), or never.
+Give it a tick: `TimelineView(.everyMinute)` around the text, a minute
+`@State` the body reads, or a trigger that fires when the user looks (the
+menu dropdown re-reads on every open). Pass the tick's date into a child
+rather than having it call `Date()`, or an unchanged child is skipped.
+
+### Long-lived hosts key on every input their `init` captures
+
+The menu bar's views are built once and kept, so a `@Query` predicate built
+in `init` keeps whatever it captured. `MenuBarKeyedContent` rebuilds them on
+the day *and* the scope. A static read (`UsageScope.storedAccountId`,
+any `UserDefaults` value) is not tracked by SwiftUI: read the observable.
+
+### An async answer checks it is still wanted
+
+Engine asks queue behind refits and fetches take seconds; neither is
+cancelled by a scope switch. Capture the scope before the `await` and drop
+the result if it has changed, or an old account's answer lands last and
+stays. And a store that nothing displays (`PaceSeriesCache`) is not
+`@Observable`: read from an `init`, it redrew the whole page on every write,
+which showed nothing new and hid cards that were missing their own updates.
+
 ### Identity
 
 - `if` / `else` / `switch` branches are distinct identities, including a

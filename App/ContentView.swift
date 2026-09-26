@@ -130,6 +130,10 @@ struct ContentView: View {
     }
 
     var body: some View {
+        // Handed to the split view only as a binding, so read here too: the
+        // screenshot run's sidebar toggle would otherwise wait for an
+        // unrelated redraw (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = columnVisibility
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
         } detail: {
@@ -207,6 +211,7 @@ struct ContentView: View {
         // tab switch (a full rebuild of the new tab) was in flight.
         .onChange(of: selectionRaw) { _, new in Log.write("Navigation", "tab → \(new)") }
         .onReceive(NotificationCenter.default.publisher(for: .pacerOpenSettings)) { _ in
+            PacerAppDelegate.pendingDestination = nil
             selectionRaw = Destination.settings.rawValue
         }
         // Consume any one-shot destination queued by `PacerAppDelegate`
@@ -423,24 +428,27 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Day-rollover keying
+// MARK: - Menu-bar keying
 
-/// Rebuilds `content` whenever the local day rolls over.
+/// Rebuilds `content` whenever the local day rolls over or the account scope
+/// changes.
 ///
-/// Date-pinned `@Query` predicates (`$0.date == <today captured in
-/// init>`) freeze at the day the host view was last initialized. For
-/// long-lived hosts that never get torn down — the menu-bar status
-/// item's retained `NSHostingController`s — that means today's rows
-/// stop matching after midnight and the chips look stale until the app
-/// restarts. Reading `PacerToday.shared.key` in `body` (tracked by
-/// `@Observable`) re-evaluates this view on rollover; the changed `.id`
-/// then rebuilds `content`, re-running its `init()` against a fresh
-/// `Date()`. The main window achieves the same effect via the `.id` on
-/// `ContentView.detail`.
-struct DayKeyedContent<Content: View>: View {
+/// The menu bar's views build their `@Query` predicates in `init()`: today's
+/// date, and the scoped account. The hosts that own them — the status item's
+/// label and the dropdown's retained `NSHostingController` — are built once
+/// and kept, so those predicates stayed on the day and the scope the menu bar
+/// was built with. After midnight today's rows stopped matching. After a
+/// scope switch the Today, Tokens and model figures kept reading the old
+/// account, or read $0 when launched on "All accounts", until midnight.
+///
+/// Reading both keys in `body` (each tracked by `@Observable`) re-evaluates
+/// this view when either moves, and the changed `.id` rebuilds `content`,
+/// re-running its `init()`. The main window gets the day half from the `.id`
+/// on `ContentView.detail`, and scope from each page taking it as an input.
+struct MenuBarKeyedContent<Content: View>: View {
     @ViewBuilder var content: () -> Content
     var body: some View {
-        content().id(PacerToday.shared.key)
+        content().id("\(PacerToday.shared.key)|\(UsageScope.shared.accountId ?? "*")")
     }
 }
 
@@ -861,4 +869,8 @@ extension Notification.Name {
     /// rollup rows keep their already-recorded cost (pricing changes
     /// only affect samples added after this point).
     static let pacerPricingDidRefresh = Notification.Name("PacerPricingDidRefresh")
+
+    /// Posted on the main thread after the launch-time skill re-sync copied a
+    /// new version out, so an open Settings card re-reads its status.
+    static let pacerClaudeSkillDidSync = Notification.Name("PacerClaudeSkillDidSync")
 }

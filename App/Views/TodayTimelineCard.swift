@@ -110,6 +110,10 @@ struct TodayTimelineCard: View {
     @State private var hoverDebounce: Task<Void, Never>?
 
     var body: some View {
+        // Read here as well as inside `PacerCard`'s stored closures, so a
+        // refresh redraws this view, not only the card it hands them to
+        // (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (cached, hoveredHour)
         PacerCard("Today by hour", trailing: {
             // Hover swaps the trailing slot to "11 AM • 32K tokens · $1.20"
             // — same pattern other charts use. Falls back to the peak
@@ -150,6 +154,10 @@ struct TodayTimelineCard: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is an input to the cache like the data is: without this
+        // the card kept the previous account after a switch until a scan
+        // ingested something, which on an idle machine may be never (#141).
+        .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
 
     private var chart: some View {

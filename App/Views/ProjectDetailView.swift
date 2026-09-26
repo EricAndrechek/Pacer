@@ -335,7 +335,11 @@ struct ProjectDetailView: View {
         let container = modelContext.container
         let path = projectPath
         let since = since
-        let account = scope.isAll ? nil : scopeAccountId
+        // The live scope, not the `scopeAccountId` this copy of the view was
+        // built with: a re-run queued behind an in-flight load re-enters
+        // through the copy the load's `Task` captured, so a switch made
+        // during the load re-ran it for the old account.
+        let account = scope.accountId
         let mode = CostMode(rawValue: costModeRaw) ?? .auto
         Task {
             let rows = await Task.detached(priority: .userInitiated) {
@@ -457,6 +461,21 @@ struct ProjectDetailView: View {
     }
 
     var body: some View {
+        // Every cache the cards draw from, read here in this view's own body.
+        // The cards read them inside `PacerModalContent`'s stored content
+        // closure, and a read there may not make this view depend on them,
+        // which is the shape of the modal bug #150 fixed. Subprojects most of
+        // all: it fills in asynchronously, after the modal is on screen, and
+        // the other three now change while it's open (#145). (#140)
+        let _ = (cachedTotals, cachedDailySeries, cachedModelSlices, cachedSubprojects)
+        // Presentation state, read here so setting it redraws this view and
+        // what it presents opens at once. Passed only as a binding, nothing
+        // read it: the collections sheet opened only after an unrelated
+        // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (bulkMergeDraft?.id, mergeError)
+        // The Sessions sort reaches its table only as bindings; read here so
+        // clicking a header re-sorts at once.
+        let _ = (sessionsSortRaw, sessionsSortDescending)
         PacerModalContent(
             title: displayName,
             subtitle: projectPath,
@@ -1198,6 +1217,12 @@ private struct BudgetEditor: View {
             return
         }
         if let existing {
+            // Seeding the toggle from the stored row on appear fires its
+            // `.onChange` too. Without this every open of a budgeted project
+            // re-wrote the row and saved, and a save re-fetches every
+            // `@Query` in the app.
+            if existing.enabled == enabled, existing.dailyLimitUSD == daily,
+               existing.weeklyLimitUSD == weekly { return }
             existing.enabled = enabled
             existing.dailyLimitUSD = daily
             existing.weeklyLimitUSD = weekly

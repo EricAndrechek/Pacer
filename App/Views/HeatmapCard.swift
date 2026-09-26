@@ -405,6 +405,12 @@ struct HeatmapCard: View {
         }
         .onAppear { refreshCache() }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
+        // The scope is an input to the cache like the data is. Without this
+        // trigger the grid, its footer and which cells open a day stayed on
+        // the previous account until a scan happened to ingest something,
+        // which on an idle machine may be never. `MonthlyChartCard` below it
+        // has the same trigger for the same reason.
+        .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
 
     /// Vertical offset between the cell's top and the tooltip's

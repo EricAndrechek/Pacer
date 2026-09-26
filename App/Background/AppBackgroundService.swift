@@ -259,6 +259,10 @@ final class AppBackgroundService {
             do {
                 if try installer.refreshIfInstalled() {
                     Log.write("Skill", "re-synced \(installer.destination.lastPathComponent) to \(installer.version)")
+                    // Settings may already be showing the old version.
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: .pacerClaudeSkillDidSync, object: nil)
+                    }
                 }
             } catch {
                 Log.write("Skill", "skill refresh failed: \(error)")

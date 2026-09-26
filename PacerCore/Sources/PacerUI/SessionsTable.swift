@@ -201,10 +201,15 @@ public struct SessionsTable: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .frame(width: 70, alignment: .trailing)
-                Text(pacerRelative(row.lastSeenAt)).help(pacerRelativeExact(row.lastSeenAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 90, alignment: .trailing)
+                // Judged against the clock, so it needs one: nothing else
+                // redraws an open detail on an idle machine, and "2 min ago"
+                // stayed "2 min ago".
+                TimelineView(.everyMinute) { _ in
+                    Text(pacerRelative(row.lastSeenAt)).help(pacerRelativeExact(row.lastSeenAt))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(width: 90, alignment: .trailing)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)

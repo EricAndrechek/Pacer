@@ -34,6 +34,10 @@ struct HistoryView: View {
     }
 
     var body: some View {
+        // Read in this body and captured below, not read inside
+        // `PageScaffold`'s stored content closure. See `ProjectsView.body`
+        // (#140).
+        let range = self.range, scopeAccountId = scope.accountId
         PageScaffold(
             "History",
             subtitle: "Totals, activity, and your most expensive days.",
@@ -49,11 +53,11 @@ struct HistoryView: View {
             }
         ) {
             LifetimeSummaryCard(range: range)
-            HeatmapCard(scopeAccountId: scope.accountId) { dayKey in
+            HeatmapCard(scopeAccountId: scopeAccountId) { dayKey in
                 Log.write("Navigation", "open day \(dayKey)")
                 modalRoot = .day(date: dayKey)
             }
-            MonthlyChartCard(scopeAccountId: scope.accountId)
+            MonthlyChartCard(scopeAccountId: scopeAccountId)
             TopDaysCard(range: range) { dayKey in
                 Log.write("Navigation", "open day \(dayKey)")
                 modalRoot = .day(date: dayKey)

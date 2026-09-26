@@ -139,9 +139,16 @@ struct MenuBarLabel: View {
     /// per body evaluation.
     @Environment(\.modelContext) private var menuModelContext
 
+    /// What `reloadWindows` reads, as one key. Each part is read here so that
+    /// its change re-runs the load: the write signal, whose account's limits
+    /// (through the observable scope, so a scope or login switch counts; the
+    /// store lookup is only the cold-start fallback), and the accounts chips
+    /// are pinned to, so a chip added in Settings shows at once rather than
+    /// after the next poll.
     var reloadKey: String {
-        return "\(RateLimitWriteSignal.shared.generation):"
-            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
+        let account = menuScope.limitAccountId ?? UsageScope.limitAccountId(in: menuModelContext)
+        let pinned = Set(chipItems.compactMap(\.pinnedAccountId)).sorted().joined(separator: ",")
+        return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none"):\(pinned)"
     }
 
     @MainActor
@@ -183,8 +190,9 @@ struct MenuBarLabel: View {
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could
-        // pass it down. A scope change is picked up on the next construction,
-        // which for a menu is every time it opens.
+        // pass it down. Its host is built once and kept, so a scope change
+        // reaches this only because `MenuBarKeyedContent` rebuilds the view
+        // when the scope moves.
         let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
         _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
@@ -464,6 +472,18 @@ struct MenuBarLabel: View {
             .onChange(of: rendered.tooltip, initial: true) { _, text in
                 onTooltipChange?(text)
             }
+            // The tooltip's "resets in 2 hr" and its awaiting-a-new-cycle
+            // line are judged against the clock, and this body re-runs only
+            // on data: idle, the hover hint kept the last poll's countdown.
+            // Re-pushed each minute straight to AppKit, not through SwiftUI
+            // state, so a hover hint never re-rasterizes the status item.
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(60))
+                    if Task.isCancelled { break }
+                    onTooltipChange?(tooltip)
+                }
+            }
     }
 
     /// Equatable render payload — captures exactly what the status item
@@ -566,6 +586,18 @@ private struct MenuBarLabelContent: View, Equatable {
     }
 }
 
+/// Counts the status menu's openings, for the dropdown to read in its body.
+///
+/// Bumped by `PacerAppDelegate.menuWillOpen`, before it re-measures the
+/// dropdown. See `MenuStatusContent.body`.
+@MainActor
+@Observable
+final class StatusMenuOpening {
+    static let shared = StatusMenuOpening()
+    private(set) var count = 0
+    func willOpen() { count &+= 1 }
+}
+
 /// The "data" portion of the status-bar NSMenu — pace rows for 5h /
 /// 7d and today's spend / tokens. Hosted in a single `NSMenuItem.view`
 /// (see `PacerAppDelegate.buildStatusMenu`) so the action items
@@ -610,9 +642,13 @@ struct MenuStatusContent: View {
     }
     @State private var perAccount: [AccountWindows] = []
 
+    /// The write signal and whose limits, both read here so either change
+    /// re-runs the load. The account comes through the observable scope so a
+    /// login switch under "All accounts" counts; the store lookup is only the
+    /// cold-start fallback.
     var reloadKey: String {
-        return "\(RateLimitWriteSignal.shared.generation):"
-            + (UsageScope.limitAccountId(in: menuModelContext) ?? "none")
+        let account = menuScope.limitAccountId ?? UsageScope.limitAccountId(in: menuModelContext)
+        return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none")"
     }
 
     @MainActor
@@ -692,8 +728,9 @@ struct MenuStatusContent: View {
         let today = TokenSample.formatDate(Date())
         // Read from the shared store rather than taken as a parameter: the
         // menu bar is constructed by AppKit, not by a parent view that could
-        // pass it down. A scope change is picked up on the next construction,
-        // which for a menu is every time it opens.
+        // pass it down. Its host is built once and kept, so a scope change
+        // reaches this only because `MenuBarKeyedContent` rebuilds the view
+        // when the scope moves.
         let acct = UsageScope.storedAccountId ?? UsageScope.noAccountSentinel
         _globalToday = Query(
             filter: #Predicate<DailyAggregate> { $0.date == today }
@@ -760,6 +797,11 @@ struct MenuStatusContent: View {
         // 336pt is that 280 plus the label column and its gap, so the captions
         // get back exactly what they lost. Still inside the range Apple's own
         // status menus occupy (Wi-Fi ~280, Sound ~300).
+        // Every open re-runs this body, so "pace 43%", "resets in 2 hr" and
+        // the awaiting-a-new-cycle state are judged against the clock at the
+        // moment the menu drops, not at the last poll or save. The host is
+        // kept between opens and nothing else here moves with the clock.
+        let _ = StatusMenuOpening.shared.count
         let windows = self.windows
         let scopedIds = windows.filter(\.isScoped).map(\.key)
         // Stable key so `.task(id:)` re-asks the engine when the window SET
@@ -898,18 +940,20 @@ struct MenuStatusContent: View {
 
             if let pct = window.usedPercentage, let resets = window.resetsAt {
                 let cycle = DisplayCycle.resolve(resetsAt: resets, duration: window.duration)
+                // One gauge for both states, dimmed while awaiting. As two
+                // branches it was a new view at every cycle reset, the one
+                // moment its fill animation is worth seeing (#140).
+                CircularGauge(
+                    percentage: pct,
+                    lineWidth: 3,
+                    labelFont: .system(size: 8, weight: .bold, design: .rounded)
+                )
+                .frame(width: 22, height: 22)
+                .opacity(cycle.isAwaiting ? 0.4 : 1)
                 if cycle.isAwaiting {
                     // Stale cycle (Pacer hasn't polled a fresh one yet).
                     // Show a muted "awaiting" line — no pace math from
                     // prior-cycle numbers.
-                    CircularGauge(
-                        percentage: pct,
-                        lineWidth: 3,
-                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
-                    )
-                    .frame(width: 22, height: 22)
-                    .opacity(0.4)
-
                     Text("—")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())
                         .foregroundStyle(.tertiary)
@@ -923,13 +967,6 @@ struct MenuStatusContent: View {
                 } else {
                     let pacePct = cycle.paceFraction * 100
                     let band = PaceBand(usedPct: pct, paceEndPct: pacePct)
-
-                    CircularGauge(
-                        percentage: pct,
-                        lineWidth: 3,
-                        labelFont: .system(size: 8, weight: .bold, design: .rounded)
-                    )
-                    .frame(width: 22, height: 22)
 
                     Text("\(Int(pct.rounded()))%")
                         .font(.system(size: 12, weight: .semibold).monospacedDigit())

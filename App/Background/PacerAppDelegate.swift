@@ -920,7 +920,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let host = SizingHostingView(
             rootView: AnyView(
-                DayKeyedContent {
+                MenuBarKeyedContent {
                     MenuBarLabel(onTooltipChange: applyToolTip)
                         .modelContainer(self.container)
                 }
@@ -1011,7 +1011,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // already current.
         let contentController = NSHostingController(
             rootView: AnyView(
-                DayKeyedContent {
+                MenuBarKeyedContent {
                     MenuStatusContent()
                         .modelContainer(self.container)
                         .environment(\.usageEngine, self.backgroundService.engine)
@@ -1088,6 +1088,7 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// current window set out (its @Query stays live while the menu is closed) —
     /// keeps the drop-down tall enough for however many windows are in play.
     func menuWillOpen(_ menu: NSMenu) {
+        StatusMenuOpening.shared.willOpen()
         guard let view = statusMenuContentController?.view else { return }
         view.layoutSubtreeIfNeeded()
         let fitting = view.fittingSize
