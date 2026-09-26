@@ -1858,6 +1858,8 @@ public final class ScanCoordinator {
 
     /// The clock the live verification runs on. Tests move it.
     var liveClock: () -> Date = { Date() }
+    /// Whether this cycle's check marked anything, for `logIfInteresting`.
+    private var liveVerifiedThisCycle = false
 
     /// Drop every `SessionRollupCache` entry if prices changed since the
     /// last check (see `SessionRollupCache.forgetAllIfPricingChanged`).
@@ -1904,6 +1906,7 @@ public final class ScanCoordinator {
             let queued = liveDaily.closed.count + liveProject.closed.count + liveHourly.closed.count
             log("verify: rebuilding daily \(pairs.count) project \(projects.count) hourly \(triples.count)"
                 + (queued > 0 ? " · \(queued) closed still queued" : ""))
+            liveVerifiedThisCycle = true
             persister.addDirtyPairs(pairs)
             persister.addDirtyProjectDates(projects)
             persister.addDirtyHourBuckets(triples)
@@ -2325,6 +2328,8 @@ public final class ScanCoordinator {
     /// Emit a log line for "interesting" scans only:
     /// - any scan with dups > 0 (potential cross-file dedup activity)
     /// - any scan slower than 1 second (unusual; pre-cursor scans were ~10s)
+    /// - any scan that rebuilt buckets on purpose (`verify:`), so what each
+    ///   check costs is on the line after it
     /// - the first scan after each `routineLogInterval` window (so the
     ///   log shows the daemon is alive without spamming)
     /// Routine fast scans with no dups stay silent.
@@ -2339,7 +2344,9 @@ public final class ScanCoordinator {
         }()
 
         cyclesSinceRoutineLog += 1
-        if isSlow || hasDups {
+        let verified = liveVerifiedThisCycle
+        liveVerifiedThisCycle = false
+        if isSlow || hasDups || verified {
             log("scan: \(formatReport(report))\(cycleRateSuffix(now: now))")
             lastRoutineLogAt = now
             cyclesSinceRoutineLog = 0
