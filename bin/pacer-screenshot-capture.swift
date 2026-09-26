@@ -149,12 +149,25 @@ func captureMenuBar(_ request: Request) async throws {
     // screenshot run's pinned clock cannot reach: the runner's real date,
     // and the screen-recording dot this very capture turns on, in some runs
     // and not others (#154). Left out, the bar behind them shows instead.
-    let barBottom = display.frame.minY + NSStatusBar.system.thickness + 1
-    let others = content.windows.filter { window in
-        window.frame.minY >= display.frame.minY && window.frame.maxY <= barBottom
-            && window.windowLayer >= Int(CGWindowLevelForKey(.statusWindow))
-            && window.owningApplication?.bundleIdentifier != "com.ericandrechek.pacer"
+    //
+    // "In the bar" is a thin window at the top of the display. Not
+    // `NSStatusBar.thickness` tall: on macOS 26 the bar is taller than its
+    // items, and a filter sized to the items excluded nothing.
+    let statusLevel = Int(CGWindowLevelForKey(.statusWindow))
+    let inBar = content.windows.filter { window in
+        window.frame.minY >= display.frame.minY - 1
+            && window.frame.minY < display.frame.minY + 60
+            && window.frame.height <= 60
     }
+    for window in inBar {
+        log("menubar: bar window \(window.owningApplication?.bundleIdentifier ?? "-")"
+            + " '\(window.title ?? "")' layer \(window.windowLayer) \(window.frame)")
+    }
+    let others = inBar.filter {
+        $0.windowLayer >= statusLevel
+            && $0.owningApplication?.bundleIdentifier != "com.ericandrechek.pacer"
+    }
+    log("menubar: leaving out \(others.count) of \(inBar.count) bar window(s)")
     let filter = SCContentFilter(display: display, excludingWindows: others)
     let config = SCStreamConfiguration()
     config.sourceRect = rect.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
