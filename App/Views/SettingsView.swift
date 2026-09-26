@@ -103,28 +103,25 @@ private struct StartupCard: View {
     @State private var loginItemStatus: LoginItemController.Status = .unknown
     @State private var actionError: String?
 
+    /// On for `.requiresApproval` too: that is registered and waiting on the
+    /// user, which the warning below says. Reading it as off hid the choice.
+    /// Flipping it records the choice, which launch re-applies if macOS drops
+    /// the registration (`LoginItemController.reconcileAtLaunch`).
     private var isEnabled: Binding<Bool> {
         Binding(
-            get: { loginItemStatus == .enabled },
+            get: { LoginItemController.isOn(loginItemStatus) },
             set: { newValue in
                 actionError = nil
-                if newValue {
+                Task { @MainActor in
                     do {
-                        try LoginItemController.register()
+                        try await LoginItemController.setEnabled(newValue)
                     } catch {
-                        actionError = "Could not register: \(error.localizedDescription)"
+                        actionError = newValue
+                            ? "Could not register: \(error.localizedDescription)"
+                            : "Could not unregister: \(error.localizedDescription)"
                     }
-                } else {
-                    Task { @MainActor in
-                        do {
-                            try await LoginItemController.unregister()
-                        } catch {
-                            actionError = "Could not unregister: \(error.localizedDescription)"
-                        }
-                        refresh()
-                    }
+                    refresh()
                 }
-                refresh()
             }
         )
     }
