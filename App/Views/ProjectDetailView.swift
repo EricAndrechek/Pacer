@@ -464,6 +464,11 @@ struct ProjectDetailView: View {
         // all: it fills in asynchronously, after the modal is on screen, and
         // the other three now change while it's open (#145). (#140)
         let _ = (cachedTotals, cachedDailySeries, cachedModelSlices, cachedSubprojects)
+        // Presentation state, read here so setting it redraws this view and
+        // what it presents opens at once. Passed only as a binding, nothing
+        // read it: the collections sheet opened only after an unrelated
+        // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (bulkMergeDraft?.id, mergeError)
         PacerModalContent(
             title: displayName,
             subtitle: projectPath,

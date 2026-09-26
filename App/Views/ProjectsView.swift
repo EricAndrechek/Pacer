@@ -96,6 +96,11 @@ struct ProjectsView: View {
     }
 
     var body: some View {
+        // Presentation state, read here so setting it redraws this view and
+        // what it presents opens at once. Passed only as a binding, nothing
+        // read it: the collections sheet opened only after an unrelated
+        // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (showingAliasManager, collectionsSheet?.id)
         // Read here, in this view's own `body`, and captured by the content
         // closure below. `PageScaffold` stores that closure and runs it in its
         // own body, and a read that happens there may make PageScaffold depend
@@ -632,6 +637,11 @@ private struct ProjectsContent: View {
     }
 
     var body: some View {
+        // Presentation state, read here so setting it redraws this view and
+        // what it presents opens at once. Passed only as a binding, nothing
+        // read it: the collections sheet opened only after an unrelated
+        // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
+        let _ = (bulkMergeDraft?.id, aliasError)
         // No more `.dismissibleModal` here — it lives on the outer
         // ProjectsView so the overlay sits ABOVE the PageScaffold's
         // ScrollView rather than inside its content. This view just
