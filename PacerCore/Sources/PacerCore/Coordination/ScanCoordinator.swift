@@ -1239,7 +1239,8 @@ public final class ScanCoordinator {
         // drift. `now - 1h` is included because the bucket that matters most
         // is the one that just closed — that's the one about to freeze.
         // Anything older is settled and is only recomputed when a sample
-        // actually lands in it.
+        // actually lands in it. The day-long buckets are spread across passes
+        // rather than rebuilt together (#151); see `rebuildLiveBuckets`.
         if try fetchMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt) == nil {
             try writeMeta(ClaudeCodeMetaKey.lastLiveBucketRebuildAt,
                           value: String(Date().timeIntervalSince1970))
@@ -1843,6 +1844,16 @@ public final class ScanCoordinator {
     /// small next to the full-store rebuild a cost-version bump triggers.
     private static let liveBucketRebuildInterval: TimeInterval = 10 * 60
 
+    /// Day-long buckets of each kind one live pass rebuilds. Nine open
+    /// project-days, a busy day on the live store, come round every half hour.
+    nonisolated static let liveRebuildLimit = 3
+
+    /// Which day-long buckets each live pass rebuilds. See `LiveRebuildPlanner`.
+    private var liveDailyPlanner = LiveRebuildPlanner<DateModelPair>(
+        limit: ScanCoordinator.liveRebuildLimit) { "\($0.date)|\($0.model)" }
+    private var liveProjectPlanner = LiveRebuildPlanner<ProjectDatePair>(
+        limit: ScanCoordinator.liveRebuildLimit) { "\($0.date)|\($0.projectPath)" }
+
     private func liveBucketRebuildIsDue() throws -> Bool {
         // Never run: stamp and skip rather than firing. This is an integrity
         // measure, not a startup one, and cold start is already the most
@@ -1871,25 +1882,36 @@ public final class ScanCoordinator {
     /// recomputers' incremental path must not touch, which is what forces
     /// the from-scratch rebuild.
     ///
+    /// The current and previous hour are rebuilt whole every pass. The
+    /// day-long buckets (per model, per project) are rationed: at most
+    /// `liveRebuildLimit` of each kind per pass, a just-closed day's first,
+    /// then the longest since its last rebuild. Rebuilding them all together
+    /// re-read the whole day's samples every ten minutes (#151). See
+    /// `LiveRebuildPlanner`.
+    ///
     /// Sessions are not in here: their cached totals expire on their own —
     /// see `SessionRollupCache.maxAge`.
     func rebuildLiveBuckets(persister: SamplePersister, now: Date = Date()) throws {
         let calendar = Calendar.current
+        let today = TokenSample.formatDate(now, timeZone: calendar.timeZone)
 
-        var pairs: Set<DateModelPair> = []
+        var openPairs: Set<DateModelPair> = [], closedPairs: Set<DateModelPair> = []
+        var openProjects: Set<ProjectDatePair> = [], closedProjects: Set<ProjectDatePair> = []
         var triples: Set<DateHourModelTriple> = []
-        var projects: Set<ProjectDatePair> = []
 
         for offset in [TimeInterval(0), -3600] {
             let at = now.addingTimeInterval(offset)
             let date = TokenSample.formatDate(at, timeZone: calendar.timeZone)
             let hour = calendar.component(.hour, from: at)
+            // `now - 1h` on another date means that day closed within the hour.
+            let isToday = date == today
 
             var models = FetchDescriptor<DailyAggregate>(
                 predicate: #Predicate<DailyAggregate> { $0.date == date })
             models.propertiesToFetch = [\.model]
             for model in try context.fetch(models).map(\.model) {
-                pairs.insert(DateModelPair(date: date, model: model))
+                let pair = DateModelPair(date: date, model: model)
+                if isToday { openPairs.insert(pair) } else { closedPairs.insert(pair) }
                 triples.insert(DateHourModelTriple(date: date, hour: hour, model: model))
             }
 
@@ -1897,11 +1919,24 @@ public final class ScanCoordinator {
                 predicate: #Predicate<ProjectDailyAggregate> { $0.date == date })
             paths.propertiesToFetch = [\.projectPath]
             for path in try context.fetch(paths).map(\.projectPath) {
-                projects.insert(ProjectDatePair(projectPath: path, date: date))
+                let pair = ProjectDatePair(projectPath: path, date: date)
+                if isToday { openProjects.insert(pair) } else { closedProjects.insert(pair) }
             }
         }
 
-        guard !pairs.isEmpty else { return }
+        let dayStart = calendar.startOfDay(for: now)
+        let pairs = liveDailyPlanner.pick(
+            open: openPairs, justClosed: closedPairs, now: now, dayStart: dayStart)
+        let projects = liveProjectPlanner.pick(
+            open: openProjects, justClosed: closedProjects, now: now, dayStart: dayStart)
+        guard !pairs.isEmpty || !projects.isEmpty || !triples.isEmpty else { return }
+
+        // One line per pass, so `dailyR` / `projR` on the cycle line below it
+        // can be read against how many day-long buckets it rebuilt.
+        let queued = liveDailyPlanner.closing.count + liveProjectPlanner.closing.count
+        log("live rebuild: daily \(pairs.count)/\(openPairs.count + closedPairs.count)"
+            + " project \(projects.count)/\(openProjects.count + closedProjects.count)"
+            + " hourly \(triples.count)" + (queued > 0 ? " · \(queued) closed still queued" : ""))
         persister.addDirtyPairs(pairs)
         persister.addDirtyHourBuckets(triples)
         persister.addDirtyProjectDates(projects)

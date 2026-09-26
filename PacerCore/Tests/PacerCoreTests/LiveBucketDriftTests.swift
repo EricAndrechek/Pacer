@@ -261,6 +261,51 @@ import Testing
         #expect(try persister.repairDuplicateSamples() == 0)
     }
 
+    /// A due pass rebuilds a bounded number of day-long buckets, and the
+    /// next pass picks up the rest (#151). Rebuilding every open project-day
+    /// at once re-read the whole day's samples: 3.8 s for eight busy ones on
+    /// a live store.
+    @ScanActor
+    @Test func dayLongBucketsAreRebuiltAFewPerPass() async throws {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = stamp.string(from: Date())
+        let projects = (1...5).map { "/tmp/pacer-live-\($0)" }
+        let root = try makeDriftFixtureRoot(withLines: projects.enumerated().map { i, cwd in
+            makeDriftAssistantLine(timestamp: now, storedCost: 0.25,
+                                   messageId: "m\(i)", requestId: "r\(i)", cwd: cwd)
+        })
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let container = try makeDriftContainer()
+        let context = ModelContext(container)
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(costMode: .display, watcherMode: .manual,
+                                 probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path])
+        )
+        _ = try await coordinator.runOnce()
+
+        let rows = try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+        #expect(rows.count == projects.count)
+        for row in rows { row.totalCostUSD = 999.0 }
+        try context.save()
+
+        func healed() throws -> Int {
+            try context.fetch(FetchDescriptor<ProjectDailyAggregate>())
+                .filter { $0.totalCostUSD == 0.25 }.count
+        }
+
+        try ageLiveRebuildThrottle(context)
+        _ = try await coordinator.runOnce()
+        #expect(try healed() == ScanCoordinator.liveRebuildLimit)
+
+        try ageLiveRebuildThrottle(context)
+        _ = try await coordinator.runOnce()
+        #expect(try healed() == projects.count, "the next pass takes the rest")
+    }
+
     /// The throttle has to actually throttle — otherwise this trades a
     /// correctness bug for the cost of rebuilding the day's buckets on every
     /// cycle, which is the fast path's whole reason for existing.
@@ -320,10 +365,23 @@ private func makeDriftFixtureRoot(withLines lines: [String]) throws -> URL {
     return root
 }
 
+/// Make the next cycle's live rebuild due, as ten minutes of wall clock would.
+@ScanActor
+private func ageLiveRebuildThrottle(_ context: ModelContext) throws {
+    let key = ClaudeCodeMetaKey.lastLiveBucketRebuildAt
+    let stale = String(Date().timeIntervalSince1970 - 3_600)
+    let meta = try context.fetch(FetchDescriptor<ClaudeCodeMeta>(
+        predicate: #Predicate<ClaudeCodeMeta> { $0.key == key }))
+    if let existing = meta.first { existing.value = stale }
+    else { context.insert(ClaudeCodeMeta(key: key, value: stale)) }
+    try context.save()
+}
+
 private func makeDriftAssistantLine(
-    timestamp: String, storedCost: Double, messageId: String, requestId: String
+    timestamp: String, storedCost: Double, messageId: String, requestId: String,
+    cwd: String? = nil
 ) -> String {
-    let fields: [String: Any] = [
+    var fields: [String: Any] = [
         "type": "assistant",
         "timestamp": timestamp,
         "requestId": requestId,
@@ -342,5 +400,6 @@ private func makeDriftAssistantLine(
             ],
         ] as [String: Any]
     ]
+    if let cwd { fields["cwd"] = cwd }
     return String(data: try! JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
 }

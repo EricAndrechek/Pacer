@@ -38,7 +38,9 @@ later overnight loops, so don't put durable knowledge there.
    full recompute; `hFast=`, `pFast=` and `sFast=` give the same ratio
    for the hourly, project and session rollups. Occasional gaps are
    pollution (recovery / cost-version bump / migration / the 10-minute
-   live rebuild). A ratio that stays near `0/M` cycle after cycle is a
+   live rebuild, whose own line — `live rebuild: daily a/b project c/d
+   hourly n` — says how many day-long buckets it rebuilt; at most three of
+   each per pass, #151). A ratio that stays near `0/M` cycle after cycle is a
    fast path that has silently stopped applying — `sFast` sat there for
    months, costing 1–2 s a cycle, because only the daily ratio was logged.
    `sMiss=p/e/u` says why sessions missed: polluted (samples rewritten
