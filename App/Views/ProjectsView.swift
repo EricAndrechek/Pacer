@@ -15,6 +15,26 @@ import PacerUI
 /// indicate direction. Both range and sort persist via App Group
 /// `UserDefaults` under per-view keys so Models doesn't share state
 /// with Projects.
+/// The Projects page's search text and collection filter, held outside the
+/// page view.
+///
+/// `ContentView` rebuilds the page at midnight (`.id(dayKey)`) so its
+/// date-pinned queries move to the new day, and `@State` on the page went with
+/// the rebuild: the search field and the collection filter cleared themselves
+/// at midnight (#140). This lives for the process, like `@State` did, so a
+/// relaunch still opens on "All" with no search. An open project detail still
+/// closes at midnight: its queries are pinned to the day too, and reopening it
+/// reads the new one.
+@MainActor
+@Observable
+final class ProjectsPageState {
+    static let shared = ProjectsPageState()
+    var searchText = ""
+    /// Active collection scope, `""` = All projects. Collections live inline
+    /// here (a filter bar), not in a separate tab.
+    var collectionFilter = ""
+}
+
 struct ProjectsView: View {
     /// Read here so a scope change re-runs the child initialiser — a
     /// `@Query` predicate is captured once at init.
@@ -31,27 +51,27 @@ struct ProjectsView: View {
     @AppStorage("pacer.projects.overviewMetric", store: PacerSettings.store)
     private var overviewMetricRaw: String = ProjectMetric.cost.rawValue
 
-    /// Active collection scope on the Projects tab — `""` = All projects.
-    /// Collections live inline here (a filter bar), not in a separate tab.
-    /// Not persisted: scope is a transient browsing choice, and reopening
-    /// on "All" is the least surprising default.
-    @State private var collectionFilter: String = ""
+    /// Search text and collection filter. See `ProjectsPageState`.
+    @State private var page = ProjectsPageState.shared
 
     /// Optional starting scope (used by the screenshot harness to render a
     /// scoped collection; nil in normal use).
     var initialScope: String? = nil
 
-    @State private var searchText: String = ""
-    /// Drives the collections-manager sheet, opened from the lane's
-    /// "Manage…" button.
-    @State private var showingCollectionsManager = false
-    /// When true, the collections manager opens straight into the
-    /// new-collection editor (from a "New collection" button) rather than
-    /// the plain list (from "Manage…").
-    @State private var collectionsManagerStartNew = false
-    /// When set, the manager opens straight into this collection's editor
-    /// (from a scope-header or chip "Edit" action).
-    @State private var editingCollectionID: String?
+    /// What the collections sheet opens into: the list ("Manage…"), a new
+    /// collection, or one collection's editor ("Edit").
+    ///
+    /// One `Identifiable` request for `.sheet(item:)`, so the sheet gets its
+    /// inputs in the value that opens it. It was three `@State` values set just
+    /// before an `isPresented` flag, and the sheet's closure captured them as
+    /// they stood when the body last ran: "Edit X" could open the plain list,
+    /// or the collection edited last time (#140).
+    struct CollectionsSheetRequest: Identifiable {
+        enum Mode: Equatable { case manage, new, edit(String) }
+        let id = UUID()
+        let mode: Mode
+    }
+    @State private var collectionsSheet: CollectionsSheetRequest?
     /// Drives the project-alias manager sheet, opened from the toolbar.
     /// Lives here (alongside `.searchable`) so the sheet attaches at the
     /// same level as the toolbar item that opens it, outside the
@@ -76,6 +96,15 @@ struct ProjectsView: View {
     }
 
     var body: some View {
+        // Read here, in this view's own `body`, and captured by the content
+        // closure below. `PageScaffold` stores that closure and runs it in its
+        // own body, and a read that happens there may make PageScaffold depend
+        // on the value rather than this page. That is the shape of the modal
+        // bug #150 fixed, where a click only showed after something unrelated
+        // redrew the page (#140; AGENTS.md, "SwiftUI state and data flow").
+        let range = self.range, sort = self.sort, overviewMetric = self.overviewMetric
+        let descending = sortDescending, scopeAccountId = scope.accountId
+        let searchText = page.searchText, collectionFilter = page.collectionFilter
         PageScaffold(
             "Projects",
             subtitle: "Per-project rollup of cost and tokens.",
@@ -83,9 +112,9 @@ struct ProjectsView: View {
         ) {
             ProjectsContent(
                 range: range,
-                scopeAccountId: scope.accountId,
+                scopeAccountId: scopeAccountId,
                 sort: sort,
-                descending: sortDescending,
+                descending: descending,
                 overviewMetric: overviewMetric,
                 searchText: searchText,
                 collectionFilter: collectionFilter,
@@ -93,26 +122,14 @@ struct ProjectsView: View {
                 sortFieldBinding: sortFieldBinding,
                 sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
-                collectionFilterBinding: $collectionFilter,
+                collectionFilterBinding: $page.collectionFilter,
                 onSelectProject: { path, displayName, since in
                     Log.write("Navigation", "open project \(URL(fileURLWithPath: path).lastPathComponent)")
                     modalRoot = .project(path: path, displayName: displayName, since: since)
                 },
-                onNewCollection: {
-                    editingCollectionID = nil
-                    collectionsManagerStartNew = true
-                    showingCollectionsManager = true
-                },
-                onManageCollections: {
-                    editingCollectionID = nil
-                    collectionsManagerStartNew = false
-                    showingCollectionsManager = true
-                },
-                onEditCollection: { id in
-                    collectionsManagerStartNew = false
-                    editingCollectionID = id
-                    showingCollectionsManager = true
-                }
+                onNewCollection: { collectionsSheet = .init(mode: .new) },
+                onManageCollections: { collectionsSheet = .init(mode: .manage) },
+                onEditCollection: { id in collectionsSheet = .init(mode: .edit(id)) }
             )
             .id("\(range.rawValue)")
         }
@@ -124,19 +141,23 @@ struct ProjectsView: View {
         // NavigationSplitView, so the field only appears while
         // Projects is the active destination.
         .searchable(
-            text: $searchText,
+            text: $page.searchText,
             placement: .toolbar,
             prompt: "Filter projects"
         )
         .sheet(isPresented: $showingAliasManager) {
             ProjectAliasManager()
         }
-        .sheet(isPresented: $showingCollectionsManager) {
-            CollectionsManager(startNew: collectionsManagerStartNew, editCollectionID: editingCollectionID)
+        .sheet(item: $collectionsSheet) { request in
+            switch request.mode {
+            case .manage:        CollectionsManager()
+            case .new:           CollectionsManager(startNew: true)
+            case .edit(let id):  CollectionsManager(editCollectionID: id)
+            }
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
         .onAppear {
-            if let initialScope, collectionFilter.isEmpty { collectionFilter = initialScope }
+            if let initialScope, page.collectionFilter.isEmpty { page.collectionFilter = initialScope }
         }
     }
 

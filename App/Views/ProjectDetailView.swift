@@ -457,6 +457,13 @@ struct ProjectDetailView: View {
     }
 
     var body: some View {
+        // Every cache the cards draw from, read here in this view's own body.
+        // The cards read them inside `PacerModalContent`'s stored content
+        // closure, and a read there may not make this view depend on them,
+        // which is the shape of the modal bug #150 fixed. Subprojects most of
+        // all: it fills in asynchronously, after the modal is on screen, and
+        // the other three now change while it's open (#145). (#140)
+        let _ = (cachedTotals, cachedDailySeries, cachedModelSlices, cachedSubprojects)
         PacerModalContent(
             title: displayName,
             subtitle: projectPath,

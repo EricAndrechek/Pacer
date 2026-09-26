@@ -1226,6 +1226,11 @@ enum ScreenshotMode {
         // first appearance — the first scene, already on its tab, had none and
         // captured a bare "Pacer" title bar with no toolbar.
         projectsInitialScope = projectsScope
+        // The Projects filter and search outlive the view now (they survive the
+        // midnight rebuild), so each scene sets them outright rather than
+        // inheriting the previous scene's.
+        ProjectsPageState.shared.collectionFilter = projectsScope ?? ""
+        ProjectsPageState.shared.searchText = ""
         let away: ContentView.Destination = tab == .settings ? .dashboard : .settings
         NotificationCenter.default.post(name: .pacerSelectDestination, object: away)
         await settle(seconds: 0.3)
