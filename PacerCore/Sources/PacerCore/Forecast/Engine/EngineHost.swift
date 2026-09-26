@@ -7,11 +7,14 @@ import SwiftData
 /// tonight" and "what will every account spend by tonight" are two different
 /// fits — not one fit filtered. This owns them.
 ///
-/// **Only scopes something is looking at get fitted.** `.allAccounts` is
-/// always live because the menu bar, alerts, widgets and the HTTP API read it
-/// whatever the window is showing. A per-account engine is created the first
-/// time a view asks for one and then kept warm, so switching back and forth
-/// costs nothing.
+/// **Every account's forecast is kept current**, plus `.allAccounts`, whatever
+/// the window is showing: `AppBackgroundService` hands the account list to
+/// `keepFitted(accounts:)` before each refit. Until 2026-09-25 only scopes a
+/// view or the API had asked for in the last fifteen minutes were refitted, so
+/// an account nobody was looking at had a forecast frozen at the last time
+/// someone did. That was a cost decision (see below). The per-scope refit got
+/// much cheaper when the scoreboard stopped being re-read every refit (#155),
+/// and a forecast should not depend on what happens to be on screen.
 ///
 /// **What a refit actually costs.** This used to say "~1.1 s per scope per
 /// five-minute cycle; two scopes is well under 1% duty". Measured on a
@@ -30,11 +33,16 @@ import SwiftData
 public final class EngineHost {
     private let container: ModelContainer
     private var engines: [EngineScope: UsageIntelligenceEngine] = [:]
-    /// When each scope was last asked for. Drives `live` — see below.
+    /// When each scope was last asked for. Keeps a scope outside
+    /// `keptAccounts` live for a while after its last ask — see `live`.
     private var lastAsked: [EngineScope: Date] = [:]
+    /// Every account Pacer knows about, refitted every cycle. See
+    /// `keepFitted(accounts:)`.
+    private var keptAccounts: Set<String> = []
 
-    /// How long a per-account scope keeps being refitted after the last view
-    /// asked for it.
+    /// How long a scope outside `keptAccounts` keeps being refitted after the
+    /// last view asked for it. Every known account is refitted anyway, so this
+    /// only matters for an account the store doesn't list yet.
     ///
     /// Generous on purpose: flicking between accounts must not pay a cold fit
     /// each time, and a fit that is one cycle stale is still a fit. What this
@@ -96,6 +104,27 @@ public final class EngineHost {
         return engine
     }
 
+    /// Keep every one of these accounts' forecasts current, asked for or not.
+    ///
+    /// Called before each refit with the store's account list. An account
+    /// without an engine gets one here, *without* the warm-up fit
+    /// `engine(for:)` starts: the refit this call precedes fits it anyway, and
+    /// a second fit racing the first would do the work twice.
+    ///
+    /// Awaits each new engine's `adopt(scope:)` before returning. A recompute
+    /// reaching an engine before its scope is set would fit every account's
+    /// data under one account's name. Adopting only sets the scope, so the hop
+    /// costs nothing.
+    public func keepFitted(accounts ids: [String]) async {
+        keptAccounts = Set(ids)
+        for id in ids where engines[.account(id)] == nil {
+            let scope = EngineScope.account(id)
+            let engine = UsageIntelligenceEngine(modelContainer: container)
+            engines[scope] = engine
+            await engine.adopt(scope: scope)
+        }
+    }
+
     /// The engine for a view's scope. `nil` account means every account.
     public func engine(forAccount accountId: String?) -> UsageIntelligenceEngine {
         engine(for: accountId.map(EngineScope.account) ?? .allAccounts)
@@ -114,8 +143,9 @@ public final class EngineHost {
         engines.map { ($0.key, $0.value) }
     }
 
-    /// The scopes worth refitting: `.allAccounts` always, plus any per-account
-    /// scope something has asked for recently.
+    /// The scopes worth refitting: `.allAccounts`, every account passed to
+    /// `keepFitted(accounts:)`, and any other scope something has asked for
+    /// recently.
     ///
     /// **This is the expensive list, and it used to be `all`.** Measured on a
     /// two-account store: 97 refits in a day, median 15.9 s, worst 41 s, half
@@ -131,6 +161,7 @@ public final class EngineHost {
         let cutoff = Date().addingTimeInterval(-Self.idleScopeGrace)
         return engines.compactMap { scope, engine in
             guard scope != .allAccounts else { return (scope, engine) }
+            if let id = scope.accountId, keptAccounts.contains(id) { return (scope, engine) }
             guard let asked = lastAsked[scope], asked >= cutoff else { return nil }
             return (scope, engine)
         }

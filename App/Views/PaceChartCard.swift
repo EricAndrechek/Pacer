@@ -213,6 +213,11 @@ struct PaceChartCard: View {
     /// no-op — and keeps doing so for whatever else joins the key later.
     @State private var loadedScopeKey: String?
 
+    /// The `RateLimitWriteSignal.historyGeneration` `series` was read at. A
+    /// fold or adoption adds rows older than the loaded tail, which a top-up
+    /// cannot fetch, so a changed value means read the whole window again.
+    @State private var loadedHistory = RateLimitWriteSignal.shared.historyGeneration
+
     /// Load the two 8-day series **off the main actor**.
     ///
     /// This used to be `@MainActor` and fetch `@Model` rows straight into
@@ -242,13 +247,16 @@ struct PaceChartCard: View {
         // Before the first `await`, so a `scopeKey` change caused by this call
         // itself cannot race ahead of it. See `loadedScopeKey`.
         loadedScopeKey = scopeKey
+        let history = RateLimitWriteSignal.shared.historyGeneration
+        let historyRewritten = history != loadedHistory
+        loadedHistory = history
         let targets = loadTargets()
         let started = Date()
         isLoading = series.isEmpty
 
         var next: [AccountSeries] = []
         for target in targets {
-            var entry = series.first { $0.accountId == target.accountId }
+            var entry = (historyRewritten ? nil : series.first { $0.accountId == target.accountId })
                 ?? AccountSeries(accountId: target.accountId, label: target.label)
             entry = AccountSeries(accountId: target.accountId, label: target.label,
                                   fixed: entry.fixed, scoped: entry.scoped,

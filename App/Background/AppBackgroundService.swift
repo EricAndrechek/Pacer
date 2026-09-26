@@ -32,11 +32,16 @@ final class AppBackgroundService {
     /// fresh rate-limit rows, we run `GlobalRateLimitReset.detect` over
     /// the recent OAuth history and dispatch an early-reset banner if it
     /// fires. Lives here — in the process-lived background service —
-    /// rather than in `NotificationsHost` (which only exists while the
-    /// dashboard window is open) so this notification works headless:
+    /// rather than in a view (which only exists while the dashboard
+    /// window is open) so this notification works headless, like
+    /// `AlertMonitor`:
     /// the whole point is to tell the user limits reset early while they
     /// weren't looking.
     private var globalResetObserver: NSObjectProtocol?
+    /// Every threshold alert: rate-limit windows, daily cost, project budgets,
+    /// custom rules, the daily summary. Here rather than in the window so they
+    /// run in a menu-bar-only session too (#143).
+    private lazy var alertMonitor = AlertMonitor(container: container)
     /// The on-device usage-intelligence engine. Owns its own `ModelContext`,
     /// rebuilds the per-user feature representation and refits its models on
     /// each scan tick, and answers the typed `EngineQuestion` → `Estimate`
@@ -168,6 +173,7 @@ final class AppBackgroundService {
 
         installImmediateScanObserver()
         installGlobalResetObserver()
+        alertMonitor.start()
         installArchiveObserver()
         startEngine()
         widgetRefreshCoordinator.start()
@@ -196,6 +202,7 @@ final class AppBackgroundService {
             NotificationCenter.default.removeObserver(observer)
             globalResetObserver = nil
         }
+        alertMonitor.stop()
         if let observer = engineRecomputeObserver {
             NotificationCenter.default.removeObserver(observer)
             engineRecomputeObserver = nil
@@ -499,12 +506,16 @@ final class AppBackgroundService {
             // Extract the Sendable summary outside the Task — capturing
             // the whole Notification would carry its non-Sendable
             // userInfo across the actor hop.
-            let rateLimitsChanged =
-                (note.object as? ScanCycleSummary)?.rateLimitsChanged ?? false
-            guard rateLimitsChanged else { return }
+            let summary = note.object as? ScanCycleSummary
+            guard summary?.rateLimitsChanged == true else { return }
+            // Every account's poll posts now (#142), but the reset detector
+            // reads the active login's series, so another account's write has
+            // nothing new for it.
+            let writer = summary?.rateLimitAccountId
+            let activeWrote = writer == nil || writer == UsageScope.storedActiveAccountId
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.checkForGlobalReset()
+                if activeWrote { await self.checkForGlobalReset() }
                 // The burn check runs only when the engine ACTUALLY refit —
                 // `recomputeEngineIfDue` returns whether it did.
                 //
@@ -595,9 +606,15 @@ final class AppBackgroundService {
         // heavy forecast fit INLINE on the main thread (uncontended-actor
         // optimization — confirmed on Main via sample(1) during a scroll).
         // A detached task forces it onto the engine's executor.
+        // Every account's forecast, whatever is on screen: the account list
+        // goes to the host before each refit. Only scopes something had asked
+        // for in the last fifteen minutes used to be refitted, so an account
+        // nobody was looking at kept a stale forecast. See `EngineHost`.
+        var accountIds = FetchDescriptor<Account>()
+        accountIds.propertiesToFetch = [\.id]
+        await engines.keepFitted(
+            accounts: ((try? container.mainContext.fetch(accountIds)) ?? []).map(\.id))
         let started = Date()
-        // Every scope anything is still reading — not every scope ever asked
-        // for. See `EngineHost.live`.
         //
         // Still concurrent, and deliberately so after trying the alternative.
         // Serialising them looked right — 83% of the pace card's multi-second
@@ -607,7 +624,9 @@ final class AppBackgroundService {
         // time. They overlap almost perfectly. Running them one at a time
         // would stretch the window the rest of the app has to get through from
         // ~16 s to ~40 s for exactly the same work, which is the wrong
-        // direction. Fewer scopes is the lever; ordering is not.
+        // direction. Fewer scopes was the lever; ordering is not. Refitting
+        // every account is the deliberate exception, and it got affordable
+        // when the scoreboard stopped being re-read each refit (#155).
         //
         // Detached for the reason above: an `await` from `@MainActor` resumes
         // the fit inline on the main thread.

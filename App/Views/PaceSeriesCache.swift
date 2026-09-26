@@ -36,6 +36,19 @@ final class PaceSeriesCache {
 
     private var byAccount: [String: Series] = [:]
 
+    /// The `RateLimitWriteSignal.historyGeneration` the cached series were read
+    /// at. A fold or adoption adds rows older than anything cached, and a top-up
+    /// only fetches newer ones, so a series cached before it would never show
+    /// them. A changed generation drops the cache (#142).
+    private var history: UInt64 = 0
+
+    private func dropIfHistoryRewritten() {
+        let current = RateLimitWriteSignal.shared.historyGeneration
+        guard current != history else { return }
+        history = current
+        byAccount = [:]
+    }
+
     /// `nil` (all accounts / no scope yet) needs a key of its own, and it must
     /// not collide with a real account id.
     private static func key(_ account: String?) -> String {
@@ -43,10 +56,12 @@ final class PaceSeriesCache {
     }
 
     func series(for account: String?) -> Series {
-        byAccount[Self.key(account)] ?? Series()
+        dropIfHistoryRewritten()
+        return byAccount[Self.key(account)] ?? Series()
     }
 
     func store(_ series: Series, for account: String?) {
+        dropIfHistoryRewritten()
         byAccount[Self.key(account)] = series
     }
 

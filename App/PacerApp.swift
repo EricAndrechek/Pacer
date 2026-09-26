@@ -51,12 +51,6 @@ struct PacerApp: App {
         // we already have.
         Window("Pacer", id: "main") {
             ContentView()
-                // NotificationsHost is invisible (zero size) but holds
-                // @Query subscriptions that fire when new RateLimit
-                // samples or DailyAggregate updates arrive. Living
-                // alongside ContentView keeps it scoped to the app's
-                // foreground lifetime.
-                .background(NotificationsHost())
                 // Hands the placement code this scene's real NSWindow, so
                 // it stops having to guess which window is the dashboard.
                 .background(DashboardWindowRegistrar())

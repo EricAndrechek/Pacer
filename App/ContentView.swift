@@ -741,6 +741,10 @@ struct ToolbarFreshness: View {
             .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { _ in
                 refreshScopedProbes()
             }
+            // Rate-limit rows arrive from every account's poll; a scan cycle
+            // only reports the active login's. Read in `body` so the pill
+            // depends on it (#142).
+            .onChange(of: RateLimitWriteSignal.shared.generation) { _, _ in refreshScopedProbes() }
             // The probes are scoped, so a scope change invalidates them —
             // otherwise the pill reports the other account's freshness until
             // the next scan cycle happens to fire.

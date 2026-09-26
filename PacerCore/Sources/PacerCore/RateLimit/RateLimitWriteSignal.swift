@@ -31,6 +31,12 @@ public final class RateLimitWriteSignal {
     /// reload is cheap where a missed one is a stale screen.
     public private(set) var generation: UInt64 = 0
 
+    /// Bumped when rows land that are *older* than rows already written:
+    /// folded back from the archive, or adopted onto an account. A view that
+    /// tops up incrementally from its newest loaded row can never fetch those,
+    /// so this tells it to read its whole window again (#142).
+    public private(set) var historyGeneration: UInt64 = 0
+
     /// The newest `sampledAt` seen. Informational; never a reload key.
     public private(set) var newest: Date?
 
@@ -41,6 +47,13 @@ public final class RateLimitWriteSignal {
     public func note(_ sampledAt: Date? = nil) {
         generation &+= 1
         if let sampledAt, newest.map({ sampledAt > $0 }) ?? true { newest = sampledAt }
+    }
+
+    /// Record rows that land behind ones already written (a fold or an
+    /// adoption). Bumps `generation` too, so everything keyed on it reloads.
+    public func noteHistoryRewritten(_ sampledAt: Date? = nil) {
+        historyGeneration &+= 1
+        note(sampledAt)
     }
 
     /// The newest row already in the store, so the first reload after launch

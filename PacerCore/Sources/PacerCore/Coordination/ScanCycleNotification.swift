@@ -57,15 +57,23 @@ public struct ScanCycleSummary: Sendable {
     public let samplesChanged: Bool
     public let rateLimitsChanged: Bool
     public let projectAttributionChanged: Bool
+    /// Whose rate-limit rows were written, when `rateLimitsChanged` and it is
+    /// one account's poll; nil when unknown (an archive fold). Every account's
+    /// poll posts now, not only the active login's: a widget scoped to the
+    /// other account and that account's engine went stale otherwise (#142).
+    /// Consumers that only care about the active login filter on this.
+    public let rateLimitAccountId: String?
 
     public init(
         samplesChanged: Bool = false,
         rateLimitsChanged: Bool = false,
-        projectAttributionChanged: Bool = false
+        projectAttributionChanged: Bool = false,
+        rateLimitAccountId: String? = nil
     ) {
         self.samplesChanged = samplesChanged
         self.rateLimitsChanged = rateLimitsChanged
         self.projectAttributionChanged = projectAttributionChanged
+        self.rateLimitAccountId = rateLimitAccountId
     }
 
     public var hasAnyChanges: Bool {

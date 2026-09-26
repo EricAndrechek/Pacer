@@ -215,7 +215,7 @@ public final class NotificationCoordinator {
                 content: content,
                 trigger: nil
             )
-            try? await center.add(request)
+            await post(request)
             markNotified(key: cycleKey, in: context)
         }
     }
@@ -319,7 +319,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .passive
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: key, in: context)
     }
 
@@ -377,7 +377,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .passive
 
         let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: cycleKey, in: context)
     }
 
@@ -480,7 +480,7 @@ public final class NotificationCoordinator {
         let request = UNNotificationRequest(
             identifier: "\(cycleKey).t\(tier.rawValue).\(Int(projectedFullAt.timeIntervalSince1970))",
             content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markBurnNotified(key: cycleKey,
                          state: .init(tier: tier, etaUnix: projectedFullAt.timeIntervalSince1970),
                          in: context)
@@ -541,7 +541,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(identifier: cycleKey, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: cycleKey, in: context)
     }
 
@@ -571,7 +571,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: key, in: context)
     }
 
@@ -617,7 +617,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: key, in: context)
     }
 
@@ -655,7 +655,7 @@ public final class NotificationCoordinator {
         content.interruptionLevel = .timeSensitive
 
         let request = UNNotificationRequest(identifier: key, content: content, trigger: nil)
-        try? await center.add(request)
+        await post(request)
         markNotified(key: key, in: context)
     }
 
@@ -678,6 +678,19 @@ public final class NotificationCoordinator {
                 pacerTokens(Int64(currentValue)),
                 pacerTokens(Int64(threshold))
             )
+        }
+    }
+
+    /// Every alert banner goes out through here and leaves a line in the log.
+    /// Without one, "why didn't I get an alert?" had no answer short of
+    /// reading the dedup rows. The identifier is the dedup key, so the line
+    /// says which window, threshold and cycle fired.
+    private func post(_ request: UNNotificationRequest) async {
+        do {
+            try await center.add(request)
+            Log.write("Notify", "posted \(request.identifier)")
+        } catch {
+            Log.write("Notify", "could not post \(request.identifier): \(error)")
         }
     }
 

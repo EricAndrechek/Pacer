@@ -50,7 +50,7 @@ public final class AlertRule {
     /// This is an explicit target on the rule, deliberately *not* the window's
     /// display scope. A view shows what you asked to see; an alert tells you
     /// what you did not, so a budget alarm a display filter could silence is a
-    /// footgun. See `NotificationsHost`, which carries the long version.
+    /// footgun. See `AlertMonitor.readCosts`, which carries the long version.
     ///
     /// Additive + optional ⇒ lightweight-migration-safe, same as
     /// `scopedWindow`. A rule targeting an account that later disappears goes
