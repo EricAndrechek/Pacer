@@ -4,9 +4,9 @@ import Testing
 @testable import PacerCore
 
 /// `EngineHost.live` decides what gets refitted every cycle, and that is the
-/// most expensive recurring thing the app does — measured at a median of 15.9s
-/// per cycle on a two-account store, half an hour of work across a day. Before
-/// this, asking for a scope once kept it refitting for the life of the process.
+/// most expensive recurring thing the app does. Every account the store knows
+/// is refitted whatever is on screen (`keepFitted(accounts:)`); a scope outside
+/// that list is refitted only for a while after something asks for it.
 ///
 /// Every host here is **preseeded**, which is not incidental: the ordinary
 /// `init` warms `.allAccounts` on a detached task, and that task outlives an
@@ -39,7 +39,7 @@ struct EngineHostLiveScopesTests {
 
     /// A warm engine nobody has asked for is not automatically a refit target —
     /// that is exactly the permanent cost being removed.
-    @Test("a warm but unasked scope is not refitted")
+    @Test("an unasked scope outside the known accounts is not refitted")
     func warmButUnaskedIsNotLive() throws {
         let host = try makeHost(accounts: ["orgA"])
         #expect(host.live.map(\.scope) == [.allAccounts])
@@ -53,7 +53,7 @@ struct EngineHostLiveScopesTests {
         #expect(Set(host.live.map(\.scope)) == [.allAccounts, .account("orgA")])
     }
 
-    @Test("a scope idle past the grace period drops out, and asking revives it")
+    @Test("outside the known accounts, a scope idle past the grace drops out; asking revives it")
     func idleScopeDropsOut() throws {
         let host = try makeHost(accounts: ["orgA"])
         _ = host.engine(forAccount: "orgA")
@@ -64,5 +64,32 @@ struct EngineHostLiveScopesTests {
         #expect(Set(host.all.map(\.scope)) == [.allAccounts, .account("orgA")])
         _ = host.engine(forAccount: "orgA")
         #expect(Set(host.live.map(\.scope)) == [.allAccounts, .account("orgA")])
+    }
+
+    /// A forecast shouldn't depend on what's on screen: an account nobody has
+    /// looked at for hours is refitted like any other.
+    @Test("every known account is refitted, asked for or not")
+    func knownAccountsAreAlwaysLive() async throws {
+        let host = try makeHost(accounts: ["orgA"])
+        await host.keepFitted(accounts: ["orgA", "orgB"])
+        let everyone: Set<EngineScope> = [.allAccounts, .account("orgA"), .account("orgB")]
+        #expect(Set(host.live.map(\.scope)) == everyone)
+        host.markAskedForTesting(.account("orgA"),
+                                 at: Date().addingTimeInterval(-EngineHost.idleScopeGrace - 60))
+        #expect(Set(host.live.map(\.scope)) == everyone)
+        // An account that leaves the list falls back to the ask rule.
+        await host.keepFitted(accounts: ["orgB"])
+        #expect(Set(host.live.map(\.scope)) == [.allAccounts, .account("orgB")])
+    }
+
+    /// An engine created for the refit has to know its scope before the refit
+    /// reaches it; fitted unscoped, it would forecast every account's usage
+    /// under one account's name.
+    @Test("an engine created for a known account is scoped before anything fits it")
+    func createdEnginesAreScoped() async throws {
+        let host = try makeHost()
+        await host.keepFitted(accounts: ["orgB"])
+        let engine = try #require(host.all.first { $0.scope == .account("orgB") }?.engine)
+        #expect(await engine.scope == .account("orgB"))
     }
 }

@@ -606,9 +606,15 @@ final class AppBackgroundService {
         // heavy forecast fit INLINE on the main thread (uncontended-actor
         // optimization — confirmed on Main via sample(1) during a scroll).
         // A detached task forces it onto the engine's executor.
+        // Every account's forecast, whatever is on screen: the account list
+        // goes to the host before each refit. Only scopes something had asked
+        // for in the last fifteen minutes used to be refitted, so an account
+        // nobody was looking at kept a stale forecast. See `EngineHost`.
+        var accountIds = FetchDescriptor<Account>()
+        accountIds.propertiesToFetch = [\.id]
+        await engines.keepFitted(
+            accounts: ((try? container.mainContext.fetch(accountIds)) ?? []).map(\.id))
         let started = Date()
-        // Every scope anything is still reading — not every scope ever asked
-        // for. See `EngineHost.live`.
         //
         // Still concurrent, and deliberately so after trying the alternative.
         // Serialising them looked right — 83% of the pace card's multi-second
@@ -618,7 +624,9 @@ final class AppBackgroundService {
         // time. They overlap almost perfectly. Running them one at a time
         // would stretch the window the rest of the app has to get through from
         // ~16 s to ~40 s for exactly the same work, which is the wrong
-        // direction. Fewer scopes is the lever; ordering is not.
+        // direction. Fewer scopes was the lever; ordering is not. Refitting
+        // every account is the deliberate exception, and it got affordable
+        // when the scoreboard stopped being re-read each refit (#155).
         //
         // Detached for the reason above: an `await` from `@MainActor` resumes
         // the fit inline on the main thread.
