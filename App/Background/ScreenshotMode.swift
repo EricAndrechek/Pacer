@@ -1293,7 +1293,11 @@ enum ScreenshotMode {
             request["crop"] = [r.minX, r.minY, r.width, r.height]
         }
         if let data = try? JSONSerialization.data(withJSONObject: request) {
-            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+            // Atomic: the capture helper polls this directory every 100 ms, and
+            // a plain write let it read a request half-written — "The data
+            // couldn't be read because it isn't in the correct format" — and
+            // drop the scene.
+            try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         }
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline,
@@ -1441,7 +1445,7 @@ enum ScreenshotMode {
                                       "rect": [left, barTop, right - left, height],
                                       "png": png.path]
         if let data = try? JSONSerialization.data(withJSONObject: request) {
-            try? data.write(to: dir.appendingPathComponent("\(name).request"))
+            try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         }
         // Opening the menu runs a tracking loop that does not return until it
         // closes, so the close is scheduled inside that loop: as soon as the
@@ -1509,7 +1513,7 @@ enum ScreenshotMode {
         body["kind"] = kind
         body["done"] = dir.appendingPathComponent("\(name).done").path
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
-        try? data.write(to: dir.appendingPathComponent("\(name).request"))
+        try? data.write(to: dir.appendingPathComponent("\(name).request"), options: .atomic)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(name).done").path) { return true }
