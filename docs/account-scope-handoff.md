@@ -501,3 +501,36 @@ starving, then both staying fresh.
 **Give it time before drawing conclusions.** A burst keeps a token throttled
 for ~35 minutes, and both clients' retries inside that window extend it. A
 snapshot taken during the penalty looks identical whether or not the fix works.
+
+## Who is signed in is decided in one place (#149)
+
+The attribution trail decides it. `AccountTrailRecorder` weighs `oauthAccount`
+in `~/.claude.json` against the account of the token the keychain holds now,
+which `OAuthPoller` publishes through `SignedInCredentialMonitor`.
+`ScanCoordinator` moves the poller's active account when the trail's login
+changes, and only then, so a pick made in the Tokens settings holds until the
+login actually moves. Do not add a second decider.
+
+The poller used to be a second one. It switched the active account whenever a
+lane labelled `.keychain` named another org. A lane kept that label after cswap
+parked its token, and the pool carried the label across restarts. With three
+accounts, each sweep of a parked token switched the active account to the
+account the user had left. On 2026-09-26 there were 89 switches in eight hours.
+On 2026-09-30 the dashboard showed the previous account's 88% for 19 minutes
+after cswap had moved the login off it. Lanes now take the label of where their
+token lives (keychain, parked, held) at every discovery.
+
+**The config file is rewritten about every 5–15 s** with a few sessions open,
+because Claude Code writes the whole file on nearly every action, and every
+process still holding an old identity writes that identity back. So "was the
+keychain read after the write?" has to mean after the *first* write naming that
+account. Measured against the latest rewrite, no re-read ever caught up. The
+stale identity waited out the 180 s timeout, was accepted, and was refuted
+straight away, with turns re-stamped both ways every few minutes.
+
+**Check it against cswap's own log.** `~/.claude-swap-backup/claude-swap.log`
+records every switch ("Switched from account 1 to 3", local time), and
+`sequence.json` maps slot numbers to org ids. The trail's `observed` spans in
+`ZACCOUNTACTIVATION` should start within about 30 s of each switch. A span
+that cswap did not cause is either a stale write the recorder let through, or
+the credential correcting one.

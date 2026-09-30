@@ -128,6 +128,58 @@ struct SignedInCredentialAttributionTests {
         #expect(recorder.drainCorrections().isEmpty)
     }
 
+    /// The field failure (#149). Claude Code rewrites `~/.claude.json` on
+    /// nearly every action, about every 5–15 s with several sessions open, so
+    /// a stale identity keeps coming back. Each keychain re-read was judged
+    /// against the newest rewrite and was always outrun by the next one. The
+    /// stale identity then sat in the hold until the timeout accepted it, the
+    /// credential refuted it at once, and turns were re-stamped both ways,
+    /// every few minutes.
+    @Test("a stale identity rewritten on every action is refuted by one read after it first appeared")
+    func repeatedStaleRewritesAreRefuted() throws {
+        let (home, context, recorder) = try setUp()
+        try writeConfig(home, org: "idle", modified: t(2_000))
+        #expect(recorder.poll(now: t(2_000),
+                              credential: reading("signed-in", since: 500, readAt: 1_500))
+                == "signed-in")
+        #expect(recorder.needsCredentialCheck)
+
+        // A re-read every 30 s, and a rewrite of the same stale identity just
+        // after each one, well past the verification timeout.
+        var clock: TimeInterval = 2_000
+        while clock < 2_000 + 2 * AccountTrailRecorder.credentialVerificationTimeout {
+            clock += 30
+            try writeConfig(home, org: "idle", modified: t(clock + 5))
+            let key = recorder.poll(now: t(clock + 6),
+                                    credential: reading("signed-in", since: 500, readAt: clock))
+            #expect(key == "signed-in")
+        }
+        let rows = try spans(context)
+        #expect(rows.count == 1)
+        #expect(rows[0].accountId == "signed-in" && rows[0].endedAt == nil)
+        #expect(recorder.drainCorrections().isEmpty)
+    }
+
+    @Test("after a stale identity is refuted, a real switch to it is still accepted")
+    func realSwitchAfterRefutationIsAccepted() throws {
+        let (home, _, recorder) = try setUp()
+        try writeConfig(home, org: "next", modified: t(2_000))
+        _ = recorder.poll(now: t(2_000),
+                          credential: reading("signed-in", since: 500, readAt: 2_100))
+        #expect(recorder.trail().currentDefaultLogin?.accountId == "signed-in")
+
+        // Later the user really does switch; the file says the same thing.
+        try writeConfig(home, org: "next", modified: t(3_000))
+        _ = recorder.poll(now: t(3_000),
+                          credential: reading("signed-in", since: 500, readAt: 2_100))
+        #expect(recorder.needsCredentialCheck)
+        let key = recorder.poll(now: t(3_040),
+                                credential: reading("next", since: 3_030, readAt: 3_030))
+        #expect(key == "next")
+        #expect(recorder.trail().accountId(at: t(3_000)) == "next")
+        #expect(recorder.trail().accountId(at: t(2_500)) == "signed-in")
+    }
+
     @Test("an unverifiable observation is accepted after the timeout, backdated")
     func timeoutAcceptsBackdated() throws {
         let (home, _, recorder) = try setUp()
