@@ -1565,7 +1565,8 @@ public final class ScanCoordinator {
             sessionIds: activePersister.dirtySessionIds,
             snapshots: sampleSnapshots,
             pending: activePersister.pendingSessionSamples,
-            polluted: activePersister.pollutedSessionIds
+            polluted: activePersister.pollutedSessionIds,
+            upgrades: activePersister.pendingSessionUpgrades
         )
         phase.sessionRecomputeMs = tickMs()
 

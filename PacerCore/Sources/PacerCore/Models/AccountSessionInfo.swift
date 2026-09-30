@@ -125,4 +125,31 @@ public struct SessionRollupValues: Sendable {
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
         if firstModel == nil { firstModel = sample.model }
     }
+
+    /// Take one turn's counts back out, the exact inverse of `add` for them.
+    ///
+    /// Only for a streamed message whose finished copy replaced a stored
+    /// partial one (#177): the same message, so the same timestamp, model,
+    /// project and version, and only the counts and cost move. That is why
+    /// first/last seen and the rest are left alone, and why cost is taken off
+    /// under the same pricing `snapshot` the add used (`SessionRollupCache`
+    /// drops everything when prices change).
+    public mutating func subtract<S: AggregatableSample>(
+        _ sample: S, mode: CostMode, snapshot: PricingTable.Snapshot
+    ) {
+        inputTokens -= sample.breakdown.inputTokens
+        outputTokens -= sample.breakdown.outputTokens
+        cacheReadTokens -= sample.breakdown.cacheReadTokens
+        cacheCreation5mTokens -= sample.breakdown.cacheCreation5mTokens
+        cacheCreation1hTokens -= sample.breakdown.cacheCreation1hTokens
+        totalCostUSD -= CostCalculator.cost(
+            storedCostUSD: sample.sourceCostUSD,
+            model: sample.model,
+            breakdown: sample.breakdown,
+            mode: mode,
+            snapshot: snapshot
+        )
+        modelTokens[sample.model, default: 0] -=
+            sample.breakdown.inputTokens + sample.breakdown.outputTokens
+    }
 }
