@@ -59,6 +59,13 @@ struct PacerApp: App {
                 // service's init, so it's non-nil here.
                 .environment(\.usageEngine, appDelegate.backgroundService.engine)
                 .environment(\.usageEngines, appDelegate.backgroundService.engines)
+                // A README screenshot run holds the wall clock still
+                // (`ScreenshotClock`, #154), so nothing may animate: a
+                // transition timed against that clock never finishes. The
+                // scoped Projects scene caught its donut mid-transition, one
+                // wedge drawn as the whole ring. Final states only. A no-op
+                // for every other launch.
+                .transaction { if ScreenshotMode.isActive { $0.disablesAnimations = true } }
         }
         .modelContainer(appDelegate.container)
         // First-launch placement. These apply only when AppKit has no
