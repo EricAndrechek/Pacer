@@ -63,7 +63,9 @@ prune:  ## Remove worktrees + branches already merged into main (squash merges i
 
 verify: vendor  ## Verification build (no signing, no install) — fastest sanity check.
 	@xcodegen generate
-	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
+	@# pipefail: the grep below always succeeds, so without it a failed build
+	@# exited 0 and `make verify` passed code that does not compile.
+	@set -o pipefail; xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
@@ -114,7 +116,7 @@ screenshots: verify  ## README screenshots: real window, synthetic data. CI → 
 
 app: vendor  ## Signed Debug build of Pacer.app (output: Build/Build/Products/Debug/Pacer.app).
 	@xcodegen generate
-	@xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
+	@set -o pipefail; xcodebuild -project Pacer.xcodeproj -scheme Pacer -configuration Debug \
 		-destination 'platform=macOS' \
 		-derivedDataPath "$(REPO_ROOT)/Build" \
 		-allowProvisioningUpdates \

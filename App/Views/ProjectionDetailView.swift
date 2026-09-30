@@ -19,8 +19,17 @@ struct ProjectionCompareModal: View {
     let windowKey: String
 
     @Environment(\.usageEngines) private var engines
-    @Query private var samples: [RateLimitSample]
-    @Query private var scopedSamples: [UsageLimitSample]
+    @Environment(\.modelContext) private var modelContext
+    /// The window's last 8 days, loaded off the main actor on every rate-limit
+    /// write. These were `@Query`s, but the poller saves through its own
+    /// `ModelContext` and nothing documents that such a save reaches a
+    /// main-context `@Query`. With the modal open on an idle machine, a new
+    /// poll did not move the actual line or the "N% used" subtitle until some
+    /// unrelated main-context save (#163; AGENTS.md, "SwiftData facts").
+    @State private var points: [LimitSamplePoint] = []
+    @State private var scopedPoints: [ScopedSamplePoint] = []
+    @State private var scopedLatest: ScopedWindowRow?
+    @State private var actualsLoaded = false
     @State private var trajectories: [BurnTrajectory.ScoredTrajectory] = []
     @State private var accuracy: EngineSelfEval.Accuracy?
     @State private var loaded = false
@@ -33,31 +42,6 @@ struct ProjectionCompareModal: View {
     init(windowKey: String, limitAccountId: String? = nil) {
         self.windowKey = windowKey
         self.limitAccountId = limitAccountId
-        let cutoff = Date().addingTimeInterval(-8 * 86400)
-        let account = limitAccountId
-        _samples = Query(
-            filter: account == nil
-                ? #Predicate<RateLimitSample> {
-                    $0.window == windowKey && $0.sampledAt >= cutoff
-                }
-                : #Predicate<RateLimitSample> {
-                    $0.window == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
-                },
-            sort: \.sampledAt
-        )
-        // Two accounts can report a scoped window under the *same* identity,
-        // so this one is not merely tidier — unscoped it would interleave two
-        // series into one line.
-        _scopedSamples = Query(
-            filter: account == nil
-                ? #Predicate<UsageLimitSample> {
-                    $0.identity == windowKey && $0.sampledAt >= cutoff
-                }
-                : #Predicate<UsageLimitSample> {
-                    $0.identity == windowKey && $0.sampledAt >= cutoff && $0.accountId == account
-                },
-            sort: \.sampledAt
-        )
     }
 
     private var isFixed: Bool {
@@ -67,12 +51,12 @@ struct ProjectionCompareModal: View {
     private var duration: TimeInterval {
         if windowKey == RateLimitWindowName.fiveHour { return 5 * 3600 }
         if windowKey == RateLimitWindowName.sevenDay { return 7 * 86400 }
-        return WindowSpec.scopedDuration(group: scopedSamples.last?.group ?? "weekly")
+        return WindowSpec.scopedDuration(group: scopedLatest?.group ?? "weekly")
     }
     private var windowTitle: String {
         if windowKey == RateLimitWindowName.fiveHour { return "5-hour" }
         if windowKey == RateLimitWindowName.sevenDay { return "7-day" }
-        return scopedSamples.last?.label ?? "Model"
+        return scopedLatest?.label ?? "Model"
     }
 
     /// Current-cycle actuals + a synthesized "now" tail, from whichever source
@@ -82,10 +66,10 @@ struct ProjectionCompareModal: View {
         let now = Date()
         let data: PaceChartView.Data?
         if isFixed {
-            data = .cycle(fixed: samples, duration: duration, now: now)
+            data = .cycle(fixed: points, duration: duration, now: now)
         } else {
-            guard let row = scopedSamples.last else { return nil }
-            data = .cycle(scoped: row, history: scopedSamples, duration: duration, now: now)
+            guard let row = scopedLatest else { return nil }
+            data = .cycle(scoped: row, history: scopedPoints, duration: duration, now: now)
         }
         guard let data,
               !DisplayCycle.resolve(resetsAt: data.resetsAt, duration: duration).isAwaiting
@@ -105,7 +89,10 @@ struct ProjectionCompareModal: View {
         // Filled in after the modal is on screen and read inside
         // `PacerModalContent`'s stored closure, so read here too (#140;
         // AGENTS.md, "SwiftUI state and data flow").
-        let _ = (trajectories, accuracy, loaded)
+        let _ = (trajectories, accuracy, loaded, actualsLoaded)
+        // Read here, by value, so a poll written by any context reloads the
+        // actuals (`RateLimitWriteSignal`).
+        let writes = RateLimitWriteSignal.shared.generation
         PacerModalContent(
             title: "\(windowTitle) projection",
             subtitle: subtitle,
@@ -130,7 +117,7 @@ struct ProjectionCompareModal: View {
                     accuracy: accuracy,
                     shadowFloors: UsageIntelligenceEngine.rlShadowFloors(duration: duration)
                 )
-            } else if loaded {
+            } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 200)
@@ -140,9 +127,49 @@ struct ProjectionCompareModal: View {
             }
         }
         .task { await refresh() }
+        .task(id: writes) { await loadActuals() }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
             Task { await refresh() }
         }
+    }
+
+    /// The window's actuals for the last 8 days, fetched on a background
+    /// context and handed back as values. The cutoff is taken per load so it
+    /// stays 8 days wide however long the modal is open.
+    private func loadActuals() async {
+        let container = modelContext.container
+        let key = windowKey, account = limitAccountId, fixed = isFixed
+        let cutoff = Date().addingTimeInterval(-8 * 86400)
+        let loaded = await Task.detached(priority: .userInitiated) {
+            () -> (points: [LimitSamplePoint], scoped: [ScopedSamplePoint], latest: ScopedWindowRow?) in
+            let context = ModelContext(container)
+            if fixed {
+                let descriptor = FetchDescriptor<RateLimitSample>(
+                    predicate: account == nil
+                        ? #Predicate<RateLimitSample> { $0.window == key && $0.sampledAt >= cutoff }
+                        : #Predicate<RateLimitSample> {
+                            $0.window == key && $0.sampledAt >= cutoff && $0.accountId == account
+                        },
+                    sortBy: [SortDescriptor(\.sampledAt)])
+                return ((try? context.fetch(descriptor))?.map(\.limitPoint) ?? [], [], nil)
+            }
+            // Two accounts can report a scoped window under the *same*
+            // identity, so the account filter is not merely tidier — unscoped
+            // it would interleave two series into one line.
+            let descriptor = FetchDescriptor<UsageLimitSample>(
+                predicate: account == nil
+                    ? #Predicate<UsageLimitSample> { $0.identity == key && $0.sampledAt >= cutoff }
+                    : #Predicate<UsageLimitSample> {
+                        $0.identity == key && $0.sampledAt >= cutoff && $0.accountId == account
+                    },
+                sortBy: [SortDescriptor(\.sampledAt)])
+            let rows = (try? context.fetch(descriptor)) ?? []
+            return ([], rows.map(\.scopedPoint), rows.last?.scopedWindowRow)
+        }.value
+        points = loaded.points
+        scopedPoints = loaded.scoped
+        scopedLatest = loaded.latest
+        actualsLoaded = true
     }
 
     private func refresh() async {
