@@ -328,49 +328,38 @@ import Testing
         #expect(monitor.current?.accountKey == "orgA")
     }
 
-    /// The field failure (#149). A switcher moved the login from orgA to orgB:
-    /// it parked tokA and put tokB in the keychain. tokA kept its `.keychain`
-    /// label, and each sweep of it switched the active account back to the
-    /// account the user had just left. With a third account parked as well,
-    /// the active account went round all three every few minutes.
-    @Test("a token the switcher parked is relabelled and cannot pull the active account back")
-    func parkedTokenCannotPullTheAccountBack() async throws {
+    /// The field failure (#149), as cswap produces it. A switch put orgB's
+    /// token in the keychain. orgA's token stayed in the pool, still valid
+    /// and still labelled `.keychain`, because cswap keeps its copy in its own
+    /// keychain items, which no discovery reads. Each sweep of it used to
+    /// switch the active account back to the account the user had just left;
+    /// with three accounts it went round all of them every few minutes.
+    @Test("a keychain token from before a switch cannot pull the active account back")
+    func formerKeychainTokenCannotPullTheAccountBack() async throws {
         let container = try Self.makeContainer()
         let keychainToken = Box<String>("tokA")
-        let parked = Box<[String]>([])
         let kc = KeychainOAuth(rawReader: {
             .success(Self.keychainBlob(token: keychainToken.value ?? ""))
         })
-        let expiry = Date().addingTimeInterval(3600)
-        let client = OAuthClient(
-            keychain: kc,
-            parkedCredentials: {
-                (parked.value ?? []).map {
-                    OAuthCredential(accessToken: $0, expiresAt: expiry, subscriptionType: nil)
-                }
-            },
-            transport: Self.orgByTokenTransport, desktopEnabled: { false })
+        let client = OAuthClient(keychain: kc, parkedCredentials: { [] },
+                                 transport: Self.orgByTokenTransport, desktopEnabled: { false })
         let monitor = SignedInCredentialMonitor()
         let poller = OAuthPoller(client: client, container: container,
                                  configuration: .init(), clock: TestClock(),
                                  signedInCredential: monitor)
-        let laneA = OAuthPoller.laneId("tokA"), laneB = OAuthPoller.laneId("tokB")
 
         _ = await poller.runOnce()
         #expect(await poller.snapshot().activeAccountKey == "orgA")
-        #expect(await poller.snapshot().laneSources[laneA] == .keychain)
 
         // The switch, then the coordinator following the trail to orgB.
         keychainToken.value = "tokB"
-        parked.value = ["tokA"]
         await poller.setActiveAccount(id: "orgB")
-        _ = await poller.testLane(id: laneB)
-        _ = await poller.testLane(id: laneA)             // the sweep that used to flip it
+        #expect(await poller.snapshot().laneCount == 2)  // tokA is still a lane
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokB"))
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokA"))  // the sweep that used to flip it
 
         let after = await poller.snapshot()
         #expect(after.activeAccountKey == "orgB")
-        #expect(after.laneSources[laneA] == .parked)
-        #expect(after.laneSources[laneB] == .keychain)
         #expect(after.misclassifiedLaneCount == 0)
         #expect(monitor.current?.accountKey == "orgB")
     }

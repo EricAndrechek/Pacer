@@ -188,8 +188,6 @@ public actor OAuthPoller: TokenPoolTesting {
         /// account's token drops to the slow secondary sweep and its readings
         /// are filed as some other account's).
         public let misclassifiedLaneCount: Int
-        /// Where each lane's token lives, by lane id.
-        public let laneSources: [String: CredentialCandidate.Source]
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -201,9 +199,7 @@ public actor OAuthPoller: TokenPoolTesting {
         /// across Pacer versions, and a lane that could never take the newer
         /// copy carried the older one for the life of the token.
         var credential: OAuthCredential
-        /// `var` because a switcher moves a token between the keychain and its
-        /// parked store without changing the token (see `mergeCandidates`).
-        var source: CredentialCandidate.Source
+        let source: CredentialCandidate.Source
         var state: OAuthPollScheduler.LaneState
         var consecutiveFailures: Int
         /// The account this token resolved to (from a successful poll's
@@ -398,10 +394,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 guard lane.state.account != .unknown, let active = activeAccountKey else { return false }
                 let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
                 return belongs != (lane.state.account == .primary)
-            }.count,
-            laneSources: Dictionary(
-                lanes.map { (Self.laneId($0.credential.accessToken), $0.source) },
-                uniquingKeysWith: { first, _ in first })
+            }.count
         )
     }
 
@@ -1157,24 +1150,14 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Only a strictly newer stored shape replaces one, so this converges after
     /// a single discovery rather than rewriting a lane every cycle, and lane
     /// state is carried across untouched.
-    ///
-    /// **A known token also takes the label of where it lives now.** A switch
-    /// parks the outgoing login's token and puts another in the keychain. The
-    /// token itself is unchanged, so its lane used to say `.keychain` for the
-    /// rest of its life, and seeding from the pool carried that label across
-    /// restarts. The poll log then read `keychain/<account>` for an account
-    /// nobody was signed into, and that line misled the #149 diagnosis.
     private func mergeCandidates(_ candidates: [CredentialCandidate]) {
         var known = Set(lanes.map { $0.credential.accessToken })
         for candidate in candidates {
             guard !known.contains(candidate.credential.accessToken) else {
-                guard let idx = lanes.firstIndex(where: {
-                    $0.credential.accessToken == candidate.credential.accessToken
-                }) else { continue }
-                if Self.relabels(lanes[idx].source, to: candidate.source) {
-                    lanes[idx].source = candidate.source
-                }
                 guard candidate.credential.isCurrentStoredShape,
+                      let idx = lanes.firstIndex(where: {
+                          $0.credential.accessToken == candidate.credential.accessToken
+                      }),
                       !lanes[idx].credential.isCurrentStoredShape
                 else { continue }
                 lanes[idx].credential = candidate.credential
@@ -1191,18 +1174,6 @@ public actor OAuthPoller: TokenPoolTesting {
             lanes.append(lane)
             known.insert(candidate.credential.accessToken)
         }
-    }
-
-    /// Whether a lane labelled `from` takes the label `to` of a source that
-    /// offers the same token now. Only between the places one Claude Code
-    /// credential lives over its life: the keychain, a switcher's parked copy,
-    /// and Pacer's held copy. `.override` is the user's own addition and keeps
-    /// its label; a Desktop token is a different credential and never matches.
-    private static func relabels(
-        _ from: CredentialCandidate.Source, to: CredentialCandidate.Source
-    ) -> Bool {
-        let movable: Set<CredentialCandidate.Source> = [.keychain, .parked, .held]
-        return from != to && movable.contains(from) && movable.contains(to)
     }
 
     /// Order primary-eligible sources first so the scheduler's index
@@ -1258,7 +1229,8 @@ public actor OAuthPoller: TokenPoolTesting {
         if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
             Log.write("OAuthPoller", Self.summarize(
                 outcome: outcome, laneCount: lanes.count,
-                lane: idx < lanes.count ? lanes[idx] : nil))
+                lane: idx < lanes.count ? lanes[idx] : nil,
+                liveKeychainToken: liveKeychainToken))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
@@ -1311,12 +1283,15 @@ public actor OAuthPoller: TokenPoolTesting {
             // This poll used to switch the active account whenever a
             // `.keychain` lane named another org. Two deciders disagreed, and
             // the active account flapped between three accounts every few
-            // minutes (#149). The label was the trigger: a lane keeps `.keychain`
-            // after a switcher parks its token and puts another account's in
-            // the keychain, so every sweep of a parked token looked like a
-            // "signed-in credential" for the account the user had just left.
-            // It also undid a manual pick from the Tokens settings on the next
-            // poll, which the coordinator's transition rule exists to respect.
+            // minutes (#149). The label was the trigger. A switch puts another
+            // account's token in the keychain, and the outgoing token stays in
+            // the pool, still valid for hours and still labelled `.keychain`.
+            // cswap keeps its copy in its own `claude-swap` items, which Pacer
+            // does not read, so no discovery relabels it. Every sweep of it
+            // then looked like the "signed-in credential" of the account the
+            // user had just left. It also undid a manual pick from the Tokens
+            // settings on the next poll, which the coordinator's transition
+            // rule exists to respect.
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
             // The lane's classification is set further down, so name the
@@ -1407,14 +1382,21 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     private static func summarize(
-        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
+        liveKeychainToken: String? = nil
     ) -> String {
         // Which credential, and whose. Enough to tell a Desktop token from the
         // Claude Code one an account switcher is also holding, without ever
         // putting the token itself in a log file.
+        //
+        // `keychain(old)` is a token the keychain held once but not now: a lane
+        // keeps its `.keychain` label after a switch. Bare `keychain/<account>`
+        // for the account the user had just left read as "the signed-in
+        // credential" and misled the #149 diagnosis.
         let which = lane.map { l in
             let org = l.accountKey.map { String($0.prefix(4)) } ?? "?"
-            return "\(l.source.rawValue)/\(org) "
+            let former = l.source == .keychain && l.credential.accessToken != liveKeychainToken
+            return "\(former ? "keychain(old)" : l.source.rawValue)/\(org) "
         } ?? ""
         let lanes = "\(which)lanes=\(laneCount)"
         switch outcome {
