@@ -223,6 +223,33 @@ public final class SamplePersister {
         /// (a genuine replay we correctly ignored) — this one changed
         /// stored numbers, so it's worth seeing in the scan log.
         public var upgradedFromPartial: Int = 0
+        /// Sessions newly marked polluted, by why (`SessionPollution`) — the
+        /// scan log's `sPol=`. A polluted session skips the rollup fast path
+        /// and re-fetches every sample it has, which on a long session is most
+        /// of a cycle's cost, so "which rule did that" has to be answerable
+        /// from the log (#177).
+        public var sessionPollution: [String: Int] = [:]
+    }
+
+    /// Why a session was marked polluted. The raw values are what the scan
+    /// log prints.
+    public enum SessionPollution: String, Sendable, CaseIterable {
+        /// More than `fastPathPendingCap` new turns for it in one cycle.
+        case cap
+        /// A streamed message's finished copy replaced its stored snapshot.
+        case upgrade
+        /// Marks left by a pass that died before its save.
+        case carry
+        /// A session with samples and no `SessionInfo` row.
+        case recovery
+        /// A duplicate row removed by `repairDuplicateSamples`.
+        case repair
+        /// Turns moved to another account after the trail was corrected.
+        case restamp
+        /// Every sample marked, after a cost-recompute version bump.
+        case all
+        /// Turns whose project path was re-canonicalised.
+        case alias
     }
 
     public private(set) var stats: Stats
@@ -478,7 +505,7 @@ public final class SamplePersister {
             var list = pendingSessionSamples[sid, default: []]
             list.append(sample)
             if list.count > Self.fastPathPendingCap {
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .cap)
                 pendingSessionSamples[sid] = nil
             } else {
                 pendingSessionSamples[sid] = list
@@ -567,7 +594,7 @@ public final class SamplePersister {
 
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .upgrade)
                 pendingSessionSamples[sid] = nil
             }
             applied += 1
@@ -659,6 +686,14 @@ public final class SamplePersister {
         pollutedSessionIds.removeAll()
     }
 
+    /// Mark one session polluted, counting why the first time it is marked
+    /// in this pass.
+    private func polluteSession(_ sid: String, _ reason: SessionPollution) {
+        if pollutedSessionIds.insert(sid).inserted {
+            stats.sessionPollution[reason.rawValue, default: 0] += 1
+        }
+    }
+
     /// Open a pass over the dirty sets (a scan cycle or an alias migration).
     ///
     /// Marks are cleared only once the pass that rebuilt them has committed,
@@ -678,7 +713,7 @@ public final class SamplePersister {
         pollutedDailyPairs.formUnion(dirtyPairs)
         pollutedHourBuckets.formUnion(dirtyHourBuckets)
         pollutedProjectPairs.formUnion(dirtyProjectDates)
-        pollutedSessionIds.formUnion(dirtySessionIds)
+        for sid in dirtySessionIds { polluteSession(sid, .carry) }
         pendingPairSamples.removeAll()
         pendingHourSamples.removeAll()
         pendingProjectSamples.removeAll()
@@ -770,7 +805,7 @@ public final class SamplePersister {
     /// columns can't be trusted under recovery semantics.
     public func addDirtySessionIds(_ ids: Set<String>) {
         dirtySessionIds.formUnion(ids)
-        pollutedSessionIds.formUnion(ids)
+        for sid in ids { polluteSession(sid, .recovery) }
     }
 
     /// Collapse turns that got stored more than once.
@@ -853,7 +888,7 @@ public final class SamplePersister {
         pollutedHourBuckets.insert(hourBucket)
         if let sid = sample.sessionId, !sid.isEmpty {
             dirtySessionIds.insert(sid)
-            pollutedSessionIds.insert(sid)
+            polluteSession(sid, .repair)
         }
     }
 
@@ -890,7 +925,7 @@ public final class SamplePersister {
             pendingHourSamples[hourBucket] = nil
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .restamp)
                 pendingSessionSamples[sid] = nil
             }
         }
@@ -933,7 +968,7 @@ public final class SamplePersister {
             pollutedHourBuckets.insert(hourBucket)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .all)
             }
         }
     }
@@ -989,7 +1024,7 @@ public final class SamplePersister {
             pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .alias)
             }
             changedCount += 1
         }
@@ -1052,7 +1087,7 @@ public final class SamplePersister {
             pollutedProjectPairs.insert(canonicalPair)
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                pollutedSessionIds.insert(sid)
+                polluteSession(sid, .alias)
             }
             changedCount += 1
         }
