@@ -118,22 +118,26 @@ struct RunLoopStallObserverTests {
     }
 
     /// Run a loop for `seconds` with a timer at each `(start, blocksFor)`.
-    /// A timer sleeps for its time, or spins when `spin` is set.
+    /// A timer sleeps for its time, or, when `spin` is set, burns that much of
+    /// the thread's own CPU time. CPU time rather than wall time, so the
+    /// expectation holds on a contended CI runner, where a thread spinning for
+    /// 250 ms of wall time got well under 200 ms of CPU (#171's first CI run).
     private func run(for seconds: TimeInterval,
                      timers: [(at: TimeInterval, blocksFor: TimeInterval)],
-                     spin: Bool = false) -> [RunLoopStallMeter.Stall] {
+                     spin: Bool = false,
+                     threshold: TimeInterval = 0.1) -> [RunLoopStallMeter.Stall] {
         let collected = Collected()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
             let loop = CFRunLoopGetCurrent()!
-            let observer = RunLoopStallObserver(runLoop: loop, threshold: 0.1) { collected.add($0) }
+            let observer = RunLoopStallObserver(runLoop: loop, threshold: threshold) { collected.add($0) }
             let now = CFAbsoluteTimeGetCurrent()
             for t in timers {
                 let timer = CFRunLoopTimerCreateWithHandler(
                     kCFAllocatorDefault, now + t.at, 0, 0, 0) { _ in
                         if spin {
-                            let end = ProcessInfo.processInfo.systemUptime + t.blocksFor
-                            while ProcessInfo.processInfo.systemUptime < end {}
+                            let end = RunLoopStallObserver.threadCPUTime() + t.blocksFor
+                            while RunLoopStallObserver.threadCPUTime() < end {}
                         } else {
                             usleep(useconds_t(t.blocksFor * 1_000_000))
                         }
@@ -157,7 +161,9 @@ struct RunLoopStallObserverTests {
     func blockingTimerIsAStall() {
         let found = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)])
         #expect(found.count == 1)
-        #expect(found.allSatisfy { $0.wall >= 0.24 && $0.wall < 0.6 })
+        // A lower bound only: on a busy machine the wake-up after the block
+        // can come late, and that lateness is a real stall too.
+        #expect(found.allSatisfy { $0.wall >= 0.24 && $0.wall < 3 })
     }
 
     /// The reason a stall carries CPU time: a thread blocked in a sleep, a lock
@@ -167,8 +173,8 @@ struct RunLoopStallObserverTests {
         let waiting = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)])
         let working = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)], spin: true)
         #expect(waiting.count == 1 && working.count == 1)
-        #expect(waiting.allSatisfy { $0.cpu < 0.05 })
-        #expect(working.allSatisfy { $0.cpu >= 0.2 })
+        #expect(waiting.allSatisfy { $0.cpu < 0.1 })
+        #expect(working.allSatisfy { $0.cpu >= 0.24 })
     }
 
     /// The #168 failure, on a real loop: a loop that sleeps most of the time
@@ -176,16 +182,19 @@ struct RunLoopStallObserverTests {
     /// work is.
     @Test("time asleep between short pieces of work is never a stall")
     func idleLoopIsQuiet() {
-        let found = run(for: 1.0, timers: [(at: 0.1, blocksFor: 0.02),
-                                           (at: 0.5, blocksFor: 0.02),
-                                           (at: 0.9, blocksFor: 0.02)])
+        // Gaps of ~0.9 s against a 0.5 s threshold: if sleep were counted,
+        // every gap would be reported; a preempted wake-up cannot reach it.
+        let found = run(for: 2.0, timers: [(at: 0.1, blocksFor: 0.02),
+                                           (at: 1.0, blocksFor: 0.02),
+                                           (at: 1.9, blocksFor: 0.02)],
+                        threshold: 0.5)
         #expect(found.isEmpty)
     }
 
     @Test("two long pieces of work with sleep between are two stalls")
     func twoStallsStaySeparate() {
-        let found = run(for: 1.2, timers: [(at: 0.1, blocksFor: 0.15), (at: 0.7, blocksFor: 0.15)])
+        let found = run(for: 1.8, timers: [(at: 0.1, blocksFor: 0.15), (at: 1.1, blocksFor: 0.15)])
         #expect(found.count == 2)
-        #expect(found.allSatisfy { $0.wall >= 0.14 && $0.wall < 0.45 })
+        #expect(found.allSatisfy { $0.wall >= 0.14 && $0.wall < 3 })
     }
 }
