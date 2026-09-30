@@ -33,13 +33,26 @@ public struct RunLoopStallMeter: Sendable {
         case exit
     }
 
+    /// One reported stretch.
+    ///
+    /// `cpu` is the observed thread's own CPU time across the stretch. Wall
+    /// time alone cannot say whether the thread was working or waiting: a
+    /// throttled background app, a lock, or a fetch blocked on another
+    /// context's write all show a long stretch with little CPU in it, and each
+    /// calls for a different fix.
+    public struct Stall: Sendable, Equatable {
+        public let wall: TimeInterval
+        public let cpu: TimeInterval
+    }
+
     /// Stretches shorter than this are not reported. Roughly six frames at
     /// 60 Hz: below it a stall is invisible, above it the window stops
     /// responding.
     public let threshold: TimeInterval
 
-    /// When the current stretch of work began, or nil while the loop sleeps.
-    private var busySince: TimeInterval?
+    /// When the current stretch of work began (wall and thread CPU time), or
+    /// nil while the loop sleeps.
+    private var busySince: (wall: TimeInterval, cpu: TimeInterval)?
     /// Whether the loop has slept since the last iteration began. An iteration
     /// that did not sleep polled its event port and went round again, which is
     /// a chance to handle input, so the next iteration is a new stretch.
@@ -49,46 +62,53 @@ public struct RunLoopStallMeter: Sendable {
         self.threshold = threshold
     }
 
-    /// Record one activity at `time` (seconds, any monotonic origin). Returns
-    /// the length of the stretch it closed, if that stretch was a stall.
-    public mutating func record(_ activity: Activity, at time: TimeInterval) -> TimeInterval? {
+    /// Record one activity at `time` (seconds, any monotonic origin) with the
+    /// thread's CPU time so far (`cpu`, seconds). Returns the stretch it
+    /// closed, if that stretch was a stall.
+    public mutating func record(
+        _ activity: Activity, at time: TimeInterval, cpu: TimeInterval = 0
+    ) -> Stall? {
+        let mark = (wall: time, cpu: cpu)
         switch activity {
         case .afterWaiting:
-            busySince = time
+            busySince = mark
             sleptThisIteration = true
             return nil
         case .beforeTimers:
             defer { sleptThisIteration = false }
             guard let start = busySince else {
-                busySince = time
+                busySince = mark
                 return nil
             }
             // Woke, handled the message, came round to the top: same stretch.
             if sleptThisIteration { return nil }
             // Polled without sleeping: the port was checked, so a new stretch.
-            busySince = time
-            return stall(from: start, to: time)
+            busySince = mark
+            return stall(from: start, to: mark)
         case .beforeWaiting:
             defer { busySince = nil }
-            return busySince.flatMap { stall(from: $0, to: time) }
+            return busySince.flatMap { stall(from: $0, to: mark) }
         case .entry:
             // A nested run (menu tracking, a modal) handles input itself; the
             // outer stretch so far ends here and the nested loop takes over.
-            let closed = busySince.flatMap { stall(from: $0, to: time) }
-            busySince = time
+            let closed = busySince.flatMap { stall(from: $0, to: mark) }
+            busySince = mark
             sleptThisIteration = true
             return closed
         case .exit:
             // Back in the outer loop's handler: whatever it does next is a
             // stretch of its own.
-            let closed = busySince.flatMap { stall(from: $0, to: time) }
-            busySince = time
+            let closed = busySince.flatMap { stall(from: $0, to: mark) }
+            busySince = mark
             return closed
         }
     }
 
-    private func stall(from start: TimeInterval, to end: TimeInterval) -> TimeInterval? {
-        let length = end - start
-        return length >= threshold ? length : nil
+    private func stall(
+        from start: (wall: TimeInterval, cpu: TimeInterval),
+        to end: (wall: TimeInterval, cpu: TimeInterval)
+    ) -> Stall? {
+        let wall = end.wall - start.wall
+        return wall >= threshold ? Stall(wall: wall, cpu: max(0, end.cpu - start.cpu)) : nil
     }
 }

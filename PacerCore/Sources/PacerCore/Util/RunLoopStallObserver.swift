@@ -20,7 +20,7 @@ public final class RunLoopStallObserver {
     private var observers: [CFRunLoopObserver] = []
     private let runLoop: CFRunLoop
     private let clock: () -> TimeInterval
-    private let report: (TimeInterval) -> Void
+    private let report: (RunLoopStallMeter.Stall) -> Void
 
     /// - Parameters:
     ///   - clock: seconds on a monotonic clock. System uptime by default, which
@@ -30,7 +30,7 @@ public final class RunLoopStallObserver {
         runLoop: CFRunLoop,
         threshold: TimeInterval,
         clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-        report: @escaping (TimeInterval) -> Void
+        report: @escaping (RunLoopStallMeter.Stall) -> Void
     ) {
         self.meter = RunLoopStallMeter(threshold: threshold)
         self.runLoop = runLoop
@@ -71,6 +71,14 @@ public final class RunLoopStallObserver {
         case .exit: mapped = .exit
         default: return
         }
-        if let stall = meter.record(mapped, at: clock()) { report(stall) }
+        if let stall = meter.record(mapped, at: clock(), cpu: Self.threadCPUTime()) {
+            report(stall)
+        }
+    }
+
+    /// The calling thread's CPU time in seconds: the observed loop's thread,
+    /// since every callback runs there.
+    static func threadCPUTime() -> TimeInterval {
+        Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1_000_000_000
     }
 }

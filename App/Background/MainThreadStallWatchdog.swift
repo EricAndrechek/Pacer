@@ -32,8 +32,12 @@ final class MainThreadStallWatchdog {
 
     func start() {
         guard observer == nil else { return }
+        // `cpu` is the main thread's own CPU time in the stretch. Close to the
+        // wall time means it was working; far below means it was waiting (a
+        // lock, a fetch blocked on another context's write) or throttled.
         observer = RunLoopStallObserver(runLoop: CFRunLoopGetMain(), threshold: 0.1) { stall in
-            Log.write("MainThread", "stalled \(Int(stall * 1000))ms")
+            Log.write("MainThread",
+                      "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)")
         }
     }
 }

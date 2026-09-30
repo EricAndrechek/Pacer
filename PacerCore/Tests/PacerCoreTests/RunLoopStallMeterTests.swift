@@ -15,7 +15,7 @@ struct RunLoopStallMeterTests {
     private func stalls(_ script: [(RunLoopStallMeter.Activity, TimeInterval)],
                         threshold: TimeInterval = 0.1) -> [TimeInterval] {
         var meter = RunLoopStallMeter(threshold: threshold)
-        return script.compactMap { meter.record($0.0, at: $0.1) }
+        return script.compactMap { meter.record($0.0, at: $0.1)?.wall }
     }
 
     private func ms(_ values: [TimeInterval]) -> [Int] { values.map { Int(($0 * 1000).rounded()) } }
@@ -54,6 +54,16 @@ struct RunLoopStallMeterTests {
             (.beforeWaiting, 20.260),
         ])
         #expect(ms(found) == [150, 110])
+    }
+
+    @Test("a stall carries the thread's CPU time across the stretch")
+    func cpuTimeIsCarried() {
+        var meter = RunLoopStallMeter(threshold: 0.1)
+        _ = meter.record(.afterWaiting, at: 1.0, cpu: 0.500)
+        _ = meter.record(.beforeTimers, at: 1.1, cpu: 0.505)
+        let stall = meter.record(.beforeWaiting, at: 1.3, cpu: 0.520)
+        #expect(stall.map { Int(($0.wall * 1000).rounded()) } == 300)
+        #expect(stall.map { Int(($0.cpu * 1000).rounded()) } == 20)
     }
 
     @Test("short stretches are not reported")
@@ -102,14 +112,16 @@ struct RunLoopStallObserverTests {
 
     private final class Collected: @unchecked Sendable {
         private let lock = NSLock()
-        private var stalls: [TimeInterval] = []
-        func add(_ s: TimeInterval) { lock.lock(); stalls.append(s); lock.unlock() }
-        var values: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return stalls }
+        private var stalls: [RunLoopStallMeter.Stall] = []
+        func add(_ s: RunLoopStallMeter.Stall) { lock.lock(); stalls.append(s); lock.unlock() }
+        var values: [RunLoopStallMeter.Stall] { lock.lock(); defer { lock.unlock() }; return stalls }
     }
 
     /// Run a loop for `seconds` with a timer at each `(start, blocksFor)`.
+    /// A timer sleeps for its time, or spins when `spin` is set.
     private func run(for seconds: TimeInterval,
-                     timers: [(at: TimeInterval, blocksFor: TimeInterval)]) -> [TimeInterval] {
+                     timers: [(at: TimeInterval, blocksFor: TimeInterval)],
+                     spin: Bool = false) -> [RunLoopStallMeter.Stall] {
         let collected = Collected()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
@@ -119,7 +131,12 @@ struct RunLoopStallObserverTests {
             for t in timers {
                 let timer = CFRunLoopTimerCreateWithHandler(
                     kCFAllocatorDefault, now + t.at, 0, 0, 0) { _ in
-                        usleep(useconds_t(t.blocksFor * 1_000_000))
+                        if spin {
+                            let end = ProcessInfo.processInfo.systemUptime + t.blocksFor
+                            while ProcessInfo.processInfo.systemUptime < end {}
+                        } else {
+                            usleep(useconds_t(t.blocksFor * 1_000_000))
+                        }
                     }
                 CFRunLoopAddTimer(loop, timer, .defaultMode)
             }
@@ -140,7 +157,18 @@ struct RunLoopStallObserverTests {
     func blockingTimerIsAStall() {
         let found = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)])
         #expect(found.count == 1)
-        #expect(found.allSatisfy { $0 >= 0.24 && $0 < 0.6 })
+        #expect(found.allSatisfy { $0.wall >= 0.24 && $0.wall < 0.6 })
+    }
+
+    /// The reason a stall carries CPU time: a thread blocked in a sleep, a lock
+    /// or a throttled app looks exactly like one doing work, by wall time.
+    @Test("CPU time tells work from waiting")
+    func cpuSeparatesWorkFromWaiting() {
+        let waiting = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)])
+        let working = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)], spin: true)
+        #expect(waiting.count == 1 && working.count == 1)
+        #expect(waiting.allSatisfy { $0.cpu < 0.05 })
+        #expect(working.allSatisfy { $0.cpu >= 0.2 })
     }
 
     /// The #168 failure, on a real loop: a loop that sleeps most of the time
@@ -158,6 +186,6 @@ struct RunLoopStallObserverTests {
     func twoStallsStaySeparate() {
         let found = run(for: 1.2, timers: [(at: 0.1, blocksFor: 0.15), (at: 0.7, blocksFor: 0.15)])
         #expect(found.count == 2)
-        #expect(found.allSatisfy { $0 >= 0.14 && $0 < 0.45 })
+        #expect(found.allSatisfy { $0.wall >= 0.14 && $0.wall < 0.45 })
     }
 }
