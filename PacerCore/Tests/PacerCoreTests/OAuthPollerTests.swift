@@ -286,54 +286,82 @@ import Testing
         #expect(await poller.snapshot().activeAccountKey == "orgA")
     }
 
-    /// The config file can lie, and the credential cannot.
-    ///
-    /// `ActiveAccountObserver` reads `oauthAccount` from `~/.claude.json`,
-    /// which is correct while one Claude Code owns that file. Run several at
-    /// once — all sharing `~/.claude`, the default — and a session started
-    /// under another account rewrites the object with its own identity,
-    /// undoing a switcher's work silently. Seen on a real machine: cswap
-    /// logged three switches to one account, and Pacer saw two reversions to
-    /// the other at times cswap logged nothing.
-    ///
-    /// The Claude Code keychain lane holds the credential that actually bills,
-    /// and every successful poll names its org for free. It outranks the file.
-    @Test("a keychain credential's own org outranks a stale config file")
-    func keychainCredentialOutranksConfig() async throws {
+    /// A transport that names the org from the token's last letter, so a test
+    /// can move tokens around and every poll still says whose each one is.
+    private static let orgByTokenTransport: OAuthClient.Transport = { request in
+        let token = request.value(forHTTPHeaderField: "Authorization") ?? ""
+        return try HTTPOutcome.success(
+            jsonBody: #"{"five_hour":{"utilization":10}}"#,
+            headers: ["anthropic-organization-id": "org" + String(token.suffix(1))]).materialize()
+    }
+
+    /// Who is signed in is decided by the attribution trail, and the
+    /// coordinator moves the active account only when the trail's login
+    /// changes. The poller used to decide it as well, from any `.keychain`
+    /// lane, and so undid a pick made in the Tokens settings on its next poll
+    /// of the Claude Code credential. What the credential says still reaches
+    /// the trail, which is where a stale config file gets refuted.
+    @Test("a poll of the signed-in credential does not move the active account")
+    func pollDoesNotMoveTheActiveAccount() async throws {
         let container = try Self.makeContainer()
         let kc = KeychainOAuth(rawReader: { .success(Self.keychainBlob(token: "tokA")) })
         let held = EphemeralCredentialStore(OAuthCredential(
             accessToken: "tokB", expiresAt: Date().addingTimeInterval(3600), subscriptionType: nil
         ))
-        let counter = AtomicCounter()
-        let outcomes: [HTTPOutcome] = [
-            .success(jsonBody: #"{"five_hour":{"utilization":10}}"#,
-                     headers: ["anthropic-organization-id": "orgA"]),
-        ]
-        let transport: OAuthClient.Transport = { _ in
-            try outcomes[min(counter.next(), outcomes.count - 1)].materialize()
-        }
-        let client = OAuthClient(keychain: kc, transport: transport,
+        let client = OAuthClient(keychain: kc, parkedCredentials: { [] },
+                                 transport: Self.orgByTokenTransport,
                                  desktopEnabled: { false }, heldStore: held)
+        let monitor = SignedInCredentialMonitor()
         let poller = OAuthPoller(client: client, container: container,
-                                 configuration: .init(), clock: TestClock())
+                                 configuration: .init(), clock: TestClock(),
+                                 signedInCredential: monitor)
 
         _ = await poller.runOnce()                       // keychain token is orgA
         #expect(await poller.snapshot().activeAccountKey == "orgA")
 
-        // A concurrent session rewrites the config to say orgB, and the
-        // observer duly reports it.
-        await poller.setActiveAccount(id: "orgB")
-        #expect(await poller.snapshot().activeAccountKey == "orgB")
-
-        // Next poll of the Claude Code credential says orgA, as it always did.
-        // That is the account being billed, so it wins. (Polled explicitly:
-        // under the test clock the lane's interval has not elapsed, and a
-        // `.secondary` lane is swept on its own cadence anyway.)
+        await poller.setActiveAccount(id: "orgB")        // picked in the Tokens settings
         _ = await poller.testLane(id: OAuthPoller.laneId("tokA"))
+
         let after = await poller.snapshot()
-        #expect(after.activeAccountKey == "orgA")
+        #expect(after.activeAccountKey == "orgB")
         #expect(after.misclassifiedLaneCount == 0)
+        #expect(monitor.current?.accountKey == "orgA")
+    }
+
+    /// The field failure (#149), as cswap produces it. A switch put orgB's
+    /// token in the keychain. orgA's token stayed in the pool, still valid
+    /// and still labelled `.keychain`, because cswap keeps its copy in its own
+    /// keychain items, which no discovery reads. Each sweep of it used to
+    /// switch the active account back to the account the user had just left;
+    /// with three accounts it went round all of them every few minutes.
+    @Test("a keychain token from before a switch cannot pull the active account back")
+    func formerKeychainTokenCannotPullTheAccountBack() async throws {
+        let container = try Self.makeContainer()
+        let keychainToken = Box<String>("tokA")
+        let kc = KeychainOAuth(rawReader: {
+            .success(Self.keychainBlob(token: keychainToken.value ?? ""))
+        })
+        let client = OAuthClient(keychain: kc, parkedCredentials: { [] },
+                                 transport: Self.orgByTokenTransport, desktopEnabled: { false })
+        let monitor = SignedInCredentialMonitor()
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock(),
+                                 signedInCredential: monitor)
+
+        _ = await poller.runOnce()
+        #expect(await poller.snapshot().activeAccountKey == "orgA")
+
+        // The switch, then the coordinator following the trail to orgB.
+        keychainToken.value = "tokB"
+        await poller.setActiveAccount(id: "orgB")
+        #expect(await poller.snapshot().laneCount == 2)  // tokA is still a lane
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokB"))
+        _ = await poller.testLane(id: OAuthPoller.laneId("tokA"))  // the sweep that used to flip it
+
+        let after = await poller.snapshot()
+        #expect(after.activeAccountKey == "orgB")
+        #expect(after.misclassifiedLaneCount == 0)
+        #expect(monitor.current?.accountKey == "orgB")
     }
 
     /// The poller fixing its own active account was not enough: the

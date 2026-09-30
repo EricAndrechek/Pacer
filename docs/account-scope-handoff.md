@@ -441,8 +441,10 @@ twelve times as often, never failed once. Any fix that throttles by account is
 solving the wrong problem — one was written and reverted.
 
 **cswap holds the same tokens.** It swaps Claude Code's keychain credential and
-parks the others as `Claude Code-credentials-<suffix>`. Both are lanes in
-Pacer's pool. Claude Desktop's tokens are separate credentials with separate
+keeps the others in its own `claude-swap` keychain items (not the
+`Claude Code-credentials-<suffix>` items Pacer reads as parked; see the last
+section). A token Pacer saw while it was live stays a lane in Pacer's pool, so
+both clients poll it. Claude Desktop's tokens are separate credentials with separate
 budgets and cswap never touches them — `sharesBudgetWithSwitcher` is that
 distinction, and getting it wrong stamps every lane of an account with one
 timestamp and collapses the multi-token stagger that makes the fast cadence
@@ -501,3 +503,46 @@ starving, then both staying fresh.
 **Give it time before drawing conclusions.** A burst keeps a token throttled
 for ~35 minutes, and both clients' retries inside that window extend it. A
 snapshot taken during the penalty looks identical whether or not the fix works.
+
+## Who is signed in is decided in one place (#149)
+
+The attribution trail decides it. `AccountTrailRecorder` weighs `oauthAccount`
+in `~/.claude.json` against the account of the token the keychain holds now,
+which `OAuthPoller` publishes through `SignedInCredentialMonitor`.
+`ScanCoordinator` moves the poller's active account when the trail's login
+changes, and only then, so a pick made in the Tokens settings holds until the
+login actually moves. Do not add a second decider.
+
+The poller used to be a second one. It switched the active account whenever a
+lane labelled `.keychain` named another org. After a switch, the outgoing
+token stays in the pool, still valid for hours and still labelled `.keychain`.
+With three accounts, each sweep of an old token switched the active account to
+the account the user had left. On 2026-09-26 there were 89 switches in eight
+hours. On 2026-09-30 the dashboard showed the previous account's 88% for 19
+minutes after cswap had moved the login off it. The poll log now writes
+`keychain(old)/<account>` for such a token, so it no longer reads as the
+signed-in credential.
+
+**cswap does not park where Pacer looks.** Pacer's "parked" source reads
+`Claude Code-credentials-<suffix>` items. cswap 0.26 keeps switched-out logins
+in its own `claude-swap` keychain items. The `-<suffix>` items on the
+maintainer's machine are old per-profile credentials from session mode, last
+written months ago. So after a cswap switch, no source offers the old token
+and its lane keeps the `.keychain` label until the token expires. Don't
+relabel it `.held` to tidy that up: cswap still polls that token, and `.held`
+is outside `sharesBudgetWithSwitcher`.
+
+**The config file is rewritten about every 5–15 s** with a few sessions open,
+because Claude Code writes the whole file on nearly every action, and every
+process still holding an old identity writes that identity back. So "was the
+keychain read after the write?" has to mean after the *first* write naming that
+account. Measured against the latest rewrite, no re-read ever caught up. The
+stale identity waited out the 180 s timeout, was accepted, and was refuted
+straight away, with turns re-stamped both ways every few minutes.
+
+**Check it against cswap's own log.** `~/.claude-swap-backup/claude-swap.log`
+records every switch ("Switched from account 1 to 3", local time), and
+`sequence.json` maps slot numbers to org ids. The trail's `observed` spans in
+`ZACCOUNTACTIVATION` should start within about 30 s of each switch. A span
+that cswap did not cause is either a stale write the recorder let through, or
+the credential correcting one.

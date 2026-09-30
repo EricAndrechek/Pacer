@@ -42,7 +42,8 @@ public final class AccountTrailRecorder {
     /// it and had not been read since the file changed. Carries the instant
     /// it was first seen so that, if it turns out to be a real switch, the
     /// span starts where the switch happened rather than where it was
-    /// confirmed.
+    /// confirmed. `fileModified` is the first write that named this account,
+    /// not the latest rewrite of it; see `decide`.
     private var pendingObservation: (observation: ActiveAccountObserver.Observation, firstSeen: Date, fileModified: Date)?
     /// Set by `poll` when a disagreeing observation is waiting on a fresh
     /// keychain read; the caller asks the poller for one.
@@ -176,15 +177,34 @@ public final class AccountTrailRecorder {
             pendingObservation = nil
             return
         }
-        // A pending sighting of this same account keeps its first-seen time.
-        let firstSeen = (pendingObservation?.observation.accountKey == observed)
-            ? (pendingObservation?.firstSeen ?? now) : now
+        // A pending sighting of this same account keeps its first-seen time,
+        // and the time of the first write that named it.
+        //
+        // The write matters more than it looks. Claude Code rewrites
+        // `~/.claude.json` wholesale on almost every action, so a stale
+        // identity is not written once: every process still holding it
+        // rewrites it again and again. Measuring the keychain read against
+        // the *latest* rewrite meant each rewrite outran the read it had just
+        // asked for, so a stale identity could never be refuted. It sat in
+        // the hold until the timeout accepted it, the credential refuted it
+        // at once, and both corrections re-stamped turns and forced full
+        // rollup rebuilds, every few minutes for hours (#149).
+        //
+        // A read after the first write is enough. A real switch moves the
+        // keychain no later than the file, so if the keychain still held the
+        // other account's token after this identity first appeared, the
+        // identity was stale when it appeared. Rewrites of it are not new
+        // evidence. A real switch to the same account after a rejection gets
+        // judged fresh, because a rejection ends the episode.
+        let continuing = pendingObservation?.observation.accountKey == observed
+        let firstSeen = continuing ? (pendingObservation?.firstSeen ?? now) : now
+        let firstWrite = continuing ? (pendingObservation?.fileModified ?? fileModified) : fileModified
 
         // No keychain read yet, but one is on its way: hold rather than let
         // the first thing read after a launch overwrite a known login.
         guard let credential else {
             if credentialExpected, current != nil {
-                hold(observation, firstSeen: firstSeen, fileModified: fileModified,
+                hold(observation, firstSeen: firstSeen, fileModified: firstWrite,
                      now: now, evidence: evidence)
             } else {
                 accept(observation, at: firstSeen, now: now, evidence: evidence)
@@ -198,10 +218,10 @@ public final class AccountTrailRecorder {
             accept(observation, at: firstSeen, now: now, evidence: evidence)
             return
         }
-        // The keychain was read after the file was written and still held
-        // another account's token: nothing switched. Some other Claude Code
-        // process wrote back an identity it was holding.
-        if credential.readAt >= fileModified {
+        // The keychain was read after the file first named this account and
+        // still held another account's token: nothing switched. Some other
+        // Claude Code process wrote back an identity it was holding.
+        if credential.readAt >= firstWrite {
             pendingObservation = nil
             // A trail with no open default span would otherwise stay empty and
             // leave every turn unattributed; the credential is itself an
@@ -223,7 +243,7 @@ public final class AccountTrailRecorder {
         }
         // The credential predates the write, so it cannot tell a real switch
         // from a stale one yet. Hold the observation and ask for a re-read.
-        hold(observation, firstSeen: firstSeen, fileModified: fileModified,
+        hold(observation, firstSeen: firstSeen, fileModified: firstWrite,
              now: now, evidence: evidence)
     }
 

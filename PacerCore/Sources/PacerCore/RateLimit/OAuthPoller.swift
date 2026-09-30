@@ -1229,7 +1229,8 @@ public actor OAuthPoller: TokenPoolTesting {
         if !Self.sameCategory(previous, outcome) || previousLane != lastPolledLaneId {
             Log.write("OAuthPoller", Self.summarize(
                 outcome: outcome, laneCount: lanes.count,
-                lane: idx < lanes.count ? lanes[idx] : nil))
+                lane: idx < lanes.count ? lanes[idx] : nil,
+                liveKeychainToken: liveKeychainToken))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
@@ -1272,34 +1273,25 @@ public actor OAuthPoller: TokenPoolTesting {
                                            snapshot.sevenDay?.resetsAt]
                 .compactMap { $0 }.min()
             let org = snapshot.organizationId
-            // The live Claude Code credential outranks the config file.
+            // This poll does not decide who is signed in, even when it holds
+            // the credential Claude Code bills. That is decided in one place:
+            // the attribution trail, which weighs `~/.claude.json` against the
+            // live keychain credential this poller publishes just below.
+            // `ScanCoordinator` then moves the active account when the trail's
+            // login changes, and only then.
             //
-            // `ActiveAccountObserver` reads `oauthAccount` out of
-            // `~/.claude.json`, which is right whenever one Claude Code owns
-            // that file. Run several at once — all sharing `~/.claude`, which
-            // is the default — and a session that started under another account
-            // rewrites the object with *its* identity, undoing a switcher's
-            // work without the switcher knowing. Observed on the maintainer's
-            // machine: cswap logged three switches to the personal account and
-            // Pacer saw two reversions to the work account at times cswap
-            // logged nothing at all, because the credential said one thing and
-            // the config file said another.
-            //
-            // This lane holds the credential Claude Code actually bills, and
-            // the response just named its org. That is not a guess, and it
-            // costs nothing extra. It wins.
-            //
-            // No thrash: the observer only votes when the *file* changes, so
-            // adopting the credential here settles it until the next real
-            // switch.
-            if lanes[idx].source == .keychain, let org,
-               let key = Optional(Account.key(forOrg: org)), key != activeAccountKey,
-               activeAccountKey != nil, activeAccountKey != Account.defaultKey {
-                Log.write("OAuthPoller",
-                          "signed-in credential resolves to \(key.prefix(4)) but the config "
-                            + "said \(activeAccountKey?.prefix(4) ?? "-") — trusting the credential")
-                await setActiveAccount(id: key)
-            }
+            // This poll used to switch the active account whenever a
+            // `.keychain` lane named another org. Two deciders disagreed, and
+            // the active account flapped between three accounts every few
+            // minutes (#149). The label was the trigger. A switch puts another
+            // account's token in the keychain, and the outgoing token stays in
+            // the pool, still valid for hours and still labelled `.keychain`.
+            // cswap keeps its copy in its own `claude-swap` items, which Pacer
+            // does not read, so no discovery relabels it. Every sweep of it
+            // then looked like the "signed-in credential" of the account the
+            // user had just left. It also undid a manual pick from the Tokens
+            // settings on the next poll, which the coordinator's transition
+            // rule exists to respect.
             let isActive = classifyIsActive(org: org)
             lanes[idx].resolvedOrg = org ?? primaryOrg
             // The lane's classification is set further down, so name the
@@ -1390,14 +1382,21 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     private static func summarize(
-        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil
+        outcome: PollOutcome, laneCount: Int, lane: Lane? = nil,
+        liveKeychainToken: String? = nil
     ) -> String {
         // Which credential, and whose. Enough to tell a Desktop token from the
         // Claude Code one an account switcher is also holding, without ever
         // putting the token itself in a log file.
+        //
+        // `keychain(old)` is a token the keychain held once but not now: a lane
+        // keeps its `.keychain` label after a switch. Bare `keychain/<account>`
+        // for the account the user had just left read as "the signed-in
+        // credential" and misled the #149 diagnosis.
         let which = lane.map { l in
             let org = l.accountKey.map { String($0.prefix(4)) } ?? "?"
-            return "\(l.source.rawValue)/\(org) "
+            let former = l.source == .keychain && l.credential.accessToken != liveKeychainToken
+            return "\(former ? "keychain(old)" : l.source.rawValue)/\(org) "
         } ?? ""
         let lanes = "\(which)lanes=\(laneCount)"
         switch outcome {
