@@ -534,6 +534,16 @@ public actor OAuthPoller: TokenPoolTesting {
         ensureLanes()
     }
 
+    /// Read every token source now. Called when a credential setting changes
+    /// (Settings → Authentication), so turning a source on or off does not
+    /// wait for the next scheduled discovery.
+    public func rediscoverTokens() async {
+        await loadPersistedMetaIfNeeded()
+        lastDiscoveryAt = nil
+        ensureLanes()
+        await publishStatus()
+    }
+
     /// Publish the account of the token the keychain holds, if a keychain
     /// read has happened. A token not yet resolved publishes as unknown,
     /// which is what makes a real switch visible before its first poll.

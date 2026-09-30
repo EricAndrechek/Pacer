@@ -46,6 +46,7 @@ struct SettingsView: View {
                 SettingsSection("Authentication") {
                     TokensCard()
                     DesktopCredentialsCard()
+                    SwitcherCredentialsCard()
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
@@ -1634,6 +1635,73 @@ private struct ProjectAliasesPointerCard: View {
 }
 
 // MARK: - Authentication
+
+/// Opt-out: read the Claude Code logins an account switcher (cswap) keeps in
+/// the keychain, so an account you switched away from keeps a live token after
+/// Pacer's own copy expires (#170). Shown only when there is something to
+/// read. Listing the items cannot prompt, and the store stops reading for the
+/// session after any failure, so the status line is where a problem shows.
+private struct SwitcherCredentialsCard: View {
+    @AppStorage(PacerSettings.Key.switcherCredentialsEnabled, store: PacerSettings.store)
+    private var enabled: Bool = true
+    @State private var status: ParkedCredentialStore.SwitcherStatus?
+
+    var body: some View {
+        // Read here so a refreshed status redraws the card.
+        let status = self.status
+        Group {
+            if let status, status.saved > 0 {
+                PacerCard("Account switcher", content: {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Read cswap's saved logins", isOn: $enabled)
+                        HStack(spacing: 6) { statusLabel(status) }
+                    }
+                }, footer: {
+                    Text("Read-only. Keeps accounts you've switched away from polled on their own Claude Code token.")
+                })
+            }
+        }
+        .task(id: enabled) { await refresh(rediscover: true) }
+        .task {
+            // The first discovery after launch may not have run yet; look again
+            // once it has, so "live" reflects what the poller found.
+            try? await Task.sleep(for: .seconds(5))
+            await refresh(rediscover: false)
+        }
+    }
+
+    @ViewBuilder
+    private func statusLabel(_ status: ParkedCredentialStore.SwitcherStatus) -> some View {
+        if let failure = status.failure, enabled {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red).font(.system(size: 12))
+            Text("Couldn't read: \(failure). Turn off and on to retry.")
+                .font(.caption).foregroundStyle(.red).lineLimit(2)
+        } else if enabled {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.system(size: 12))
+            Text("\(status.saved) saved login\(status.saved == 1 ? "" : "s") · \(status.usable) live")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        } else {
+            Image(systemName: "person.2")
+                .foregroundStyle(.tertiary).font(.system(size: 12))
+            Text("Off")
+                .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+        }
+    }
+
+    /// Off the main actor: the listing walks every generic-password item.
+    private func refresh(rediscover: Bool) async {
+        if rediscover {
+            // A toggle is the user asking to try now, failure or not.
+            ParkedCredentialStore.shared.resetFailures()
+            await TokenPoolStatus.shared.rediscoverTokens()
+        }
+        status = await Task.detached(priority: .utility) {
+            ParkedCredentialStore.shared.switcherStatus()
+        }.value
+    }
+}
 
 /// Opt-in: also read Claude Desktop's credential. When on, Pacer decrypts
 /// Claude Desktop's `safeStorage` token cache (read-only) and the poller
