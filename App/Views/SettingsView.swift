@@ -21,12 +21,21 @@ import PacerUI
 /// the dashboard, so Settings reads as a continuation of the app
 /// rather than its own visual idiom.
 struct SettingsView: View {
+    /// The switcher-logins card's status, loaded here rather than by the card:
+    /// the card is absent until there is something to show, and a `.task` on
+    /// an absent view never runs (AGENTS.md trap list), so the card could never
+    /// have loaded its own status.
+    @State private var switcherStatus: ParkedCredentialStore.SwitcherStatus?
+    @AppStorage(PacerSettings.Key.switcherCredentialsEnabled, store: PacerSettings.store)
+    private var switcherEnabled: Bool = true
+
     var body: some View {
         // Read here, not inside a section's stored closure, so a login switch
         // redraws this view and the `.id` below rebuilds the alerts card
         // against the new account (#140; AGENTS.md, "SwiftUI state and data
         // flow").
         let activeAccountId = UsageScope.shared.activeAccountId
+        let switcherStatus = self.switcherStatus
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 SettingsSection("General") {
@@ -46,6 +55,9 @@ struct SettingsView: View {
                 SettingsSection("Authentication") {
                     TokensCard()
                     DesktopCredentialsCard()
+                    if let switcherStatus, switcherStatus.saved > 0 {
+                        SwitcherCredentialsCard(status: switcherStatus, enabled: $switcherEnabled)
+                    }
                 }
                 SettingsSection("Data") {
                     CostCalculationCard()
@@ -72,6 +84,28 @@ struct SettingsView: View {
         #if canImport(AppKit)
         .modifier(DismissFocusOnOutsideClick())
         #endif
+        .task {
+            await loadSwitcherStatus()
+            // The first discovery after launch may not have run yet; look
+            // again once it has, so "live" reflects what the poller found.
+            try? await Task.sleep(for: .seconds(5))
+            await loadSwitcherStatus()
+        }
+        .onChange(of: switcherEnabled) { _, _ in
+            // A toggle is the user asking to try now, failure or not.
+            ParkedCredentialStore.shared.resetFailures()
+            Task {
+                await TokenPoolStatus.shared.rediscoverTokens()
+                await loadSwitcherStatus()
+            }
+        }
+    }
+
+    /// Off the main actor: the listing walks every generic-password item.
+    private func loadSwitcherStatus() async {
+        switcherStatus = await Task.detached(priority: .utility) {
+            ParkedCredentialStore.shared.switcherStatus()
+        }.value
     }
 }
 
@@ -1634,6 +1668,48 @@ private struct ProjectAliasesPointerCard: View {
 }
 
 // MARK: - Authentication
+
+/// Opt-out: read the Claude Code logins an account switcher (cswap) keeps in
+/// the keychain, so an account you switched away from keeps a live token after
+/// Pacer's own copy expires (#170). `SettingsView` shows it only when there is
+/// something to read, and owns the status. Listing cannot prompt, and the
+/// store stops reading for the session after any failure, so the status line
+/// is where a problem shows.
+private struct SwitcherCredentialsCard: View {
+    let status: ParkedCredentialStore.SwitcherStatus
+    @Binding var enabled: Bool
+
+    var body: some View {
+        PacerCard("Account switcher", content: {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Read cswap's saved logins", isOn: $enabled)
+                HStack(spacing: 6) { statusLabel }
+            }
+        }, footer: {
+            Text("Read-only. Keeps accounts you've switched away from polled on their own Claude Code token.")
+        })
+    }
+
+    @ViewBuilder
+    private var statusLabel: some View {
+        if let failure = status.failure, enabled {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red).font(.system(size: 12))
+            Text("Couldn't read: \(failure). Turn off and on to retry.")
+                .font(.caption).foregroundStyle(.red).lineLimit(2)
+        } else if enabled {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green).font(.system(size: 12))
+            Text("\(status.saved) saved login\(status.saved == 1 ? "" : "s") · \(status.usable) live")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        } else {
+            Image(systemName: "person.2")
+                .foregroundStyle(.tertiary).font(.system(size: 12))
+            Text("Off")
+                .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+        }
+    }
+}
 
 /// Opt-in: also read Claude Desktop's credential. When on, Pacer decrypts
 /// Claude Desktop's `safeStorage` token cache (read-only) and the poller

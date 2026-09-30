@@ -102,6 +102,7 @@ public enum PacerSettings {
         public static let projectsSort           = PacerPreferenceKeys.projectsSort
         public static let oauthTokenOverride     = PacerPreferenceKeys.oauthTokenOverride
         public static let desktopCredentialsEnabled = PacerPreferenceKeys.desktopCredentialsEnabled
+        public static let switcherCredentialsEnabled = PacerPreferenceKeys.switcherCredentialsEnabled
         public static let desktopOnboardingDismissed = PacerPreferenceKeys.desktopOnboardingDismissed
         public static let apiEnabled             = PacerPreferenceKeys.apiEnabled
         public static let apiPort                = PacerPreferenceKeys.apiPort
@@ -151,6 +152,7 @@ public enum PacerSettings {
         Key.projectsSort:          "cost",
         Key.oauthTokenOverride:    "",
         Key.desktopCredentialsEnabled: false,
+        Key.switcherCredentialsEnabled: true,
         Key.desktopOnboardingDismissed: false,
         Key.apiEnabled:            false,
         Key.apiPort:               PacerPreferences.apiDefaultPort,

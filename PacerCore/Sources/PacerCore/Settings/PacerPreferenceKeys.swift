@@ -108,6 +108,13 @@ public enum PacerPreferenceKeys {
     /// app's credential store and triggers a one-time keychain approval, so
     /// the user turns it on deliberately. Read-only; never refreshes.
     public static let desktopCredentialsEnabled = "pacer.desktop.credentialsEnabled"
+    /// Opt-out: read the Claude Code logins an account switcher (cswap) keeps
+    /// in the keychain, so an account you switched away from keeps a live
+    /// token after Pacer's own copy expires. On by default: the read is
+    /// silent (cswap and Pacer both go through `/usr/bin/security`) and
+    /// read-only. Off stops it for anyone who would rather Pacer not read
+    /// another tool's credentials. See `ParkedCredentialStore`.
+    public static let switcherCredentialsEnabled = "pacer.switcher.credentialsEnabled"
     /// Set when the user dismisses the first-run "Also track Claude Desktop"
     /// nudge with "Not now" — so it never reappears. The feature itself stays
     /// reachable in Settings → Authentication; this only silences the banner.
@@ -227,6 +234,12 @@ public enum PacerPreferences {
     /// touches the Desktop keychain item without explicit consent.
     public static func desktopCredentialsEnabled(from store: UserDefaults = store) -> Bool {
         store.bool(forKey: PacerPreferenceKeys.desktopCredentialsEnabled)
+    }
+
+    /// Whether to read an account switcher's saved logins. Defaults to `true`
+    /// (key absent → on); only an explicit off disables it.
+    public static func switcherCredentialsEnabled(from store: UserDefaults = store) -> Bool {
+        (store.object(forKey: PacerPreferenceKeys.switcherCredentialsEnabled) as? Bool) ?? true
     }
 
     /// Default port for the local API/metrics server. 7223 = "PACE" on a
