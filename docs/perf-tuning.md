@@ -56,6 +56,22 @@ later overnight loops, so don't put durable knowledge there.
    then grep for `_layoutSubtreeIfNeeded`, `cacheDisplayInRect`,
    `_updateReplicants`, `_scalableMinSize` — those are the AppKit hot
    paths the SwiftUI animations hit when they're misconfigured.
+4. **Read wall-clock timings with two caveats.**
+   - **A background app is throttled.** While Pacer sits behind other
+     windows, macOS slows it down, and a duration measured by wall clock
+     (a phase timing, the pace chart's `body build` line) can be ten times
+     its CPU cost with nobody waiting on it. The pace chart logged 4,444
+     body builds of 100 ms or more in five days, and none within 90 s of a
+     click (#173). `[MainThread] stalled Nms (cpu Nms)` reports both: CPU
+     close to wall time means the main thread was working; far below means
+     it was waiting (a lock, a fetch blocked on another context's write)
+     or throttled (#168).
+   - **`make install` builds Debug.** That is what keeps Sparkle's
+     automatic update checks off a dev build (`PacerUpdater.swift`). Swift
+     data preparation runs about 2.2× slower than in the Release build the
+     DMG ships: the pace chart's column build over 30,200 points measured
+     14 ms Debug against 6.4 ms Release. Framework time (SwiftUI, SwiftData,
+     Foundation) is optimised either way.
 
 ## What got fixed (chronological)
 

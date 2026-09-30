@@ -1,8 +1,8 @@
 import Foundation
 import PacerCore
 
-/// Logs when the main thread stops servicing its run loop for longer than a
-/// frame budget allows.
+/// Logs when the main thread goes longer than a frame budget without being
+/// able to handle input.
 ///
 /// Added because "switching accounts takes about five seconds" could not be
 /// explained by anything measurable: the pace chart's own load was 578 ms and
@@ -11,40 +11,33 @@ import PacerCore
 /// no evidence. This produces evidence — a timestamped duration for every main
 /// thread stall, so a slow interaction says how long it blocked and when.
 ///
-/// Cheap enough to leave on: one timer at 10 Hz that compares "now" against
-/// when it last ran, and writes a line only when the gap is anomalous.
+/// **It watches the run loop, not a timer.** The first version ran a 20 Hz
+/// timer and logged whenever a tick came late. macOS throttles a background
+/// app's timers, so while the user was working in another app every tick came
+/// late and logged: ~16,000 lines an hour, for four days, while clicks in the
+/// same hours were delivered in 2–4 ms (#168). Observers are only called when
+/// the loop runs, so throttling cannot fake a stall, and there is no timer
+/// waking the app twenty times a second to look.
+///
+/// The observing and the accounting are `RunLoopStallObserver` and
+/// `RunLoopStallMeter` in PacerCore, where a unit test runs them against a real
+/// run loop.
 @MainActor
 final class MainThreadStallWatchdog {
     static let shared = MainThreadStallWatchdog()
 
-    /// Roughly six frames at 60 Hz. Below this a stall is invisible; above it
-    /// the user sees the window stop responding.
-    private static let threshold: TimeInterval = 0.1
-    private static let tick: TimeInterval = 0.05
-
-    private var timer: Timer?
-    private var lastFired = Date()
+    private var observer: RunLoopStallObserver?
 
     private init() {}
 
     func start() {
-        guard timer == nil else { return }
-        lastFired = Date()
-        let t = Timer(timeInterval: Self.tick, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let now = Date()
-                let gap = now.timeIntervalSince(self.lastFired) - Self.tick
-                self.lastFired = now
-                if gap >= Self.threshold {
-                    Log.write("MainThread", "stalled \(Int(gap * 1000))ms")
-                }
-            }
+        guard observer == nil else { return }
+        // `cpu` is the main thread's own CPU time in the stretch. Close to the
+        // wall time means it was working; far below means it was waiting (a
+        // lock, a fetch blocked on another context's write) or throttled.
+        observer = RunLoopStallObserver(runLoop: CFRunLoopGetMain(), threshold: 0.1) { stall in
+            Log.write("MainThread",
+                      "stalled \(Int(stall.wall * 1000))ms (cpu \(Int(stall.cpu * 1000))ms)")
         }
-        // `.common` so the stall is still reported while a menu is open or the
-        // window is being resized — which is exactly when the account switch
-        // this was written for happens.
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 }
