@@ -487,8 +487,23 @@ private struct SwipeBackGestureHost: NSViewRepresentable {
     var onBack: () -> Void
 
     func makeNSView(context: Context) -> NSView {
+        let view = WindowReportingView(frame: .zero)
+        view.onWindowChange = { [weak coordinator = context.coordinator] window in
+            coordinator?.window = window
+        }
         context.coordinator.attach()
-        return NSView(frame: .zero)
+        return view
+    }
+
+    /// Tells the coordinator which window the modal is in, whenever that
+    /// changes. `viewDidMoveToWindow` runs on the main thread, so the event
+    /// handler can compare windows without touching main-actor API itself.
+    private final class WindowReportingView: NSView {
+        var onWindowChange: ((NSWindow?) -> Void)?
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange?(window)
+        }
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
@@ -517,6 +532,9 @@ private struct SwipeBackGestureHost: NSViewRepresentable {
         nonisolated(unsafe) var canGoBack: Bool
         nonisolated(unsafe) var onBack: () -> Void
         nonisolated(unsafe) private var monitor: Any?
+        /// The modal's window. A local monitor sees every window's events, so
+        /// this is what keeps the monitor scoped to the modal's own.
+        nonisolated(unsafe) weak var window: NSWindow?
         /// Accumulated horizontal delta inside the active gesture
         /// phase. Reset on `.began`, sampled on `.changed`, cleared on
         /// `.ended` / `.cancelled` so two consecutive swipes register
@@ -554,6 +572,11 @@ private struct SwipeBackGestureHost: NSViewRepresentable {
 
         private func handle(event: NSEvent) {
             guard canGoBack else { return }
+            // `addLocalMonitorForEvents` sees every window in the app. Only a
+            // swipe over this modal's own window may pop it: a horizontal swipe
+            // in the menu-bar popover or another Pacer window used to pop the
+            // dashboard's open modal too (#163).
+            guard let window, event.window === window else { return }
             // Precise deltas are emitted by trackpads and Magic Mouse.
             // A regular wheel mouse (line-by-line scrolling) shouldn't
             // pop the modal on a stray horizontal nudge.

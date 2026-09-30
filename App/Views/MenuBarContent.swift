@@ -690,38 +690,65 @@ struct MenuStatusContent: View {
     /// is measured at attach time, so conditional rows would clip.
     @Environment(\.usageEngines) private var engines
     @State private var outlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+    /// The same captions for each account group in the concurrent layout,
+    /// keyed by account and then window. Each group asks its own account's
+    /// engine. The groups used to read `outlooks`, which is keyed by window
+    /// alone and comes from the scope's engine, so every account's 5h row
+    /// showed the same "limit in N hr", including an account that was not
+    /// burning at all (#163).
+    @State private var groupOutlooks: [String: [String: UsageIntelligenceEngine.BurnOutlook]] = [:]
     @State private var todayEOD: Estimate?
     @State private var pacePercentile: Double?
 
-    private func refreshEngine(scopedIdentities: [String]) async {
+    private func refreshEngine(
+        scopedIdentities: [String],
+        groups: [(account: String, scoped: [String])]
+    ) async {
         // The menu bar follows the window's scope for spend, so its outlook
         // captions come from the same scope's engine — otherwise the dropdown
         // would show one account's cost above every account's projection.
-        guard let engine = engines?.engine(forAccount: UsageScope.storedAccountId) else { return }
+        guard let host = engines else { return }
+        let engine = host.engine(forAccount: UsageScope.storedAccountId)
+        let groupEngines = groups.map {
+            (account: $0.account, scoped: $0.scoped, engine: host.engine(forAccount: $0.account))
+        }
         // Off the main actor — `burnOutlook` runs `DiurnalBurnModel.fit`, and a
         // launch-time profile found it doing exactly that on the main thread
         // from here. See `askEngine`.
         let ids = scopedIdentities
         let computed = await askEngine {
             () -> (outlooks: [String: UsageIntelligenceEngine.BurnOutlook],
+                   groups: [String: [String: UsageIntelligenceEngine.BurnOutlook]],
                    eod: Estimate, pace: Estimate) in
-            var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
-            for w in RateLimitWindowKind.allCases {
-                if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+            var perGroup: [String: [String: UsageIntelligenceEngine.BurnOutlook]] = [:]
+            for group in groupEngines {
+                perGroup[group.account] = await Self.outlooks(from: group.engine, scoped: group.scoped)
             }
-            // Scoped per-model windows ask the SAME forecast surface, keyed by
-            // identity — so each dynamic row gets the same "limit in N hr"
-            // caption.
-            for id in ids {
-                if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
-            }
-            return (next,
+            return (await Self.outlooks(from: engine, scoped: ids),
+                    perGroup,
                     await engine.ask(.projectedCost(.today)),
                     await engine.ask(.pace))
         }
         outlooks = computed.outlooks
+        groupOutlooks = computed.groups
         todayEOD = computed.eod
         pacePercentile = computed.pace.isInsufficient ? nil : computed.pace.value
+    }
+
+    /// One engine's caption for every fixed window, and for each scoped
+    /// per-model window by identity, so each dynamic row gets the same
+    /// "limit in N hr" caption as 5h and 7d.
+    private nonisolated static func outlooks(
+        from engine: UsageIntelligenceEngine, scoped ids: [String]
+    ) async -> [String: UsageIntelligenceEngine.BurnOutlook] {
+        var next: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
+        for w in RateLimitWindowKind.allCases {
+            if let o = await engine.burnOutlook(window: w) { next[w.rawValue] = o }
+        }
+        for id in ids {
+            if let o = await engine.burnOutlook(windowKey: id) { next[id] = o }
+        }
+        return next
     }
 
     init() {
@@ -804,9 +831,15 @@ struct MenuStatusContent: View {
         let _ = StatusMenuOpening.shared.count
         let windows = self.windows
         let scopedIds = windows.filter(\.isScoped).map(\.key)
+        let groups = perAccount.map {
+            (account: $0.id, scoped: $0.windows.filter(\.isScoped).map(\.key))
+        }
         // Stable key so `.task(id:)` re-asks the engine when the window SET
-        // changes (a scoped window appears / disappears), not on every save.
-        let windowKey = windows.map(\.key).joined(separator: ",")
+        // changes (a scoped window appears / disappears, or an account group
+        // comes or goes), not on every save.
+        let windowKey = ([windows.map(\.key).joined(separator: ",")]
+            + perAccount.map { "\($0.id):" + $0.windows.map(\.key).joined(separator: ",") })
+            .joined(separator: "|")
         return VStack(alignment: .leading, spacing: 4) {
             // Whose limits these are, when that is a question at all.
             //
@@ -861,7 +894,7 @@ struct MenuStatusContent: View {
                     }
                     .padding(.top, group.id == perAccount.first?.id ? 0 : 6)
                     ForEach(group.windows) { window in
-                        paceRow(window: window, outlook: outlooks[window.key])
+                        paceRow(window: window, outlook: groupOutlooks[group.id]?[window.key])
                     }
                 }
             }
@@ -881,9 +914,9 @@ struct MenuStatusContent: View {
         // freshly-appeared row gets its outlook caption without waiting for the
         // next engine recompute.
         .task(id: reloadKey) { reloadWindows() }
-        .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds) }
+        .task(id: windowKey) { await refreshEngine(scopedIdentities: scopedIds, groups: groups) }
         .onReceive(NotificationCenter.default.publisher(for: .pacerEngineDidRecompute)) { _ in
-            Task { await refreshEngine(scopedIdentities: scopedIds) }
+            Task { await refreshEngine(scopedIdentities: scopedIds, groups: groups) }
         }
     }
 
