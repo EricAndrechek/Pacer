@@ -152,11 +152,23 @@ func pinWallpaper(dark: Bool) {
         let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
         do {
             try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
-            let now = NSWorkspace.shared.desktopImageURL(for: screen)?.lastPathComponent ?? "-"
-            log("wallpaper: display \(id) set to \(url.lastPathComponent), reads back \(now)")
         } catch {
             log("wallpaper: display \(id) FAILED: \(error.localizedDescription)")
+            continue
         }
+        // The setting lands asynchronously: straight after a display is
+        // configured it read back the runner's own `Black.png` (#166). Wait for
+        // it, briefly, so the log says what the screenshots will show.
+        let started = Date()
+        var now = NSWorkspace.shared.desktopImageURL(for: screen)?.lastPathComponent ?? "-"
+        while now != url.lastPathComponent, Date().timeIntervalSince(started) < 3 {
+            Thread.sleep(forTimeInterval: 0.1)
+            now = NSWorkspace.shared.desktopImageURL(for: screen)?.lastPathComponent ?? "-"
+        }
+        let waited = Int(Date().timeIntervalSince(started) * 1000)
+        log(now == url.lastPathComponent
+            ? "wallpaper: display \(id) set to \(now) (took \(waited) ms)"
+            : "wallpaper: display \(id) set to \(url.lastPathComponent) but still reads \(now) after \(waited) ms")
     }
 }
 
