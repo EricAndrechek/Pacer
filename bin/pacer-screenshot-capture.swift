@@ -21,6 +21,7 @@
 // <request-dir>/display so the app can put its windows there. Never used on a
 // person's Mac: a new display reshuffles every window they have open.
 import AppKit
+import ImageIO
 import ScreenCaptureKit
 
 // A window-server connection. `SCScreenshotManager` needs one and a bare
@@ -40,6 +41,18 @@ try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: t
 func log(_ s: String) { print("[capture] \(s)"); fflush(stdout) }
 
 var virtualDisplay: CGVirtualDisplay?
+/// The desktop picture's light and dark frames as static PNGs.
+///
+/// Set as-is, the picture left the menu bar shots at the mercy of the time of
+/// day: `menubar.png` and `menubar-dark.png` are the only images that show the
+/// desktop, and their wallpaper blue moved from 243 to 238 between two runs
+/// five hours apart, past `png-pixels-equal`'s tolerance, so a ready-for-review
+/// at another hour re-committed both (#166). Either the picture was dynamic on
+/// the runner, or setting it failed and the runner's own dynamic default
+/// stayed: the old code could not tell, because it swallowed the error and
+/// logged the file name either way. A static PNG of one frame, set with the
+/// error logged and the result read back, answers both.
+var wallpaperFrames: (light: URL, dark: URL)?
 if wantsVirtualDisplay {
     guard ProcessInfo.processInfo.environment["CI"] == "true" else {
         log("refusing --virtual-display outside CI: adding a display rearranges a person's windows")
@@ -76,15 +89,75 @@ if wantsVirtualDisplay {
     try? await Task.sleep(for: .seconds(1))
     let pictures = "/System/Library/Desktop Pictures"
     if let picture = ((try? FileManager.default.contentsOfDirectory(atPath: pictures)) ?? [])
-        .sorted().first(where: { $0.hasSuffix(".heic") || $0.hasSuffix(".jpg") || $0.hasSuffix(".png") }),
-       let screen = NSScreen.screens.first(where: {
-           ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID }) {
-        try? NSWorkspace.shared.setDesktopImageURL(URL(fileURLWithPath: "\(pictures)/\(picture)"), for: screen, options: [:])
-        log("wallpaper: \(picture)")
+        .sorted().first(where: { $0.hasSuffix(".heic") || $0.hasSuffix(".jpg") || $0.hasSuffix(".png") }) {
+        wallpaperFrames = staticFrames(of: URL(fileURLWithPath: "\(pictures)/\(picture)"), into: dir)
+        pinWallpaper(dark: false)
     }
     try? await Task.sleep(for: .seconds(2))   // the wallpaper paints asynchronously
     try? "\(display.displayID)".write(to: dir.appendingPathComponent("display"), atomically: true, encoding: .utf8)
     log("virtual display \(display.displayID): 1600×1200 pt @2×, main")
+}
+
+// MARK: - Wallpaper (CI only)
+
+
+/// Rasterise the picture's light and dark frames. A dynamic HEIC names them in
+/// its `apple_desktop` metadata (`apr`, or the `ap` entry of `solar`/`h24`);
+/// anything else uses its first frame for both.
+func staticFrames(of picture: URL, into dir: URL) -> (light: URL, dark: URL)? {
+    guard let source = CGImageSourceCreateWithURL(picture as CFURL, nil) else {
+        log("wallpaper: cannot read \(picture.lastPathComponent)"); return nil
+    }
+    let count = CGImageSourceGetCount(source)
+    var light = 0, dark = 0, origin = "single frame"
+    if count > 1 {
+        (light, dark, origin) = (0, count - 1, "first/last frame")
+        if let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
+            for key in ["apr", "solar", "h24"] {
+                guard let tag = CGImageMetadataCopyTagWithPath(meta, nil, "apple_desktop:\(key)" as CFString),
+                      let encoded = CGImageMetadataTagCopyValue(tag) as? String,
+                      let data = Data(base64Encoded: encoded),
+                      let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil))
+                          as? [String: Any]
+                else { continue }
+                let pair = (plist["ap"] as? [String: Any]) ?? plist
+                if let l = pair["l"] as? Int, let d = pair["d"] as? Int, l < count, d < count {
+                    (light, dark, origin) = (l, d, "apple_desktop:\(key)")
+                    break
+                }
+            }
+        }
+    }
+    func write(_ index: Int, _ name: String) -> URL? {
+        guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { return nil }
+        let url = dir.appendingPathComponent(name)
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest) ? url : nil
+    }
+    guard let l = write(light, "wallpaper-light.png"), let d = write(dark, "wallpaper-dark.png") else {
+        log("wallpaper: could not write frames of \(picture.lastPathComponent)"); return nil
+    }
+    log("wallpaper: \(picture.lastPathComponent), \(count) frame(s), light=\(light) dark=\(dark) (\(origin))")
+    return (l, d)
+}
+
+/// Put the matching static frame on every screen, and say what took. Only ever
+/// called on CI: it changes the desktop picture.
+func pinWallpaper(dark: Bool) {
+    guard ProcessInfo.processInfo.environment["CI"] == "true", let frames = wallpaperFrames else { return }
+    let url = dark ? frames.dark : frames.light
+    for screen in NSScreen.screens {
+        let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        do {
+            try NSWorkspace.shared.setDesktopImageURL(url, for: screen, options: [:])
+            let now = NSWorkspace.shared.desktopImageURL(for: screen)?.lastPathComponent ?? "-"
+            log("wallpaper: display \(id) set to \(url.lastPathComponent), reads back \(now)")
+        } catch {
+            log("wallpaper: display \(id) FAILED: \(error.localizedDescription)")
+        }
+    }
 }
 
 struct Request: Decodable {
@@ -127,7 +200,8 @@ func setDarkMode(_ dark: Bool) throws {
     p.arguments = ["-e", "tell application \"System Events\" to tell appearance preferences to set dark mode to \(dark)"]
     try p.run(); p.waitUntilExit()
     guard p.terminationStatus == 0 else { throw fail("osascript exited \(p.terminationStatus)") }
-    Thread.sleep(forTimeInterval: 2)   // let the menu bar and apps redraw
+    pinWallpaper(dark: dark)
+    Thread.sleep(forTimeInterval: 2)   // let the menu bar, apps and wallpaper redraw
     log("system appearance: \(dark ? "dark" : "light")")
 }
 
