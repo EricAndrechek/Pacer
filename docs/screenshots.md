@@ -115,9 +115,32 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
   in the `Widgets` package — they're widget-specific UI that *composes* shared
   `PacerUI` primitives, not shared UI. `@Environment(\.widgetFamily)` is
   read-only, so the gallery shows each widget's default (medium) layout.
-- **Determinism.** No `Date.now`-relative randomness beyond a fixed hash
-  (`noise(_:)`); data is keyed to the run's wall-clock so the time-windowed
-  queries (today, last 30 days, six months) match, but the *shape* is stable.
+- **Determinism.** A PR that changes no UI must produce the same pixels, so
+  every input a scene reads is pinned (#154, #166):
+  - **One instant and time zone.** `ScreenshotClock` is Fri 2026-09-18 14:30,
+    America/Los_Angeles, and `bin/dev-screenshots.sh` reads both from Swift, so
+    there is one copy of each. The seed data is built around that instant; the
+    only randomness is a fixed hash (`noise(_:)`).
+  - **The app's clock is frozen,** pinned from outside by `bin/fixed-clock.c`
+    (`DYLD_INSERT_LIBRARIES`, which works because `make verify` builds without
+    hardened runtime). Two consequences: a wait for a wall time never ends, so
+    screenshot deadlines use `ContinuousClock` and the script has a 15-minute
+    watchdog; and an animated data change is captured on its first frame, which
+    is how the scoped Projects first-frame bug surfaced.
+  - **Widgets:** fixture builds pin `PacerClock`, `NSTimeZone.default` and
+    SwiftUI's `\.timeZone`.
+  - **Menu bar:** only Pacer's item is in the bar. On macOS 26 Control Center
+    owns every status item, so Pacer's is picked out by its window title.
+  - **Wallpaper:** the two menu bar shots are the only ones that show the
+    desktop. On CI the helper rasterises the picture's light and dark frames to
+    static PNGs, sets the matching one on every screen with each appearance
+    change, and logs what took. Set as a file, the desktop followed the
+    runner's time of day, and those two images re-committed at a different
+    hour.
+  - **Noise:** `png-pixels-equal` tolerates up to 2 levels (of 255) per
+    channel, for translucent materials that come out 1–2 levels apart between
+    identical runs. There is no threshold on how many pixels differ, because a
+    one-label change would slip under it.
 
 ### The rate-limit / pace data
 
@@ -146,7 +169,8 @@ To re-tune the story, edit the `keyframes` arrays in `seedRateLimits`.
 ## When to regenerate
 
 **Every UI PR gets fresh images when it is marked ready for review** — review
-that commit with the rest of the change. For a UI change that went in without
+that commit with the rest of the change. A PR that changes no UI gets no
+screenshot commit: images whose pixels are unchanged are kept as committed. For a UI change that went in without
 them, run the workflow by hand. It's also
 a step in the [release checklist](releasing.md) — the published README and any
 store assets should match the version being shipped.
