@@ -93,3 +93,71 @@ struct RunLoopStallMeterTests {
         #expect(ms(found) == [260])
     }
 }
+
+// The meter's model of CFRunLoop is only as good as the model. These run the
+// real observers on a real run loop, on a thread of their own, with work of
+// known length, and check what comes out.
+@Suite("Run loop stall observer, on a real run loop")
+struct RunLoopStallObserverTests {
+
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stalls: [TimeInterval] = []
+        func add(_ s: TimeInterval) { lock.lock(); stalls.append(s); lock.unlock() }
+        var values: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return stalls }
+    }
+
+    /// Run a loop for `seconds` with a timer at each `(start, blocksFor)`.
+    private func run(for seconds: TimeInterval,
+                     timers: [(at: TimeInterval, blocksFor: TimeInterval)]) -> [TimeInterval] {
+        let collected = Collected()
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            let loop = CFRunLoopGetCurrent()!
+            let observer = RunLoopStallObserver(runLoop: loop, threshold: 0.1) { collected.add($0) }
+            let now = CFAbsoluteTimeGetCurrent()
+            for t in timers {
+                let timer = CFRunLoopTimerCreateWithHandler(
+                    kCFAllocatorDefault, now + t.at, 0, 0, 0) { _ in
+                        usleep(useconds_t(t.blocksFor * 1_000_000))
+                    }
+                CFRunLoopAddTimer(loop, timer, .defaultMode)
+            }
+            // Keeps the loop alive (and asleep) for the whole run.
+            let keepAlive = CFRunLoopTimerCreateWithHandler(
+                kCFAllocatorDefault, now + seconds + 60, 0, 0, 0) { _ in }
+            CFRunLoopAddTimer(loop, keepAlive, .defaultMode)
+            CFRunLoopRunInMode(.defaultMode, seconds, false)
+            observer.invalidate()
+            done.signal()
+        }
+        thread.start()
+        done.wait()
+        return collected.values
+    }
+
+    @Test("one long piece of work is one stall of about its length")
+    func blockingTimerIsAStall() {
+        let found = run(for: 0.8, timers: [(at: 0.1, blocksFor: 0.25)])
+        #expect(found.count == 1)
+        #expect(found.allSatisfy { $0 >= 0.24 && $0 < 0.6 })
+    }
+
+    /// The #168 failure, on a real loop: a loop that sleeps most of the time
+    /// and does a little work now and then logs nothing, however far apart the
+    /// work is.
+    @Test("time asleep between short pieces of work is never a stall")
+    func idleLoopIsQuiet() {
+        let found = run(for: 1.0, timers: [(at: 0.1, blocksFor: 0.02),
+                                           (at: 0.5, blocksFor: 0.02),
+                                           (at: 0.9, blocksFor: 0.02)])
+        #expect(found.isEmpty)
+    }
+
+    @Test("two long pieces of work with sleep between are two stalls")
+    func twoStallsStaySeparate() {
+        let found = run(for: 1.2, timers: [(at: 0.1, blocksFor: 0.15), (at: 0.7, blocksFor: 0.15)])
+        #expect(found.count == 2)
+        #expect(found.allSatisfy { $0 >= 0.14 && $0 < 0.45 })
+    }
+}
