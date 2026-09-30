@@ -511,7 +511,13 @@ private struct ProjectsContent: View {
         return cachedCollectionRollups.first { $0.id == collectionFilter }?.memberPaths
             ?? {
                 let byID = Dictionary(collections.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-                let known = (cachedAllRows ?? []).map(\.path)
+                // `allRows`, not `cachedAllRows`: on the first frame the cache
+                // is still empty, and against no known projects a rule (a
+                // folder, a pattern) matches nothing. A collection scoped
+                // through rules opened showing only its hand-picked members
+                // (one donut wedge as the whole ring), then snapped to the
+                // rest a frame later.
+                let known = allRows.map(\.path)
                 return CollectionResolver.resolve(collectionFilter, collections: byID, knownPaths: known)
             }()
     }
