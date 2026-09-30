@@ -370,11 +370,17 @@ public final class SamplePersister {
     ///
     /// The file is rewritten whole, so writing every cycle meant re-emitting
     /// 4.4 MB for one new row — 90 ms on every scan, against a 33-80 ms
-    /// budget for the entire cycle. Lagging is explicitly safe: the watermark
-    /// makes a behind-but-valid index usable, because rows newer than it are
-    /// re-walked on load. Worst case after a hard kill is re-walking a few
-    /// minutes of rows.
-    private static let indexWriteInterval: TimeInterval = 5 * 60
+    /// budget for the entire cycle.
+    ///
+    /// An hour, not five minutes (#174). The file had grown to 12 MB, so five
+    /// minutes was ~144 MB of SSD writes an hour while sessions were active,
+    /// about 3.4 GB a day, to record a few dozen new keys each time. And the
+    /// periodic write buys less than it looks: `DedupIndex.isValid` wants the
+    /// store's keyed row count exactly, so an index written before the last
+    /// insert is rebuilt at launch however recent it is. A clean quit writes
+    /// it anyway (`ScanCoordinator.stop`). What the periodic write covers is
+    /// a hard kill during a quiet stretch, and an hour covers that as well.
+    private static let indexWriteInterval: TimeInterval = 60 * 60
     private var lastIndexWriteAt: Date?
 
     /// Persist the dedup map so the next launch skips the walk. Called after a
