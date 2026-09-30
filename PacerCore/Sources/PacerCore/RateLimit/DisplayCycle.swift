@@ -45,11 +45,11 @@ public extension DisplayCycle {
     /// Resolve the display cycle for one window. `resetsAt` is the most
     /// recent sample's reset time, `duration` is the window's nominal
     /// length (e.g. 5×3600 for the 5-hour window). Pass `now` in tests
-    /// to control time; production uses the current date.
+    /// to control time; production uses the current date (`PacerClock`).
     static func resolve(
         resetsAt: Date,
         duration: TimeInterval,
-        now: Date = Date()
+        now: Date = PacerClock.now
     ) -> DisplayCycle {
         if now >= resetsAt {
             // Prior cycle has ended. Roll forward by exactly one

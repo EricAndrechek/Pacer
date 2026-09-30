@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 import SwiftUI
 
 /// Shared rolling-window selection used by Projects, Models, and any
@@ -51,6 +52,6 @@ public enum TimeRange: String, CaseIterable, Identifiable {
 
     public var since: Date? {
         guard let days else { return nil }
-        return Calendar.current.date(byAdding: .day, value: -days, to: Date())
+        return Calendar.current.date(byAdding: .day, value: -days, to: PacerClock.now)
     }
 }

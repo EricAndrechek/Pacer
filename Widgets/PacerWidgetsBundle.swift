@@ -24,6 +24,10 @@ import SwiftUI
 /// writes to, so timelines reflect the same data the dashboard reads.
 @main
 struct PacerWidgetsBundle: WidgetBundle {
+    #if PACER_WIDGET_FIXTURES
+    init() { WidgetFixtures.pinClock() }
+    #endif
+
     var body: some Widget {
         #if PACER_WIDGET_FIXTURES
         // CI README screenshot builds only: the README's widgets, each the
