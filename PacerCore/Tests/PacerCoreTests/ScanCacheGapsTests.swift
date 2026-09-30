@@ -104,6 +104,47 @@ import Testing
         #expect(line.range(of: #" fast=\d+/\d+ hFast=\d+/\d+ pFast=\d+/\d+ sFast=\d+/\d+ sMiss=\d+/\d+/\d+ ms="#,
                            options: .regularExpression) != nil, "\(line)")
     }
+
+    /// `upg=` read 0 whatever happened, because the per-cycle stats never
+    /// copied it, and #149 ruled streamed upgrades out on that reading. A
+    /// cycle that replaces a partial streamed copy with its finished one has
+    /// to say so, and say it polluted the session (#177).
+    @ScanActor
+    @Test func upgradeIsCountedAndNamedInTheScanLine() async throws {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let when = stamp.string(from: Date())
+        let partial = makeGapsLine(timestamp: when, messageId: "m1", requestId: "r1",
+                                   outputTokens: 20, stopReason: nil)
+        let finished = makeGapsLine(timestamp: when, messageId: "m1", requestId: "r1",
+                                    outputTokens: 400, stopReason: "end_turn")
+        let root = try makeGapsFixtureRoot(lines: [partial])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let container = try makeGapsContainer()
+        let coordinator = makeCoordinator(container: container, root: root)
+        let first = try await coordinator.runOnce()
+        #expect(first.persisterStats.inserted == 1)
+        #expect(first.persisterStats.upgradedFromPartial == 0)
+
+        // The finished copy lands in the next cycle, as it does when a scan
+        // falls between two writes of one streamed message.
+        let file = root.appendingPathComponent("projects/-tmp-fixture/gaps-session.jsonl")
+        try ([partial, finished].joined(separator: "\n") + "\n")
+            .write(to: file, atomically: false, encoding: .utf8)
+        let second = try await coordinator.runOnce()
+
+        #expect(second.persisterStats.upgradedFromPartial == 1)
+        #expect(second.persisterStats.sessionPollution == ["upgrade": 1])
+        let line = coordinator.formatReport(second)
+        #expect(line.contains(" upg=1 "), "\(line)")
+        #expect(line.range(of: #" sMiss=\d+/\d+/\d+ sPol=upgrade:1 ms="#,
+                           options: .regularExpression) != nil, "\(line)")
+    }
+
+    @Test func pollutionTokenIsEmptyWhenNothingWasPolluted() {
+        #expect(ScanCoordinator.pollutionToken([:]) == "")
+        #expect(ScanCoordinator.pollutionToken(["upgrade": 2, "cap": 1]) == " sPol=cap:1,upgrade:2")
+    }
 }
 
 // MARK: - Fixtures
@@ -135,7 +176,22 @@ private func makeGapsFixtureRoot(lines: [String]) throws -> URL {
     return root
 }
 
-private func makeGapsLine(timestamp: String, messageId: String, requestId: String) -> String {
+private func makeGapsLine(timestamp: String, messageId: String, requestId: String,
+                          outputTokens: Int = 200, stopReason: String? = nil) -> String {
+    var message: [String: Any] = [
+        "model": "claude-opus-4-8",
+        "id": messageId,
+        "usage": [
+            "input_tokens": 100,
+            "output_tokens": outputTokens,
+            "cache_read_input_tokens": 0,
+            "cache_creation": [
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0,
+            ],
+        ],
+    ]
+    if let stopReason { message["stop_reason"] = stopReason }
     let fields: [String: Any] = [
         "type": "assistant",
         "timestamp": timestamp,
@@ -143,19 +199,7 @@ private func makeGapsLine(timestamp: String, messageId: String, requestId: Strin
         "sessionId": "gaps-session",
         "cwd": "/tmp/acme",
         "costUSD": 0.25,
-        "message": [
-            "model": "claude-opus-4-8",
-            "id": messageId,
-            "usage": [
-                "input_tokens": 100,
-                "output_tokens": 200,
-                "cache_read_input_tokens": 0,
-                "cache_creation": [
-                    "ephemeral_5m_input_tokens": 0,
-                    "ephemeral_1h_input_tokens": 0,
-                ],
-            ],
-        ] as [String: Any],
+        "message": message,
     ]
     return String(data: try! JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
 }

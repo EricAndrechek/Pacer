@@ -1004,6 +1004,9 @@ public final class ScanCoordinator {
 
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
+        // Taken before anything this cycle can pollute a session: re-stamps,
+        // carried-over marks and recovery all run before `beforeStats` below.
+        let pollutionBefore = activePersister.stats.sessionPollution
 
         // Notice a login change before anything is inserted, so samples
         // parsed this cycle are attributed against an up-to-date trail.
@@ -1399,9 +1402,19 @@ public final class ScanCoordinator {
         // there is more than one account to compare — a single-account user
         // already has this number on every other card.
 
+        // Every field, as a delta. `upgradedFromPartial` used to be left out,
+        // so it defaulted to 0 and the scan log's `upg=` read 0 whatever
+        // happened. #149 ruled streamed upgrades out on that reading (#177).
         let cycleStats = SamplePersister.Stats(
             inserted: activePersister.stats.inserted - beforeStats.inserted,
-            skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate
+            skippedAsDuplicate: activePersister.stats.skippedAsDuplicate - beforeStats.skippedAsDuplicate,
+            upgradedFromPartial: activePersister.stats.upgradedFromPartial
+                - beforeStats.upgradedFromPartial,
+            sessionPollution: activePersister.stats.sessionPollution
+                .reduce(into: [:]) { out, entry in
+                    let n = entry.value - (pollutionBefore[entry.key] ?? 0)
+                    if n > 0 { out[entry.key] = n }
+                }
         )
         lastCycleInsertedCount = cycleStats.inserted
 
@@ -2401,10 +2414,19 @@ public final class ScanCoordinator {
         let dailyPairs = r.recomputeStats.pairsRecomputed
         let h = r.hourlyRecomputeStats, pj = r.projectRecomputeStats, ss = r.sessionRecomputeStats
         let otherFast = "hFast=\(h.fastPathApplied)/\(h.bucketsRecomputed) pFast=\(pj.fastPathApplied)/\(pj.pairsRecomputed) sFast=\(ss.fastPathApplied)/\(ss.sessionsRecomputed) sMiss=\(ss.missPolluted)/\(ss.missExpired)/\(ss.missUncached)"
+            + Self.pollutionToken(r.persisterStats.sessionPollution)
         let base = "\(kind) files=\(r.scanProgress.filesScanned) skipped=\(r.scanProgress.filesSkipped) parsed=\(r.scanProgress.entriesParsed) inserted=\(r.persisterStats.inserted) dups=\(r.persisterStats.skippedAsDuplicate) upg=\(r.persisterStats.upgradedFromPartial) aggs=\(r.recomputeStats.aggregatesUpserted) hourAggs=\(r.hourlyRecomputeStats.aggregatesUpserted) projAggs=\(r.projectRecomputeStats.aggregatesUpserted) sess=\(r.sessionRecomputeStats.sessionsUpserted) fast=\(dailyFast)/\(dailyPairs) \(otherFast) ms=\(Int(r.durationSeconds * 1000))"
         let p = r.phaseTimings
         let phases = "[autoA=\(Self.fmtMs(p.autoAliasMs)) prep=\(Self.fmtMs(p.metaPrepMs)) mig=\(Self.fmtMs(p.migrationMs)) consume=\(Self.fmtMs(p.consumeChangedPathsMs)) scan=\(Self.fmtMs(p.scanMs)) flush=\(Self.fmtMs(p.flushMs)) curs=\(Self.fmtMs(p.saveCursorsMs)) dailyR=\(Self.fmtMs(p.dailyRecomputeMs)) hourR=\(Self.fmtMs(p.hourlyRecomputeMs)) projR=\(Self.fmtMs(p.projectRecomputeMs)) sessR=\(Self.fmtMs(p.sessionRecomputeMs)) probe=\(Self.fmtMs(p.probeMs)) save=\(Self.fmtMs(p.saveMs)) notif=\(Self.fmtMs(p.notifMs))]"
         return "\(base) \(phases)"
+    }
+
+    /// ` sPol=upgrade:2,cap:1` — why sessions were marked polluted this cycle,
+    /// the reason `sMiss=`'s first number is what it is. Empty when nothing
+    /// was, so a quiet cycle's line is unchanged. Sorted for stable greps.
+    nonisolated static func pollutionToken(_ counts: [String: Int]) -> String {
+        guard !counts.isEmpty else { return "" }
+        return " sPol=" + counts.keys.sorted().map { "\($0):\(counts[$0]!)" }.joined(separator: ",")
     }
 
     /// Round to int milliseconds for the log line — every phase emits
