@@ -117,10 +117,11 @@ same as each other:
 - **4, misconfigured** — Pacer answered and rejected the request, almost always
   a token set in Pacer but not in `PACE_TOKEN`. Proceed if you must, but **tell
   the user**: the run is unpaced and one line of configuration would fix it.
-- **3, unknown or stale** — no gate has run, or the last verdict is older than
-  `--max-age` (default 15 min). A verdict has a shelf life: an orchestrator
-  that died an hour ago left its last word on disk, and obeying it is obeying a
-  window that has since moved. Re-gate.
+- **3, unknown or stale** — no gate has run, the last verdict is older than
+  `--max-age` (default 15 min), or it was a pause and the window that caused it
+  has reset since. A verdict has a shelf life: an orchestrator that died an
+  hour ago left its last word on disk, and obeying it is obeying a window that
+  has since moved. Re-gate.
 
 A bad `--window` (1) *does* stop you, because a selector that matches nothing
 would otherwise report GO forever.
