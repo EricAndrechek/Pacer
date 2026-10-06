@@ -307,6 +307,25 @@ struct PaceScriptTests {
         #expect(!result.out.contains("proceeding ungated"))
     }
 
+    /// `accounts` prints 8-character ids and Pacer resolves a unique prefix,
+    /// so the rows it returns carry the full id. Filtering them against the
+    /// prefix by equality kept none (#184).
+    @Test func anAccountPrefixKeepsThatAccountsRows() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="74598a77-37aa",window="five_hour"} 0.71
+        pacer_rate_limit_reset_seconds{account="74598a77-37aa",window="five_hour"} 3600
+        pacer_rate_limit_used_ratio{account="e34c1364-fc39",window="five_hour"} 0.41
+        pacer_rate_limit_reset_seconds{account="e34c1364-fc39",window="five_hour"} 3600
+        pacer_account_info{account="e34c1364-fc39",name="w",active="true"} 1
+        pacer_account_info{account="74598a77-37aa",name="h",active="false"} 1
+        """)
+        let result = try run(box, ["report", "--account", "74598a77"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 0)
+        #expect(result.out.contains("71% used"))
+        #expect(!result.out.contains("41% used"))
+    }
+
     /// A rejected `--account` read like the API being off (#184). The
     /// server's answer names what it rejected, so the script passes it on.
     @Test func aRejectedRequestSaysWhatWasRejected() throws {

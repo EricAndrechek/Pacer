@@ -196,7 +196,10 @@ END {
   if (want == "all") want = ""
   for (i = 1; i <= n; i++) {
     key = order[i]
-    if (want != "" && acct[key] != want) continue
+    # A prefix, because `accounts` prints ids cut to 8 and Pacer resolves a
+    # unique one. An exact match here dropped every row the server returned
+    # for it, and the gate said "no windows yet" (#184).
+    if (want != "" && index(acct[key], want) != 1) continue
     if (!(key in pct)) continue                       # a window with no reading
     printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
            acct[key], SEP, win[key], SEP, labelfor(win[key]), SEP, modelfor(win[key]), SEP,
