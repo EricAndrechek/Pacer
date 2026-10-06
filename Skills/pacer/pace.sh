@@ -407,6 +407,11 @@ evaluate() {
   line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" '
     {
       pct = $5; secs = $6; eta = $7; hit = $9
+      # A window whose reset is already due describes the window that just
+      # ended: Pacer polls every few minutes, so for a while after a reset its
+      # last reading still says "85%, resets in 0m". Pausing on that paused a
+      # run on an empty window, and `status` kept serving it.
+      if (secs != "null" && secs + 0 <= 0) next
       why = ""
       if (pct != "null" && pct + 0 >= cap + 0) why = "cap"
       else if (horizon + 0 > 0 && hit + 0 == 1 && eta != "null" && eta + 0 <= horizon + 0) why = "eta"
@@ -673,6 +678,19 @@ cmd_status() {
     exit 3
   fi
   st=$(awk -F'"' '/"status"/ { print $4; exit }' "$STATE" 2>/dev/null)
+  # A pause ends when the window that caused it resets, whatever its shelf
+  # life says. Without this, a verdict written just before (or, from a reading
+  # that predated it, just after) a reset kept every subagent paused on an
+  # empty window for up to `--max-age`.
+  if [ "$st" = paused ] && [ -n "$age" ]; then
+    local resetIn trip
+    resetIn=$(awk -F': ' '/"resetsInSeconds"/ { gsub(/[ ,]/, "", $2); print $2; exit }' "$STATE" 2>/dev/null)
+    trip=$(awk -F'"' '/"tripWindow"/ { print $4; exit }' "$STATE" 2>/dev/null)
+    if [[ "$resetIn" =~ ^[0-9]+$ ]] && [ "$age" -ge "$resetIn" ]; then
+      echo "stale: the ${trip:-window} pause has expired — that window reset since; re-gate."
+      exit 3
+    fi
+  fi
   case "$st" in
     go)     echo "go"; exit 0;;
     paused) note=$(awk -F'"' '/"note"/ { print $4; exit }' "$STATE" 2>/dev/null)

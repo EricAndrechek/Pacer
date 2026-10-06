@@ -317,6 +317,50 @@ struct PaceScriptTests {
         #expect(stale.out.hasPrefix("stale:"))
     }
 
+    /// Reported from a real run (2026-10-01, 05:29Z reset): a gate a minute
+    /// after the reset still read "5h 85%, resets in 0m", because Pacer had not
+    /// polled since. That reading is the window that just ended.
+    @Test func aWindowWhoseResetIsDueDoesNotPause() throws {
+        let box = try Sandbox(metrics: """
+            pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.85
+            pacer_rate_limit_used_ratio{account="org-work",window="seven_day"} 0.10
+            pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 0
+            pacer_rate_limit_reset_seconds{account="org-work",window="seven_day"} 300000
+            pacer_account_info{account="org-work",name="Account work",active="true"} 1
+            pacer_up 1
+            """)
+        let result = try run(box, ["gate", "--cap", "85"])
+        #expect(result.status == 0, "\(result.out)")
+        #expect(box.stateText.contains("\"status\": \"go\""))
+    }
+
+    /// The same run's other half: `status` kept serving the pause for its whole
+    /// shelf life after the window reset, so a subagent returned RESUME-NEEDED
+    /// on an empty window. A pause ends when its window resets.
+    @Test func aPauseExpiresWhenItsWindowResets() throws {
+        let box = try Sandbox(metrics: """
+            pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.90
+            pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 300
+            pacer_account_info{account="org-work",name="Account work",active="true"} 1
+            pacer_up 1
+            """)
+        #expect(try run(box, ["gate", "--cap", "85"]).status == 10)
+        #expect(try run(box, ["status"]).status == 10)
+
+        // Five minutes and a second later: well inside `--max-age`, past the
+        // reset.
+        let later = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-301))
+        let rewritten = box.stateText.replacingOccurrences(
+            of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(later)"#,
+            options: .regularExpression)
+        try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
+
+        let expired = try run(box, ["status"])
+        #expect(expired.status == 3)
+        #expect(expired.out.hasPrefix("stale:"), "\(expired.out)")
+        #expect(expired.out.contains("5h"))
+    }
+
     /// Two orchestrations on one machine must not overwrite each other's
     /// verdict — the shared default is a convenience, not a requirement.
     @Test func namedRunsKeepSeparateState() throws {
