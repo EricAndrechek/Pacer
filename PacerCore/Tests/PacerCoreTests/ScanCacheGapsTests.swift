@@ -105,12 +105,14 @@ import Testing
                            options: .regularExpression) != nil, "\(line)")
     }
 
-    /// `upg=` read 0 whatever happened, because the per-cycle stats never
-    /// copied it, and #149 ruled streamed upgrades out on that reading. A
-    /// cycle that replaces a partial streamed copy with its finished one has
-    /// to say so, and say it polluted the session (#177).
+    /// `upg=` read 0 whatever happened (#177's first finding), and once it
+    /// could count, upgrades turned out to be the whole of session pollution:
+    /// each one rebuilt its session from every sample it had. An upgrade is now
+    /// a delta on the session's cached totals. The line still says `upg=1`,
+    /// nothing is polluted, the session takes the fast path, and the row ends
+    /// up exactly where a rebuild from the samples puts it.
     @ScanActor
-    @Test func upgradeIsCountedAndNamedInTheScanLine() async throws {
+    @Test func upgradeIsADeltaNotAPollution() async throws {
         let stamp = ISO8601DateFormatter()
         stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let when = stamp.string(from: Date())
@@ -124,7 +126,6 @@ import Testing
         let coordinator = makeCoordinator(container: container, root: root)
         let first = try await coordinator.runOnce()
         #expect(first.persisterStats.inserted == 1)
-        #expect(first.persisterStats.upgradedFromPartial == 0)
 
         // The finished copy lands in the next cycle, as it does when a scan
         // falls between two writes of one streamed message.
@@ -134,11 +135,47 @@ import Testing
         let second = try await coordinator.runOnce()
 
         #expect(second.persisterStats.upgradedFromPartial == 1)
-        #expect(second.persisterStats.sessionPollution == ["upgrade": 1])
+        #expect(second.persisterStats.sessionPollution.isEmpty)
+        #expect(second.sessionRecomputeStats.fastPathApplied == 1)
+        #expect(second.sessionRecomputeStats.missPolluted == 0)
         let line = coordinator.formatReport(second)
         #expect(line.contains(" upg=1 "), "\(line)")
-        #expect(line.range(of: #" sMiss=\d+/\d+/\d+ sPol=upgrade:1 ms="#,
-                           options: .regularExpression) != nil, "\(line)")
+        #expect(!line.contains("sPol="), "\(line)")
+
+        let delta = try sessionTotals(container)
+        #expect(delta.output == 400 && delta.input == 100)
+        #expect(abs(delta.cost - 0.25) < 1e-9)
+        #expect(delta == (try await rebuiltSessionTotals(container)))
+    }
+
+    /// Partial and finished copies inside one cycle: the partial row is still
+    /// in the pending list, and the pending add reads the finished counts off
+    /// the same object, so the upgrade must not also be applied as a delta.
+    @ScanActor
+    @Test func upgradeOfATurnInsertedThisCycleCountsOnce() async throws {
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let when = stamp.string(from: Date())
+        let earlier = makeGapsLine(timestamp: when, messageId: "m0", requestId: "r0")
+        let root = try makeGapsFixtureRoot(lines: [earlier])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let container = try makeGapsContainer()
+        let coordinator = makeCoordinator(container: container, root: root)
+        _ = try await coordinator.runOnce()   // seeds the session's cached totals
+
+        let partial = makeGapsLine(timestamp: when, messageId: "m1", requestId: "r1",
+                                   outputTokens: 20, stopReason: nil)
+        let finished = makeGapsLine(timestamp: when, messageId: "m1", requestId: "r1",
+                                    outputTokens: 400, stopReason: "end_turn")
+        let file = root.appendingPathComponent("projects/-tmp-fixture/gaps-session.jsonl")
+        try ([earlier, partial, finished].joined(separator: "\n") + "\n")
+            .write(to: file, atomically: false, encoding: .utf8)
+        let second = try await coordinator.runOnce()
+
+        #expect(second.sessionRecomputeStats.fastPathApplied == 1)
+        let totals = try sessionTotals(container)
+        #expect(totals.output == 600)   // 200 + 400, not 200 + 400 + 380
+        #expect(totals == (try await rebuiltSessionTotals(container)))
     }
 
     @Test func pollutionTokenIsEmptyWhenNothingWasPolluted() {
@@ -148,6 +185,38 @@ import Testing
 }
 
 // MARK: - Fixtures
+
+private struct SessionTotals: Equatable {
+    let input: Int64, output: Int64, cost: Double, topModel: String
+    let accountOutput: [String: Int64]
+    static func == (a: Self, b: Self) -> Bool {
+        a.input == b.input && a.output == b.output && abs(a.cost - b.cost) < 1e-9
+            && a.topModel == b.topModel && a.accountOutput == b.accountOutput
+    }
+}
+
+@ScanActor
+private func sessionTotals(_ container: ModelContainer) throws -> SessionTotals {
+    let context = ModelContext(container)
+    let row = try #require(try context.fetch(FetchDescriptor<SessionInfo>()).first)
+    let accounts = try context.fetch(FetchDescriptor<AccountSessionInfo>())
+    return SessionTotals(
+        input: row.cumulativeInputTokens, output: row.cumulativeOutputTokens,
+        cost: row.cumulativeCostUSD, topModel: row.topModel,
+        accountOutput: Dictionary(accounts.map { ($0.accountId, $0.cumulativeOutputTokens) },
+                                  uniquingKeysWith: +))
+}
+
+/// The same session rebuilt from its samples, the path the delta must match.
+@ScanActor
+private func rebuiltSessionTotals(_ container: ModelContainer) async throws -> SessionTotals {
+    let context = ModelContext(container)
+    let sid = try #require(try context.fetch(FetchDescriptor<SessionInfo>()).first?.sessionId)
+    let recomputer = SessionInfoRecomputer(container: container, context: context, mode: .display)
+    _ = try await recomputer.recompute(sessionIds: [sid], polluted: [sid])
+    try context.save()
+    return try sessionTotals(container)
+}
 
 @ScanActor
 private func makeCoordinator(container: ModelContainer, root: URL) -> ScanCoordinator {
