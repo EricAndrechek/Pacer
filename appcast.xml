@@ -1191,5 +1191,47 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="BFkeaVEuiigbhtflBCzFChom1MBCN/GpTA8memL5SNSKTergf83qxm7iJdATsOioJ+CJJc6Dl0MtQUGX5XxLBQ==" />
     </item>
+            <item>
+        <title>Version 0.7.2</title>
+        <description><![CDATA[<p>Clicks that open right away, a dashboard that no longer freezes while Pacer works, alerts that fire with the window closed, and live readings for every <code class="notranslate">claude-swap</code> account.</p>
+<h2>Clicks open right away</h2>
+<p>Clicking a project or a History day could take seconds to open its detail, and sometimes waited until something else on the page changed. "Edit collection" did the same, then bounced the Dock icon. They now open the moment you click.</p>
+<h2>No more freezes while Pacer is busy</h2>
+<p>The dashboard could stop responding for 1–4 seconds at a time: while forecasts recalculated, during heavy Claude Code activity, and every ten minutes when Pacer re-checked the day's totals. Each of those now runs without holding up the window.</p>
+<h2>Alerts work with the window closed</h2>
+<p>Alerts were checked only while the dashboard window was open. If Pacer started at login with the window closed, no alert fired at all, and a threshold crossed while the window was closed was skipped when you reopened it. Alerts now run whenever Pacer is running, and a crossing that happened while the window was closed, or while Pacer was quit, is announced the next time Pacer checks.</p>
+<h2>"Open Pacer at login" stays on</h2>
+<p>Pacer now remembers that you turned "Open Pacer at login" on and registers it again if macOS drops it.</p>
+<h2>Numbers that keep up</h2>
+<p>Some cards only refreshed when something else on the screen redrew, so on a quiet machine they could sit on old numbers:</p>
+<ul>
+<li>Project detail's totals, daily chart and model chart kept the numbers they opened with.</li>
+<li>The Compare models view's actual-usage line didn't move when a new reading came in.</li>
+<li>In the menu bar dropdown, every account showed the same "limit in…" forecast, even an account that wasn't being used.</li>
+</ul>
+<p>They now update as soon as their own data changes.</p>
+<h2>More than one account</h2>
+<ul>
+<li><strong>The active account no longer flips back.</strong> After a <code class="notranslate">claude-swap</code> switch, Pacer could switch back to the account you'd just left whenever it checked that account's old token, and show the old account's 5-hour and 7-day usage until that token expired. Pacer now goes only by the login Claude Code is actually using.</li>
+<li><strong>Switched-away accounts keep live readings.</strong> Pacer's copy of an account's token runs out about 8 hours after you switch away, and from then on that account's usage stopped updating. Pacer now also reads the logins <code class="notranslate">claude-swap</code> keeps for each account, so every account stays current. This shouldn't ask for your password. If your Mac does ask, Pacer stops trying until it next launches. Turn it off in Settings → Authentication → Account switcher.</li>
+</ul>
+<h2>Also</h2>
+<ul>
+<li>Two rare failures could leave a day's or a project's totals wrong for good: a project merge made in the middle of a scan, or a scan that failed partway through. Both are fixed.</li>
+<li>Pacer writes much less to disk. An index it rewrote every five minutes is now saved hourly. On a large history that cuts about 3 GB of writes a day to under 0.3 GB.</li>
+<li>A horizontal swipe in the menu bar popover could close a detail open in the dashboard. Swipes now apply only to the window they happen in.</li>
+<li>The pacing skill no longer reports a pause after the limit it was waiting on has reset.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 06 Oct 2026 23:23:04 +0000</pubDate>
+        <sparkle:version>1791325885</sparkle:version>
+        <sparkle:shortVersionString>0.7.2</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.2/Pacer-0.7.2.dmg"
+            length="22091716"
+            type="application/octet-stream"
+            sparkle:edSignature="JDzLFf1O/UNR9S8m7zuBOPNoJhFSovG1LZ28jJEizMa0H4+r73scgnCfi/xNgurnFD4/fg1ccazMikXJaH75Dg==" />
+    </item>
         </channel>
 </rss>
