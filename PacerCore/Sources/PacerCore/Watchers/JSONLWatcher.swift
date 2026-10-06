@@ -170,6 +170,13 @@ public actor JSONLWatcher {
         liveRootPaths = []
     }
 
+    /// Run a cycle now, for a change no transcript shows: a login switch.
+    /// The stream buffers the newest trigger, so one sent during a cycle runs
+    /// right after it.
+    public func requestScan() {
+        continuation?.yield(Date())
+    }
+
     /// Test hook: emit a synthetic trigger as if from FSEvents. Only
     /// usable in `.manual` mode (other modes ignore for safety).
     public func manualTrigger() {

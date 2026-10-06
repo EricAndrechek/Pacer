@@ -292,6 +292,34 @@ struct SignedInCredentialMonitorTests {
         #expect(monitor.current == reading("b", since: 300, readAt: 300))
     }
 
+    /// A switch has to reach the scan coordinator at once, because a switch is
+    /// accepted only when a cycle runs (#184). Anything else must not, or every
+    /// poll would cost a scan.
+    @Test("only a read naming a different, known account counts as a switch")
+    func onlyARealSwitchCallsBack() {
+        final class Count: @unchecked Sendable { var n = 0 }
+        let calls = Count()
+        let monitor = SignedInCredentialMonitor()
+        monitor.setOnAccountChange { calls.n += 1 }
+
+        monitor.publish(accountKey: "a", readAt: t(100))   // first read of the process
+        monitor.publish(accountKey: "a", readAt: t(200))   // same login
+        #expect(calls.n == 0)
+        monitor.publish(accountKey: "b", readAt: t(300))   // switched
+        #expect(calls.n == 1)
+        monitor.publish(accountKey: "a", readAt: t(250))   // older read: ignored
+        monitor.publish(accountKey: nil, readAt: t(400))   // new token, not resolved yet
+        monitor.publish(accountKey: "b", readAt: t(400))   // …a refresh of the same login
+        #expect(calls.n == 1)
+        monitor.publish(accountKey: nil, readAt: t(450))
+        monitor.publish(accountKey: "c", readAt: t(450))   // …resolved to another login
+        #expect(calls.n == 2)
+
+        monitor.setOnAccountChange(nil)
+        monitor.publish(accountKey: "d", readAt: t(500))
+        #expect(calls.n == 2)
+    }
+
     @Test("an older read never rewinds a newer one")
     func olderReadIsIgnored() {
         let monitor = SignedInCredentialMonitor()

@@ -24,8 +24,8 @@
 #   wait  --cap N          block until the tripping window resets; 0=resume
 #                          20=beyond --max-wait (checkpoint & stop) 2=api-off
 #
-# Flags: --cap N (default 85), --interval S (default 300, floor 300 — Pacer
-#   only updates every ~5 min), --window SEL (default all; a label or identity
+# Flags: --cap N (default 85), --interval S (how often `wait` looks; default
+#   15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
 #   substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
 #   21600 = 6h), --max-age S (default 900; how old a state file may be before
 #   `status` calls it stale), --retries N (default 3), --state FILE
@@ -715,9 +715,10 @@ cmd_wait() {
   local waiting=false everRead=false fails=0 startedOn="" nowOn=""
   # A waiting process has a reason to look more often than a reading changes:
   # under sequential accounts, switching logins restores headroom immediately
-  # and Pacer sees it as soon as it notices the switch. Waiting out a *reset*
+  # and Pacer sees it within seconds. At 60 s a switch was found up to a minute
+  # late (#184); a look is two requests to this machine. Waiting out a *reset*
   # is still bounded by the ~5-minute poll either way.
-  [ "$INTERVAL_SET" = 0 ] && INTERVAL=60
+  [ "$INTERVAL_SET" = 0 ] && INTERVAL=15
   while :; do
     refresh_scope
     if ! fetch_rows; then

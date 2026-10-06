@@ -717,6 +717,13 @@ public final class ScanCoordinator {
             await oauthPoller.start()
             log("oauth poller started")
         }
+        // A login switch is accepted by the next cycle, and the next cycle
+        // waited for a transcript to change: ~40 s on a busy machine when it
+        // was measured, up to the 5-minute backstop on a quiet one (#184).
+        let watcher = self.watcher
+        signedInCredential.setOnAccountChange {
+            Task { await watcher.requestScan() }
+        }
 
         for await _ in stream {
             // Skip if a scan is already underway. The watcher fires
@@ -740,6 +747,7 @@ public final class ScanCoordinator {
     }
 
     public func stop() async {
+        signedInCredential.setOnAccountChange(nil)
         // Flush the dedup index unconditionally on the way out: writes are
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.

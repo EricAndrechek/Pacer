@@ -318,8 +318,9 @@ it and continue. Keep it current as items complete.
   about; a selector matching nothing is an error, not a free pass. `--window`
   is about what you *watch*; `--model` is about what *binds you*.
 - `--account ID|all` (default: the active login): whose windows to read.
-- `--interval S` (default 300, floored to 300): poll cadence while waiting.
-  Pacer updates about every 5 minutes; polling faster is wasted.
+- `--interval S` (default 15, floor 5): how often `wait` looks. Readings
+  change about every 5 minutes, but a login switch shows up within seconds,
+  and each look is a request to this machine.
 - `--max-wait S` (default 21600 = 6h): auto-sleep only if the reset is within
   this. A further-out reset returns exit 20 so you checkpoint and stop instead
   of sleeping for days.
