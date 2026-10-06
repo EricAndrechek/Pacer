@@ -234,7 +234,13 @@ resolve_session() {
          "${PACE_SESSION_API:-${API_BASE%/}}/v1/session") || return 1
   case "$body" in *'"sessionId"'*) ;; *) return 1;; esac
   SESSION_MODEL=$(printf '%s\n' "$body" | awk -F'"' '/"model"/ { print $4; exit }')
-  SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  # The login the session's next turn bills to, where Pacer says. The
+  # account of its last stored turn stays on the old login after a `/login`
+  # until the session writes another turn, which a session asleep in `wait`
+  # never does (#184).
+  SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"currentAccountId"/ { print $4; exit }')
+  [ -n "$SESSION_ACCOUNT" ] \
+    || SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
   # Every model this session is running, not just the newest turn's. A
   # subagent shares its parent's session id, so this is how we find out that
   # "the session's model" is not a single answer.
@@ -271,7 +277,8 @@ fetch_rows() {
       case "$code" in
         401|403) FETCH_REASON=auth; return 1;;
         000|200) ;;                       # 000 = a non-HTTP URL, e.g. file://
-        *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
+        *)       FETCH_REASON=http; HTTP_CODE=$code
+                 HTTP_BODY=$(printf '%s\n' "$body" | head -1); return 1;;
       esac
       if [ -n "$body" ]; then
         # Counted before filtering: `ROWS` is already narrowed to one login, so
@@ -465,7 +472,9 @@ summary() {
 api_off_note() {
   case "${FETCH_REASON:-off}" in
     auth) echo "pace: Pacer requires a token and this one was rejected. Set PACE_TOKEN to the token in Pacer → Settings → Integrations. NOT gating — fix this or the run is unpaced." >&2;;
-    http) echo "pace: Pacer answered HTTP ${HTTP_CODE:-?} at $API. NOT gating." >&2;;
+    # The server's first line says what it rejected — an unknown account
+    # read like the API being off until it was shown (#184).
+    http) echo "pace: Pacer answered HTTP ${HTTP_CODE:-?} at $API${HTTP_BODY:+: $HTTP_BODY}. NOT gating." >&2;;
     empty) echo "pace: Pacer answered but reported no rate-limit windows yet — it may not have polled since launch. Proceeding ungated.";;
     *)    echo "Pacer API unreachable at $API — it is opt-in and likely just off (Pacer → Settings → Integrations). Proceed normally.";;
   esac
@@ -707,6 +716,7 @@ cmd_wait() {
   # is still bounded by the ~5-minute poll either way.
   [ "$INTERVAL_SET" = 0 ] && INTERVAL=60
   while :; do
+    refresh_scope
     if ! fetch_rows; then
       # A blip is not a reset. Pacer ships silent auto-updates and restarts
       # itself, so a wait long enough to matter *will* meet a minute where
@@ -817,18 +827,34 @@ fi
 # "no rate-limit windows yet" while staring at a full set of them. The rule is
 # now that whenever the id is known it is used for both, and the client-side
 # "whichever is active" fallback applies only when nothing else has said.
-if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
-  SCOPE=(--data-urlencode "account=$ACCOUNT")
-  AWK_WANT="$ACCOUNT"
-elif [ -n "$SESSION_ACCOUNT" ]; then
-  SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
-  AWK_WANT="$SESSION_ACCOUNT"
-elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  # Only Pacer can turn a config directory into an id, so here — and only
-  # here — the response is taken as already narrowed.
-  SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
-  AWK_WANT=all
-fi
+set_scope() {
+  SCOPE=(); AWK_WANT="${PACE_ACCOUNT:-}"
+  if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
+    SCOPE=(--data-urlencode "account=$ACCOUNT")
+    AWK_WANT="$ACCOUNT"
+  elif [ -n "$SESSION_ACCOUNT" ]; then
+    SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
+    AWK_WANT="$SESSION_ACCOUNT"
+  elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    # Only Pacer can turn a config directory into an id, so here — and only
+    # here — the response is taken as already narrowed.
+    SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
+    AWK_WANT=all
+  fi
+}
+set_scope
+
+# Look the session's account up again. A `wait` resolved once and kept asking
+# about the login it started on, so a switch to another login could never
+# end it (#184). An explicit --account is the caller's choice and stays.
+refresh_scope() {
+  if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = all ]; then
+    session_looked_up=false
+    SESSION_ACCOUNT=""
+    resolve_session || true
+  fi
+  set_scope
+}
 
 case "$SUB" in
   accounts) cmd_accounts;;

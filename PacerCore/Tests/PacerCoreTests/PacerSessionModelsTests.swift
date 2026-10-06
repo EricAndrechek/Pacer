@@ -102,4 +102,83 @@ struct PacerSessionModelsTests {
         #expect(found.models == ["claude-opus-5"])
         #expect(found.model == "claude-opus-5")
     }
+
+    // MARK: - Which login the session bills now (#184)
+
+    @MainActor
+    private static func login(_ context: ModelContext, _ account: String,
+                              from: Date, until: Date?) {
+        context.insert(AccountActivation(
+            accountId: account, startedAt: from, endedAt: until, rootPath: nil,
+            source: AccountActivation.sourceObserved))
+    }
+
+    /// The session's last turn was before a `/login` switch and it has written
+    /// none since (asleep in `pace.sh wait`). Its turn stays on the old login;
+    /// its next one goes to the new login.
+    @MainActor
+    @Test func aSwitchSinceTheLastTurnMovesTheCurrentAccount() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        Self.turn(context, session: "s1", model: "claude-opus-5", secondsAgo: 600, now: now)
+        (try context.fetch(FetchDescriptor<TokenSample>())).forEach { $0.accountId = "org-work" }
+        Self.login(context, "org-work", from: now.addingTimeInterval(-7200),
+                   until: now.addingTimeInterval(-300))
+        Self.login(context, "org-home", from: now.addingTimeInterval(-300), until: nil)
+        try context.save()
+
+        let found = try #require(try PacerSessionLookupBuilder.lookup(
+            container: container, sessionId: "s1", now: now))
+        #expect(found.accountId == "org-work")
+        #expect(found.currentAccountId == "org-home")
+    }
+
+    @MainActor
+    @Test func withNoObservedLoginTheCurrentAccountIsTheTurns() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        Self.turn(context, session: "s1", model: "claude-opus-5", secondsAgo: 5, now: now)
+        (try context.fetch(FetchDescriptor<TokenSample>())).forEach { $0.accountId = "org-work" }
+        try context.save()
+
+        let found = try #require(try PacerSessionLookupBuilder.lookup(
+            container: container, sessionId: "s1", now: now))
+        #expect(found.currentAccountId == "org-work")
+    }
+
+    /// A session that spans a switch has a per-account row for each login.
+    /// The accounts list counted it on both, so the old login kept its
+    /// sessions for an hour after everyone had moved.
+    @MainActor
+    @Test func aSessionSpanningASwitchCountsOnceOnItsNewestLogin() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for id in ["org-work", "org-home"] {
+            context.insert(Account(id: id, organizationId: id, displayName: id,
+                                   isActive: id == "org-home",
+                                   firstSeenAt: .distantPast, lastSeenAt: now))
+        }
+        func row(_ account: String, lastSeen secondsAgo: Double) {
+            context.insert(AccountSessionInfo(
+                accountId: account, sessionId: "s1",
+                firstSeenAt: now.addingTimeInterval(-secondsAgo - 60),
+                lastSeenAt: now.addingTimeInterval(-secondsAgo), projectPath: "/tmp/p",
+                ccVersion: nil, cumulativeCostUSD: 0, cumulativeInputTokens: 0,
+                cumulativeOutputTokens: 0, cumulativeCacheReadTokens: 0,
+                cumulativeCacheCreation5mTokens: 0, cumulativeCacheCreation1hTokens: 0,
+                topModel: "claude-opus-5"))
+        }
+        row("org-work", lastSeen: 240)
+        row("org-home", lastSeen: 30)
+        try context.save()
+
+        let list = try PacerAccountsBuilder.list(container: container, now: now)
+        let byId = Dictionary(uniqueKeysWithValues: list.accounts.map { ($0.id, $0) })
+        #expect(byId["org-home"]?.activeSessions == 1)
+        #expect(byId["org-work"]?.activeSessions == 0)
+        #expect(byId["org-work"]?.recentSessions == 0)
+    }
 }

@@ -45,7 +45,9 @@ its own profile (`CLAUDE_CONFIG_DIR`, which is how two accounts run at once)
 gets that account's windows: the script hands Pacer the directory and Pacer
 resolves it, because only Pacer knows which login is signed into it. Otherwise
 the active login. `--account all` shows every account, prefixed by id;
-`--account <id>` picks one.
+`--account <id>` picks one, and the 8-character id `accounts` prints is
+enough. A `wait` looks the session's account up again on every poll, so a
+`/login` switch to a login with headroom ends it.
 
 ## 2. Who else is spending this budget
 

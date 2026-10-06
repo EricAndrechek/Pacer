@@ -196,14 +196,25 @@ public enum PacerAccountsBuilder {
     /// so a freshly discovered account with no usage yet resolves and returns
     /// an empty result — the honest answer — instead of a 400 that implies it
     /// does not exist.
+    ///
+    /// A unique prefix of at least `minimumPrefix` characters also resolves,
+    /// because `pace.sh accounts` prints ids cut to 8 and that is what people
+    /// paste back. Before that, the 8-character id it showed answered 400 (#184).
     public nonisolated static func resolve(_ raw: String) throws -> String {
         let wanted = raw.trimmingCharacters(in: .whitespaces)
         if wanted == unattributedAlias { return AccountDailyAggregate.unattributedKey }
-        let known = try knownAccountIds()
-        guard known.contains(wanted) else {
+        return try resolve(wanted, known: knownAccountIds())
+    }
+
+    static let minimumPrefix = 4
+
+    nonisolated static func resolve(_ wanted: String, known: [String]) throws -> String {
+        if known.contains(wanted) { return wanted }
+        let matches = wanted.count >= minimumPrefix ? known.filter { $0.hasPrefix(wanted) } : []
+        guard matches.count == 1, let match = matches.first else {
             throw ResolveError.unknownAccount(known: known + [unattributedAlias])
         }
-        return wanted
+        return match
     }
 
     /// Which account a `CLAUDE_CONFIG_DIR` is signed into, or nil when no
@@ -264,9 +275,17 @@ public enum PacerAccountsBuilder {
         let sessionCutoff = now.addingTimeInterval(-LiveSessionActivity.recentThreshold)
         let liveSessions = (try? context.fetch(FetchDescriptor<AccountSessionInfo>(
             predicate: #Predicate { $0.lastSeenAt >= sessionCutoff }))) ?? []
+        // One count per session, under the account of its newest row. A session
+        // that spans a `/login` switch has a row for each account, and counting
+        // both put it on the old account for as long as it stayed recent (#184).
+        var newestBySession: [String: AccountSessionInfo] = [:]
+        for session in liveSessions
+        where session.lastSeenAt > (newestBySession[session.sessionId]?.lastSeenAt ?? .distantPast) {
+            newestBySession[session.sessionId] = session
+        }
         var active: [String: Int] = [:]
         var recent: [String: Int] = [:]
-        for session in liveSessions {
+        for session in newestBySession.values {
             recent[session.accountId, default: 0] += 1
             if LiveSessionActivity.from(lastSeen: session.lastSeenAt, now: now) == .active {
                 active[session.accountId, default: 0] += 1

@@ -84,10 +84,14 @@ struct PaceScriptTests {
 
         enum StartFailure: Error { case neverListened }
 
-        init(status: Int, body: String) throws {
+        /// `file`, when given, is re-read on every request instead of `body`,
+        /// so a test can change the answer while the script is running.
+        init(status: Int, body: String, file: URL? = nil) throws {
             var launched: (Process, Int)?
             for _ in 0..<5 {
                 let port = Int.random(in: 49_200...49_900)
+                let payload = file.map { "open(\"\($0.path)\", \"rb\").read()" }
+                    ?? "b\"\"\"\(body)\"\"\""
                 let script = """
                 from http.server import BaseHTTPRequestHandler, HTTPServer
                 class H(BaseHTTPRequestHandler):
@@ -95,7 +99,7 @@ struct PaceScriptTests {
                         self.send_response(\(status))
                         self.send_header("Content-Type", "text/plain")
                         self.end_headers()
-                        self.wfile.write(b\"\"\"\(body)\"\"\")
+                        self.wfile.write(\(payload))
                     def log_message(self, *a): pass
                 HTTPServer(("127.0.0.1", \(port)), H).serve_forever()
                 """
@@ -142,8 +146,11 @@ struct PaceScriptTests {
         func stop() { task.terminate() }
     }
 
+    /// `timeout` ends a run that would otherwise never return, so a `wait`
+    /// that misses what it is waiting for fails the test instead of hanging it.
     private func run(_ sandbox: Sandbox, _ args: [String], api: String? = nil,
-                     unsetState: Bool = false, extra: [String: String] = [:]) throws -> Run {
+                     unsetState: Bool = false, extra: [String: String] = [:],
+                     timeout: TimeInterval? = nil) throws -> Run {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [Self.scriptPath] + args
@@ -157,6 +164,11 @@ struct PaceScriptTests {
         process.standardOutput = pipe
         process.standardError = pipe
         try process.run()
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning { process.terminate() }
+            }
+        }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return Run(status: process.terminationStatus,
@@ -292,6 +304,21 @@ struct PaceScriptTests {
         let result = try run(box, ["gate", "--retries", "1"], api: server.base)
         #expect(result.status == 4)
         #expect(result.out.contains("PACE_TOKEN"))
+        #expect(!result.out.contains("proceeding ungated"))
+    }
+
+    /// A rejected `--account` read like the API being off (#184). The
+    /// server's answer names what it rejected, so the script passes it on.
+    @Test func aRejectedRequestSaysWhatWasRejected() throws {
+        let box = try Sandbox(metrics: nil)
+        let server = try StubServer(status: 400,
+                                    body: "Unknown account zzzz. Known: org-home, org-work\n")
+        defer { server.stop() }
+
+        let result = try run(box, ["gate", "--retries", "1", "--account", "zzzz"],
+                             api: server.base)
+        #expect(result.status == 4)
+        #expect(result.out.contains("Unknown account"))
         #expect(!result.out.contains("proceeding ungated"))
     }
 
@@ -538,6 +565,74 @@ struct PaceScriptTests {
         #expect(result.status == 0)
         #expect(result.out.contains("account switched"))
         #expect(box.stateText.contains("account switched"))
+    }
+
+    /// #184: a session asleep in `wait` when its login is switched. Pacer's
+    /// session lookup keeps the old account on the session's last turn, since
+    /// the session writes no turn while it sleeps, and names the new login as
+    /// `currentAccountId`. The wait resolved the session once and kept asking
+    /// about the old account, so it waited out a reset the new login didn't
+    /// need.
+    @Test func waitFollowsTheSessionToTheNewLogin() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.97
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 900
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.04
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 3600
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        pacer_account_info{account="org-home",name="h",active="false"} 1
+        """)
+        let session = box.dir.appendingPathComponent("session.json")
+        func answer(current: String) throws {
+            try """
+            {
+              "accountId" : "org-work",
+              "currentAccountId" : "\(current)",
+              "sessionId" : "abc-123"
+            }
+            """.write(to: session, atomically: true, encoding: .utf8)
+        }
+        try answer(current: "org-work")
+        let server = try StubServer(status: 200, body: "", file: session)
+        defer { server.stop() }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+            try? answer(current: "org-home")
+        }
+
+        let result = try run(box, ["wait", "--cap", "85", "--interval", "2"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base],
+                             timeout: 20)
+        #expect(result.status == 0)
+        #expect(result.out.contains("account switched"))
+    }
+
+    /// An `--account` the caller gave is theirs to change, so a waiter on it
+    /// stays on it even when the session's login moves.
+    @Test func waitKeepsAnExplicitAccount() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} 0.97
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} 900
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.04
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 3600
+        pacer_account_info{account="org-home",name="h",active="true"} 1
+        """)
+        let server = try StubServer(status: 200, body: """
+        {
+          "accountId" : "org-home",
+          "currentAccountId" : "org-home",
+          "sessionId" : "abc-123"
+        }
+        """)
+        defer { server.stop() }
+        // Past max-wait, so it reports the pause and stops instead of waiting.
+        let result = try run(box, ["wait", "--account", "org-work", "--cap", "85",
+                                   "--max-wait", "60"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base],
+                             timeout: 20)
+        #expect(result.status == 20)
+        #expect(!result.out.contains("account switched"))
     }
 
     /// Pacer installs its own updates and restarts, so any wait long enough to

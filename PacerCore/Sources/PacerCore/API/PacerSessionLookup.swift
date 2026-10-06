@@ -49,6 +49,16 @@ public struct PacerSessionLookup: Codable, Sendable {
     public let models: [String]
     /// The account that turn was attributed to.
     public let accountId: String?
+    /// The account this session's next turn bills to: the default login's
+    /// current account. Nil when no login has been observed.
+    ///
+    /// Differs from `accountId` after a `/login` switch until the session
+    /// writes a turn and Pacer scans it. That can be never for a session
+    /// sleeping in `pace.sh wait`, and pacing it on `accountId` waited out
+    /// the old login's reset while the new one had headroom (#184). Every
+    /// session the lookup can find is on the default login, because pinned
+    /// profiles aren't scanned (see `AccountTrailRecorder.poll`).
+    public let currentAccountId: String?
     public let projectPath: String?
     /// Last path component of `projectPath`, for display.
     public let project: String?
@@ -197,6 +207,7 @@ public enum PacerSessionLookupBuilder {
             if seen.insert(row.model).inserted { models.append(row.model) }
         }
         let path = newest.projectPath
+        let current = AccountParallelism.trail(context: context).currentDefaultLogin?.accountId
         return PacerSessionLookup(
             schemaVersion: 1,
             generatedAt: now,
@@ -204,6 +215,7 @@ public enum PacerSessionLookupBuilder {
             model: models.first,
             models: models,
             accountId: newest.accountId,
+            currentAccountId: current ?? newest.accountId,
             projectPath: path,
             project: path.map { URL(fileURLWithPath: $0).lastPathComponent },
             lastActiveAt: newest.sampledAt)
