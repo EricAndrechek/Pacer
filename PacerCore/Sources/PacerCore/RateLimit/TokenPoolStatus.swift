@@ -145,6 +145,13 @@ public protocol TokenPoolTesting: AnyObject, Sendable {
     /// Give the account a name of the user's choosing. An empty or
     /// whitespace-only name clears the rename and restores the derived one.
     func renameAccount(id: String, to name: String) async
+    /// Read every token source again now rather than at the next scheduled
+    /// discovery, so a changed credential setting takes effect at once.
+    func rediscoverTokens() async
+}
+
+public extension TokenPoolTesting {
+    func rediscoverTokens() async {}
 }
 
 /// Process-wide, MainActor-isolated snapshot of the OAuth token pool —
@@ -220,5 +227,9 @@ public final class TokenPoolStatus {
 
     public func renameAccount(id: String, to name: String) async {
         await tester?.renameAccount(id: id, to: name)
+    }
+
+    public func rediscoverTokens() async {
+        await tester?.rediscoverTokens()
     }
 }
