@@ -446,6 +446,9 @@ final class AppBackgroundService {
     /// must still find that high on next launch. Bounded to the
     /// authoritative OAuth source (~12 rows/hour), so even the 7-day
     /// window is ~2k rows scanned once per ~5-min poll — trivial.
+    /// Set while `checkForGlobalReset` runs. See there.
+    private var globalResetCheckRunning = false
+
     private func globalResetLookback(forWindow window: String) -> TimeInterval {
         (PaceMath.windowDuration(for: window) ?? (72 * 3600)) + 3600
     }
@@ -703,37 +706,19 @@ final class AppBackgroundService {
     /// each window and dispatch an early-reset banner on a hit. The
     /// detector is the gatekeeper for "is this real / not a blip"; the
     /// coordinator handles the settings gate and per-cycle dedup.
+    ///
+    /// The reads run off the main actor. This runs on every poll of the
+    /// active login (about every 30 s), and reading on the main thread froze
+    /// the dashboard for a third of a ~230 ms stall each time.
     private func checkForGlobalReset() async {
-        let context = ModelContext(container)
-        let oauthSource = RateLimitSource.oauth
+        // Polls land 30 s apart and the coordinator awaits between its dedup
+        // check and its mark, so two overlapping checks could both pass the
+        // check and post the same banner twice.
+        guard !globalResetCheckRunning else { return }
+        globalResetCheckRunning = true
+        defer { globalResetCheckRunning = false }
 
-        for window in [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay] {
-            let cutoff = Date().addingTimeInterval(-globalResetLookback(forWindow: window))
-            // The **active** login's, like every other decision surface: a
-            // global reset is something to be told about, not a view. Scoping
-            // is also load-bearing here — an unscoped series would interleave
-            // two accounts' utilisation and the collapse detector would read
-            // the gap between them as a reset.
-            let account = Account.activeId(in: context)
-            let descriptor = FetchDescriptor<RateLimitSample>(
-                predicate: account == nil
-                    ? #Predicate<RateLimitSample> {
-                        $0.source == oauthSource && $0.window == window && $0.sampledAt >= cutoff
-                    }
-                    : #Predicate<RateLimitSample> {
-                        $0.source == oauthSource && $0.window == window
-                            && $0.sampledAt >= cutoff && $0.accountId == account
-                    },
-                sortBy: [SortDescriptor(\.sampledAt, order: .forward)]
-            )
-            guard let rows = try? context.fetch(descriptor) else { continue }
-            let observations = rows.map {
-                GlobalRateLimitReset.Observation(
-                    sampledAt: $0.sampledAt,
-                    usedPercentage: $0.usedPercentage,
-                    resetsAt: $0.resetsAt
-                )
-            }
+        let checks = [RateLimitWindowName.fiveHour, RateLimitWindowName.sevenDay].map { window in
             // Window-aware gates. The 5-hour window rolls over constantly and
             // naturally touches 0%, so keep its high bar (25%) and a short
             // cut-short lead. The 7-day window hitting 0% is rare and almost
@@ -742,19 +727,43 @@ final class AppBackgroundService {
             // from ~17% and nulled the anchor), and a larger lead (10% of the
             // window) keeps a sleep-gap rollover from masquerading as one.
             let windowDuration = PaceMath.windowDuration(for: window) ?? (7 * 24 * 3600)
-            let highWatermark: Double = window == RateLimitWindowName.sevenDay ? 15 : 25
-            let minAnchorLead = max(GlobalRateLimitReset.defaultMinAnchorLead, windowDuration * 0.1)
-            guard let detection = GlobalRateLimitReset.detect(
-                observations,
-                highWatermark: highWatermark,
-                minAnchorLead: minAnchorLead
-            ) else { continue }
-            await NotificationCoordinator.shared.handleGlobalRateLimitReset(
+            return GlobalResetCheck(
                 window: window,
-                detection: detection,
+                lookback: globalResetLookback(forWindow: window),
+                highWatermark: window == RateLimitWindowName.sevenDay ? 15 : 25,
+                minAnchorLead: max(GlobalRateLimitReset.defaultMinAnchorLead, windowDuration * 0.1))
+        }
+        let container = self.container
+        let detections = await Task.detached(priority: .utility) {
+            let context = ModelContext(container)
+            // The **active** login's, like every other decision surface: a
+            // global reset is something to be told about, not a view.
+            let account = Account.activeId(in: context)
+            return checks.compactMap { check in
+                GlobalRateLimitReset.detectRecent(
+                    in: context, account: account, window: check.window,
+                    lookback: check.lookback, highWatermark: check.highWatermark,
+                    minAnchorLead: check.minAnchorLead
+                ).map { (window: check.window, detection: $0) }
+            }
+        }.value
+        guard !detections.isEmpty else { return }
+
+        let context = ModelContext(container)
+        for found in detections {
+            await NotificationCoordinator.shared.handleGlobalRateLimitReset(
+                window: found.window,
+                detection: found.detection,
                 context: context
             )
         }
+    }
+
+    private struct GlobalResetCheck: Sendable {
+        let window: String
+        let lookback: TimeInterval
+        let highWatermark: Double
+        let minAnchorLead: TimeInterval
     }
 
     // MARK: - Burn-rate (slope) warning
