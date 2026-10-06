@@ -64,10 +64,11 @@ public enum OAuthClientError: Error, Sendable {
 public struct CredentialCandidate: Sendable, Equatable {
     public enum Source: String, Sendable, Equatable, Codable {
         case override, keychain, held, desktop
-        /// A credential an account switcher stashed for a login that is not
-        /// currently signed in. Distinct from `.keychain` because it is the
-        /// only source that can speak for an account you are *not* using —
-        /// see `KeychainOAuth.parkedServicePrefix`.
+        /// A credential kept for a login that is not currently signed in: a
+        /// session profile's item, or an account switcher's saved copy.
+        /// Distinct from `.keychain` because it is the only source that can
+        /// speak for an account you are *not* using — see
+        /// `ParkedCredentialStore`.
         case parked
     }
     public let credential: OAuthCredential
@@ -103,8 +104,8 @@ public struct OAuthClient: Sendable {
     /// currently signed in.
     ///
     /// Injected rather than called statically, and that is not ceremony: the
-    /// first version reached straight for `KeychainOAuth.parkedServiceNames()`
-    /// from inside `candidateCredentials`, which meant every test — with a
+    /// first version reached straight for the keychain from inside
+    /// `candidateCredentials`, which meant every test — with a
     /// fully mocked keychain — quietly scanned the developer's real one and
     /// shelled out to `security` for each hit. One of them went from passing to
     /// polling zero times. Anything that touches the machine belongs behind the
@@ -336,10 +337,10 @@ public struct OAuthClient: Sendable {
         }
     }
 
-    /// Reads every `Claude Code-credentials-<suffix>` item the switcher has
-    /// stashed. Enumeration is attributes-only and cannot prompt; the reads
-    /// themselves can, which is why this is only consulted when building the
-    /// candidate list rather than on every poll.
+    /// Every parked credential: session profiles' items and, unless turned
+    /// off in Settings, an account switcher's saved logins. Listing cannot
+    /// prompt, an unchanged item is not re-read, and a failed read stops that
+    /// kind for the session. See `ParkedCredentialStore`.
     public static let defaultParkedCredentials: @Sendable () -> [OAuthCredential] = {
         // Never in tests. Twenty test sites build an `OAuthClient` with a fully
         // mocked keychain and would otherwise have scanned the developer's real
@@ -347,12 +348,7 @@ public struct OAuthClient: Sendable {
         // effect on somebody's machine and, on a locked keychain, a password
         // prompt in the middle of a test run.
         guard !PacerPreferences.isTestProcess else { return [] }
-        return KeychainOAuth.parkedServiceNames().compactMap { service in
-            guard case .success(let data) = KeychainOAuth.readParked(service: service),
-                  case .success(let cred) = KeychainOAuth(rawReader: { .success(data) }).read()
-            else { return nil }
-            return cred
-        }
+        return ParkedCredentialStore.shared.credentials()
     }
 
     /// Resolve Claude Desktop's tokens with the layered fallback that keeps
