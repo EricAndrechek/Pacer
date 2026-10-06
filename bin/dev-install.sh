@@ -266,7 +266,11 @@ else
 echo
 echo "==> Notarizing with Apple (profile: ${NOTARY_PROFILE})"
 
-if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+# Keep what notarytool says. A 403 "required agreement is missing or has
+# expired" (Apple wants a new developer agreement accepted) used to be
+# swallowed here and then reported, if at all, as "profile not found".
+if ! NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" 2>&1)"; then
+    echo "    notarytool: $(printf '%s\n' "${NOTARY_CHECK}" | grep -m1 -iE 'error|status' || echo 'credential check failed')"
     # Self-heal. The notarization profile is a login-Keychain item, NOT a
     # file in keys/ — so it goes missing on a fresh machine or after a
     # Keychain reset even when keys/ already holds every credential (the
@@ -274,7 +278,10 @@ if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 
     # are present locally, recreate the profile non-interactively instead
     # of erroring out. keys/ is gitignored; nothing here is committed.
     KEYS_DIR="${REPO_ROOT}/keys"
-    KEYS_P8="$(ls "${KEYS_DIR}"/AuthKey_*.p8 2>/dev/null | head -1)"
+    # `|| true`: with no match `ls` fails, and under `set -euo pipefail` that
+    # ended the whole install with no message at all. A worktree has no keys/
+    # (it is gitignored), so this happened on every failed check there.
+    KEYS_P8="$(ls "${KEYS_DIR}"/AuthKey_*.p8 2>/dev/null | head -1 || true)"
     if [ -f "${KEYS_DIR}/.env" ] && [ -n "${KEYS_P8}" ]; then
         echo "    profile '${NOTARY_PROFILE}' not in Keychain — recreating from keys/ …"
         # Subshell so the sourced secrets (incl. CERTIFICATE_PASSWORD) stay
@@ -293,7 +300,15 @@ fi
 
 # Re-check: covers both the just-healed case and a genuinely-absent
 # profile (keys/ not present, or auto-setup failed above).
-if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null 2>&1; then
+if ! NOTARY_CHECK="$(xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" 2>&1)"; then
+    if printf '%s' "${NOTARY_CHECK}" | grep -q "403"; then
+        echo "ERROR: Apple refused notarization (HTTP 403):"
+        printf '%s\n' "${NOTARY_CHECK}" | grep -m1 -iE 'error' | sed 's/^/    /'
+        echo "If it mentions an agreement, the team's Account Holder must accept it at"
+        echo "developer.apple.com → Account → Agreements. Until then, PACER_DEV_SKIP_NOTARIZE=1"
+        echo "installs locally (with the App Management prompt on launch)."
+        exit 1
+    fi
     echo "ERROR: notarytool credential profile '${NOTARY_PROFILE}' not found."
     echo "Set it up once with:"
     echo "  xcrun notarytool store-credentials ${NOTARY_PROFILE} \\"
