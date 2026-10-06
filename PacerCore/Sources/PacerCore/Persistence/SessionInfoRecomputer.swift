@@ -69,7 +69,8 @@ public final class SessionInfoRecomputer {
         sessionIds: Set<String>,
         snapshots: SampleSnapshotCache? = nil,
         pending: [String: [TokenSample]] = [:],
-        polluted: Set<String> = []
+        polluted: Set<String> = [],
+        upgrades: [String: [SamplePersister.SessionUpgrade]] = [:]
     ) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
@@ -94,10 +95,12 @@ public final class SessionInfoRecomputer {
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
             let pendingForSid = pending[sid] ?? []
+            let upgradesForSid = upgrades[sid] ?? []
             let isPolluted = polluted.contains(sid)
             if isPolluted { cache.forget([sid]) }
-            if !isPolluted, !pendingForSid.isEmpty,
+            if !isPolluted, !pendingForSid.isEmpty || !upgradesForSid.isEmpty,
                try fastPathApply(sessionId: sid, pending: pendingForSid,
+                                 upgrades: upgradesForSid,
                                  snapshot: snapshot, stats: &stats) {
                 continue
             }
@@ -126,9 +129,14 @@ public final class SessionInfoRecomputer {
     /// `SessionRollupValues.add` and the same writers the full path uses, so
     /// the two paths cannot disagree. No cache entry (first touch since
     /// launch, or just polluted) means the full path, which seeds one.
+    ///
+    /// A streamed message's upgrade is a delta on the same values: the partial
+    /// copy's counts come off and the finished copy's go on, globally and for
+    /// the account that paid for it (#177).
     private func fastPathApply(
         sessionId: String,
         pending: [TokenSample],
+        upgrades: [SamplePersister.SessionUpgrade] = [],
         snapshot: PricingTable.Snapshot,
         stats: inout Stats
     ) throws -> Bool {
@@ -147,6 +155,15 @@ public final class SessionInfoRecomputer {
             values.byAccount[key, default: SessionRollupValues()]
                 .add(s, mode: mode, snapshot: snapshot)
         }
+        for upgrade in upgrades {
+            values.global.subtract(upgrade.old, mode: mode, snapshot: snapshot)
+            values.global.add(upgrade.new, mode: mode, snapshot: snapshot)
+            let key = upgrade.new.accountId ?? AccountDailyAggregate.unattributedKey
+            values.byAccount[key, default: SessionRollupValues()]
+                .subtract(upgrade.old, mode: mode, snapshot: snapshot)
+            values.byAccount[key, default: SessionRollupValues()]
+                .add(upgrade.new, mode: mode, snapshot: snapshot)
+        }
 
         let accountRows = try context.fetch(
             FetchDescriptor<AccountSessionInfo>(
@@ -155,7 +172,8 @@ public final class SessionInfoRecomputer {
         )
         var rowsByAccount: [String: AccountSessionInfo] = [:]
         for row in accountRows { rowsByAccount[row.accountId] = row }
-        let touched = Set(pending.map { $0.accountId ?? AccountDailyAggregate.unattributedKey })
+        let touched = Set(pending.map { $0.accountId ?? AccountDailyAggregate.unattributedKey }
+            + upgrades.map { $0.new.accountId ?? AccountDailyAggregate.unattributedKey })
         for key in touched {
             guard let accountValues = values.byAccount[key] else { continue }
             if let row = rowsByAccount[key] {

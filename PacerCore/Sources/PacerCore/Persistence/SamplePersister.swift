@@ -146,6 +146,18 @@ public final class SamplePersister {
     /// existing row's `topModel` — otherwise it falls through to a
     /// full recompute (full re-fetch of the session's samples).
     public private(set) var pendingSessionSamples: [String: [TokenSample]]
+    /// Streamed messages whose finished copy replaced a stored partial one this
+    /// pass, per session: what the partial copy contributed, and the row now
+    /// holding the finished counts. The session rollup applies each as a delta
+    /// (take the partial copy off, add the finished one) instead of rebuilding
+    /// the whole session from its samples, which on a long session cost
+    /// 0.7-0.8 s and was 90% of all session rollup time (#177).
+    public private(set) var pendingSessionUpgrades: [String: [SessionUpgrade]]
+
+    public struct SessionUpgrade {
+        public let old: SampleSnapshot.Row
+        public let new: TokenSample
+    }
     /// `(date, model)` pairs whose pending list overflowed the per-pair
     /// cap, OR that were marked dirty by something other than an
     /// `insert(_:)` call (recovery drain, `markEverySampleDirty`, alias
@@ -236,8 +248,6 @@ public final class SamplePersister {
     public enum SessionPollution: String, Sendable, CaseIterable {
         /// More than `fastPathPendingCap` new turns for it in one cycle.
         case cap
-        /// A streamed message's finished copy replaced its stored snapshot.
-        case upgrade
         /// Marks left by a pass that died before its save.
         case carry
         /// A session with samples and no `SessionInfo` row.
@@ -269,6 +279,7 @@ public final class SamplePersister {
         self.pendingHourSamples = [:]
         self.pendingProjectSamples = [:]
         self.pendingSessionSamples = [:]
+        self.pendingSessionUpgrades = [:]
         self.pollutedDailyPairs = []
         self.pollutedHourBuckets = []
         self.pollutedProjectPairs = []
@@ -507,6 +518,7 @@ public final class SamplePersister {
             if list.count > Self.fastPathPendingCap {
                 polluteSession(sid, .cap)
                 pendingSessionSamples[sid] = nil
+                pendingSessionUpgrades[sid] = nil
             } else {
                 pendingSessionSamples[sid] = list
             }
@@ -568,6 +580,13 @@ public final class SamplePersister {
 
         for sample in rows {
             guard let key = sample.dedupKey, let entry = wanted[key] else { continue }
+            // What the partial copy contributed, before it is overwritten.
+            let old = SampleSnapshot.Row(
+                date: sample.date, model: sample.model, projectPath: sample.projectPath,
+                sessionId: sample.sessionId, sampledAt: sample.sampledAt,
+                localHour: sample.localHour, ccVersion: sample.ccVersion,
+                breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
+                accountId: sample.accountId)
             sample.inputTokens = entry.breakdown.inputTokens
             sample.outputTokens = entry.breakdown.outputTokens
             sample.cacheReadTokens = entry.breakdown.cacheReadTokens
@@ -592,10 +611,21 @@ public final class SamplePersister {
             pollutedHourBuckets.insert(hourBucket)
             pendingHourSamples[hourBucket] = nil
 
+            // The session takes the upgrade as a delta. The day, hour and
+            // project buckets above are still rebuilt: one turn's bucket is
+            // tens of milliseconds, where a long session is most of a second.
             if let sid = sample.sessionId, !sid.isEmpty {
                 dirtySessionIds.insert(sid)
-                polluteSession(sid, .upgrade)
-                pendingSessionSamples[sid] = nil
+                if pollutedSessionIds.contains(sid) {
+                    // Rebuilt from its samples anyway.
+                } else if pendingSessionSamples[sid]?.contains(where: { $0 === sample }) == true {
+                    // Inserted this pass: the pending add already reads the
+                    // finished counts off the same object, so a delta too
+                    // would count the upgrade twice.
+                } else {
+                    pendingSessionUpgrades[sid, default: []]
+                        .append(SessionUpgrade(old: old, new: sample))
+                }
             }
             applied += 1
             if applied == wanted.count { break }   // nothing left to find
@@ -666,6 +696,7 @@ public final class SamplePersister {
         pendingHourSamples.removeAll()
         pendingProjectSamples.removeAll()
         pendingSessionSamples.removeAll()
+        pendingSessionUpgrades.removeAll()
         pollutedDailyPairs.removeAll()
         pollutedHourBuckets.removeAll()
         pollutedProjectPairs.removeAll()
@@ -682,6 +713,7 @@ public final class SamplePersister {
         dirtySessionIds.removeAll()
         pendingProjectSamples.removeAll()
         pendingSessionSamples.removeAll()
+        pendingSessionUpgrades.removeAll()
         pollutedProjectPairs.removeAll()
         pollutedSessionIds.removeAll()
     }
@@ -718,6 +750,7 @@ public final class SamplePersister {
         pendingHourSamples.removeAll()
         pendingProjectSamples.removeAll()
         pendingSessionSamples.removeAll()
+        pendingSessionUpgrades.removeAll()
         return carried
     }
 
@@ -927,6 +960,7 @@ public final class SamplePersister {
                 dirtySessionIds.insert(sid)
                 polluteSession(sid, .restamp)
                 pendingSessionSamples[sid] = nil
+                pendingSessionUpgrades[sid] = nil
             }
         }
     }
