@@ -266,7 +266,14 @@ struct PacerAPISnapshotTests {
         #expect(Date().timeIntervalSince(started) >= 0.09)
 
         let snapshot = try await MainActor.run { try Self.seededSnapshot(now: Self.noon).0 }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { cache.store(snapshot) }
+        // A thread of its own, not a GCD block: with the suite running in
+        // parallel on a CI runner the global queues are saturated, and a
+        // block queued there did not run inside the 10 s wait at all.
+        let storer = Thread {
+            Thread.sleep(forTimeInterval: 0.05)
+            cache.store(snapshot)
+        }
+        storer.start()
         let waited = Date()
         #expect(cache.current(waitingUpTo: 10)?.builtAt == snapshot.builtAt)
         #expect(Date().timeIntervalSince(waited) < 5)
