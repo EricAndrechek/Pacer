@@ -88,7 +88,7 @@ Commit it all, then open the PR.
   short note (e.g. "fix release pipeline"), no gating — these are needed to make
   the *already-approved* release actually work. Repeat until
   `bin/ship.sh verify <version>` is green.
-- **Except a notarization timeout** (`Apple still processing (app|dmg)` on the
+- **Except a notarization timeout** (`Apple still processing (dmg)` on the
   run page): that's Apple's queue, not our code, so no bump. The submission IDs
   are in the run's annotations (`gh run view <id> --log | grep 'Notarization
   submitted'`), and `xcrun notarytool info <submission> --keychain-profile

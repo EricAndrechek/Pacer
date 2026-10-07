@@ -56,9 +56,9 @@ The steps `bin/ship.sh` automates, spelled out:
 4. Watch the `Release` workflow. It will:
    - Build a Release-config app.
    - Sign with Developer ID, embed the Hardened Runtime entitlements.
-   - Notarize and staple via App Store Connect.
    - Package as a styled DMG with a drag-to-Applications affordance.
-   - Sign the DMG itself + notarize that too.
+   - Sign the DMG, notarize it (one submission; Apple tickets the app inside
+     too) and staple it, then check the app inside assesses as notarized.
    - Sign the Sparkle update with the EdDSA private key.
    - Publish the DMG as the asset on a GitHub Release named `vX.Y.Z`.
    - Append the new item to `appcast.xml` on the `gh-pages` branch.
@@ -238,7 +238,7 @@ When it goes green, you're ready to tag.
   (`--options runtime`). The release workflow signs all known
   components but if you add a new bundled tool, update the signing
   loop in `release.yml`.
-- **`Apple still processing (app)` / `(dmg)`** — Apple's notary queue
+- **`Apple still processing (dmg)`** — Apple's notary queue
   didn't answer within `NOTARY_WAIT` (75 min) in `bin/ci-notarize.sh`. It's
   not a rejection, and it happens: 49 min for the app on 2026-10-06 (#189).
   Every submission ID is on the run page (a notice annotation and the job

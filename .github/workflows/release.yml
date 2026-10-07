@@ -256,28 +256,6 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
           echo "APP_PATH=${APP_PATH}" >> "${GITHUB_ENV}"
 
-      - name: Notarize and staple
-        env:
-          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
-          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-        # Notarize via App Store Connect API key (the only flow that
-        # works in CI — interactive Apple-ID auth obviously can't).
-        # bin/ci-notarize.sh puts the submission ID on the run page, waits
-        # with its own limit, and fails with Apple's log on a rejection.
-        run: |
-          set -euo pipefail
-          export NOTARY_KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
-          echo "${NOTARY_KEY_P8}" > "${NOTARY_KEY_PATH}"
-
-          ZIP_PATH="${RUNNER_TEMP}/Pacer.zip"
-          ditto -c -k --keepParent "${APP_PATH}" "${ZIP_PATH}"
-
-          bin/ci-notarize.sh "${ZIP_PATH}" app
-
-          xcrun stapler staple "${APP_PATH}"
-          xcrun stapler validate "${APP_PATH}"
-
       - name: Build DMG
         # `create-dmg` is the gold-standard CLI for building a signed
         # macOS DMG with a styled background + drag-to-Applications
@@ -315,20 +293,38 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-        # The DMG itself also needs Developer ID signing + notarization
-        # so users don't get a Gatekeeper "downloaded from internet"
-        # prompt on first mount. (The app inside is already notarized;
-        # the DMG container is separate.)
+        # One notarization, of the outermost container. Apple's guidance:
+        # sign inside-out, then notarize and staple the outermost container.
+        # The notary service issues tickets for every nested item, and the
+        # ticket stapled to the DMG covers the app inside, taken in when the
+        # DMG is first opened. The app used to be notarized and stapled on its
+        # own first, which doubled the time in Apple's queue (#189).
+        # Notarized via App Store Connect API key, the only flow that works in
+        # CI. bin/ci-notarize.sh puts the submission ID on the run page, waits
+        # with its own limit, and fails with Apple's log on a rejection.
         run: |
           set -euo pipefail
           IDENTITY="Developer ID Application: Eric Andrechek (${APPLE_TEAM_ID})"
           codesign --force --sign "${IDENTITY}" --timestamp "${DMG_PATH}"
 
           export NOTARY_KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
+          echo "${NOTARY_KEY_P8}" > "${NOTARY_KEY_PATH}"
           bin/ci-notarize.sh "${DMG_PATH}" dmg
 
           xcrun stapler staple "${DMG_PATH}"
           xcrun stapler validate "${DMG_PATH}"
+
+          # The app inside must assess as notarized too: that's the claim
+          # the single submission rests on, so check it rather than trust it.
+          MNT="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "${MNT}" "${DMG_PATH}" >/dev/null
+          verdict="$(spctl --assess --type execute --verbose=2 "${MNT}/Pacer.app" 2>&1 || true)"
+          hdiutil detach "${MNT}" >/dev/null || true
+          echo "${verdict}"
+          if ! grep -q 'source=Notarized Developer ID' <<<"${verdict}"; then
+            echo "::error::The app inside the notarized DMG does not assess as notarized: ${verdict}"
+            exit 1
+          fi
 
       - name: Sign Sparkle update
         id: sparkle
