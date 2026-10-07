@@ -57,9 +57,11 @@ jobs:
     # `MACOSX_DEPLOYMENT_TARGET` stays 15.0, so this is still a single binary
     # that runs on macOS 15 and up. See docs/liquid-glass-migration.md.
     runs-on: macos-26
-    # Normally restores the DuckDB cache that CI populated on main. Budgeted
-    # for the case where it doesn't and the engine compiles from source.
-    timeout-minutes: 75
+    # Normally ~15 min. The ceiling is for Apple: its notary queue took 49 min
+    # on 2026-10-06 and a 75-min job was cancelled mid-wait (#189). Each
+    # notarization waits at most NOTARY_WAIT (75m) in bin/ci-notarize.sh, so a
+    # slow queue ends in a clear message with the submission ID, never a cancel.
+    timeout-minutes: 180
     env:
       # Used in several steps; declaring once here keeps them in sync.
       APP_NAME: Pacer
@@ -261,35 +263,17 @@ jobs:
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
         # Notarize via App Store Connect API key (the only flow that
         # works in CI — interactive Apple-ID auth obviously can't).
-        # `--wait` blocks until Apple's notary service returns Accepted/
-        # Invalid so we fail fast on rejection.
+        # bin/ci-notarize.sh puts the submission ID on the run page, waits
+        # with its own limit, and fails with Apple's log on a rejection.
         run: |
           set -euo pipefail
-          KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
-          echo "${NOTARY_KEY_P8}" > "${KEY_PATH}"
+          export NOTARY_KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
+          echo "${NOTARY_KEY_P8}" > "${NOTARY_KEY_PATH}"
 
           ZIP_PATH="${RUNNER_TEMP}/Pacer.zip"
           ditto -c -k --keepParent "${APP_PATH}" "${ZIP_PATH}"
 
-          xcrun notarytool submit "${ZIP_PATH}" \
-            --key "${KEY_PATH}" \
-            --key-id "${NOTARY_KEY_ID}" \
-            --issuer "${NOTARY_ISSUER_ID}" \
-            --wait \
-            --output-format json \
-            | tee "${RUNNER_TEMP}/notary.json"
-
-          status="$(jq -r .status "${RUNNER_TEMP}/notary.json")"
-          if [ "${status}" != "Accepted" ]; then
-            submission_id="$(jq -r .id "${RUNNER_TEMP}/notary.json")"
-            echo "::error::Notarization failed with status=${status}"
-            xcrun notarytool log "${submission_id}" \
-              --key "${KEY_PATH}" \
-              --key-id "${NOTARY_KEY_ID}" \
-              --issuer "${NOTARY_ISSUER_ID}" \
-              || true
-            exit 1
-          fi
+          bin/ci-notarize.sh "${ZIP_PATH}" app
 
           xcrun stapler staple "${APP_PATH}"
           xcrun stapler validate "${APP_PATH}"
@@ -340,12 +324,8 @@ jobs:
           IDENTITY="Developer ID Application: Eric Andrechek (${APPLE_TEAM_ID})"
           codesign --force --sign "${IDENTITY}" --timestamp "${DMG_PATH}"
 
-          KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
-          xcrun notarytool submit "${DMG_PATH}" \
-            --key "${KEY_PATH}" \
-            --key-id "${NOTARY_KEY_ID}" \
-            --issuer "${NOTARY_ISSUER_ID}" \
-            --wait
+          export NOTARY_KEY_PATH="${RUNNER_TEMP}/notary-key.p8"
+          bin/ci-notarize.sh "${DMG_PATH}" dmg
 
           xcrun stapler staple "${DMG_PATH}"
           xcrun stapler validate "${DMG_PATH}"
