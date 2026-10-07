@@ -284,8 +284,8 @@ workflow open for hours.
 
 ## 8. Resume manifest
 
-A plain file you own — `.pace/resume.json` in the repo (gitignored) or
-`~/.claude/pace/resume-<run>.json`. Minimum shape:
+One JSON file per run: `~/.claude/pace/resume-<run>.json`, or
+`.pace/resume.json` in the repo (gitignored). Minimum shape:
 
 ```json
 {
@@ -303,6 +303,13 @@ A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
+
+**`~/.claude/pace/` is `pace.sh`'s store, and it holds exactly two kinds of
+file:**
+- the state files `pace.sh gate` writes (`state*.json`);
+- one resume manifest per run (`resume-<run>.json`).
+
+Write nothing else there: no notes, plans, scripts, logs or directories.
 
 ## 9. Parameters and policy
 
