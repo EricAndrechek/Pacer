@@ -148,6 +148,14 @@ public struct PacerAccountList: Codable, Sendable {
     }
 
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
+
+    /// The list as served at `now` from a copy built earlier. Every date in a
+    /// row is absolute, so only `generatedAt` moves; see
+    /// `PacerSnapshotPayload.rebased(to:)` for why it moves at all.
+    public func rebased(to now: Date) -> Self {
+        Self(schemaVersion: schemaVersion, generatedAt: now, activeAccountId: activeAccountId,
+             parallelism: parallelism, accounts: accounts)
+    }
 }
 
 public extension PacerAccountList.Row {
@@ -201,9 +209,18 @@ public enum PacerAccountsBuilder {
     /// because `pace.sh accounts` prints ids cut to 8 and that is what people
     /// paste back. Before that, the 8-character id it showed answered 400 (#184).
     public nonisolated static func resolve(_ raw: String) throws -> String {
+        try resolve(parameter: raw, known: knownAccountIds())
+    }
+
+    /// The same resolution against ids the caller already holds — the HTTP
+    /// API's cached account list, so resolving a parameter is not a store
+    /// read on the request path (#191). `known` is only evaluated when the
+    /// alias does not answer first, as it always was.
+    nonisolated static func resolve(parameter raw: String,
+                                    known: @autoclosure () throws -> [String]) throws -> String {
         let wanted = raw.trimmingCharacters(in: .whitespaces)
         if wanted == unattributedAlias { return AccountDailyAggregate.unattributedKey }
-        return try resolve(wanted, known: knownAccountIds())
+        return try resolve(wanted, known: known())
     }
 
     static let minimumPrefix = 4
@@ -236,10 +253,18 @@ public enum PacerAccountsBuilder {
 
     nonisolated static func resolve(configDir raw: String,
                                     container: ModelContainer) throws -> String? {
+        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let context = ModelContext(container)
+        return resolve(configDir: raw,
+                       roots: AccountParallelism.trail(context: context).openPinnedRoots)
+    }
+
+    /// The same join against pinned roots the caller already holds (root →
+    /// account, as `AccountTrail.openPinnedRoots` reports them).
+    nonisolated static func resolve(configDir raw: String,
+                                    roots: [String: String]) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
-        let context = ModelContext(container)
-        let roots = AccountParallelism.trail(context: context).openPinnedRoots
         // `CLAUDE_CONFIG_DIR` is comma-separated, and a session that lists
         // several is reading all of them — the first one an activation claims
         // is the one whose login it is writing under.
@@ -264,7 +289,10 @@ public enum PacerAccountsBuilder {
 
     nonisolated static func list(container: ModelContainer,
                                  now: Date) throws -> PacerAccountList {
-        let context = ModelContext(container)
+        list(context: ModelContext(container), now: now)
+    }
+
+    nonisolated static func list(context: ModelContext, now: Date) -> PacerAccountList {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let rollups = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>())) ?? []
         let trail = AccountParallelism.trail(context: context)

@@ -83,9 +83,13 @@ public enum PacerUsageBuilder {
     /// numbers depending on what a human last clicked in the dashboard.
     public nonisolated static func daily(days: Int, account: String? = nil,
                                          now: Date = Date()) throws -> PacerDailyUsage {
+        daily(context: ModelContext(try PacerStore.sharedModelContainer()),
+              days: days, account: account, now: now)
+    }
+
+    nonisolated static func daily(context: ModelContext, days: Int, account: String?,
+                                  now: Date) -> PacerDailyUsage {
         let span = min(max(days, 1), 3650)
-        let container = try PacerStore.sharedModelContainer()
-        let context = ModelContext(container)
         let calendar = Calendar.current
         let todayKey = TokenSample.formatDate(now)
         let cutoffDate = calendar.date(byAdding: .day, value: -(span - 1), to: now) ?? now
@@ -146,6 +150,11 @@ public enum PacerUsageBuilder {
     public nonisolated static func todayByModel(account: String? = nil,
                                                 now: Date = Date()) throws -> [PacerDailyUsage.Row] {
         try daily(days: 1, account: account, now: now).rows.filter { $0.inProgress }
+    }
+
+    nonisolated static func todayByModel(context: ModelContext, account: String?,
+                                         now: Date) -> [PacerDailyUsage.Row] {
+        daily(context: context, days: 1, account: account, now: now).rows.filter { $0.inProgress }
     }
 
     /// Per-model lifetime totals across all retained daily history.
