@@ -326,6 +326,56 @@ struct PaceScriptTests {
         #expect(!result.out.contains("41% used"))
     }
 
+    // MARK: - The safe limit (no --cap)
+
+    /// With no `--cap`, a window is held to 100% minus how far it can climb
+    /// before a fresher reading: measured burn × (reading age + 5 min).
+    /// +60%/h on a 5-minute-old reading → 60 × 600 s / 3600 = 10 points.
+    @Test func heavyBurnStopsAtTheSafeLimit() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.92
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 60
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 300
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        let result = try run(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 10)
+        #expect(result.out.contains("safe limit 90%"))
+        #expect(box.stateText.contains("\"cap\": \"safe\""))
+    }
+
+    /// Light use leaves only the 1-point floor: no budget is held back.
+    @Test func lightBurnRunsToNearTheLimit() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.95
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 3
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 60
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        let result = try run(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 0)
+        #expect(result.out.contains("safe limit 5h 99%"))
+    }
+
+    /// No burn measured yet: 98%. An explicit --cap still wins.
+    @Test func withoutABurnTheLimitIs98AndCapStillWins() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.985
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        let safe = try run(box, ["gate"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(safe.status == 10)
+        #expect(safe.out.contains("safe limit 98%"))
+        let json = try run(box, ["json"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(json.out.contains("\"safeLimit\": 98"))
+        let capped = try run(box, ["gate", "--cap", "99.5"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(capped.status == 0)
+        #expect(capped.out.contains("cap 99.5%"))
+    }
+
     /// A rejected `--account` read like the API being off (#184). The
     /// server's answer names what it rejected, so the script passes it on.
     @Test func aRejectedRequestSaysWhatWasRejected() throws {
