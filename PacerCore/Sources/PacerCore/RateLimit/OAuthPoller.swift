@@ -1114,8 +1114,11 @@ public actor OAuthPoller: TokenPoolTesting {
         let noUsable = lanes.isEmpty
         let stale = lastDiscoveryAt.map { now.timeIntervalSince($0) >= configuration.laneRediscoverInterval } ?? true
         var discovered = false
-        if stale || noUsable || emptyPoolDiscoveryDue(now) {
-            discoverLanes(now: now)
+        if stale || noUsable {
+            discoverLanes(now: now, full: true)
+            discovered = true
+        } else if emptyPoolDiscoveryDue(now) {
+            discoverLanes(now: now, full: false)
             discovered = true
         }
         dropExpiredLanes(now: now)
@@ -1124,7 +1127,7 @@ public actor OAuthPoller: TokenPoolTesting {
         // written its replacement. Look again in this pass rather than the
         // next one (the throttle still applies).
         if !discovered, emptyPoolDiscoveryDue(now) {
-            discoverLanes(now: now)
+            discoverLanes(now: now, full: false)
             dropExpiredLanes(now: now)
         }
         sortLanes()
@@ -1151,13 +1154,21 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     /// Re-read Claude's stores and merge what they offer into `lanes`.
-    private func discoverLanes(now: Date) {
+    ///
+    /// `full: false` is the once-a-minute empty-pool look: it never reads
+    /// `Claude Safe Storage`, and it leaves `lastDiscoveryAt` alone so the
+    /// scheduled full discovery still runs on time. At that cadence a
+    /// declined Desktop prompt would be back within the minute, every minute,
+    /// which is the prompt loop v0.3.9 removed. The token it is looking for is
+    /// Claude Code's, in the keychain, and reading that never prompts.
+    private func discoverLanes(now: Date, full: Bool) {
         // Hand the client our Desktop-origin tokens so its layered read
         // can decide whether it even needs to touch Claude Desktop.
         let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
-        let candidates = client.candidateCredentials(cachedDesktopTokens: cachedDesktop)
+        let candidates = client.candidateCredentials(cachedDesktopTokens: cachedDesktop,
+                                                     allowDesktopKeyRead: full)
         mergeCandidates(candidates)
-        lastDiscoveryAt = now
+        if full { lastDiscoveryAt = now }
         lastEmptyPoolDiscoveryAt = now
         // Remember what the keychain holds *now*, so the attribution trail
         // can tell a real switch (the keychain changed) from a stale

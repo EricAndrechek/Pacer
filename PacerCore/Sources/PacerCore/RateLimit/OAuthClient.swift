@@ -291,7 +291,13 @@ public struct OAuthClient: Sendable {
     /// - Parameter cachedDesktopTokens: the Desktop-origin tokens the
     ///   caller (the poller) already holds, used only to decide the Desktop
     ///   escalation.
-    public func candidateCredentials(cachedDesktopTokens: [OAuthCredential] = []) -> [CredentialCandidate] {
+    /// - Parameter allowDesktopKeyRead: false keeps this read silent whatever
+    ///   state Desktop is in: the `Claude Safe Storage` step (layer 3 of
+    ///   `resolveDesktopTokens`) is skipped and the cached tokens stand. For a
+    ///   caller that may run every minute, where a declined prompt would
+    ///   otherwise come straight back.
+    public func candidateCredentials(cachedDesktopTokens: [OAuthCredential] = [],
+                                     allowDesktopKeyRead: Bool = true) -> [CredentialCandidate] {
         // Manually-added tokens are no longer a "sole override" that
         // replaces auto-discovery — they live in the poller's pool as
         // `.override` lanes and are seeded from there, so here we only
@@ -322,7 +328,9 @@ public struct OAuthClient: Sendable {
         // `seen` then keeps the duplicate out.
         for cred in parkedCredentials() { add(cred, .parked) }
         if desktopEnabled() {
-            let (tokens, newKey) = resolveDesktopTokens(cachedDesktop: cachedDesktopTokens, now: referenceNow)
+            let (tokens, newKey) = resolveDesktopTokens(cachedDesktop: cachedDesktopTokens,
+                                                             allowKeyRead: allowDesktopKeyRead,
+                                                             now: referenceNow)
             if let newKey { desktopKeyStore.save(newKey) }
             for c in tokens { add(c, .desktop) }
         }
@@ -367,6 +375,7 @@ public struct OAuthClient: Sendable {
     /// one).
     private func resolveDesktopTokens(
         cachedDesktop: [OAuthCredential],
+        allowKeyRead: Bool = true,
         now: Date
     ) -> (tokens: [OAuthCredential], newKey: Data?) {
         let working = { cachedDesktop.filter { $0.expiresAt == nil || $0.expiresAt! >= now } }
@@ -382,6 +391,7 @@ public struct OAuthClient: Sendable {
             if !stillWorking.isEmpty { return (stillWorking, nil) }
         }
         // Layer 3 (or first-ever read): the only prompt-risking step.
+        guard allowKeyRead else { return (working(), nil) }
         guard case .success(let key) = desktop.readKey() else {
             return (working(), nil)
         }
