@@ -164,13 +164,21 @@ struct PaceScriptTests {
         process.standardOutput = pipe
         process.standardError = pipe
         try process.run()
+        // A separate process, not a GCD timer. With many of these tests
+        // blocked on child processes, the global queue can be starved on a
+        // small CI runner; the timeout then fired minutes late and a 20 s
+        // limit became a 178 s test.
+        var watchdog: Process?
         if let timeout {
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                if process.isRunning { process.terminate() }
-            }
+            let w = Process()
+            w.executableURL = URL(fileURLWithPath: "/bin/bash")
+            w.arguments = ["-c", "sleep \(Int(timeout)); kill -TERM \(process.processIdentifier) 2>/dev/null; true"]
+            try? w.run()
+            watchdog = w
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        if let watchdog, watchdog.isRunning { watchdog.terminate() }
         return Run(status: process.terminationStatus,
                    out: String(decoding: data, as: UTF8.self))
     }
@@ -664,9 +672,21 @@ struct PaceScriptTests {
         try answer(current: "org-work")
         let server = try StubServer(status: 200, body: "", file: session)
         defer { server.stop() }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-            try? answer(current: "org-home")
+        // The switch lands a second in, from its own process: a GCD timer can
+        // be starved on a busy CI runner and then never lands in time.
+        let switched = box.dir.appendingPathComponent("session-switched.json")
+        try """
+        {
+          "accountId" : "org-work",
+          "currentAccountId" : "org-home",
+          "sessionId" : "abc-123"
         }
+        """.write(to: switched, atomically: true, encoding: .utf8)
+        let flip = Process()
+        flip.executableURL = URL(fileURLWithPath: "/bin/bash")
+        flip.arguments = ["-c", "sleep 1; mv '\(switched.path)' '\(session.path)'"]
+        try flip.run()
+        defer { flip.waitUntilExit() }
 
         let result = try run(box, ["wait", "--cap", "85", "--interval", "2"],
                              extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
