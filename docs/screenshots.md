@@ -132,11 +132,20 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
   - **Menu bar:** only Pacer's item is in the bar. On macOS 26 Control Center
     owns every status item, so Pacer's is picked out by its window title.
   - **Wallpaper:** the two menu bar shots are the only ones that show the
-    desktop. On CI the helper rasterises the picture's light and dark frames to
-    static PNGs, sets the matching one on every screen with each appearance
-    change, and logs what took. Set as a file, the desktop followed the
-    runner's time of day, and those two images re-committed at a different
-    hour.
+    desktop. On CI the helper draws two vertical gradients in code (light and
+    dark, Mac Blue's colours) and sets the matching one on every screen with
+    each appearance change. Mac Blue itself, even pinned to one static frame,
+    came out ~66k pixels different (up to 143 levels, thin edges) between runs
+    hours apart.
+  - **System clock:** while the menu bar is photographed the runner's clock is
+    set to Fri 2026-09-18 09:41, so the bar's clock text cannot move the items
+    beside it. The helper puts real time back right after (and the workflow
+    runs an NTP sync as a safety net before any push).
+  - **What is compared:** the helper writes `<shot>.rects.json` (Pacer's status
+    item, menu and any tooltip window, in image pixels) to
+    `$PACER_SCREENSHOT_SIDECARS` (the runner's temp dir, not docs/), and
+    `png-pixels-equal` compares only inside those rectangles. Without a sidecar
+    it compares the whole image.
   - **Noise:** `png-pixels-equal` tolerates up to 2 levels (of 255) per
     channel, for translucent materials that come out 1–2 levels apart between
     identical runs. There is no threshold on how many pixels differ, because a
