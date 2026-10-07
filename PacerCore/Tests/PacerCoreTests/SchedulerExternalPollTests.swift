@@ -160,6 +160,37 @@ struct SchedulerProbeFloorTests {
                              account: .primary)) == .poll(laneIndex: 0))
     }
 
+    /// #207: the active account's only token, polled by cswap every few
+    /// minutes. Every reading came from cswap, so Pacer's own last poll was
+    /// ancient and the lane looked overdue: Pacer probed past cswap's
+    /// announced next poll, 38 s before it, and both took a 429. A reading the
+    /// other client delivered counts, so Pacer leaves its schedule alone.
+    @Test("a client that keeps delivering readings is not overtaken")
+    func deliveredReadingsKeepTheYield() {
+        let lane = OAuthPollScheduler.LaneState(
+            lastPolledAt: now.addingTimeInterval(-yieldMax * 3),
+            externalNextPollAt: now.addingTimeInterval(38),
+            externalLastPollAt: now.addingTimeInterval(-170),
+            externalLastSuccessAt: now.addingTimeInterval(-170),
+            account: .primary)
+        guard case .wait(let seconds) = decide(lane) else {
+            Issue.record("probed into a client that is still delivering"); return
+        }
+        // Clear of cswap's next request by a full interval.
+        #expect(seconds >= 38 + floor - 1)
+    }
+
+    /// The escape hatch still works when the other client stops delivering:
+    /// no answer from anyone for longer than the yield, so Pacer probes.
+    @Test("a client whose last answer is older than the yield no longer holds the lane")
+    func staleDeliveriesReleaseTheLane() {
+        #expect(decide(.init(lastPolledAt: nil,
+                             externalNextPollAt: now.addingTimeInterval(-60),
+                             externalLastPollAt: now.addingTimeInterval(-floor - 1),
+                             externalLastSuccessAt: now.addingTimeInterval(-yieldMax - 1),
+                             account: .primary)) == .poll(laneIndex: 0))
+    }
+
     /// Inside the floor the yield stands — this is the ordinary cooperative
     /// case and it must not be weakened by the escape hatch.
     @Test("inside the floor Pacer still stands aside")
