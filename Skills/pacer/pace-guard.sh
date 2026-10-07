@@ -7,13 +7,14 @@
 # Usage:  pace-guard.sh [claude args...]
 #         pace-guard.sh -p "keep working on the migration"
 #
-# Env: PACE_THRESHOLD (default 85), plus PACER_API / PACE_TOKEN / PACE_STATE
-#      / PACE_ACCOUNT. PACE_WINDOW narrows which windows count.
+# Env: PACE_THRESHOLD (default: pace.sh's safe limit, just before the limit),
+#      plus PACER_API / PACE_TOKEN / PACE_STATE / PACE_ACCOUNT. PACE_WINDOW
+#      narrows which windows count.
 #
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CAP="${PACE_THRESHOLD:-85}"
-ARGS=(wait --cap "$CAP")
+ARGS=(wait)
+[ -n "${PACE_THRESHOLD:-}" ] && ARGS+=(--cap "$PACE_THRESHOLD")
 [ -n "${PACE_WINDOW:-}" ] && ARGS+=(--window "$PACE_WINDOW")
 
 "$HERE/pace.sh" "${ARGS[@]}"; code=$?

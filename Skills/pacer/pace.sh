@@ -17,14 +17,14 @@
 #   sessions               where the live sessions are, with branches (HTTP)
 #   report                 human table of every window (HTTP)
 #   json                   machine JSON of the same (HTTP)
-#   gate  --cap N          HTTP read + write state file; 0=go 10=paused
+#   gate  [--cap N]        HTTP read + write state file; 0=go 10=paused
 #                          2=api-off 4=misconfigured
 #   status                 read state file only (no HTTP); 0=go 10=paused
 #                          3=unknown or stale
-#   wait  --cap N          block until the tripping window resets; 0=resume
+#   wait  [--cap N]        block until the tripping window resets; 0=resume
 #                          20=beyond --max-wait (checkpoint & stop) 2=api-off
 #
-# Flags: --cap N (default 85), --interval S (how often `wait` looks; default
+# Flags: --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
 #   15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
 #   substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
 #   21600 = 6h), --max-age S (default 900; how old a state file may be before
@@ -48,7 +48,12 @@ API="${API_BASE%/}/metrics"
 # names itself gets its own.
 STATE="${PACE_STATE:-$HOME/.claude/pace/state${PACE_RUN:+-$PACE_RUN}.json}"
 ACCOUNT="${PACE_ACCOUNT:-}"
-CAP=85
+# No budget by default: stop just before the limit. How much of a window a
+# task may spend is the caller's decision (`--cap N`), not this script's.
+CAP=safe
+# The longest a reading can go unrefreshed: Pacer polls each token at most
+# every 5 minutes, which is the worst case with a single token.
+POLL_WORST=300
 INTERVAL=300
 WINDOW=all
 MAXWAIT=21600
@@ -188,6 +193,7 @@ function slot(line,   a, w, key) {
 /^pacer_rate_limit_will_hit\{/            { hit[slot($0)]  = $NF; next }
 /^pacer_rate_limit_burn_percent_per_hour\{/ { burn[slot($0)] = $NF; next }
 /^pacer_rate_limit_recent_burn_percent_per_hour\{/ { recent[slot($0)] = $NF; next }
+/^pacer_rate_limit_sample_age_seconds\{/ { age[slot($0)] = $NF; next }
 END {
   count = 0
   for (a in accounts) { count++; only = a }
@@ -201,14 +207,15 @@ END {
     # for it, and the gate said "no windows yet" (#184).
     if (want != "" && index(acct[key], want) != 1) continue
     if (!(key in pct)) continue                       # a window with no reading
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
            acct[key], SEP, win[key], SEP, labelfor(win[key]), SEP, modelfor(win[key]), SEP,
            pct[key], SEP,
            (key in secs ? secs[key] : "null"), SEP,
            (key in eta  ? eta[key]  : "null"), SEP,
            (key in burn ? burn[key] : "null"), SEP,
            (key in hit  ? hit[key]  : "0"), SEP,
-           (key in recent ? recent[key] : "null")
+           (key in recent ? recent[key] : "null"), SEP,
+           (key in age ? age[key] : "null")
   }
 }'
 
@@ -385,7 +392,10 @@ write_state() {  # status window pct secs note
     printf '  "status": "%s",\n' "$1"
     printf '  "tripWindow": "%s",\n' "$2"
     printf '  "model": "%s",\n' "$MODEL"
-    printf '  "cap": %s,\n' "$CAP"
+    case "$CAP" in
+      safe) printf '  "cap": "safe",\n';;
+      *)    printf '  "cap": %s,\n' "$CAP";;
+    esac
     printf '  "usedPercent": %s,\n' "${3:-null}"
     printf '  "resetsInSeconds": %s,\n' "${4:-null}"
     printf '  "note": "%s",\n' "$5"
@@ -408,6 +418,24 @@ state_age_seconds() {
 
 # --- evaluation ------------------------------------------------------------
 
+# The safe limit for one window: 100% minus how far usage can climb before a
+# fresher reading arrives. That's the recent burn times (the reading's age plus
+# one worst-case poll), at least 1 point. With no burn measured yet, 2 points.
+# Heavy use at +60%/h with a 5-minute-old reading stops near 90%; light use
+# near 99%. Fields: $8 modelled burn, $10 measured burn, $11 reading age.
+SAFE_AWK='
+function safecap(burn, recent, age,   b, m) {
+  if (recent != "null" && recent != "") b = recent + 0
+  else if (burn != "null" && burn != "") b = burn + 0
+  else return 98
+  if (b < 0) b = 0
+  if (age == "null" || age == "") age = POLL
+  m = b * (age + POLL) / 3600
+  if (m < 1) m = 1
+  m = (m == int(m)) ? m : int(m) + 1
+  return 100 - m
+}'
+
 # Sets TRIP/TPCT/TSECS to the watched window that is at or over the cap and
 # resets soonest — the one worth waiting out. Empty TRIP means headroom.
 evaluate() {
@@ -416,8 +444,9 @@ evaluate() {
   # window at 40% climbing fast enough to hit the cap inside the horizon is a
   # worse place to launch a wave from than one sitting still at 80%. Whichever
   # binding window resets soonest wins, since that is the one worth waiting out.
-  line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" '
+  line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" -v POLL="$POLL_WORST" "$SAFE_AWK"'
     {
+      capv = (cap == "safe") ? safecap($8, $10, $11) : cap + 0
       pct = $5; secs = $6; eta = $7; hit = $9
       # A window whose reset is already due describes the window that just
       # ended: Pacer polls every few minutes, so for a while after a reset its
@@ -425,15 +454,15 @@ evaluate() {
       # run on an empty window, and `status` kept serving it.
       if (secs != "null" && secs + 0 <= 0) next
       why = ""
-      if (pct != "null" && pct + 0 >= cap + 0) why = "cap"
+      if (pct != "null" && pct + 0 >= capv) why = "cap"
       else if (horizon + 0 > 0 && hit + 0 == 1 && eta != "null" && eta + 0 <= horizon + 0) why = "eta"
       if (why == "") next
       s = (secs == "null" ? 9999999 : secs + 0)
-      if (best == "" || s < bests) { best = $3 SEP pct SEP secs SEP why SEP eta; bests = s }
+      if (best == "" || s < bests) { best = $3 SEP pct SEP secs SEP why SEP eta SEP capv; bests = s }
     }
     END { if (best != "") print best }')
-  TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""
-  [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA <<<"$line"
+  TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""; TCAP=""
+  [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA TCAP <<<"$line"
 }
 
 # Whose numbers these are, said out loud when it had to be inferred.
@@ -461,7 +490,21 @@ trip_reason() {
   if [ "${TWHY:-cap}" = eta ]; then
     echo "${TRIP} at $(pct_fmt "$TPCT")% is projected to fill in $(human "$TETA") (horizon $(human "$ETA"))"
   else
-    echo "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%"
+    if [ "$CAP" = safe ]; then
+      echo "${TRIP} at $(pct_fmt "$TPCT")% >= safe limit ${TCAP}%"
+    else
+      echo "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%"
+    fi
+  fi
+}
+
+# What the gate is holding each window to, for the GO line.
+cap_note() {
+  if [ "$CAP" = safe ]; then
+    printf 'safe limit %s' "$(binding_rows | awk -F"$SEP" -v POLL="$POLL_WORST" "$SAFE_AWK"'
+      { printf "%s%s %d%%", (NR > 1 ? ", " : ""), $3, safecap($8, $10, $11) }')"
+  else
+    printf 'cap %s%%' "$CAP"
   fi
 }
 
@@ -497,7 +540,7 @@ cmd_report() {
   [ -n "$AUTO_NOTE" ] && printf 'pace:%s\n' "$(auto_note)"
   local multi
   multi=$(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ a[$1] = 1 } END { print length(a) }')
-  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent; do
+  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent age; do
     local prefix="" rate="" full="" mine=""
     [ "$multi" -gt 1 ] && prefix="$(printf '%-8s ' "${acct:0:8}")"
     # The measured half-hour rate answers "right now"; the engine's smoothed
@@ -644,7 +687,7 @@ cmd_json() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$( [ -n "$acct" ] && printf '"%s"' "$acct" || printf null)" \
     "$( [ -n "$since" ] && printf '"%s"' "$since" || printf null)"
-  selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
+  selected_rows | awk -F"$SEP" -v WANT="$MODEL" -v POLL="$POLL_WORST" "$SAFE_AWK"'
     function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
     function binds(model,   m) {
       if (want == "" || want == "all" || model == "") return 1
@@ -652,9 +695,10 @@ cmd_json() {
       return (index(m, want) || index(want, m)) ? 1 : 0
     }
     BEGIN { want = norm(WANT) }
-    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"recentBurnPercentPerHour\": %s, \"binds\": %s}",
+    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"recentBurnPercentPerHour\": %s, \"sampleAgeSeconds\": %s, \"safeLimit\": %d, \"binds\": %s}",
              (NR > 1 ? ",\n" : ""), $1, $2, $3, $4, $5, $6,
-             ($9 + 0 == 1 ? "true" : "false"), $7, $8, $10,
+             ($9 + 0 == 1 ? "true" : "false"), $7, $8, $10, $11,
+             safecap($8, $10, $11),
              (binds($4) ? "true" : "false") }
     END { if (NR > 0) printf "\n" }'
   printf '  ]\n}\n'
@@ -670,8 +714,8 @@ cmd_gate() {
   require_selection
   evaluate
   if [ -z "$TRIP" ]; then
-    write_state go "" "" "" "$(summary) (cap ${CAP}%)"
-    echo "pace: GO — $(summary) (cap ${CAP}%).$(auto_note)$(scope_caveat)"
+    write_state go "" "" "" "$(summary) ($(cap_note))"
+    echo "pace: GO — $(summary) ($(cap_note)).$(auto_note)$(scope_caveat)"
     exit 0
   fi
   write_state paused "$TRIP" "$TPCT" "$TSECS" \
