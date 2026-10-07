@@ -48,8 +48,20 @@ public struct SignedInCredentialReading: Sendable, Equatable {
 public final class SignedInCredentialMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var reading: SignedInCredentialReading?
+    private var onAccountChange: (@Sendable () -> Void)?
+    /// The last account a read resolved to, across unresolved reads between.
+    private var lastKnownAccount: String?
 
     public init() {}
+
+    /// Called after a read names a different account than the one held: a
+    /// login switch. The scan coordinator runs a cycle on it, because the trail
+    /// only accepts a switch when a cycle runs, and on a quiet machine the next
+    /// one could be minutes away (#184).
+    public func setOnAccountChange(_ handler: (@Sendable () -> Void)?) {
+        lock.lock(); defer { lock.unlock() }
+        onAccountChange = handler
+    }
 
     public var current: SignedInCredentialReading? {
         lock.lock(); defer { lock.unlock() }
@@ -62,15 +74,26 @@ public final class SignedInCredentialMonitor: @unchecked Sendable {
     /// A read older than the one already held is ignored, so a slow poll that
     /// resolves a token after a newer discovery cannot rewind the reading.
     public func publish(accountKey: String?, readAt: Date) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        var switched: (@Sendable () -> Void)?
         if let prior = reading {
-            if readAt < prior.readAt { return }
+            if readAt < prior.readAt { lock.unlock(); return }
             if let accountKey, prior.accountKey == accountKey {
                 reading = SignedInCredentialReading(
                     accountKey: accountKey, readAt: readAt, since: prior.since)
+                lock.unlock()
                 return
             }
         }
+        // A switch is a resolved account other than the last resolved one. Not
+        // the first read of the process, not an unknown token, and not a token
+        // refresh, which reads as unknown and then the same account again.
+        if let accountKey {
+            if let known = lastKnownAccount, known != accountKey { switched = onAccountChange }
+            lastKnownAccount = accountKey
+        }
         reading = SignedInCredentialReading(accountKey: accountKey, readAt: readAt, since: readAt)
+        lock.unlock()
+        switched?()
     }
 }

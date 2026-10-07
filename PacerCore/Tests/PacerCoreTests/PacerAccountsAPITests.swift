@@ -350,4 +350,28 @@ struct PlanLabelTests {
         #expect(credential(subscription: "max", tier: "   ").planLabel == "Max")
         #expect(credential(subscription: "pro", tier: "").planLabel == "Pro")
     }
+
+    // MARK: - Short ids (#184)
+
+    /// `pace.sh accounts` prints ids cut to 8 characters, and that is what
+    /// people paste back into `PACE_ACCOUNT`.
+    @Test func aUniquePrefixResolvesToTheFullId() throws {
+        let known = ["74598a77-aaaa", "e34c1364-bbbb", "e34d0000-cccc"]
+        #expect(try PacerAccountsBuilder.resolve("74598a77", known: known) == "74598a77-aaaa")
+        #expect(try PacerAccountsBuilder.resolve("e34c", known: known) == "e34c1364-bbbb")
+        #expect(try PacerAccountsBuilder.resolve("e34d0000-cccc", known: known) == "e34d0000-cccc")
+    }
+
+    @Test func anAmbiguousOrTooShortPrefixIsRejected() {
+        let known = ["74598a77-aaaa", "e34c1364-bbbb", "e34d0000-cccc"]
+        #expect(throws: PacerAccountsBuilder.ResolveError.self) {
+            try PacerAccountsBuilder.resolve("e34", known: known)
+        }
+        #expect(throws: PacerAccountsBuilder.ResolveError.self) {
+            try PacerAccountsBuilder.resolve("7459", known: ["74598a77-aaaa", "74599999-dddd"])
+        }
+        #expect(throws: PacerAccountsBuilder.ResolveError.self) {
+            try PacerAccountsBuilder.resolve("ffff", known: known)
+        }
+    }
 }

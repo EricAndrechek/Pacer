@@ -142,6 +142,12 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// consumer can act on an urgency hint before the percentage is
             /// high, and so a severity Pacer has never seen is still passed on.
             public let severity: String?
+            /// When the reading behind `usedPercent` was taken, and how old it
+            /// was when this snapshot was built. A consumer that stops "just
+            /// before the limit" needs both the burn and how stale the number
+            /// is: the usage has kept climbing since (pace.sh's safe limit).
+            public let sampledAt: Date?
+            public let sampleAgeSeconds: Int?
 
             public init(identity: String, label: String, group: String,
                         usedPercent: Double, resetsAt: Date?, resetsInSeconds: Int?,
@@ -152,7 +158,8 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                         limitEtaAt: Date? = nil, limitEtaInSeconds: Int? = nil,
                         burnPercentPerHour: Double? = nil,
                         recentBurnPercentPerHour: Double? = nil,
-                        isActive: Bool? = nil, severity: String? = nil) {
+                        isActive: Bool? = nil, severity: String? = nil,
+                        sampledAt: Date? = nil, sampleAgeSeconds: Int? = nil) {
                 self.identity = identity
                 self.label = label
                 self.group = group
@@ -169,6 +176,8 @@ public struct PacerSnapshotPayload: Codable, Sendable {
                 self.recentBurnPercentPerHour = recentBurnPercentPerHour
                 self.isActive = isActive
                 self.severity = severity
+                self.sampledAt = sampledAt
+                self.sampleAgeSeconds = sampleAgeSeconds
             }
         }
 
@@ -493,6 +502,7 @@ public enum PacerSnapshotBuilder {
             scoped: scopedRows.map { row in
                 window(identity: row.identity, label: row.label, group: row.group,
                        usedPercent: row.percent, resetsAt: row.resetsAt,
+                       sampledAt: row.sampledAt,
                        isActive: row.isActive, severity: row.severity,
                        outlook: scopedOutlooks[row.identity],
                        recentBurn: RecentBurn.percentPerHour(
@@ -528,6 +538,7 @@ public enum PacerSnapshotBuilder {
         guard let sample else { return nil }
         return window(identity: identity, label: label, group: group,
                       usedPercent: sample.usedPercentage, resetsAt: sample.resetsAt,
+                      sampledAt: sample.sampledAt,
                       outlook: outlook, recentBurn: recentBurn, now: now)
     }
 
@@ -538,6 +549,7 @@ public enum PacerSnapshotBuilder {
     private static func window(
         identity: String, label: String, group: String,
         usedPercent: Double, resetsAt: Date?,
+        sampledAt: Date? = nil,
         isActive: Bool? = nil, severity: String? = nil,
         outlook: EngineSnapshot.WindowOutlook?,
         recentBurn: Double?,
@@ -574,7 +586,9 @@ public enum PacerSnapshotBuilder {
             burnPercentPerHour: burn,
             recentBurnPercentPerHour: recentBurn,
             isActive: isActive,
-            severity: severity)
+            severity: severity,
+            sampledAt: sampledAt,
+            sampleAgeSeconds: sampledAt.map { max(0, Int(now.timeIntervalSince($0))) })
     }
 
     /// The most recent session for one account, or across every account when

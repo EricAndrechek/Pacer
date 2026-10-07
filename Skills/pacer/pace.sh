@@ -17,15 +17,15 @@
 #   sessions               where the live sessions are, with branches (HTTP)
 #   report                 human table of every window (HTTP)
 #   json                   machine JSON of the same (HTTP)
-#   gate  --cap N          HTTP read + write state file; 0=go 10=paused
+#   gate  [--cap N]        HTTP read + write state file; 0=go 10=paused
 #                          2=api-off 4=misconfigured
 #   status                 read state file only (no HTTP); 0=go 10=paused
 #                          3=unknown or stale
-#   wait  --cap N          block until the tripping window resets; 0=resume
+#   wait  [--cap N]        block until the tripping window resets; 0=resume
 #                          20=beyond --max-wait (checkpoint & stop) 2=api-off
 #
-# Flags: --cap N (default 85), --interval S (default 300, floor 300 — Pacer
-#   only updates every ~5 min), --window SEL (default all; a label or identity
+# Flags: --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
+#   15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
 #   substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
 #   21600 = 6h), --max-age S (default 900; how old a state file may be before
 #   `status` calls it stale), --retries N (default 3), --state FILE
@@ -48,7 +48,12 @@ API="${API_BASE%/}/metrics"
 # names itself gets its own.
 STATE="${PACE_STATE:-$HOME/.claude/pace/state${PACE_RUN:+-$PACE_RUN}.json}"
 ACCOUNT="${PACE_ACCOUNT:-}"
-CAP=85
+# No budget by default: stop just before the limit. How much of a window a
+# task may spend is the caller's decision (`--cap N`), not this script's.
+CAP=safe
+# The longest a reading can go unrefreshed: Pacer polls each token at most
+# every 5 minutes, which is the worst case with a single token.
+POLL_WORST=300
 INTERVAL=300
 WINDOW=all
 MAXWAIT=21600
@@ -188,6 +193,7 @@ function slot(line,   a, w, key) {
 /^pacer_rate_limit_will_hit\{/            { hit[slot($0)]  = $NF; next }
 /^pacer_rate_limit_burn_percent_per_hour\{/ { burn[slot($0)] = $NF; next }
 /^pacer_rate_limit_recent_burn_percent_per_hour\{/ { recent[slot($0)] = $NF; next }
+/^pacer_rate_limit_sample_age_seconds\{/ { age[slot($0)] = $NF; next }
 END {
   count = 0
   for (a in accounts) { count++; only = a }
@@ -196,16 +202,20 @@ END {
   if (want == "all") want = ""
   for (i = 1; i <= n; i++) {
     key = order[i]
-    if (want != "" && acct[key] != want) continue
+    # A prefix, because `accounts` prints ids cut to 8 and Pacer resolves a
+    # unique one. An exact match here dropped every row the server returned
+    # for it, and the gate said "no windows yet" (#184).
+    if (want != "" && index(acct[key], want) != 1) continue
     if (!(key in pct)) continue                       # a window with no reading
-    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+    printf "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
            acct[key], SEP, win[key], SEP, labelfor(win[key]), SEP, modelfor(win[key]), SEP,
            pct[key], SEP,
            (key in secs ? secs[key] : "null"), SEP,
            (key in eta  ? eta[key]  : "null"), SEP,
            (key in burn ? burn[key] : "null"), SEP,
            (key in hit  ? hit[key]  : "0"), SEP,
-           (key in recent ? recent[key] : "null")
+           (key in recent ? recent[key] : "null"), SEP,
+           (key in age ? age[key] : "null")
   }
 }'
 
@@ -223,6 +233,7 @@ END {
 SESSION_MODEL=""
 SESSION_MODELS=""
 SESSION_ACCOUNT=""
+SESSION_ACCOUNT_SINCE=""
 session_looked_up=false
 resolve_session() {
   $session_looked_up && return 0
@@ -234,7 +245,14 @@ resolve_session() {
          "${PACE_SESSION_API:-${API_BASE%/}}/v1/session") || return 1
   case "$body" in *'"sessionId"'*) ;; *) return 1;; esac
   SESSION_MODEL=$(printf '%s\n' "$body" | awk -F'"' '/"model"/ { print $4; exit }')
-  SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  # The login the session's next turn bills to, where Pacer says. The
+  # account of its last stored turn stays on the old login after a `/login`
+  # until the session writes another turn, which a session asleep in `wait`
+  # never does (#184).
+  SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"currentAccountId"/ { print $4; exit }')
+  [ -n "$SESSION_ACCOUNT" ] \
+    || SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  SESSION_ACCOUNT_SINCE=$(printf '%s\n' "$body" | awk -F'"' '/"currentAccountSince"/ { print $4; exit }')
   # Every model this session is running, not just the newest turn's. A
   # subagent shares its parent's session id, so this is how we find out that
   # "the session's model" is not a single answer.
@@ -271,7 +289,8 @@ fetch_rows() {
       case "$code" in
         401|403) FETCH_REASON=auth; return 1;;
         000|200) ;;                       # 000 = a non-HTTP URL, e.g. file://
-        *)       FETCH_REASON=http; HTTP_CODE=$code; return 1;;
+        *)       FETCH_REASON=http; HTTP_CODE=$code
+                 HTTP_BODY=$(printf '%s\n' "$body" | head -1); return 1;;
       esac
       if [ -n "$body" ]; then
         # Counted before filtering: `ROWS` is already narrowed to one login, so
@@ -373,7 +392,10 @@ write_state() {  # status window pct secs note
     printf '  "status": "%s",\n' "$1"
     printf '  "tripWindow": "%s",\n' "$2"
     printf '  "model": "%s",\n' "$MODEL"
-    printf '  "cap": %s,\n' "$CAP"
+    case "$CAP" in
+      safe) printf '  "cap": "safe",\n';;
+      *)    printf '  "cap": %s,\n' "$CAP";;
+    esac
     printf '  "usedPercent": %s,\n' "${3:-null}"
     printf '  "resetsInSeconds": %s,\n' "${4:-null}"
     printf '  "note": "%s",\n' "$5"
@@ -396,6 +418,24 @@ state_age_seconds() {
 
 # --- evaluation ------------------------------------------------------------
 
+# The safe limit for one window: 100% minus how far usage can climb before a
+# fresher reading arrives. That's the recent burn times (the reading's age plus
+# one worst-case poll), at least 1 point. With no burn measured yet, 2 points.
+# Heavy use at +60%/h with a 5-minute-old reading stops near 90%; light use
+# near 99%. Fields: $8 modelled burn, $10 measured burn, $11 reading age.
+SAFE_AWK='
+function safecap(burn, recent, age,   b, m) {
+  if (recent != "null" && recent != "") b = recent + 0
+  else if (burn != "null" && burn != "") b = burn + 0
+  else return 98
+  if (b < 0) b = 0
+  if (age == "null" || age == "") age = POLL
+  m = b * (age + POLL) / 3600
+  if (m < 1) m = 1
+  m = (m == int(m)) ? m : int(m) + 1
+  return 100 - m
+}'
+
 # Sets TRIP/TPCT/TSECS to the watched window that is at or over the cap and
 # resets soonest — the one worth waiting out. Empty TRIP means headroom.
 evaluate() {
@@ -404,8 +444,9 @@ evaluate() {
   # window at 40% climbing fast enough to hit the cap inside the horizon is a
   # worse place to launch a wave from than one sitting still at 80%. Whichever
   # binding window resets soonest wins, since that is the one worth waiting out.
-  line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" '
+  line=$(binding_rows | awk -F"$SEP" -v SEP="$SEP" -v cap="$CAP" -v horizon="$ETA" -v POLL="$POLL_WORST" "$SAFE_AWK"'
     {
+      capv = (cap == "safe") ? safecap($8, $10, $11) : cap + 0
       pct = $5; secs = $6; eta = $7; hit = $9
       # A window whose reset is already due describes the window that just
       # ended: Pacer polls every few minutes, so for a while after a reset its
@@ -413,15 +454,15 @@ evaluate() {
       # run on an empty window, and `status` kept serving it.
       if (secs != "null" && secs + 0 <= 0) next
       why = ""
-      if (pct != "null" && pct + 0 >= cap + 0) why = "cap"
+      if (pct != "null" && pct + 0 >= capv) why = "cap"
       else if (horizon + 0 > 0 && hit + 0 == 1 && eta != "null" && eta + 0 <= horizon + 0) why = "eta"
       if (why == "") next
       s = (secs == "null" ? 9999999 : secs + 0)
-      if (best == "" || s < bests) { best = $3 SEP pct SEP secs SEP why SEP eta; bests = s }
+      if (best == "" || s < bests) { best = $3 SEP pct SEP secs SEP why SEP eta SEP capv; bests = s }
     }
     END { if (best != "") print best }')
-  TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""
-  [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA <<<"$line"
+  TRIP=""; TPCT=""; TSECS=""; TWHY=""; TETA=""; TCAP=""
+  [ -n "$line" ] && IFS="$SEP" read -r TRIP TPCT TSECS TWHY TETA TCAP <<<"$line"
 }
 
 # Whose numbers these are, said out loud when it had to be inferred.
@@ -449,7 +490,21 @@ trip_reason() {
   if [ "${TWHY:-cap}" = eta ]; then
     echo "${TRIP} at $(pct_fmt "$TPCT")% is projected to fill in $(human "$TETA") (horizon $(human "$ETA"))"
   else
-    echo "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%"
+    if [ "$CAP" = safe ]; then
+      echo "${TRIP} at $(pct_fmt "$TPCT")% >= safe limit ${TCAP}%"
+    else
+      echo "${TRIP} at $(pct_fmt "$TPCT")% >= cap ${CAP}%"
+    fi
+  fi
+}
+
+# What the gate is holding each window to, for the GO line.
+cap_note() {
+  if [ "$CAP" = safe ]; then
+    printf 'safe limit %s' "$(binding_rows | awk -F"$SEP" -v POLL="$POLL_WORST" "$SAFE_AWK"'
+      { printf "%s%s %d%%", (NR > 1 ? ", " : ""), $3, safecap($8, $10, $11) }')"
+  else
+    printf 'cap %s%%' "$CAP"
   fi
 }
 
@@ -465,7 +520,9 @@ summary() {
 api_off_note() {
   case "${FETCH_REASON:-off}" in
     auth) echo "pace: Pacer requires a token and this one was rejected. Set PACE_TOKEN to the token in Pacer → Settings → Integrations. NOT gating — fix this or the run is unpaced." >&2;;
-    http) echo "pace: Pacer answered HTTP ${HTTP_CODE:-?} at $API. NOT gating." >&2;;
+    # The server's first line says what it rejected — an unknown account
+    # read like the API being off until it was shown (#184).
+    http) echo "pace: Pacer answered HTTP ${HTTP_CODE:-?} at $API${HTTP_BODY:+: $HTTP_BODY}. NOT gating." >&2;;
     empty) echo "pace: Pacer answered but reported no rate-limit windows yet — it may not have polled since launch. Proceeding ungated.";;
     *)    echo "Pacer API unreachable at $API — it is opt-in and likely just off (Pacer → Settings → Integrations). Proceed normally.";;
   esac
@@ -483,7 +540,7 @@ cmd_report() {
   [ -n "$AUTO_NOTE" ] && printf 'pace:%s\n' "$(auto_note)"
   local multi
   multi=$(printf '%s\n' "$ROWS" | awk -F"$SEP" '{ a[$1] = 1 } END { print length(a) }')
-  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent; do
+  selected_rows | while IFS="$SEP" read -r acct id label model pct secs eta burn hit recent age; do
     local prefix="" rate="" full="" mine=""
     [ "$multi" -gt 1 ] && prefix="$(printf '%-8s ' "${acct:0:8}")"
     # The measured half-hour rate answers "right now"; the engine's smoothed
@@ -584,8 +641,9 @@ cmd_sessions() {
       q = index(rest, "\"")
       return q ? substr(rest, 1, q - 1) : ""
     }
-    /^ *\{/ { acct = ""; model = ""; path = ""; proj = ""; repo = ""; when = ""; state = ""; next }
+    /^ *\{/ { acct = ""; cur = ""; model = ""; path = ""; proj = ""; repo = ""; when = ""; state = ""; next }
     /"accountId" *:/  { acct  = val($0); next }
+    /"currentAccountId" *:/ { cur = val($0); next }
     /"model" *:/      { model = val($0); next }
     /"projectPath" *:/{ path  = val($0); next }
     /"project" *:/    { proj  = val($0); next }
@@ -594,7 +652,7 @@ cmd_sessions() {
     /"activity" *:/   { state = val($0); next }
     /^ *\}/ {
       if (proj != "" || path != "")
-        printf "%s%s%s%s%s%s%s%s%s%s%s\n", state, SEP, substr(acct, 1, 8), SEP,
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", state, SEP, substr(cur != "" ? cur : acct, 1, 8), SEP,
                proj, SEP, (model == "" ? "?" : model), SEP, path, SEP, repo
     }')
   [ -n "$rows" ] || { echo "No sessions in the last hour."; return 0; }
@@ -620,8 +678,16 @@ cmd_json() {
     exit "$(off_exit_code)"
   }
   require_selection
-  printf '{\n  "ok": true,\n  "at": "%s",\n  "windows": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
+  # Whose windows these are, and since when that login has been signed in,
+  # so a loop can see a switch without diffing every window's account (#184).
+  local acct since
+  acct=$(selected_rows | awk -F"$SEP" 'NR == 1 { print $1; exit }')
+  since=""; [ "$acct" = "$SESSION_ACCOUNT" ] && since="${SESSION_ACCOUNT_SINCE:-}"
+  printf '{\n  "ok": true,\n  "at": "%s",\n  "account": %s,\n  "accountSince": %s,\n  "windows": [\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$( [ -n "$acct" ] && printf '"%s"' "$acct" || printf null)" \
+    "$( [ -n "$since" ] && printf '"%s"' "$since" || printf null)"
+  selected_rows | awk -F"$SEP" -v WANT="$MODEL" -v POLL="$POLL_WORST" "$SAFE_AWK"'
     function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
     function binds(model,   m) {
       if (want == "" || want == "all" || model == "") return 1
@@ -629,9 +695,10 @@ cmd_json() {
       return (index(m, want) || index(want, m)) ? 1 : 0
     }
     BEGIN { want = norm(WANT) }
-    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"recentBurnPercentPerHour\": %s, \"binds\": %s}",
+    { printf "%s    {\"account\": \"%s\", \"identity\": \"%s\", \"label\": \"%s\", \"model\": \"%s\", \"usedPercent\": %s, \"resetsInSeconds\": %s, \"willHitLimit\": %s, \"hitEtaSeconds\": %s, \"burnPercentPerHour\": %s, \"recentBurnPercentPerHour\": %s, \"sampleAgeSeconds\": %s, \"safeLimit\": %d, \"binds\": %s}",
              (NR > 1 ? ",\n" : ""), $1, $2, $3, $4, $5, $6,
-             ($9 + 0 == 1 ? "true" : "false"), $7, $8, $10,
+             ($9 + 0 == 1 ? "true" : "false"), $7, $8, $10, $11,
+             safecap($8, $10, $11),
              (binds($4) ? "true" : "false") }
     END { if (NR > 0) printf "\n" }'
   printf '  ]\n}\n'
@@ -647,8 +714,8 @@ cmd_gate() {
   require_selection
   evaluate
   if [ -z "$TRIP" ]; then
-    write_state go "" "" "" "$(summary) (cap ${CAP}%)"
-    echo "pace: GO — $(summary) (cap ${CAP}%).$(auto_note)$(scope_caveat)"
+    write_state go "" "" "" "$(summary) ($(cap_note))"
+    echo "pace: GO — $(summary) ($(cap_note)).$(auto_note)$(scope_caveat)"
     exit 0
   fi
   write_state paused "$TRIP" "$TPCT" "$TSECS" \
@@ -703,10 +770,12 @@ cmd_wait() {
   local waiting=false everRead=false fails=0 startedOn="" nowOn=""
   # A waiting process has a reason to look more often than a reading changes:
   # under sequential accounts, switching logins restores headroom immediately
-  # and Pacer sees it as soon as it notices the switch. Waiting out a *reset*
+  # and Pacer sees it within seconds. At 60 s a switch was found up to a minute
+  # late (#184); a look is two requests to this machine. Waiting out a *reset*
   # is still bounded by the ~5-minute poll either way.
-  [ "$INTERVAL_SET" = 0 ] && INTERVAL=60
+  [ "$INTERVAL_SET" = 0 ] && INTERVAL=15
   while :; do
+    refresh_scope
     if ! fetch_rows; then
       # A blip is not a reset. Pacer ships silent auto-updates and restarts
       # itself, so a wait long enough to matter *will* meet a minute where
@@ -817,18 +886,34 @@ fi
 # "no rate-limit windows yet" while staring at a full set of them. The rule is
 # now that whenever the id is known it is used for both, and the client-side
 # "whichever is active" fallback applies only when nothing else has said.
-if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
-  SCOPE=(--data-urlencode "account=$ACCOUNT")
-  AWK_WANT="$ACCOUNT"
-elif [ -n "$SESSION_ACCOUNT" ]; then
-  SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
-  AWK_WANT="$SESSION_ACCOUNT"
-elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  # Only Pacer can turn a config directory into an id, so here — and only
-  # here — the response is taken as already narrowed.
-  SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
-  AWK_WANT=all
-fi
+set_scope() {
+  SCOPE=(); AWK_WANT="${PACE_ACCOUNT:-}"
+  if [ -n "$ACCOUNT" ] && [ "$ACCOUNT" != all ]; then
+    SCOPE=(--data-urlencode "account=$ACCOUNT")
+    AWK_WANT="$ACCOUNT"
+  elif [ -n "$SESSION_ACCOUNT" ]; then
+    SCOPE=(--data-urlencode "account=$SESSION_ACCOUNT")
+    AWK_WANT="$SESSION_ACCOUNT"
+  elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    # Only Pacer can turn a config directory into an id, so here — and only
+    # here — the response is taken as already narrowed.
+    SCOPE=(--data-urlencode "config_dir=$CLAUDE_CONFIG_DIR")
+    AWK_WANT=all
+  fi
+}
+set_scope
+
+# Look the session's account up again. A `wait` resolved once and kept asking
+# about the login it started on, so a switch to another login could never
+# end it (#184). An explicit --account is the caller's choice and stays.
+refresh_scope() {
+  if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = all ]; then
+    session_looked_up=false
+    SESSION_ACCOUNT=""
+    resolve_session || true
+  fi
+  set_scope
+}
 
 case "$SUB" in
   accounts) cmd_accounts;;

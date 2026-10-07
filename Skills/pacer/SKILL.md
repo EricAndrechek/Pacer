@@ -45,7 +45,9 @@ its own profile (`CLAUDE_CONFIG_DIR`, which is how two accounts run at once)
 gets that account's windows: the script hands Pacer the directory and Pacer
 resolves it, because only Pacer knows which login is signed into it. Otherwise
 the active login. `--account all` shows every account, prefixed by id;
-`--account <id>` picks one.
+`--account <id>` picks one, and the 8-character id `accounts` prints is
+enough. A `wait` looks the session's account up again on every poll, so a
+`/login` switch to a login with headroom ends it.
 
 ## 2. Who else is spending this budget
 
@@ -95,7 +97,7 @@ Three things that changes:
 Pacer only recomputes every **~5 min**, and you must not have 200 subagents
 each curling it. So it is **one poller, many cheap readers**:
 
-- **One poller** — the orchestrator runs `pace.sh gate --cap N` once per
+- **One poller** — the orchestrator runs `pace.sh gate` once per
   fan-out *wave*. That is the single HTTP read; it writes a shared **state
   file**.
 - **Many cheap readers** — every subagent runs `pace.sh status`, a plain
@@ -138,14 +140,14 @@ at 95% has nothing to say to an Opus agent, and pausing one for it is a pause
 nobody needed. So pass the model your work will actually use:
 
 ```
-$ pace.sh gate --cap 85                 # every window binds — the safe reading
-pace: PAUSE — Fable at 95% >= cap 85%, resets in 3d 17h.
+$ pace.sh gate                          # every window binds — the safe reading
+pace: PAUSE — Fable at 99% >= safe limit 98%, resets in 3d 17h.
 
-$ pace.sh gate --cap 85 --model opus    # Fable is not this agent's problem
-pace: GO — 5h 40%, 7d 32% (cap 85%).
+$ pace.sh gate --model opus             # Fable is not this agent's problem
+pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
 
-$ pace.sh gate --cap 85 --model auto    # ask Pacer what this session runs
-pace: GO — 5h 40%, 7d 32% (cap 85%).
+$ pace.sh gate --model auto             # ask Pacer what this session runs
+pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
 ```
 
 **`--model auto` asks Pacer what this session runs.** Claude Code exports
@@ -161,8 +163,8 @@ session has more than one model in flight, `auto` will not guess: it binds only
 the account-wide windows and says so.
 
 ```
-$ pace.sh gate --cap 85 --model auto     # Fable orchestrator, Sonnet builders
-pace: GO — 5h 12%, 7d 32% (cap 85%). [model ambiguous (claude-fable-5-1,
+$ pace.sh gate --model auto              # Fable orchestrator, Sonnet builders
+pace: GO — 5h 12%, 7d 32% (safe limit 5h 97%, 7d 99%). [model ambiguous (claude-fable-5-1,
 claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
 ```
 
@@ -191,17 +193,17 @@ re-gate) rather than letting an Opus wave inherit a Fable pause. So gate once
 per model your fan-out uses, and give each group its own run name:
 
 ```
-PACE_RUN=opus-wave  pace.sh gate --cap 85 --model opus
-PACE_RUN=fable-wave pace.sh gate --cap 85 --model fable
+PACE_RUN=opus-wave  pace.sh gate --model opus
+PACE_RUN=fable-wave pace.sh gate --model fable
 ```
 
 ## 5. Gate on the forecast, not just the level
 
-`--cap` asks "am I nearly out". `--eta` asks the better question — **"will this
-wave finish before I run out"**:
+The default asks "am I about to run out". `--eta` asks the better question for a
+long wave — **"will this wave finish before I run out"**:
 
 ```
-$ pace.sh gate --cap 85 --eta 90m
+$ pace.sh gate --eta 90m
 pace: PAUSE — 5h at 40% is projected to fill in 45m (horizon 1h 30m).
 ```
 
@@ -212,11 +214,11 @@ how long your wave runs.
 
 ## 6. Orchestrator protocol
 
-Invoke with a cap (default **85**). For a big fan-out:
+For a big fan-out:
 
 1. **Pre-flight:** `pace.sh report` so you and the user see the starting
    headroom.
-2. **Before each wave:** `pace.sh gate --cap 85 --model <yours> --eta <wave length>`.
+2. **Before each wave:** `pace.sh gate --model <yours> --eta <wave length>`.
    - exit 0 → spawn the wave; give every subagent the clause in §7.
    - exit 10 → do **not** spawn; go to step 4.
 3. Keep waves small enough to finish in a few minutes, so a mid-wave trip is
@@ -231,7 +233,7 @@ Invoke with a cap (default **85**). For a big fan-out:
    background (`run_in_background: true`):
 
    ```
-   ~/.claude/skills/pacer/pace.sh wait --cap 85
+   ~/.claude/skills/pacer/pace.sh wait
    ```
 
    It blocks *across turns* until there is headroom again, then **exits —
@@ -282,8 +284,8 @@ workflow open for hours.
 
 ## 8. Resume manifest
 
-A plain file you own — `.pace/resume.json` in the repo (gitignored) or
-`~/.claude/pace/resume-<run>.json`. Minimum shape:
+One JSON file per run: `~/.claude/pace/resume-<run>.json`, or
+`.pace/resume.json` in the repo (gitignored). Minimum shape:
 
 ```json
 {
@@ -302,9 +304,23 @@ A plain file you own — `.pace/resume.json` in the repo (gitignored) or
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
 
+**`~/.claude/pace/` is `pace.sh`'s store, and it holds exactly two kinds of
+file:**
+- the state files `pace.sh gate` writes (`state*.json`);
+- one resume manifest per run (`resume-<run>.json`).
+
+Write nothing else there: no notes, plans, scripts, logs or directories.
+
 ## 9. Parameters and policy
 
-- `--cap N` (default 85): pause when **any** watched window is at or over N%.
+- `--cap N` (default: the **safe limit**): pause when any watched window is at
+  or over N%. The default stops just before the limit, nothing earlier:
+  100% minus how far usage can climb before a fresher reading. That's the
+  window's recent burn × (the reading's age + one worst-case 5-minute poll),
+  at least 1 point. Heavy use stops near 90%, light use near 99%; `report` and
+  `json` show each window's figure. **Pass `--cap` only when the user, or the
+  task, decides to keep part of a window in reserve.** How much to spend is
+  their call, not a default's.
 - `--model NAME|auto` (default: every window binds): only gate on windows that
   constrain this model. `auto` asks Pacer what this session is running. Account-wide windows always bind; per-model caps bind
   only when the name matches theirs, compared loosely so `opus`,
@@ -316,8 +332,9 @@ it and continue. Keep it current as items complete.
   about; a selector matching nothing is an error, not a free pass. `--window`
   is about what you *watch*; `--model` is about what *binds you*.
 - `--account ID|all` (default: the active login): whose windows to read.
-- `--interval S` (default 300, floored to 300): poll cadence while waiting.
-  Pacer updates about every 5 minutes; polling faster is wasted.
+- `--interval S` (default 15, floor 5): how often `wait` looks. Readings
+  change about every 5 minutes, but a login switch shows up within seconds,
+  and each look is a request to this machine.
 - `--max-wait S` (default 21600 = 6h): auto-sleep only if the reset is within
   this. A further-out reset returns exit 20 so you checkpoint and stop instead
   of sleeping for days.

@@ -102,4 +102,168 @@ struct PacerSessionModelsTests {
         #expect(found.models == ["claude-opus-5"])
         #expect(found.model == "claude-opus-5")
     }
+
+    // MARK: - Which login the session bills now (#184)
+
+    @MainActor
+    private static func login(_ context: ModelContext, _ account: String,
+                              from: Date, until: Date?) {
+        context.insert(AccountActivation(
+            accountId: account, startedAt: from, endedAt: until, rootPath: nil,
+            source: AccountActivation.sourceObserved))
+    }
+
+    /// The session's last turn was before a `/login` switch and it has written
+    /// none since (asleep in `pace.sh wait`). Its turn stays on the old login;
+    /// its next one goes to the new login.
+    @MainActor
+    @Test func aSwitchSinceTheLastTurnMovesTheCurrentAccount() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        Self.turn(context, session: "s1", model: "claude-opus-5", secondsAgo: 600, now: now)
+        (try context.fetch(FetchDescriptor<TokenSample>())).forEach { $0.accountId = "org-work" }
+        Self.login(context, "org-work", from: now.addingTimeInterval(-7200),
+                   until: now.addingTimeInterval(-300))
+        Self.login(context, "org-home", from: now.addingTimeInterval(-300), until: nil)
+        try context.save()
+
+        let found = try #require(try PacerSessionLookupBuilder.lookup(
+            container: container, sessionId: "s1", now: now))
+        #expect(found.accountId == "org-work")
+        #expect(found.currentAccountId == "org-home")
+    }
+
+    @MainActor
+    @Test func withNoObservedLoginTheCurrentAccountIsTheTurns() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        Self.turn(context, session: "s1", model: "claude-opus-5", secondsAgo: 5, now: now)
+        (try context.fetch(FetchDescriptor<TokenSample>())).forEach { $0.accountId = "org-work" }
+        try context.save()
+
+        let found = try #require(try PacerSessionLookupBuilder.lookup(
+            container: container, sessionId: "s1", now: now))
+        #expect(found.currentAccountId == "org-work")
+    }
+
+    /// A session that spans a switch has a per-account row for each login.
+    /// The accounts list counted it on both, so the old login kept its
+    /// sessions for an hour after everyone had moved.
+    @MainActor
+    @Test func aSessionSpanningASwitchCountsOnceOnItsNewestLogin() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for id in ["org-work", "org-home"] {
+            context.insert(Account(id: id, organizationId: id, displayName: id,
+                                   isActive: id == "org-home",
+                                   firstSeenAt: .distantPast, lastSeenAt: now))
+        }
+        func row(_ account: String, lastSeen secondsAgo: Double) {
+            context.insert(AccountSessionInfo(
+                accountId: account, sessionId: "s1",
+                firstSeenAt: now.addingTimeInterval(-secondsAgo - 60),
+                lastSeenAt: now.addingTimeInterval(-secondsAgo), projectPath: "/tmp/p",
+                ccVersion: nil, cumulativeCostUSD: 0, cumulativeInputTokens: 0,
+                cumulativeOutputTokens: 0, cumulativeCacheReadTokens: 0,
+                cumulativeCacheCreation5mTokens: 0, cumulativeCacheCreation1hTokens: 0,
+                topModel: "claude-opus-5"))
+        }
+        row("org-work", lastSeen: 240)
+        row("org-home", lastSeen: 30)
+        try context.save()
+
+        let list = try PacerAccountsBuilder.list(container: container, now: now)
+        let byId = Dictionary(uniqueKeysWithValues: list.accounts.map { ($0.id, $0) })
+        #expect(byId["org-home"]?.activeSessions == 1)
+        #expect(byId["org-work"]?.activeSessions == 0)
+        #expect(byId["org-work"]?.recentSessions == 0)
+    }
+
+    /// #190: right after a switch, every running session's newest row is still
+    /// on the old login, because none has written a turn since. The counts
+    /// credited all of them to the old login, and the new one, whose usage was
+    /// the one rising, showed none.
+    @MainActor
+    @Test func runningSessionsCountOnTheLoginTheyAreOnNow() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for id in ["org-work", "org-home"] {
+            context.insert(Account(id: id, organizationId: id, displayName: id,
+                                   isActive: id == "org-home",
+                                   firstSeenAt: .distantPast, lastSeenAt: now))
+        }
+        Self.login(context, "org-work", from: now.addingTimeInterval(-7200),
+                   until: now.addingTimeInterval(-30))
+        Self.login(context, "org-home", from: now.addingTimeInterval(-30), until: nil)
+        func row(_ session: String, lastSeen secondsAgo: Double) {
+            context.insert(AccountSessionInfo(
+                accountId: "org-work", sessionId: session,
+                firstSeenAt: now.addingTimeInterval(-secondsAgo - 60),
+                lastSeenAt: now.addingTimeInterval(-secondsAgo), projectPath: "/tmp/p",
+                ccVersion: nil, cumulativeCostUSD: 0, cumulativeInputTokens: 0,
+                cumulativeOutputTokens: 0, cumulativeCacheReadTokens: 0,
+                cumulativeCacheCreation5mTokens: 0, cumulativeCacheCreation1hTokens: 0,
+                topModel: "claude-opus-5"))
+        }
+        row("running", lastSeen: 60)        // active, last turn before the switch
+        row("idle", lastSeen: 1800)         // recent but idle: counted where it drew
+        try context.save()
+
+        let list = try PacerAccountsBuilder.list(container: container, now: now)
+        let byId = Dictionary(uniqueKeysWithValues: list.accounts.map { ($0.id, $0) })
+        #expect(byId["org-home"]?.activeSessions == 1)
+        #expect(byId["org-work"]?.activeSessions == 0)
+        #expect(byId["org-work"]?.recentSessions == 1)
+
+        let sessions = try PacerSessionLookupBuilder.list(
+            container: container, withinSeconds: 3600, account: nil, now: now)
+        let running = try #require(sessions.sessions.first { $0.sessionId == "running" })
+        #expect(running.accountId == "org-work")
+        #expect(running.currentAccountId == "org-home")
+        let idle = try #require(sessions.sessions.first { $0.sessionId == "idle" })
+        #expect(idle.currentAccountId == "org-work")
+        // Filtering by the new login finds the running session.
+        let onHome = try PacerSessionLookupBuilder.list(
+            container: container, withinSeconds: 3600, account: "org-home", now: now)
+        #expect(onHome.sessions.map(\.sessionId) == ["running"])
+    }
+
+    @MainActor
+    @Test func aSessionSpanningASwitchIsListedOnce() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        for (account, ago) in [("org-work", 400.0), ("org-home", 20.0)] {
+            context.insert(AccountSessionInfo(
+                accountId: account, sessionId: "s1",
+                firstSeenAt: now.addingTimeInterval(-ago - 60),
+                lastSeenAt: now.addingTimeInterval(-ago), projectPath: "/tmp/p",
+                ccVersion: nil, cumulativeCostUSD: 0, cumulativeInputTokens: 0,
+                cumulativeOutputTokens: 0, cumulativeCacheReadTokens: 0,
+                cumulativeCacheCreation5mTokens: 0, cumulativeCacheCreation1hTokens: 0,
+                topModel: "claude-opus-5"))
+        }
+        try context.save()
+        let sessions = try PacerSessionLookupBuilder.list(
+            container: container, withinSeconds: 3600, account: nil, now: now)
+        #expect(sessions.sessions.count == 1)
+        #expect(sessions.sessions.first?.accountId == "org-home")
+    }
+
+    @MainActor
+    @Test func theLookupSaysWhenTheCurrentLoginStarted() throws {
+        let container = try Self.makeContainer()
+        let context = ModelContext(container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        Self.turn(context, session: "s1", model: "claude-opus-5", secondsAgo: 5, now: now)
+        Self.login(context, "org-home", from: now.addingTimeInterval(-300), until: nil)
+        try context.save()
+        let found = try #require(try PacerSessionLookupBuilder.lookup(
+            container: container, sessionId: "s1", now: now))
+        #expect(found.currentAccountSince == now.addingTimeInterval(-300))
+    }
 }

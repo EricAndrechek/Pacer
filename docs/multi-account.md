@@ -343,6 +343,10 @@ same id that names the transcript Pacer parses. That closes two guesses at
 once: a per-model cap only gates work using that model, and a session's account
 is better read from its own recorded turns than inferred from a profile
 directory. A subagent has its own session id, so it resolves to the subagent.
+It also reports `currentAccountId`, the login the session's *next* turn bills
+to. After a `/login` switch the session's recorded turns stay on the old login
+until it writes another, and a session asleep in `pace.sh wait` writes none, so
+pacing reads `currentAccountId` and `wait` looks it up again on every poll.
 
 **A session pinned to its own profile can ask about itself.** Under concurrent
 use the honest answer to "how much headroom do I have" is not the active

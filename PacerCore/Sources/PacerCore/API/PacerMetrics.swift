@@ -136,6 +136,11 @@ public struct PacerMetrics: Sendable {
                                      help: "Measured burn over the last 30 minutes, in percentage points of the window per hour.",
                                      labels: labels))
             }
+            if let age = w.sampleAgeSeconds {
+                m.append(PacerMetric("pacer_rate_limit_sample_age_seconds", Double(age),
+                                     help: "Age of the reading behind used_ratio when this was built; usage has kept moving since.",
+                                     labels: labels))
+            }
         }
         // Every window of every account passed in — the fixed 5h/7d blocks and
         // each scoped per-model cap, keyed by its own identity. `window=` used
