@@ -1,7 +1,16 @@
 // png-pixels-equal — do two images have exactly the same pixels?
 //
 //   swiftc -O -o png-pixels-equal bin/png-pixels-equal.swift
-//   png-pixels-equal a.png b.png     # exit 0: same pixels, 1: they differ, 2: unreadable
+//   png-pixels-equal a.png b.png [rects.json]
+//       # exit 0: same pixels, 1: they differ, 2: unreadable
+//
+// With a rects.json (`{"rects": [[x, y, w, h], …]}`, image pixels, top-left
+// origin — written by pacer-screenshot-capture beside a menu bar shot), only
+// the pixels inside those rectangles are compared: Pacer's own windows. The
+// desktop behind a translucent menu is not ours and drifted between runs
+// hours apart (#166); the rectangles are the windows' frames, so what the
+// window draws of the desktop through itself is still compared. Sizes must
+// still match. Without a sidecar, or an unreadable one, the whole image.
 //
 // Used by .github/workflows/screenshots.yml to drop re-rendered README images
 // whose pixels did not change. A render re-encodes every image, so an
@@ -40,26 +49,43 @@ func pixels(of path: String) -> (width: Int, height: Int, bytes: Data)? {
 
 let tolerance: UInt8 = 2
 
-func samePixels(_ a: Data, _ b: Data) -> Bool {
+func samePixels(_ a: Data, _ b: Data, width: Int, height: Int, rects: [CGRect]?) -> Bool {
     guard a.count == b.count else { return false }
+    let regions = rects ?? [CGRect(x: 0, y: 0, width: width, height: height)]
     return a.withUnsafeBytes { pa in
         b.withUnsafeBytes { pb in
-            for i in 0..<pa.count {
-                let x = pa[i], y = pb[i]
-                if (x > y ? x - y : y - x) > tolerance { return false }
+            for r in regions {
+                let x0 = max(0, Int(r.minX)), x1 = min(width, Int(r.maxX))
+                let y0 = max(0, Int(r.minY)), y1 = min(height, Int(r.maxY))
+                guard x0 < x1, y0 < y1 else { continue }
+                for y in y0..<y1 {
+                    for i in (y * width + x0) * 4..<(y * width + x1) * 4 {
+                        let x = pa[i], y = pb[i]
+                        if (x > y ? x - y : y - x) > tolerance { return false }
+                    }
+                }
             }
             return true
         }
     }
 }
 
+func sidecarRects(_ path: String) -> [CGRect]? {
+    guard let data = FileManager.default.contents(atPath: path),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let list = json["rects"] as? [[Double]], !list.isEmpty else { return nil }
+    return list.compactMap { $0.count == 4 ? CGRect(x: $0[0], y: $0[1], width: $0[2], height: $0[3]) : nil }
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
-guard args.count == 2 else {
-    FileHandle.standardError.write(Data("usage: png-pixels-equal <a.png> <b.png>\n".utf8))
+guard args.count == 2 || args.count == 3 else {
+    FileHandle.standardError.write(Data("usage: png-pixels-equal <a.png> <b.png> [rects.json]\n".utf8))
     exit(2)
 }
 guard let a = pixels(of: args[0]), let b = pixels(of: args[1]) else {
     FileHandle.standardError.write(Data("png-pixels-equal: cannot read \(args[0]) or \(args[1])\n".utf8))
     exit(2)
 }
-exit(a.width == b.width && a.height == b.height && samePixels(a.bytes, b.bytes) ? 0 : 1)
+let rects = args.count == 3 ? sidecarRects(args[2]) : nil
+exit(a.width == b.width && a.height == b.height
+    && samePixels(a.bytes, b.bytes, width: a.width, height: a.height, rects: rects) ? 0 : 1)

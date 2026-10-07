@@ -50,10 +50,21 @@ jobs:
       # through an xcconfig xcodebuild applies over every target, so no build
       # that ships can show fake numbers.
       - name: Render screenshots
+        env:
+          # Where the capture helper writes each menu bar shot's rectangles of
+          # Pacer's own windows. Not under docs/: they are not README assets.
+          PACER_SCREENSHOT_SIDECARS: ${{ runner.temp }}/shot-rects
         run: |
           printf 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) PACER_WIDGET_FIXTURES\n' \
               > "$RUNNER_TEMP/widget-fixtures.xcconfig"
           XCODE_XCCONFIG_FILE="$RUNNER_TEMP/widget-fixtures.xcconfig" make screenshots
+
+      # The capture pins the system clock to 9:41 while it photographs the menu
+      # bar and puts it back itself; this is for the run that died in between.
+      # Before anything that needs a true clock (TLS, git push).
+      - name: Make sure the clock is real again
+        if: always()
+        run: sudo sntp -sS time.apple.com || true
 
       # Lossless: pixels are untouched, only the encoding is tightened. The
       # images are committed on every UI PR and git keeps each version, so
@@ -67,15 +78,19 @@ jobs:
 
       # A render re-encodes every image, so one whose pixels did not change
       # still comes out byte-different. Committing it adds a review item and
-      # another copy in history for nothing (#154). Put those back. Exact
-      # pixels, no threshold: a real one-label change is as small as the noise.
+      # another copy in history for nothing (#154). Put those back, within
+      # png-pixels-equal's 2 levels. A menu bar shot is compared only inside
+      # Pacer's own windows (its rects.json sidecar): the translucent bar and
+      # menu show the desktop, which is not ours to keep identical (#166).
       - name: Keep the committed copy of images whose pixels are unchanged
         run: |
           set -euo pipefail
           swiftc -O -o "$RUNNER_TEMP/png-pixels-equal" bin/png-pixels-equal.swift
           for f in $(git diff --name-only -- 'docs/screenshots/*.png'); do
             git show "HEAD:$f" > "$RUNNER_TEMP/committed.png"
-            if "$RUNNER_TEMP/png-pixels-equal" "$RUNNER_TEMP/committed.png" "$f"; then
+            rects="$RUNNER_TEMP/shot-rects/$(basename "$f" .png).rects.json"
+            [ -f "$rects" ] || rects=""
+            if "$RUNNER_TEMP/png-pixels-equal" "$RUNNER_TEMP/committed.png" "$f" $rects; then
               git checkout -- "$f"
               echo "pixels unchanged: $f"
             fi

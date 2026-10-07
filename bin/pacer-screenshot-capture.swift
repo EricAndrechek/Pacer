@@ -41,17 +41,14 @@ try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: t
 func log(_ s: String) { print("[capture] \(s)"); fflush(stdout) }
 
 var virtualDisplay: CGVirtualDisplay?
-/// The desktop picture's light and dark frames as static PNGs.
+/// The desktop picture's light and dark frames: gradients drawn here, in code.
 ///
-/// Set as-is, the picture left the menu bar shots at the mercy of the time of
-/// day: `menubar.png` and `menubar-dark.png` are the only images that show the
-/// desktop, and their wallpaper blue moved from 243 to 238 between two runs
-/// five hours apart, past `png-pixels-equal`'s tolerance, so a ready-for-review
-/// at another hour re-committed both (#166). Either the picture was dynamic on
-/// the runner, or setting it failed and the runner's own dynamic default
-/// stayed: the old code could not tell, because it swallowed the error and
-/// logged the file name either way. A static PNG of one frame, set with the
-/// error logged and the result read back, answers both.
+/// The menu bar shots are the only images that show the desktop, and a system
+/// picture ("Mac Blue") drifted between runs hours apart — thin bright edges up
+/// to 143 levels off, ~66k pixels — even pinned to one static frame (#166, #175).
+/// A picture we draw has no detail to shift, and cannot change with the runner
+/// image or macOS version. Its colours are Mac Blue's, sampled down the strip
+/// the menu panel blurs, so the panel's tint stays what the README had.
 var wallpaperFrames: (light: URL, dark: URL)?
 if wantsVirtualDisplay {
     guard ProcessInfo.processInfo.environment["CI"] == "true" else {
@@ -87,12 +84,8 @@ if wantsVirtualDisplay {
         log("mirror \(previousMain) of \(display.displayID): \(err.rawValue); main now \(CGMainDisplayID())")
     }
     try? await Task.sleep(for: .seconds(1))
-    let pictures = "/System/Library/Desktop Pictures"
-    if let picture = ((try? FileManager.default.contentsOfDirectory(atPath: pictures)) ?? [])
-        .sorted().first(where: { $0.hasSuffix(".heic") || $0.hasSuffix(".jpg") || $0.hasSuffix(".png") }) {
-        wallpaperFrames = staticFrames(of: URL(fileURLWithPath: "\(pictures)/\(picture)"), into: dir)
-        pinWallpaper(dark: false)
-    }
+    wallpaperFrames = generatedFrames(into: dir)
+    pinWallpaper(dark: false)
     try? await Task.sleep(for: .seconds(2))   // the wallpaper paints asynchronously
     try? "\(display.displayID)".write(to: dir.appendingPathComponent("display"), atomically: true, encoding: .utf8)
     log("virtual display \(display.displayID): 1600×1200 pt @2×, main")
@@ -100,46 +93,33 @@ if wantsVirtualDisplay {
 
 // MARK: - Wallpaper (CI only)
 
-
-/// Rasterise the picture's light and dark frames. A dynamic HEIC names them in
-/// its `apple_desktop` metadata (`apr`, or the `ap` entry of `solar`/`h24`);
-/// anything else uses its first frame for both.
-func staticFrames(of picture: URL, into dir: URL) -> (light: URL, dark: URL)? {
-    guard let source = CGImageSourceCreateWithURL(picture as CFURL, nil) else {
-        log("wallpaper: cannot read \(picture.lastPathComponent)"); return nil
-    }
-    let count = CGImageSourceGetCount(source)
-    var light = 0, dark = 0, origin = "single frame"
-    if count > 1 {
-        (light, dark, origin) = (0, count - 1, "first/last frame")
-        if let meta = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
-            for key in ["apr", "solar", "h24"] {
-                guard let tag = CGImageMetadataCopyTagWithPath(meta, nil, "apple_desktop:\(key)" as CFString),
-                      let encoded = CGImageMetadataTagCopyValue(tag) as? String,
-                      let data = Data(base64Encoded: encoded),
-                      let plist = (try? PropertyListSerialization.propertyList(from: data, format: nil))
-                          as? [String: Any]
-                else { continue }
-                let pair = (plist["ap"] as? [String: Any]) ?? plist
-                if let l = pair["l"] as? Int, let d = pair["d"] as? Int, l < count, d < count {
-                    (light, dark, origin) = (l, d, "apple_desktop:\(key)")
-                    break
-                }
-            }
-        }
-    }
-    func write(_ index: Int, _ name: String) -> URL? {
-        guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { return nil }
+/// Two vertical gradients, 3200×2400 px (the virtual display at 2×).
+///
+/// Smooth on purpose: the panel and bar are translucent, so any fine detail
+/// behind them is detail in the shot. The ramp is the colour of Mac Blue at the
+/// top-left of the display, where the menu hangs, continued down the display.
+func generatedFrames(into dir: URL) -> (light: URL, dark: URL)? {
+    func make(_ name: String, top: [CGFloat], bottom: [CGFloat]) -> URL? {
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let ctx = CGContext(data: nil, width: 3200, height: 2400, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let gradient = CGGradient(colorSpace: space, colorComponents: top + [1] + bottom + [1],
+                                        locations: [0, 1], count: 2)
+        else { return nil }
+        // CoreGraphics' origin is bottom-left: start at the top of the image.
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 2400), end: .zero, options: [])
+        guard let image = ctx.makeImage() else { return nil }
         let url = dir.appendingPathComponent(name)
         guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)
         else { return nil }
         CGImageDestinationAddImage(dest, image, nil)
         return CGImageDestinationFinalize(dest) ? url : nil
     }
-    guard let l = write(light, "wallpaper-light.png"), let d = write(dark, "wallpaper-dark.png") else {
-        log("wallpaper: could not write frames of \(picture.lastPathComponent)"); return nil
-    }
-    log("wallpaper: \(picture.lastPathComponent), \(count) frame(s), light=\(light) dark=\(dark) (\(origin))")
+    func rgb(_ r: Double, _ g: Double, _ b: Double) -> [CGFloat] { [r / 255, g / 255, b / 255] }
+    guard let l = make("wallpaper-light.png", top: rgb(70, 185, 246), bottom: rgb(0, 100, 242)),
+          let d = make("wallpaper-dark.png", top: rgb(52, 138, 190), bottom: rgb(0, 74, 188))
+    else { log("wallpaper: could not draw the gradients"); return nil }
+    log("wallpaper: drew light and dark gradients")
     return (l, d)
 }
 
@@ -224,8 +204,14 @@ func captureMenuBar(_ request: Request) async throws {
     guard ProcessInfo.processInfo.environment["CI"] == "true" else { throw fail("menubar: CI only") }
     guard let r = request.rect, r.count == 4, let png = request.png else { throw fail("menubar: rect and png required") }
     let rect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
-    // The menu opens just after the request is written; let it finish animating.
-    try await Task.sleep(for: .milliseconds(1200))
+    // The menu bar's clock reads 9:41 — Apple's own screenshot time — so its
+    // width cannot move the items beside it. Put back before anything else
+    // needs a true clock (TLS, git), even if this throws.
+    pinSystemClock()
+    defer { restoreSystemClock() }
+    // The menu opens just after the request is written; let it finish animating,
+    // and the bar redraw its clock.
+    try await Task.sleep(for: .milliseconds(3500))
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     guard let display = content.displays.first(where: { $0.frame.intersects(rect) }) else {
         throw fail("menubar: no display holds \(rect)")
@@ -268,8 +254,83 @@ func captureMenuBar(_ request: Request) async throws {
     guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
         throw fail("menubar: PNG encoding failed")
     }
+    // Pacer's own windows, for the workflow's comparison: the shot's wallpaper
+    // and the bar around the item are not Pacer's to keep. The status item is
+    // found by its title, the menu (and any tooltip) as the popup-level windows
+    // on this display. Written BEFORE the PNG: the PNG landing is what closes
+    // the menu, and what the app waits for.
+    let popUpLevel = Int(CGWindowLevelForKey(.popUpMenuWindow))
+    let ours = content.windows.filter { w in
+        guard w.frame.intersects(rect), w.frame.width < display.frame.width * 0.9 else { return false }
+        let pacer = w.owningApplication?.bundleIdentifier == "com.ericandrechek.pacer"
+            || (w.title ?? "").hasPrefix("com.ericandrechek.pacer")
+        return pacer || (w.windowLayer >= popUpLevel && !others.contains { $0.windowID == w.windowID })
+    }
+    for w in content.windows where w.frame.intersects(rect) {
+        log("menubar: window \(w.owningApplication?.bundleIdentifier ?? "-") '\(w.title ?? "")'"
+            + " layer \(w.windowLayer) \(w.frame)\(ours.contains { $0.windowID == w.windowID } ? " [Pacer UI]" : "")")
+    }
+    writeRectsSidecar(for: png, windows: ours.map(\.frame), origin: rect.origin, scale: scale,
+                      size: CGSize(width: image.width, height: image.height))
     try data.write(to: URL(fileURLWithPath: png))
     log("✓ \(URL(fileURLWithPath: png).lastPathComponent) (\(image.width)×\(image.height), menu bar)")
+}
+
+/// `<name>.rects.json` in $PACER_SCREENSHOT_SIDECARS: `{"rects": [[x, y, w, h], …]}`,
+/// image pixels, top-left origin — where Pacer's windows are in the PNG, which
+/// `png-pixels-equal` compares instead of the whole image. Not under
+/// docs/screenshots: they are not README assets. No windows found writes
+/// nothing, so the comparison falls back to the whole image.
+func writeRectsSidecar(for png: String, windows: [CGRect], origin: CGPoint, scale: Double, size: CGSize) {
+    guard let out = ProcessInfo.processInfo.environment["PACER_SCREENSHOT_SIDECARS"], !out.isEmpty else { return }
+    let bounds = CGRect(origin: .zero, size: size)
+    let rects = windows.map {
+        CGRect(x: ($0.minX - origin.x) * scale, y: ($0.minY - origin.y) * scale,
+               width: $0.width * scale, height: $0.height * scale).integral.intersection(bounds)
+    }.filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+    let name = URL(fileURLWithPath: png).deletingPathExtension().lastPathComponent
+    let url = URL(fileURLWithPath: out).appendingPathComponent("\(name).rects.json")
+    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    guard !rects.isEmpty,
+          let data = try? JSONSerialization.data(withJSONObject: ["rects": rects.map {
+              [Int($0.minX), Int($0.minY), Int($0.width), Int($0.height)] }])
+    else { log("menubar: no Pacer windows found — \(name) will be compared whole"); return }
+    try? data.write(to: url)
+    log("menubar: \(rects.count) Pacer window rect(s) → \(url.lastPathComponent)")
+}
+
+// MARK: - System clock (CI only)
+
+var clockSaved: (wall: Date, uptime: TimeInterval)?
+
+func sudo(_ args: [String]) -> Bool {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+    p.arguments = ["-n"] + args
+    do { try p.run() } catch { return false }
+    p.waitUntilExit()
+    return p.terminationStatus == 0
+}
+
+/// Fri 2026-09-18 09:41 in the runner's own zone (`ScreenshotClock`'s date, so
+/// nothing in the shot says another day). CI only: it sets the machine's clock.
+func pinSystemClock() {
+    guard ProcessInfo.processInfo.environment["CI"] == "true", clockSaved == nil else { return }
+    clockSaved = (Date(), ProcessInfo.processInfo.systemUptime)
+    log("clock: pinning to 2026-09-18 09:41 (\(sudo(["date", "0918094126"]) ? "ok" : "FAILED"))")
+}
+
+/// Real time back: the instant saved plus the monotonic time since, so the
+/// pinned stretch costs no drift. The workflow also runs an NTP sync after the
+/// render, whatever happened here.
+func restoreSystemClock() {
+    guard let saved = clockSaved else { return }
+    clockSaved = nil
+    let now = saved.wall.addingTimeInterval(ProcessInfo.processInfo.systemUptime - saved.uptime)
+    let f = DateFormatter()
+    f.dateFormat = "MMddHHmmyy.ss"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    log("clock: restoring (\(sudo(["date", f.string(from: now)]) ? "ok" : "FAILED"))")
 }
 
 func capture(_ request: Request) async throws {
