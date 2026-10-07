@@ -62,6 +62,10 @@ The steps `bin/ship.sh` automates, spelled out:
    - Sign the Sparkle update with the EdDSA private key.
    - Publish the DMG as the asset on a GitHub Release named `vX.Y.Z`.
    - Append the new item to `appcast.xml` on the `gh-pages` branch.
+   - Bump `Casks/pacer.rb` in
+     [EricAndrechek/homebrew-tap](https://github.com/EricAndrechek/homebrew-tap)
+     (`brew install --cask ericandrechek/tap/pacer`) to the new version and the
+     DMG's sha256. `bin/ship.sh verify` warns if the cask didn't follow.
 
 5. Within ~24h, every installed Pacer instance will see the new
    release on its next launch (or on-demand via Pacer → "Check for
@@ -195,6 +199,7 @@ your local cert/Apple-account state:
 | `NOTARY_KEY_ID` | needs you | from step 2 |
 | `NOTARY_ISSUER_ID` | needs you | from step 2 |
 | `NOTARY_KEY_P8` | needs you | the full contents of the `.p8` file from step 2 |
+| `HOMEBREW_TAP_DEPLOY_KEY` | ✓ already set | private half of an ed25519 deploy key with write access to `EricAndrechek/homebrew-tap` only. To rotate: `ssh-keygen -t ed25519 -N '' -f k`, `gh repo deploy-key add k.pub --repo EricAndrechek/homebrew-tap --allow-write`, `gh secret set HOMEBREW_TAP_DEPLOY_KEY < k`, delete `k*` |
 
 The fastest way to set the five remaining secrets is the
 [`bin/setup-release-secrets.sh`](../bin/setup-release-secrets.sh)

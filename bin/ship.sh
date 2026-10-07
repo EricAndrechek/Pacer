@@ -292,6 +292,16 @@ PY
     warn "skipped EdDSA crypto-verify (need uv + a signature/pubkey); asset+length checks still cover integrity"
   fi
 
+  # The Homebrew cask. A warning, not a failure: the release workflow bumps it
+  # after publishing, and a stale cask doesn't make the release itself wrong.
+  local cask
+  cask="$(curl -fsSL "https://raw.githubusercontent.com/EricAndrechek/homebrew-tap/main/Casks/pacer.rb" 2>/dev/null || true)"
+  if printf '%s\n' "$cask" | grep -q "^  version \"${version}\"$"; then
+    ok "Homebrew cask advertises ${version}"
+  else
+    warn "Homebrew cask (EricAndrechek/homebrew-tap) is not at ${version} — check the Release run's \"Update the Homebrew cask\" step"
+  fi
+
   echo
   [ "$rc" = 0 ] && ok "${tag} verified: published, advertised, and signed correctly." \
                 || bad "${tag} verification FAILED — see above."

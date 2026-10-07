@@ -85,6 +85,12 @@ keeps all of your data on your own Mac.
 4. The first time, macOS asks permission for Pacer to read Claude Code's files.
    Click **Allow** — that's how Pacer sees your usage. Nothing leaves your Mac.
 
+Or with Homebrew:
+
+```sh
+brew install --cask ericandrechek/tap/pacer
+```
+
 That's all. **Pacer keeps itself up to date automatically:** when a new version
 ships, it offers to install it for you — no re-downloading, no reinstalling.
 
