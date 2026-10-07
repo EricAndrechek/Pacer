@@ -122,6 +122,19 @@ public struct OAuthPollScheduler: Sendable {
         /// its lanes share, delaying tokens the other client never touches.
         public var externalLastPollAt: Date?
 
+        /// When another client last *got an answer* on this token: a reading
+        /// Pacer has also taken in. That is fresh data Pacer didn't have to
+        /// spend budget on, so it counts toward "Pacer has a recent reading" in
+        /// `overdueForOwnPoll`.
+        ///
+        /// Without it, an account whose only token cswap polls looked
+        /// permanently overdue: every sample came from cswap, Pacer's own
+        /// `lastPolledAt` never moved, so Pacer kept probing straight past
+        /// cswap's announced schedule. On 2026-10-07 the two polled the active
+        /// account's token 38 s apart, both took a 429, and its reading went
+        /// 14 minutes stale (#207).
+        public var externalLastSuccessAt: Date?
+
         /// Set after a 429/transport failure; the lane is ineligible until
         /// this passes. The poller grows it per-lane on repeated failures.
         public var cooldownUntil: Date?
@@ -129,9 +142,11 @@ public struct OAuthPollScheduler: Sendable {
 
         public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil,
                     externalNextPollAt: Date? = nil, externalLastPollAt: Date? = nil,
+                    externalLastSuccessAt: Date? = nil,
                     account: AccountStatus = .unknown) {
             self.externalNextPollAt = externalNextPollAt
             self.externalLastPollAt = externalLastPollAt
+            self.externalLastSuccessAt = externalLastSuccessAt
             self.lastPolledAt = lastPolledAt
             self.cooldownUntil = cooldownUntil
             self.account = account
@@ -239,14 +254,18 @@ public struct OAuthPollScheduler: Sendable {
         return max(own, byExternalSchedule(l, earliest: own, interval: interval, now: now))
     }
 
-    /// True when Pacer has stood aside for this lane longer than it is willing
-    /// to. Only meaningful where another client is known to be on the token; a
-    /// lane it has never polled qualifies immediately, since the first reading
-    /// is what proves the token works at all.
+    /// True when this token has gone without a reading for longer than Pacer
+    /// will stand aside. Only meaningful where another client is known to be
+    /// on the token. The reading can be Pacer's own poll or one the other
+    /// client got and Pacer took in. Either is data, and only a token nobody
+    /// is getting answers from needs Pacer to step in. With no reading from
+    /// either, the lane qualifies at once: the first reading is what proves
+    /// the token works at all.
     private func overdueForOwnPoll(_ l: LaneState, now: Date) -> Bool {
         guard l.externalNextPollAt != nil || l.externalLastPollAt != nil else { return false }
-        guard let own = l.lastPolledAt else { return true }
-        return now.timeIntervalSince(own) >= tuning.externalYieldMax
+        guard let freshest = [l.lastPolledAt, l.externalLastSuccessAt].compactMap({ $0 }).max()
+        else { return true }
+        return now.timeIntervalSince(freshest) >= tuning.externalYieldMax
     }
 
     /// Keep clear of another client's known request on the same token.

@@ -927,6 +927,9 @@ public actor OAuthPoller: TokenPoolTesting {
             lanes[i].state.externalLastPollAt = hold.spentAt
             // Forwards: where cswap says it is going next.
             lanes[i].state.externalNextPollAt = hold.nextPollAt
+            // And when it last got an answer, which Pacer ingests: a reading
+            // Pacer has, so the lane isn't "overdue" for one of its own (#207).
+            lanes[i].state.externalLastSuccessAt = reading.fetchedAt
         }
     }
 
