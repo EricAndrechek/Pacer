@@ -626,6 +626,33 @@ struct PaceScriptTests {
         #expect(result.out.contains("account switched"))
     }
 
+    /// `json` names whose windows it read and since when that login has been
+    /// signed in, so a loop can see a switch without diffing accounts (#184).
+    @Test func jsonSaysWhoseWindowsAndSinceWhen() throws {
+        let box = try Sandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.42
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 3600
+        pacer_account_info{account="org-home",name="h",active="true"} 1
+        """)
+        let server = try StubServer(status: 200, body: """
+        {
+          "accountId" : "org-work",
+          "currentAccountId" : "org-home",
+          "currentAccountSince" : "2026-10-07T00:07:30Z",
+          "sessionId" : "abc-123"
+        }
+        """)
+        defer { server.stop() }
+        let result = try run(box, ["json"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                     "PACE_SESSION_API": server.base])
+        #expect(result.status == 0)
+        #expect(result.out.contains("\"account\": \"org-home\""))
+        #expect(result.out.contains("\"accountSince\": \"2026-10-07T00:07:30Z\""))
+        let json = try JSONSerialization.jsonObject(with: Data(result.out.utf8)) as? [String: Any]
+        #expect(json?["ok"] as? Bool == true)
+    }
+
     /// An `--account` the caller gave is theirs to change, so a waiter on it
     /// stays on it even when the session's login moves.
     @Test func waitKeepsAnExplicitAccount() throws {

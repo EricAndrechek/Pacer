@@ -59,6 +59,9 @@ public struct PacerSessionLookup: Codable, Sendable {
     /// session the lookup can find is on the default login, because pinned
     /// profiles aren't scanned (see `AccountTrailRecorder.poll`).
     public let currentAccountId: String?
+    /// When the default login became `currentAccountId`: the last switch. A
+    /// loop can compare it between reads to see a switch happen.
+    public let currentAccountSince: Date?
     public let projectPath: String?
     /// Last path component of `projectPath`, for display.
     public let project: String?
@@ -88,7 +91,11 @@ public struct PacerSessionList: Codable, Sendable {
 
     public struct Row: Codable, Sendable {
         public let sessionId: String
+        /// The account its last turn was stamped with.
         public let accountId: String?
+        /// For an active session, the login it bills to now (see
+        /// `PacerSessionLookup.currentAccountId`); otherwise `accountId`.
+        public let currentAccountId: String?
         public let model: String?
         public let projectPath: String?
         public let project: String?
@@ -139,8 +146,16 @@ public enum PacerSessionLookupBuilder {
             predicate: #Predicate { $0.lastSeenAt >= cutoff },
             sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
         descriptor.fetchLimit = 200
+        let currentLogin = AccountParallelism.trail(context: context).currentDefaultLogin?.accountId
+        // One row per session, its newest: a session that spans a switch has a
+        // row for each login, and listed both (#190).
+        var seen = Set<String>()
         let rows = ((try? context.fetch(descriptor)) ?? [])
-            .filter { account == nil || $0.accountId == account }
+            .filter { seen.insert($0.sessionId).inserted }
+        func current(_ row: AccountSessionInfo) -> String {
+            LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now) == .active
+                ? (currentLogin ?? row.accountId) : row.accountId
+        }
 
         // One lookup for every project involved, rather than one per session.
         let paths = Set(rows.map(\.projectPath))
@@ -161,10 +176,11 @@ public enum PacerSessionLookupBuilder {
         return PacerSessionList(
             schemaVersion: 1,
             generatedAt: now,
-            sessions: rows.map { row in
+            sessions: rows.filter { account == nil || current($0) == account }.map { row in
                 PacerSessionList.Row(
                     sessionId: row.sessionId,
                     accountId: row.accountId,
+                    currentAccountId: current(row),
                     model: row.topModel.isEmpty ? nil : row.topModel,
                     projectPath: row.projectPath,
                     project: URL(fileURLWithPath: row.projectPath).lastPathComponent,
@@ -207,7 +223,7 @@ public enum PacerSessionLookupBuilder {
             if seen.insert(row.model).inserted { models.append(row.model) }
         }
         let path = newest.projectPath
-        let current = AccountParallelism.trail(context: context).currentDefaultLogin?.accountId
+        let login = AccountParallelism.trail(context: context).currentDefaultLogin
         return PacerSessionLookup(
             schemaVersion: 1,
             generatedAt: now,
@@ -215,7 +231,8 @@ public enum PacerSessionLookupBuilder {
             model: models.first,
             models: models,
             accountId: newest.accountId,
-            currentAccountId: current ?? newest.accountId,
+            currentAccountId: login?.accountId ?? newest.accountId,
+            currentAccountSince: login?.startedAt,
             projectPath: path,
             project: path.map { URL(fileURLWithPath: $0).lastPathComponent },
             lastActiveAt: newest.sampledAt)

@@ -267,7 +267,9 @@ public enum PacerAccountsBuilder {
         let context = ModelContext(container)
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let rollups = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>())) ?? []
-        let pinnedRoots = AccountParallelism.trail(context: context).openPinnedRoots
+        let trail = AccountParallelism.trail(context: context)
+        let pinnedRoots = trail.openPinnedRoots
+        let currentLogin = trail.currentDefaultLogin?.accountId
         let rootsByAccount = Dictionary(grouping: pinnedRoots.keys) { pinnedRoots[$0] ?? "" }
 
         // How many sessions are drawing on each account right now. One bounded
@@ -286,10 +288,15 @@ public enum PacerAccountsBuilder {
         var active: [String: Int] = [:]
         var recent: [String: Int] = [:]
         for session in newestBySession.values {
-            recent[session.accountId, default: 0] += 1
-            if LiveSessionActivity.from(lastSeen: session.lastSeenAt, now: now) == .active {
-                active[session.accountId, default: 0] += 1
-            }
+            let isActive = LiveSessionActivity.from(lastSeen: session.lastSeenAt, now: now) == .active
+            // A running session bills to the login it is on now, not the one its
+            // last turn was stamped with: after a switch that turn is on the old
+            // login until the session writes another, and the old login kept every
+            // session for that long (#190). An idle one is counted where it last
+            // drew, since nothing says it will draw again.
+            let account = (isActive ? currentLogin : nil) ?? session.accountId
+            recent[account, default: 0] += 1
+            if isActive { active[account, default: 0] += 1 }
         }
 
         var usage: [String: PacerAccountList.Usage] = [:]

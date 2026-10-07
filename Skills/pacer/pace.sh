@@ -226,6 +226,7 @@ END {
 SESSION_MODEL=""
 SESSION_MODELS=""
 SESSION_ACCOUNT=""
+SESSION_ACCOUNT_SINCE=""
 session_looked_up=false
 resolve_session() {
   $session_looked_up && return 0
@@ -244,6 +245,7 @@ resolve_session() {
   SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"currentAccountId"/ { print $4; exit }')
   [ -n "$SESSION_ACCOUNT" ] \
     || SESSION_ACCOUNT=$(printf '%s\n' "$body" | awk -F'"' '/"accountId"/ { print $4; exit }')
+  SESSION_ACCOUNT_SINCE=$(printf '%s\n' "$body" | awk -F'"' '/"currentAccountSince"/ { print $4; exit }')
   # Every model this session is running, not just the newest turn's. A
   # subagent shares its parent's session id, so this is how we find out that
   # "the session's model" is not a single answer.
@@ -596,8 +598,9 @@ cmd_sessions() {
       q = index(rest, "\"")
       return q ? substr(rest, 1, q - 1) : ""
     }
-    /^ *\{/ { acct = ""; model = ""; path = ""; proj = ""; repo = ""; when = ""; state = ""; next }
+    /^ *\{/ { acct = ""; cur = ""; model = ""; path = ""; proj = ""; repo = ""; when = ""; state = ""; next }
     /"accountId" *:/  { acct  = val($0); next }
+    /"currentAccountId" *:/ { cur = val($0); next }
     /"model" *:/      { model = val($0); next }
     /"projectPath" *:/{ path  = val($0); next }
     /"project" *:/    { proj  = val($0); next }
@@ -606,7 +609,7 @@ cmd_sessions() {
     /"activity" *:/   { state = val($0); next }
     /^ *\}/ {
       if (proj != "" || path != "")
-        printf "%s%s%s%s%s%s%s%s%s%s%s\n", state, SEP, substr(acct, 1, 8), SEP,
+        printf "%s%s%s%s%s%s%s%s%s%s%s\n", state, SEP, substr(cur != "" ? cur : acct, 1, 8), SEP,
                proj, SEP, (model == "" ? "?" : model), SEP, path, SEP, repo
     }')
   [ -n "$rows" ] || { echo "No sessions in the last hour."; return 0; }
@@ -632,7 +635,15 @@ cmd_json() {
     exit "$(off_exit_code)"
   }
   require_selection
-  printf '{\n  "ok": true,\n  "at": "%s",\n  "windows": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Whose windows these are, and since when that login has been signed in,
+  # so a loop can see a switch without diffing every window's account (#184).
+  local acct since
+  acct=$(selected_rows | awk -F"$SEP" 'NR == 1 { print $1; exit }')
+  since=""; [ "$acct" = "$SESSION_ACCOUNT" ] && since="${SESSION_ACCOUNT_SINCE:-}"
+  printf '{\n  "ok": true,\n  "at": "%s",\n  "account": %s,\n  "accountSince": %s,\n  "windows": [\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$( [ -n "$acct" ] && printf '"%s"' "$acct" || printf null)" \
+    "$( [ -n "$since" ] && printf '"%s"' "$since" || printf null)"
   selected_rows | awk -F"$SEP" -v WANT="$MODEL" '
     function norm(v) { v = tolower(v); gsub(/[^a-z0-9]/, "", v); return v }
     function binds(model,   m) {
