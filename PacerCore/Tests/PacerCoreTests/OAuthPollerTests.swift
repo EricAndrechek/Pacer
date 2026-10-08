@@ -402,6 +402,34 @@ import Testing
         #expect(monitor.current?.since == since)
     }
 
+    /// #214: a new login's token must reach the scheduler as a first-poll
+    /// candidate the moment the keychain offers it, not after the idle gate.
+    @Test("a new keychain token is marked probeFirst by refreshSignedInCredential")
+    func newKeychainTokenIsProbeFirst() async throws {
+        let container = try Self.makeContainer()
+        let blob = LockedBox(Self.keychainBlob(token: "tokA"))
+        let kc = KeychainOAuth(rawReader: { .success(blob.value) })
+        let transport: OAuthClient.Transport = { _ in
+            try HTTPOutcome.success(
+                jsonBody: #"{"five_hour":{"utilization":10}}"#,
+                headers: ["anthropic-organization-id": "orgA"]).materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false })
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+        _ = await poller.runOnce()   // tokA polled, primary
+        #expect(await poller.snapshot().probeFirstLaneCount == 0)
+
+        blob.value = Self.keychainBlob(token: "tokB")
+        await poller.refreshSignedInCredential()
+        let snap = await poller.snapshot()
+        #expect(snap.laneCount == 2)
+        #expect(snap.probeFirstLaneCount == 1)
+
+        _ = await poller.runOnce()   // polls the never-polled lane
+        #expect(await poller.snapshot().probeFirstLaneCount == 0)
+    }
+
     /// The restart case, which is where this went wrong in the field.
     ///
     /// Lane classification is restored from persisted meta, and so is
@@ -848,5 +876,15 @@ final class TestClock: PollerClock, @unchecked Sendable {
         }
         let discoveries = (keychain.reads - before) / perDiscovery
         #expect(discoveries == 3, "got \(discoveries) discoveries over 150 s")
+    }
+}
+
+private final class LockedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Data
+    init(_ v: Data) { stored = v }
+    var value: Data {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); defer { lock.unlock() }; stored = newValue }
     }
 }

@@ -25,6 +25,30 @@ import Testing
         #expect(empty == .wait(seconds: 600))
     }
 
+    // MARK: - Signed-in token's first poll (#214)
+
+    private var idlePool: [Lane] {
+        [Lane(lastPolledAt: at(-60), account: .primary),
+         Lane(lastPolledAt: at(-60), account: .primary)]
+    }
+
+    @Test func probeFirstLanePollsAheadOfIdleCadenceGate() {
+        let lanes = idlePool + [Lane(account: .unknown, probeFirst: true)]
+        #expect(sched.decide(lanes: lanes, lastActivityAt: nil, now: t0) == .poll(laneIndex: 2))
+        #expect(sched.decide(lanes: lanes, lastActivityAt: at(-5000), now: t0) == .poll(laneIndex: 2))
+    }
+
+    @Test func neverPolledLaneWithoutProbeFirstStillWaitsBehindGate() {
+        let lanes = idlePool + [Lane(account: .unknown)]
+        #expect(sched.decide(lanes: lanes, lastActivityAt: nil, now: t0) == .wait(seconds: 540))
+    }
+
+    @Test func probeFirstLaneUnderCooldownIsNotPolled() {
+        let lanes = idlePool + [Lane(cooldownUntil: at(120), account: .unknown, probeFirst: true)]
+        let d = sched.decide(lanes: lanes, lastActivityAt: nil, now: t0)
+        #expect(d != .poll(laneIndex: 2))
+    }
+
     // MARK: - Single lane: floors at the per-token invariant
 
     @Test func singleLaneIdleWaitsIdleInterval() {

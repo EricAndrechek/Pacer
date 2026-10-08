@@ -194,6 +194,8 @@ public actor OAuthPoller: TokenPoolTesting {
         /// account's token drops to the slow secondary sweep and its readings
         /// are filed as some other account's).
         public let misclassifiedLaneCount: Int
+        /// Lanes the scheduler will poll ahead of its cadence gate (#214).
+        public let probeFirstLaneCount: Int
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -403,7 +405,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 guard lane.state.account != .unknown, let active = activeAccountKey else { return false }
                 let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
                 return belongs != (lane.state.account == .primary)
-            }.count
+            }.count,
+            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count
         )
     }
 
@@ -540,7 +543,9 @@ public actor OAuthPoller: TokenPoolTesting {
         // token as unresolved, and an unresolved token cannot veto anything.
         await loadPersistedMetaIfNeeded()
         lastDiscoveryAt = nil
+        let before = lanes.count
         ensureLanes()
+        wakeIfNewLane(countBefore: before)
     }
 
     /// Read every token source now. Called when a credential setting changes
@@ -549,8 +554,20 @@ public actor OAuthPoller: TokenPoolTesting {
     public func rediscoverTokens() async {
         await loadPersistedMetaIfNeeded()
         lastDiscoveryAt = nil
+        let before = lanes.count
         ensureLanes()
+        wakeIfNewLane(countBefore: before)
         await publishStatus()
+    }
+
+    /// Cancel the loop's nap when discovery added a lane or marked one
+    /// `probeFirst`, so the loop re-decides now instead of when the nap ends
+    /// (#214). Never polls here: polling stays in the loop, because actor
+    /// reentrancy could otherwise interleave two polls.
+    private func wakeIfNewLane(countBefore: Int) {
+        if lanes.count > countBefore || lanes.contains(where: { $0.state.probeFirst }) {
+            notifyActivity()
+        }
     }
 
     /// Publish the account of the token the keychain holds, if a keychain
@@ -1176,6 +1193,13 @@ public actor OAuthPoller: TokenPoolTesting {
         // did not).
         liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
         liveKeychainReadAt = liveKeychainToken == nil ? nil : now
+        // The token Claude Code is billing now, never polled: let the
+        // scheduler poll it ahead of the endpoint-cadence gate (#214).
+        if let live = liveKeychainToken,
+           let i = lanes.firstIndex(where: { $0.credential.accessToken == live }),
+           lanes[i].state.account == .unknown, lanes[i].state.lastPolledAt == nil {
+            lanes[i].state.probeFirst = true
+        }
         publishSignedInCredential()
     }
 
@@ -1286,6 +1310,7 @@ public actor OAuthPoller: TokenPoolTesting {
             return lastOutcome ?? .transport
         }
         lanes[idx].state.lastPolledAt = now
+        lanes[idx].state.probeFirst = false
 
         let previous = lastOutcome
         let previousLane = lastPolledLaneId
