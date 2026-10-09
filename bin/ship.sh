@@ -292,14 +292,23 @@ PY
     warn "skipped EdDSA crypto-verify (need uv + a signature/pubkey); asset+length checks still cover integrity"
   fi
 
-  # The Homebrew cask. A warning, not a failure: the release workflow bumps it
-  # after publishing, and a stale cask doesn't make the release itself wrong.
-  local cask
-  cask="$(curl -fsSL "https://raw.githubusercontent.com/EricAndrechek/homebrew-tap/main/Casks/pacer.rb" 2>/dev/null || true)"
+  # The Homebrew cask. A warning, not a failure: the tap pins it itself once
+  # the release is out (the "Homebrew tap" workflow asks it to; its autobump
+  # verifies the DMG first), and a stale cask doesn't make the release wrong.
+  # Read through the API, not raw.githubusercontent.com, which serves a copy
+  # up to five minutes old; and give the tap's run a few minutes to land.
+  local cask cask_waited=0
+  while :; do
+    cask="$(gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb --jq .content 2>/dev/null | base64 --decode 2>/dev/null || true)"
+    printf '%s\n' "$cask" | grep -q "^  version \"${version}\"$" && break
+    [ "$cask_waited" -ge 600 ] && break
+    sleep 20; cask_waited=$((cask_waited + 20))
+  done
   if printf '%s\n' "$cask" | grep -q "^  version \"${version}\"$"; then
+    [ "$cask_waited" -gt 0 ] && info "waited ${cask_waited}s for the Homebrew tap"
     ok "Homebrew cask advertises ${version}"
   else
-    warn "Homebrew cask (EricAndrechek/homebrew-tap) is not at ${version} — check the Release run's \"Update the Homebrew cask\" step"
+    warn "Homebrew cask (EricAndrechek/homebrew-tap) is not at ${version} after ${cask_waited}s — check: gh run list -R EricAndrechek/homebrew-tap"
   fi
 
   echo

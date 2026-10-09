@@ -1,0 +1,47 @@
+# When a release has been published, ask the Homebrew tap to pin it.
+#
+# The tap pins releases itself (EricAndrechek/homebrew-tap's `autobump`):
+# its own livecheck finds the version, and it pins it only once the DMG proves
+# to be signed by our team, notarized and stapled, and newer than the current
+# pin. This repo holds no key that can write to the tap. HOMEBREW_TAP_TRIGGER_TOKEN
+# is a fine-grained token limited to the tap's Actions (read & write): all it
+# can do is start that check early. Without it, the tap's six-hourly schedule
+# picks the release up anyway.
+#
+# A workflow of its own, chained to Release, rather than a step inside it: it
+# can be run by hand to test the token without cutting a release, and it is the
+# file another project copies to publish through the same tap (change `cask=`).
+
+name: Homebrew tap
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+# The tap is reached with the trigger token, not this repo's GITHUB_TOKEN.
+permissions: {}
+
+jobs:
+  ask-tap:
+    # A real release only: Release succeeded, started by a tag push (not a
+    # dry run, which is a workflow_dispatch). Release itself never runs for a
+    # fork's pull request, so nothing here runs on behalf of one.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask EricAndrechek/homebrew-tap to pin the release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TRIGGER_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TRIGGER_TOKEN is not set; the tap will pick the release up on its six-hourly schedule"
+            exit 0
+          fi
+          gh workflow run autobump.yml -R EricAndrechek/homebrew-tap -f cask=pacer
+          echo "::notice title=Homebrew tap::asked EricAndrechek/homebrew-tap to pin the latest release"
