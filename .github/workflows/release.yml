@@ -532,35 +532,8 @@ jobs:
             git push origin gh-pages
           )
 
-      - name: Update the Homebrew cask
-        if: github.event_name == 'push' && github.event.inputs.dry_run != 'true'
-        # EricAndrechek/homebrew-tap's Casks/pacer.rb points at this release's
-        # DMG. A deploy key scoped to that one repo pushes the bump. The release
-        # is already published by now, so a failure here warns rather than
-        # failing the run, and `bin/ship.sh verify` reports a stale cask.
-        continue-on-error: true
-        env:
-          TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
-          sha="$(shasum -a 256 "${DMG_PATH}" | cut -d' ' -f1)"
-          key="${RUNNER_TEMP}/tap-key"
-          printf '%s\n' "${TAP_KEY}" > "${key}"
-          chmod 600 "${key}"
-          export GIT_SSH_COMMAND="ssh -i ${key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          git clone -q --depth 1 git@github.com:EricAndrechek/homebrew-tap.git "${RUNNER_TEMP}/tap"
-          cd "${RUNNER_TEMP}/tap"
-          sed -i '' -E "s/^  version \"[^\"]*\"/  version \"${version}\"/; s/^  sha256 \"[^\"]*\"/  sha256 \"${sha}\"/" Casks/pacer.rb
-          if git diff --quiet; then echo "cask already at ${version}"; exit 0; fi
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -qam "pacer ${version}"
-          git push -q origin HEAD:main
-          echo "::notice title=Homebrew cask::pacer ${version}, sha256 ${sha}"
-
       - name: Clean up ephemeral keychain
         if: always()
         run: |
           security delete-keychain "${RUNNER_TEMP}/build.keychain-db" 2>/dev/null || true
-          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary-key.p8" "${RUNNER_TEMP}/sparkle.key" "${RUNNER_TEMP}/tap-key"
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary-key.p8" "${RUNNER_TEMP}/sparkle.key"
