@@ -376,6 +376,23 @@ public final class ScanCoordinator {
     /// timeout, so a held observation always gets a fresh read before it
     /// would be accepted unverified.
     private static let credentialCheckInterval: TimeInterval = 30
+    /// The same gap for a login pass a watcher woke (#192). Much shorter,
+    /// because the watcher already filtered for a real identity change; long
+    /// enough that a stale session flip-flopping the config cannot turn into
+    /// a keychain read per rewrite.
+    private static let loginPassCredentialCheckInterval: TimeInterval = 2
+    /// Home directory the login lives under. The real one in the app; a
+    /// temporary one in tests, so nothing reads the developer's own login.
+    private let homeDirectory: URL
+    /// Watches the files a login change moves (#192). Started by
+    /// `runForever` in live mode only; tests drive `followLoginChange`
+    /// directly.
+    private var loginWatcher: LoginChangeWatcher?
+    /// A login pass queued behind a cycle, and whether any signal folded into
+    /// it was the keychain's. A burst of signals is one pass.
+    private var loginPassQueued = false
+    private var loginPassKeychainMoved = false
+    private var loginPassSeenAt: Date?
     private var scanInFlight = false
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
@@ -494,10 +511,12 @@ public final class ScanCoordinator {
         statsCacheURL: URL? = nil,
         resolver: ClaudePathResolver = ClaudePathResolver(),
         oauthClient: OAuthClient? = nil,
-        oauthPoolStore: TokenPoolStoring = EphemeralTokenPoolStore()
+        oauthPoolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         self.container = container
         self.configuration = configuration
+        self.homeDirectory = homeDirectory
         self.scanner = JSONLScanner()
         self.watcher = JSONLWatcher(mode: configuration.watcherMode)
         self.resolver = resolver
@@ -507,11 +526,19 @@ public final class ScanCoordinator {
             self.probe = nil
         }
         if let oauthClient {
+            let switcherURL = SwitcherUsageCache.defaultURL(homeDirectory: homeDirectory)
+            // A test process never reads the developer's own cswap cache — its
+            // roster would land in the test's store as accounts. A test that
+            // wants one passes a home of its own.
+            let readsMachine = PacerPreferences.isTestProcess
+                && homeDirectory.standardizedFileURL
+                    == FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
             self.oauthPoller = OAuthPoller(
                 client: oauthClient,
                 container: container,
                 configuration: configuration.oauthPolling,
                 poolStore: oauthPoolStore,
+                switcherCache: { readsMachine ? .empty : SwitcherUsageCache.read(at: switcherURL) },
                 signedInCredential: signedInCredential
             )
         } else {
@@ -724,6 +751,8 @@ public final class ScanCoordinator {
         signedInCredential.setOnAccountChange {
             Task { await watcher.requestScan() }
         }
+        // And the login itself, pushed rather than found (#192).
+        startLoginWatcher()
 
         for await _ in stream {
             // Skip if a scan is already underway. The watcher fires
@@ -748,6 +777,8 @@ public final class ScanCoordinator {
 
     public func stop() async {
         signedInCredential.setOnAccountChange(nil)
+        loginWatcher?.stop()
+        loginWatcher = nil
         // Flush the dedup index unconditionally on the way out: writes are
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
@@ -758,6 +789,198 @@ public final class ScanCoordinator {
         }
         visibilityObservationTask?.cancel()
         visibilityObservationTask = nil
+    }
+
+    // MARK: - Following the login
+
+    /// The attribution trail's recorder, built on first use because it needs
+    /// the scan context, which is born on `@ScanActor`. Reads the config the
+    /// resolver says names the default login (`loginConfigRoot`).
+    /// Test seam: the poller this coordinator owns.
+    var oauthPollerForTesting: OAuthPoller? { oauthPoller }
+
+    private func trailRecorder() -> AccountTrailRecorder {
+        if let accountTrailRecorder { return accountTrailRecorder }
+        let made = AccountTrailRecorder(
+            context: context, homeDirectory: homeDirectory,
+            defaultRoot: resolver.loginConfigRoot)
+        accountTrailRecorder = made
+        return made
+    }
+
+    /// Follow the login. Pacer's headline numbers should describe the
+    /// account the user's NEXT message will be billed to, and until now
+    /// nothing connected the two: `setActiveAccount` was reachable only
+    /// from the Tokens settings switcher, so a login change outside the
+    /// app left Pacer reporting an account that had stopped serving
+    /// requests — a 100% weekly window belonging to an account that was
+    /// no longer in use, which is worse than no number at all.
+    ///
+    /// Returns the activation to run, or nil when the login has not moved;
+    /// the scan cycle fires it and forgets, because it is not work for the
+    /// scan's budget, and a login pass awaits it, because finishing the
+    /// switch is that pass's whole job.
+    ///
+    /// Carries a seed for the account (#241): the login just accepted may be
+    /// one Pacer has never polled, and `setActiveAccount` creates its row
+    /// from this before activating it, so the switch lands on every surface
+    /// before the first reading does.
+    private func loginTransition(
+        _ observedAccount: String?, recorder: AccountTrailRecorder
+    ) -> (id: String, seed: Account.Seed)? {
+        guard let observedAccount, observedAccount != lastObservedLoginAccount else { return nil }
+        let previous = lastObservedLoginAccount
+        lastObservedLoginAccount = observedAccount
+        // Only on a *transition*. Following the steady state instead would
+        // make the Tokens settings switcher useless — a manual pick would
+        // be silently reverted on the next cycle, roughly every twenty
+        // seconds. Pacer should follow the login when the login moves, and
+        // otherwise respect what the user asked to look at.
+        //
+        // `previous == nil` is the first observation of this process, not
+        // a switch. That used to mean "do nothing", to avoid overriding a
+        // deliberate choice made before the last restart — and it left the
+        // poller pointed at whatever account it had persisted, forever.
+        //
+        // Which is a much worse failure. Restart Pacer while signed into a
+        // different account than the one it last saved (any `make install`
+        // does this) and the poller keeps treating the *other* account as
+        // primary: the signed-in account's token drops to the slow
+        // secondary sweep, its readings are recorded as a non-active
+        // account's, and nothing ever corrects it, because a transition
+        // never happens again. Measured on 2026-09-09: the signed-in
+        // account went 18 minutes without a reading while it climbed from
+        // 82% to 97%, and Pacer spent 19 of the 21 polls in that window on
+        // the account the user was not using.
+        //
+        // So reconcile on the first observation too. Claude Code's own
+        // record of who is signed in outranks a pick made before a
+        // restart, and `setActiveAccount` no-ops when it already agrees.
+        guard oauthPoller != nil else { return nil }
+        if previous == nil {
+            Log.write("ScanCoordinator", "reconciling active account with the observed login")
+        }
+        // The config's own label when the observation is of this account;
+        // otherwise (a span the credential opened) all that is known is the id.
+        let seed = recorder.lastDefaultObservation
+            .flatMap { $0.accountKey == observedAccount ? Account.Seed($0) : nil }
+            ?? Account.Seed(
+                id: observedAccount,
+                organizationId: observedAccount == Account.defaultKey ? nil : observedAccount)
+        return (observedAccount, seed)
+    }
+
+    /// A watcher saw the login move (#192): settle it now instead of on the
+    /// next scan cycle, which on a quiet machine could be minutes away.
+    ///
+    /// cswap's cache is ingested straight away — roster and readings — and
+    /// needs nothing else. A config or keychain change runs a *login pass*:
+    /// the trail's half of a scan cycle and nothing more — no transcript
+    /// walk, no rollups — so following a switch costs a config parse and at
+    /// most one keychain read, not the ~1 s full walk a requested cycle
+    /// would do. Passes queue behind a cycle in flight (they share the
+    /// trail and the scan context), and a burst of signals while one is
+    /// queued folds into it.
+    public func followLoginChange(_ signal: LoginChangeWatcher.Signal, seenAt: Date = Date()) async {
+        if signal == .switcher {
+            await oauthPoller?.ingestSwitcherCacheNow()
+            return
+        }
+        if signal == .keychain { loginPassKeychainMoved = true }
+        loginPassSeenAt = min(loginPassSeenAt ?? seenAt, seenAt)
+        guard !loginPassQueued else { return }
+        loginPassQueued = true
+        await withMarksToItself {
+            loginPassQueued = false
+            let keychainMoved = loginPassKeychainMoved
+            let seen = loginPassSeenAt ?? seenAt
+            loginPassKeychainMoved = false
+            loginPassSeenAt = nil
+            await runLoginPass(keychainMoved: keychainMoved, seenAt: seen)
+        }
+    }
+
+    /// The trail's half of a scan cycle — see `followLoginChange`.
+    ///
+    /// The stale-config veto is the trail's and runs unchanged: a config
+    /// naming another account is held until the keychain has been read after
+    /// the file first named it, then accepted if the token is that account's
+    /// or unresolved, rejected if it resolves to anyone else. All this pass
+    /// changes is that the read happens now, awaited, instead of on a later
+    /// cycle.
+    private func runLoginPass(keychainMoved: Bool, seenAt: Date) async {
+        let recorder = trailRecorder()
+        if keychainMoved, let oauthPoller {
+            // The credential moved. Read it before judging anything, and judge
+            // the config again even though the file may not have changed: a
+            // switch whose keychain write landed after its config write was
+            // rejected against the old token, and the file will not be
+            // re-read until Claude Code next rewrites it.
+            await oauthPoller.refreshSignedInCredential()
+            lastCredentialCheckAt = Date()
+            recorder.rejudgeDefaultLogin()
+        }
+        var polled = recorder.poll(
+            credential: signedInCredential.current, credentialExpected: oauthPoller != nil)
+        if recorder.needsCredentialCheck, let oauthPoller {
+            let now = Date()
+            let wait = lastCredentialCheckAt.map {
+                Self.loginPassCredentialCheckInterval - now.timeIntervalSince($0)
+            } ?? 0
+            if wait <= 0 {
+                lastCredentialCheckAt = now
+                await oauthPoller.refreshSignedInCredential()
+                // Unchanged file, so this re-decides the held observation
+                // against the reading just taken.
+                polled = recorder.poll(credential: signedInCredential.current, credentialExpected: true)
+            } else {
+                // A read went out moments ago, before this write. Come back
+                // when the throttle allows one rather than leave the
+                // observation waiting for a cycle.
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    await self?.followLoginChange(.config, seenAt: seenAt)
+                }
+            }
+        }
+        if let credential = signedInCredential.current { recorder.reconcile(with: credential) }
+        let observedAccount = polled.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
+        persister?.accountTrail = recorder.trail()
+        // The activation now, not at the next cycle's terminal save: the
+        // session lookup (`/v1/session`'s `currentAccountId`) reads the trail
+        // from the store. Nothing else is pending — passes run between cycles.
+        if context.hasChanges {
+            do { try context.save() } catch { log("login pass: save failed: \(error)") }
+        }
+        if let accepted = recorder.acceptedThisPoll {
+            log("login pass: trail accepted \(accepted.prefix(4)) "
+                + "(+\(Int(Date().timeIntervalSince(seenAt) * 1000)) ms since seen)")
+        }
+        if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
+            await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: seenAt)
+        }
+    }
+
+    /// Arm the login watcher (#192). Live mode only: tests drive
+    /// `followLoginChange` themselves and must never watch the developer's
+    /// real config or keychain.
+    private func startLoginWatcher() {
+        guard case .live = configuration.watcherMode, loginWatcher == nil else { return }
+        let recorder = trailRecorder()
+        let candidates = ActiveAccountObserver().configCandidates(
+            forRoot: recorder.defaultRoot, homeDirectory: homeDirectory)
+        // Without the poller there is no credential to confirm against and no
+        // cswap ingest to run, so only the config is worth watching.
+        let polling = oauthPoller != nil
+        let watcher = LoginChangeWatcher(
+            configCandidates: candidates,
+            keychainFile: polling ? LoginChangeWatcher.defaultKeychainFile(homeDirectory: homeDirectory) : nil,
+            switcherCache: polling ? SwitcherUsageCache.defaultURL(homeDirectory: homeDirectory) : nil,
+            onSignal: { [weak self] signal, seenAt in
+                Task { await self?.followLoginChange(signal, seenAt: seenAt) }
+            })
+        loginWatcher = watcher
+        watcher.start()
     }
 
     // MARK: - Visibility-aware cadence
@@ -1019,8 +1242,7 @@ public final class ScanCoordinator {
         // Notice a login change before anything is inserted, so samples
         // parsed this cycle are attributed against an up-to-date trail.
         // Costs one `stat` when the config hasn't been rewritten.
-        let recorder = accountTrailRecorder ?? AccountTrailRecorder(context: context)
-        if accountTrailRecorder == nil { accountTrailRecorder = recorder }
+        let recorder = trailRecorder()
         // Bind each session profile to its account before anything under it
         // is attributed. Runs first so a profile discovered this cycle is
         // already in the trail when its transcripts are parsed below —
@@ -1051,52 +1273,8 @@ public final class ScanCoordinator {
         let observedAccount = polledAccount.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         activePersister.accountTrail = recorder.trail()
 
-        // Follow the login. Pacer's headline numbers should describe the
-        // account the user's NEXT message will be billed to, and until now
-        // nothing connected the two: `setActiveAccount` was reachable only
-        // from the Tokens settings switcher, so a login change outside the
-        // app left Pacer reporting an account that had stopped serving
-        // requests — a 100% weekly window belonging to an account that was
-        // no longer in use, which is worse than no number at all.
-        //
-        // Idempotent (the poller no-ops when the id already matches) and
-        // fire-and-forget, because switching swaps sample timelines and
-        // that is not work to run inside the scan's budget.
-        if let observedAccount, observedAccount != lastObservedLoginAccount {
-            let previous = lastObservedLoginAccount
-            lastObservedLoginAccount = observedAccount
-            // Only on a *transition*. Following the steady state instead would
-            // make the Tokens settings switcher useless — a manual pick would
-            // be silently reverted on the next cycle, roughly every twenty
-            // seconds. Pacer should follow the login when the login moves, and
-            // otherwise respect what the user asked to look at.
-            //
-            // `previous == nil` is the first observation of this process, not
-            // a switch. That used to mean "do nothing", to avoid overriding a
-            // deliberate choice made before the last restart — and it left the
-            // poller pointed at whatever account it had persisted, forever.
-            //
-            // Which is a much worse failure. Restart Pacer while signed into a
-            // different account than the one it last saved (any `make install`
-            // does this) and the poller keeps treating the *other* account as
-            // primary: the signed-in account's token drops to the slow
-            // secondary sweep, its readings are recorded as a non-active
-            // account's, and nothing ever corrects it, because a transition
-            // never happens again. Measured on 2026-09-09: the signed-in
-            // account went 18 minutes without a reading while it climbed from
-            // 82% to 97%, and Pacer spent 19 of the 21 polls in that window on
-            // the account the user was not using.
-            //
-            // So reconcile on the first observation too. Claude Code's own
-            // record of who is signed in outranks a pick made before a
-            // restart, and `setActiveAccount` no-ops when it already agrees.
-            if let oauthPoller {
-                Task { await oauthPoller.setActiveAccount(id: observedAccount) }
-                if previous == nil {
-                    Log.write("ScanCoordinator",
-                              "reconciling active account with the observed login")
-                }
-            }
+        if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
+            Task { await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: nil) }
         }
 
         // One-time, and only for the unambiguous case: a store that has

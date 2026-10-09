@@ -18,6 +18,11 @@ public final class AccountTrailRecorder {
     private let context: ModelContext
     private let observer: ActiveAccountObserver
     private let homeDirectory: URL
+    /// The data root whose config names the default login: nil for the home
+    /// layout (`~/.claude.json`), or the directory `CLAUDE_CONFIG_DIR` names
+    /// when Pacer itself runs with one — a cold-start probe pointed at a
+    /// frozen copy, say. The login watcher watches the same file.
+    public let defaultRoot: URL?
 
     /// Last-seen modification date per config path, so an unchanged file
     /// costs a `stat` rather than a 180 KB parse.
@@ -53,6 +58,13 @@ public final class AccountTrailRecorder {
     /// The account last rejected as a stale config write, so the log says
     /// so once per episode rather than on every rewrite of the file.
     private var lastRejectedKey: String?
+    /// The last successful read of the default login's config — what a newly
+    /// accepted account is provisioned from (`Account.Seed`), since it carries
+    /// the email and org name Claude Code already knows.
+    public private(set) var lastDefaultObservation: ActiveAccountObserver.Observation?
+    /// Set by `accept`, so a caller can tell "accepted just now" from "was
+    /// already the login" and log the moment. Cleared by `poll`.
+    public private(set) var acceptedThisPoll: String?
 
     /// How long an observation may wait for the credential to confirm or
     /// refute it before it is accepted anyway. Long enough for a throttled
@@ -64,11 +76,27 @@ public final class AccountTrailRecorder {
     public init(
         context: ModelContext,
         observer: ActiveAccountObserver = ActiveAccountObserver(),
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        defaultRoot: URL? = nil
     ) {
         self.context = context
         self.observer = observer
         self.homeDirectory = homeDirectory
+        self.defaultRoot = defaultRoot
+    }
+
+    /// Judge the default login's config again on the next `poll`, even though
+    /// the file has not changed.
+    ///
+    /// For a keychain change with no config write behind it: a rejected
+    /// identity is only re-read when the file moves, but the thing that
+    /// rejected it was the credential, and that has just moved. Re-reading
+    /// is one parse; the veto in `decide` is unchanged — a credential that
+    /// still resolves to another account rejects the file exactly as before.
+    public func rejudgeDefaultLogin() {
+        for candidate in observer.configCandidates(forRoot: defaultRoot, homeDirectory: homeDirectory) {
+            lastModified[candidate.path] = nil
+        }
     }
 
     /// Poll every pinned session profile, so a root that a terminal has
@@ -134,8 +162,9 @@ public final class AccountTrailRecorder {
         credentialExpected: Bool = false
     ) -> String? {
         needsCredentialCheck = false
+        acceptedThisPoll = nil
         guard let (url, modified) = observer.currentConfig(
-            forRoot: nil, homeDirectory: homeDirectory
+            forRoot: defaultRoot, homeDirectory: homeDirectory
         ) else { return nil }
 
         let key = url.path
@@ -154,6 +183,7 @@ public final class AccountTrailRecorder {
         guard let observation = observer.read(configAt: url, rootPath: nil) else {
             return trail().currentDefaultLogin?.accountId
         }
+        lastDefaultObservation = observation
         decide(observation, fileModified: modified, credential: credential,
                credentialExpected: credentialExpected, now: now,
                evidence: url.lastPathComponent)
@@ -273,6 +303,12 @@ public final class AccountTrailRecorder {
         let previous = trail().currentDefaultLogin?.accountId
         record(observation, now: start, source: AccountActivation.sourceObserved,
                evidence: "oauthAccount in \(evidence)")
+        if previous != observation.accountKey {
+            acceptedThisPoll = observation.accountKey
+            Log.write("AccountTrail",
+                      "accepted login \(observation.accountKey.prefix(4))"
+                        + (previous.map { " (was \($0.prefix(4)))" } ?? ""))
+        }
         // Accepted late: turns between the sighting and now were stamped with
         // the account being left.
         if start < now, let previous, previous != observation.accountKey {
