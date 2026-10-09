@@ -113,6 +113,7 @@ public enum JSONLLineParser {
             originalProjectPath: raw.cwd,
             claudeCodeVersion: raw.version,
             rootPath: rootPath,
+            entrypoint: raw.entrypoint,
             isApiErrorMessage: raw.isApiErrorMessage ?? false,
             // A finished message carries a stop_reason; a mid-stream
             // snapshot of it doesn't. See `ParsedUsageEntry.isComplete`.
