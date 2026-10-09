@@ -20,7 +20,6 @@
 #   bin/ship.sh wait-ci [<ref>]                 # block until CI on <ref> is green
 #   bin/ship.sh release <version>               # tag → watch Release run → verify
 #   bin/ship.sh verify <version>                # health-check a published release
-#   bin/ship.sh tap                             # ask the Homebrew tap to pin the latest release now
 #
 # `release` and `wait-ci` are the long-running ones — run them backgrounded
 # (they print a structured summary at the end) so nothing has to poll them.
@@ -191,42 +190,8 @@ cmd_release() {
   gh run watch "$run_id" --exit-status >/dev/null \
     || die "Release run failed — $(gh run view "$run_id" --json url --jq .url)"
   ok "Release workflow succeeded"
-  bump_tap
   echo
   cmd_verify "$version"
-}
-
-# The Homebrew tap pins new releases itself (EricAndrechek/homebrew-tap's
-# autobump: livecheck finds the version, and it is pinned only once the DMG
-# proves to be signed by our team and notarized). Nothing here holds a key to
-# the tap; this only asks it to look now rather than at its next six-hourly
-# check, using the maintainer's own gh login. Non-fatal: the release is out
-# either way, and the schedule follows.
-TAP_REPO="EricAndrechek/homebrew-tap"
-bump_tap() {
-  local started_at run_id=
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  info "Asking ${TAP_REPO} to pin the release"
-  if ! gh workflow run autobump.yml -R "$TAP_REPO" -f cask=pacer >/dev/null 2>&1; then
-    warn "could not start the tap's autobump — the cask will follow on its schedule"
-    return 0
-  fi
-  for _ in $(seq 1 20); do
-    run_id="$(gh run list -R "$TAP_REPO" --workflow=autobump.yml --limit 5 \
-      --json databaseId,createdAt \
-      --jq "[.[]|select(.createdAt > \"$started_at\")]|sort_by(.createdAt)|last|.databaseId" 2>/dev/null || true)"
-    [ -n "$run_id" ] && [ "$run_id" != null ] && break
-    sleep 5
-  done
-  if [ -z "$run_id" ] || [ "$run_id" = null ]; then
-    warn "the tap's autobump run never appeared — the cask will follow on its schedule"
-    return 0
-  fi
-  if gh run watch "$run_id" -R "$TAP_REPO" --exit-status >/dev/null 2>&1; then
-    ok "tap autobump finished"
-  else
-    warn "tap autobump failed — $(gh run view "$run_id" -R "$TAP_REPO" --json url --jq .url)"
-  fi
 }
 
 cmd_verify() {
@@ -327,14 +292,23 @@ PY
     warn "skipped EdDSA crypto-verify (need uv + a signature/pubkey); asset+length checks still cover integrity"
   fi
 
-  # The Homebrew cask. A warning, not a failure: the tap's autobump pins it
-  # after publishing, and a stale cask doesn't make the release itself wrong.
-  local cask
-  cask="$(curl -fsSL "https://raw.githubusercontent.com/EricAndrechek/homebrew-tap/main/Casks/pacer.rb" 2>/dev/null || true)"
+  # The Homebrew cask. A warning, not a failure: the tap pins it itself once
+  # the release is out (the "Homebrew tap" workflow asks it to; its autobump
+  # verifies the DMG first), and a stale cask doesn't make the release wrong.
+  # Read through the API, not raw.githubusercontent.com, which serves a copy
+  # up to five minutes old; and give the tap's run a few minutes to land.
+  local cask cask_waited=0
+  while :; do
+    cask="$(gh api repos/EricAndrechek/homebrew-tap/contents/Casks/pacer.rb --jq .content 2>/dev/null | base64 --decode 2>/dev/null || true)"
+    printf '%s\n' "$cask" | grep -q "^  version \"${version}\"$" && break
+    [ "$cask_waited" -ge 600 ] && break
+    sleep 20; cask_waited=$((cask_waited + 20))
+  done
   if printf '%s\n' "$cask" | grep -q "^  version \"${version}\"$"; then
+    [ "$cask_waited" -gt 0 ] && info "waited ${cask_waited}s for the Homebrew tap"
     ok "Homebrew cask advertises ${version}"
   else
-    warn "Homebrew cask (EricAndrechek/homebrew-tap) is not at ${version} — check its autobump runs: gh run list -R EricAndrechek/homebrew-tap"
+    warn "Homebrew cask (EricAndrechek/homebrew-tap) is not at ${version} after ${cask_waited}s — check: gh run list -R EricAndrechek/homebrew-tap"
   fi
 
   echo
@@ -351,7 +325,6 @@ case "$sub" in
   wait-ci)   cmd_wait_ci "$@" ;;
   release)   cmd_release "$@" ;;
   verify)    cmd_verify "$@" ;;
-  tap)       need gh; bump_tap ;;
   ""|-h|--help|help)
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;

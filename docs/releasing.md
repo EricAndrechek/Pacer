@@ -69,9 +69,12 @@ The steps `bin/ship.sh` automates, spelled out:
    pins new releases itself: its `autobump` workflow finds the version with
    the cask's `livecheck`, and pins it only once the DMG proves to be signed
    by team `YZXWMJ5VBY`, notarized and stapled, and newer than the current
-   pin. It runs every six hours; `bin/ship.sh release` asks it to run as soon
-   as the release is published, and `bin/ship.sh verify` warns if the cask
-   didn't follow.
+   pin. It runs every six hours, and the `Homebrew tap` workflow here asks it
+   to run as soon as `Release` succeeds for a tag (using
+   `HOMEBREW_TAP_TRIGGER_TOKEN`, which can only start the tap's workflows).
+   `bin/ship.sh verify` waits up to ten minutes for the cask to follow and
+   warns if it doesn't. To nudge it by hand:
+   `gh workflow run autobump.yml -R EricAndrechek/homebrew-tap -f cask=pacer`.
 
 5. Within ~24h, every installed Pacer instance will see the new
    release on its next launch (or on-demand via Pacer → "Check for
@@ -205,6 +208,7 @@ your local cert/Apple-account state:
 | `NOTARY_KEY_ID` | needs you | from step 2 |
 | `NOTARY_ISSUER_ID` | needs you | from step 2 |
 | `NOTARY_KEY_P8` | needs you | the full contents of the `.p8` file from step 2 |
+| `HOMEBREW_TAP_TRIGGER_TOKEN` | needs you | fine-grained personal access token: repository access *only* `EricAndrechek/homebrew-tap`, permission *Actions: Read and write*, nothing else. It can only start the tap's workflows; it cannot write to the tap. Used by `.github/workflows/homebrew-tap.yml`; without it the tap still follows on its six-hourly schedule. Rotate before it expires: generate a new one the same way, `gh secret set HOMEBREW_TAP_TRIGGER_TOKEN -R EricAndrechek/Pacer`, then delete the old token. |
 
 The fastest way to set the five remaining secrets is the
 [`bin/setup-release-secrets.sh`](../bin/setup-release-secrets.sh)
