@@ -21,7 +21,11 @@ import Foundation
 /// change org.
 ///
 /// Only the org folder's name and that one field are read. A record's session
-/// and org never change, so each file is parsed once.
+/// and org never change, so each file is read once. And only its first few
+/// kilobytes: records run to megabytes (one MCP server configuration is
+/// 1.8 MB of a real one, 51 MB across 86 of them), and parsing them whole cost
+/// the first snapshot after launch most of a second. Desktop writes
+/// `cliSessionId` second, at byte 58.
 @ScanActor
 public final class DesktopSessionDirectory {
     /// Where Desktop keeps its session records, or nil when Pacer should not
@@ -47,6 +51,10 @@ public final class DesktopSessionDirectory {
     /// Record files that yielded a session. Others are read again, since a
     /// record can be written before its `cliSessionId` is.
     private var readFiles: Set<String> = []
+    /// Record files that yielded no session, by modification date: read again
+    /// only once they change, so one empty record does not cost a whole-file
+    /// parse on every listing.
+    private var emptyFiles: [String: Date] = [:]
     /// Sessions that gained an account since `drainDiscovered`.
     private var discovered: [String: String] = [:]
     /// When each unrecorded session last caused a read.
@@ -106,8 +114,15 @@ public final class DesktopSessionDirectory {
                 for file in files where file.pathExtension == "json"
                     && file.lastPathComponent.hasPrefix("local_") {
                     let path = file.path
-                    guard !readFiles.contains(path),
-                          let sessionId = Self.cliSessionId(in: file) else { continue }
+                    guard !readFiles.contains(path) else { continue }
+                    let modified = (try? file.resourceValues(
+                        forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                    if let seen = emptyFiles[path], seen == modified { continue }
+                    guard let sessionId = Self.cliSessionId(in: file) else {
+                        emptyFiles[path] = modified
+                        continue
+                    }
+                    emptyFiles[path] = nil
                     readFiles.insert(path)
                     guard accounts[sessionId] != accountId else { continue }
                     accounts[sessionId] = accountId
@@ -128,11 +143,27 @@ public final class DesktopSessionDirectory {
     }
 
     /// The transcript session a record describes. Nothing else in the file is
-    /// read or kept.
-    private static func cliSessionId(in file: URL) -> String? {
+    /// kept.
+    ///
+    /// Looks in the first `headBytes` for the key, and takes the value only if
+    /// it is a UUID, which every Claude Code session id is. A record written
+    /// some other way (keys reordered, pretty-printed) is parsed whole instead.
+    nonisolated static func cliSessionId(in file: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        let head = (try? handle.read(upToCount: headBytes)) ?? Data()
+        try? handle.close()
+        let key = Data(#""cliSessionId":""#.utf8)
+        if let found = head.range(of: key),
+           let end = head[found.upperBound...].firstIndex(of: UInt8(ascii: "\"")) {
+            let id = String(decoding: head[found.upperBound..<end], as: UTF8.self)
+            if UUID(uuidString: id) != nil { return id }
+        }
         guard let data = try? Data(contentsOf: file),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = object["cliSessionId"] as? String, !id.isEmpty else { return nil }
         return id
     }
+
+    /// Enough for the handful of short fields Desktop writes first.
+    nonisolated static let headBytes = 4096
 }
