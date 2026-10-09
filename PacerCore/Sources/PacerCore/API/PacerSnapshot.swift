@@ -286,6 +286,92 @@ public struct PacerSnapshotPayload: Codable, Sendable {
     }
 }
 
+// MARK: - Serving a payload built earlier
+
+// The HTTP API answers from a payload built in the background (#191), so by
+// the time one is served its seconds-from-now fields describe a moment that
+// has passed. A `resetsInSeconds` that stops counting down is worse than a
+// stale percentage: a pacing script waits it out and the window has already
+// reset. Each relative field is recomputed from the absolute date stored next
+// to it, by the same rule the builder applies, so a rebased payload says what
+// a fresh build at `now` would have said about the same rows. A relative field
+// with no absolute date behind it is left as it was; there is nothing to
+// recompute it from.
+
+public extension PacerSnapshotPayload.Limits.Window {
+    func rebased(to now: Date) -> Self {
+        // The builder only reports a crossing that is still ahead of it, so one
+        // that has passed since goes the same way a rebuild would take it.
+        var etaAt = limitEtaAt
+        var etaSeconds = limitEtaInSeconds
+        var willHit = willHitLimit
+        if let at = limitEtaAt {
+            if at > now {
+                etaSeconds = PacerSnapshotPayload.seconds(from: now, until: at)
+            } else {
+                etaAt = nil
+                etaSeconds = nil
+                willHit = false
+            }
+        }
+        return Self(
+            identity: identity, label: label, group: group,
+            usedPercent: usedPercent,
+            resetsAt: resetsAt,
+            resetsInSeconds: resetsAt.map { PacerSnapshotPayload.seconds(from: now, until: $0) }
+                ?? resetsInSeconds,
+            projectedEndPercent: projectedEndPercent,
+            projectedEndLowPercent: projectedEndLowPercent,
+            projectedEndHighPercent: projectedEndHighPercent,
+            willHitLimit: willHit,
+            limitEtaAt: etaAt, limitEtaInSeconds: etaSeconds,
+            burnPercentPerHour: burnPercentPerHour,
+            recentBurnPercentPerHour: recentBurnPercentPerHour,
+            isActive: isActive, severity: severity,
+            sampledAt: sampledAt,
+            sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) }
+                ?? sampleAgeSeconds)
+    }
+}
+
+public extension PacerSnapshotPayload.Limits {
+    func rebased(to now: Date) -> Self {
+        Self(fiveHour: fiveHour?.rebased(to: now),
+             sevenDay: sevenDay?.rebased(to: now),
+             scoped: scoped.map { $0.rebased(to: now) })
+    }
+}
+
+public extension PacerSnapshotPayload.DataSource {
+    func rebased(to now: Date) -> Self {
+        Self(source: source, lastSampleAt: lastSampleAt,
+             ageSeconds: lastSampleAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) }
+                ?? ageSeconds,
+             forecastFresh: forecastFresh)
+    }
+}
+
+public extension PacerSnapshotPayload {
+    /// `generatedAt` moves to `now` as well: it is the instant every
+    /// seconds-from-now field is measured from, and leaving it at build time
+    /// would make `generatedAt + resetsInSeconds` miss `resetsAt` by the
+    /// payload's age. How old the underlying build is travels separately (the
+    /// `Age` header and `pacer_api_data_age_seconds`).
+    func rebased(to now: Date) -> Self {
+        Self(schemaVersion: schemaVersion, generatedAt: now, account: account,
+             limits: limits.rebased(to: now), cost: cost, tokens: tokens, pace: pace,
+             session: session, overageUSD: overageUSD,
+             dataSource: dataSource.rebased(to: now))
+    }
+
+    /// Whole seconds from `start` to `end`, floored at zero — the builder's
+    /// rule for every relative field, kept in one place so a rebase cannot
+    /// round differently from a build.
+    internal static func seconds(from start: Date, until end: Date) -> Int {
+        max(0, Int(end.timeIntervalSince(start)))
+    }
+}
+
 // MARK: - Builder (single source of truth for every external surface)
 
 public enum PacerSnapshotBuilder {
@@ -329,7 +415,15 @@ public enum PacerSnapshotBuilder {
     nonisolated static func build(container: ModelContainer, account: String?,
                                   activeAccountId: String?,
                                   now: Date) throws -> PacerSnapshotPayload {
-        let context = ModelContext(container)
+        build(context: ModelContext(container), account: account,
+              activeAccountId: activeAccountId, now: now)
+    }
+
+    /// The same build on a context the caller owns, so `PacerAPISnapshot` can
+    /// assemble every account's payload in one pass on one context.
+    nonisolated static func build(context: ModelContext, account: String?,
+                                  activeAccountId: String?,
+                                  now: Date) -> PacerSnapshotPayload {
         let calendar = Calendar.current
 
         // --- Rate-limit windows (fixed + scoped, one account's) ---
@@ -415,7 +509,7 @@ public enum PacerSnapshotBuilder {
         let dataSource = PacerSnapshotPayload.DataSource(
             source: freshestSample?.source,
             lastSampleAt: freshestSample?.sampledAt,
-            ageSeconds: freshestSample.map { max(0, Int(now.timeIntervalSince($0.sampledAt))) },
+            ageSeconds: freshestSample.map { PacerSnapshotPayload.seconds(from: $0.sampledAt, until: now) },
             forecastFresh: costSnapshot != nil)
 
         return PacerSnapshotPayload(
@@ -555,7 +649,7 @@ public enum PacerSnapshotBuilder {
         recentBurn: Double?,
         now: Date
     ) -> PacerSnapshotPayload.Limits.Window {
-        let resetsInSeconds = resetsAt.map { max(0, Int($0.timeIntervalSince(now))) }
+        let resetsInSeconds = resetsAt.map { PacerSnapshotPayload.seconds(from: now, until: $0) }
 
         var endPct: Double?
         var endLo: Double?
@@ -582,13 +676,13 @@ public enum PacerSnapshotBuilder {
             projectedEndHighPercent: endHi,
             willHitLimit: crossingAt != nil,
             limitEtaAt: crossingAt,
-            limitEtaInSeconds: crossingAt.map { max(0, Int($0.timeIntervalSince(now))) },
+            limitEtaInSeconds: crossingAt.map { PacerSnapshotPayload.seconds(from: now, until: $0) },
             burnPercentPerHour: burn,
             recentBurnPercentPerHour: recentBurn,
             isActive: isActive,
             severity: severity,
             sampledAt: sampledAt,
-            sampleAgeSeconds: sampledAt.map { max(0, Int(now.timeIntervalSince($0))) })
+            sampleAgeSeconds: sampledAt.map { PacerSnapshotPayload.seconds(from: $0, until: now) })
     }
 
     /// The most recent session for one account, or across every account when

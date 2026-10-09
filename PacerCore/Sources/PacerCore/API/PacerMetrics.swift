@@ -95,7 +95,8 @@ public struct PacerMetrics: Sendable {
                 limits accountLimits: [AccountLimits] = [],
                 todayModels: [PacerDailyUsage.Row] = [],
                 todayAccounts: [AccountToday] = [],
-                version: String, build: String) {
+                version: String, build: String,
+                apiDataAgeSeconds: Int? = nil) {
         var m: [PacerMetric] = []
 
         func windowMetrics(_ w: PacerSnapshotPayload.Limits.Window, account: String?) {
@@ -249,6 +250,14 @@ public struct PacerMetrics: Sendable {
         }
 
         m.append(PacerMetric("pacer_up", 1, help: "Always 1 while the Pacer API is responding."))
+        // The API answers from a snapshot rebuilt in the background (#191),
+        // so `pacer_up` alone would keep saying 1 over a refresher that has
+        // stopped. Every countdown above is rebased to the scrape; this is
+        // the one number that says how old everything else is.
+        if let age = apiDataAgeSeconds {
+            m.append(PacerMetric("pacer_api_data_age_seconds", Double(age),
+                                 help: "Seconds since the snapshot this answer was rendered from was built; climbs if the background refresh stalls."))
+        }
         m.append(PacerMetric("pacer_build_info", 1,
                              help: "Pacer build info; value is always 1.",
                              labels: [("version", version), ("build", build)]))
