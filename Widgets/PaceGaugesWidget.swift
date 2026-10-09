@@ -120,7 +120,10 @@ struct PaceGaugesProvider: AppIntentTimelineProvider {
             // makes `fetchLimit: 50` correct again: with every account writing
             // the live table, the newest fifty rows can be one login's, and
             // `rows.first { window == ... }` would then gauge the wrong one.
-            let account = UsageScope.storedLimitAccountId
+            // With the store's active flag as the fallback when the defaults
+            // mirror has nothing: an unscoped read there gauges whichever
+            // account wrote last.
+            let account = UsageScope.limitAccountId(in: context)
             let rows = try context.fetch(LimitScope.rateLimits(account: account, limit: 50))
             let five = rows.first { $0.window == "five_hour" }
             let seven = rows.first { $0.window == "seven_day" }
@@ -259,7 +262,8 @@ struct PaceGaugesWidgetView: View {
             ringGauge(for: cell.usedPct.map { .init(usedPct: $0, resetsAt: cell.resetsAt) },
                       lineWidth: ring > 80 ? 10 : 8, labelSize: ring > 80 ? 24 : 20)
                 .frame(width: ring, height: ring)
-            resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds)
+            resetCaption(cell.resetsAt, durationSeconds: cell.durationSeconds,
+                         hasReading: cell.usedPct != nil)
         }
         .frame(maxWidth: .infinity)
     }
@@ -282,7 +286,8 @@ struct PaceGaugesWidgetView: View {
                 Spacer()
             }
             Spacer(minLength: 2)
-            resetCaption(target.state?.resetsAt, durationSeconds: target.durationSeconds)
+            resetCaption(target.state?.resetsAt, durationSeconds: target.durationSeconds,
+                         hasReading: target.state != nil)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
         .padding(WidgetStyle.smallPad)
@@ -336,7 +341,7 @@ struct PaceGaugesWidgetView: View {
             }
             ringGauge(for: state, lineWidth: lineWidth, labelSize: labelSize)
                 .frame(width: ringSize, height: ringSize)
-            resetCaption(state?.resetsAt, durationSeconds: durationSeconds,
+            resetCaption(state?.resetsAt, durationSeconds: durationSeconds, hasReading: state != nil,
                          font: large ? .caption : .caption2)
         }
         .frame(maxWidth: .infinity)
@@ -348,13 +353,12 @@ struct PaceGaugesWidgetView: View {
         lineWidth: CGFloat,
         labelSize: CGFloat
     ) -> some View {
-        let pct = state?.usedPct ?? 0
         let labelFont: Font = .system(size: labelSize, weight: .semibold, design: .rounded)
         // Shared `PacerUI.CircularGauge` — same primitive the dashboard
         // uses, identical geometry/coloring per UsageBand. No widget-
-        // local copy.
-        CircularGauge(percentage: pct, lineWidth: lineWidth, labelFont: labelFont)
-            .opacity(state == nil ? 0.3 : 1.0)
+        // local copy. No reading draws its "—" state, not a dimmed 0%: an
+        // account seen before its first reading has not used nothing (#241).
+        CircularGauge(reading: state?.usedPct, lineWidth: lineWidth, labelFont: labelFont)
     }
 
     private func dotColor(for state: PaceGaugesEntry.WindowState?) -> Color? {
@@ -370,9 +374,13 @@ struct PaceGaugesWidgetView: View {
     /// grid truncated every caption to "resets in 2d · Sat…". `ViewThatFits`
     /// below picks the full form when the column can hold it and the compact
     /// one when it cannot, which is better than either hard-coding.
+    ///
+    /// No reading at all says so; a reading with no reset time (the server
+    /// sends none at 0%) keeps its old caption.
     private func resetText(
-        _ date: Date?, durationSeconds: TimeInterval, compact: Bool = false
+        _ date: Date?, durationSeconds: TimeInterval, hasReading: Bool, compact: Bool = false
     ) -> String {
+        guard hasReading else { return "no reading yet" }
         guard let date else { return "no data" }
         return pacerResetCaption(
             resetsAt: date, durationSeconds: durationSeconds, compact: compact)
@@ -381,11 +389,12 @@ struct PaceGaugesWidgetView: View {
     /// The caption at whichever detail level survives the width on offer.
     @ViewBuilder
     private func resetCaption(
-        _ date: Date?, durationSeconds: TimeInterval, font: Font = .caption2
+        _ date: Date?, durationSeconds: TimeInterval, hasReading: Bool, font: Font = .caption2
     ) -> some View {
         ViewThatFits(in: .horizontal) {
             ForEach([false, true], id: \.self) { compact in
-                Text(resetText(date, durationSeconds: durationSeconds, compact: compact))
+                Text(resetText(date, durationSeconds: durationSeconds,
+                               hasReading: hasReading, compact: compact))
                     .font(font)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)

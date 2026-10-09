@@ -50,6 +50,22 @@ public struct ClaudePathResolver: @unchecked Sendable {
         self.fileManager = fileManager
     }
 
+    /// The data root whose global config names the default login: the first
+    /// `CLAUDE_CONFIG_DIR` entry when it is set, nil for the home layout
+    /// (`~/.claude.json`). The attribution trail reads that config and the
+    /// login watcher watches it, so both take it from here and cannot
+    /// disagree about which file is the login.
+    ///
+    /// No `projects/` requirement, unlike `resolve()`: a login exists before
+    /// any transcript does.
+    public var loginConfigRoot: URL? {
+        guard let raw = environment["CLAUDE_CONFIG_DIR"], !raw.isEmpty else { return nil }
+        let first = raw.split(separator: ",", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+        return first.map { URL(fileURLWithPath: $0).canonicalPathURL }
+    }
+
     public func resolve() throws -> [ResolvedRoot] {
         if let raw = environment["CLAUDE_CONFIG_DIR"], !raw.isEmpty {
             let valid = parseConfigDirOverride(raw)

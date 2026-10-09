@@ -63,7 +63,10 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 ///                    `?account=` / `?config_dir=` so a *client* can ask for
 ///                    one login; a scrape sends neither and gets them all.
 /// - `/v1/stream`   — Server-Sent Events; a `snapshot` event on connect and on
-///                    every engine recompute, plus `:keepalive` comments.
+///                    every engine recompute, an `account` event the moment
+///                    the active login changes followed by a fresh `snapshot`
+///                    (`PacerAccountChange` documents both), plus
+///                    `:keepalive` comments.
 /// - `/healthz`     — liveness (unauthenticated).
 /// - `/`            — JSON service info (unauthenticated).
 ///
@@ -202,7 +205,9 @@ final class PacerHTTPServer: @unchecked Sendable {
             }
             listener = newListener
             newListener.start(queue: queue)
-            refresher.start { [weak self] snapshot in self?.broadcast(snapshot) }
+            refresher.start(
+                onBroadcast: { [weak self] snapshot in self?.broadcast(snapshot) },
+                onAccountChange: { [weak self] change in self?.broadcast(change) })
             startKeepalive()
         } catch {
             publish("Failed to start: \(error.localizedDescription)", isError: true)
@@ -619,14 +624,22 @@ final class PacerHTTPServer: @unchecked Sendable {
         }
     }
 
-    private func writeEvent(_ client: ClientConnection, event: String, json: String) {
-        var frame = "event: \(event)\n"
-        // SSE requires one `data:` line per physical line of the payload.
-        for line in json.split(separator: "\n", omittingEmptySubsequences: false) {
-            frame += "data: \(line)\n"
+    /// Push an active-login change to every subscriber (#192). Called from
+    /// the refresher's account watch; encoded there, written here on `queue`,
+    /// ahead of the snapshot build the change also triggers.
+    private func broadcast(_ change: PacerAccountChange) {
+        guard let json = try? change.encodedJSON() else { return }
+        queue.async { [self] in
+            for client in sseClients.values {
+                writeEvent(client, event: PacerAccountChange.eventName, json: json)
+            }
+            Log.write("HTTPServer", "SSE account \(change.activeAccountId.prefix(4)) sent to "
+                      + "\(sseClients.count) client(s)")
         }
-        frame += "\n"
-        send(client, Data(frame.utf8), closeAfter: false)
+    }
+
+    private func writeEvent(_ client: ClientConnection, event: String, json: String) {
+        send(client, Data(PacerSSE.frame(event: event, data: json).utf8), closeAfter: false)
     }
 
     private func startKeepalive() {

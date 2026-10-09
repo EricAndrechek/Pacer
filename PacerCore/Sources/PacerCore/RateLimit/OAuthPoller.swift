@@ -153,7 +153,16 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Last switcher-cache timestamp ingested per account, so an unchanged
     /// file costs one comparison rather than a store query each cycle.
     private var lastSwitcherIngestAt: [String: Date] = [:]
-    private let switcherCache: @Sendable () -> [SwitcherUsageCache.Reading]
+    private let switcherCache: @Sendable () -> SwitcherUsageCache.Contents
+    /// One ingest at a time. The loop and the file watcher (#241) can both ask
+    /// for one, and the ingest suspends on store reads; a second one running
+    /// in that gap would replay the same reading. A request that arrives
+    /// during one is folded into a single re-run after it.
+    private var switcherIngestInFlight = false
+    private var switcherIngestRequested = false
+    /// Accounts already provisioned from cswap's roster, so an unchanged
+    /// roster costs a set comparison rather than a store fetch per ingest.
+    private var provisionedSwitcherAccounts: Set<String> = []
 
     /// Categorized outcome of one poll, surfaced for tests and debug UI.
     public enum PollOutcome: Sendable, Equatable {
@@ -304,6 +313,13 @@ public actor OAuthPoller: TokenPoolTesting {
     private var loopTask: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
     private var stopping = false
+    /// Whether `publishStatus` writes the process-wide `UsageScope` mirror.
+    /// Always in the app. A test that drives activations turns it off, because
+    /// `UsageScope.shared` is one object for the whole test process and the
+    /// suites that assert on it run in parallel with everything else.
+    private var publishesScope = true
+
+    func stopPublishingScopeForTesting() { publishesScope = false }
 
     public init(
         client: OAuthClient = OAuthClient(),
@@ -313,9 +329,11 @@ public actor OAuthPoller: TokenPoolTesting {
         activityProbe: (@Sendable () async -> Date?)? = nil,
         poolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
         /// Injected so tests do not read the developer's real switcher cache —
-        /// the same seam every other machine-touching source here has.
-        switcherCache: @escaping @Sendable () -> [SwitcherUsageCache.Reading]
-            = { SwitcherUsageCache.readings(at: SwitcherUsageCache.defaultURL()) },
+        /// the same seam every other machine-touching source here has. The
+        /// default reads nothing in a test process, for a test that forgets.
+        switcherCache: @escaping @Sendable () -> SwitcherUsageCache.Contents
+            = { PacerPreferences.isTestProcess
+                    ? .empty : SwitcherUsageCache.read(at: SwitcherUsageCache.defaultURL()) },
         random: @escaping RandomSource = { Double.random(in: 0..<1) },
         signedInCredential: SignedInCredentialMonitor? = nil
     ) {
@@ -585,9 +603,20 @@ public actor OAuthPoller: TokenPoolTesting {
     }
 
     /// Make `id` the active account. Swaps the live sample timeline to that
-    /// account's, reclassifies lanes, and flips `Account.isActive`. No-op if
-    /// already active or the account isn't known.
+    /// account's, reclassifies lanes, and flips `Account.isActive`.
+    ///
+    /// `seed` is what the caller knows about an account Pacer may never have
+    /// polled — the login the trail just accepted. With it, a missing row is
+    /// created first, so activation always finds something to activate and
+    /// the account is on every surface before its first reading (#241).
+    /// Without it (the Settings switcher, which lists only known rows) an
+    /// unknown id activates nothing, as before.
     public func setActiveAccount(id: String) async {
+        await setActiveAccount(id: id, seed: nil, seenAt: nil)
+    }
+
+    /// `seenAt` is when the change that led here was first seen, for the log.
+    public func setActiveAccount(id: String, seed: Account.Seed?, seenAt: Date?) async {
         await loadPersistedMetaIfNeeded()
         ensureLanes()
 
@@ -599,10 +628,26 @@ public actor OAuthPoller: TokenPoolTesting {
         // That is a silent, self-perpetuating wrong answer, and the repair is
         // three comparisons.
         let unchanged = (id == activeAccountKey)
+        // The store can disagree with `activeAccountKey` even when the id
+        // matches: a login seen before it had a row left every row inactive.
+        // `activateAccount` is idempotent and cheap (a handful of rows), so it
+        // runs whenever there is a seed to provision from, not only on a change.
+        var storeChanged = false
+        if unchanged, seed != nil {
+            storeChanged = await activateAccount(id, seed: seed).changed
+            if storeChanged {
+                Log.write("OAuthPoller", "account \(id.prefix(4)) active\(Self.sinceNote(seenAt))")
+            }
+        }
         if !unchanged {
-            let newOrg = await activateAccount(id)
+            let activation = await activateAccount(id, seed: seed)
+            let newOrg = activation.organizationId
             activeAccountKey = id
             primaryOrg = newOrg
+            storeChanged = true
+            Log.write("OAuthPoller",
+                      "account \(id.prefix(4)) active\(activation.created ? " (new — no reading yet)" : "")"
+                        + Self.sinceNote(seenAt))
 
             // The login moved, so Claude Code has just written a *different*
             // token to the keychain — the one thing that makes the lane set
@@ -631,12 +676,20 @@ public actor OAuthPoller: TokenPoolTesting {
             lanes[i].state.account = want
         }
         if unchanged {
-            guard reclassified > 0 else { return }
-            Log.write("OAuthPoller",
-                      "repaired \(reclassified) lane(s) whose account no longer matched the active one")
+            guard reclassified > 0 || storeChanged else { return }
+            if reclassified > 0 {
+                Log.write("OAuthPoller",
+                          "repaired \(reclassified) lane(s) whose account no longer matched the active one")
+            }
         }
         await saveAllLaneMeta()
         await publishStatus()
+    }
+
+    /// " (+412 ms since seen)", for lining a switch up across the log (#192).
+    private static func sinceNote(_ seenAt: Date?) -> String {
+        guard let seenAt else { return "" }
+        return " (+\(Int(Date().timeIntervalSince(seenAt) * 1000)) ms since seen)"
     }
 
     /// Rename an account. Identity is the org id, so this touches nothing but
@@ -701,8 +754,9 @@ public actor OAuthPoller: TokenPoolTesting {
         // empty chart you would notice as a bug: just gauges that stopped
         // having a value.
         let activeId = accounts.first(where: \.isActive)?.id
+        let publishesScope = self.publishesScope
         await MainActor.run {
-            UsageScope.shared.setActiveAccount(activeId)
+            if publishesScope { UsageScope.shared.setActiveAccount(activeId) }
             TokenPoolStatus.shared.publish(
                 lanes: statuses, accounts: accounts,
                 isActive: active, effectiveIntervalSeconds: effective
@@ -856,7 +910,31 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Pacer already holds for that account, so a stale cache can never walk a
     /// live series backwards, and an absent file is simply nothing.
     private func ingestSwitcherCache() async {
-        let readings = switcherCache()
+        if switcherIngestInFlight {
+            switcherIngestRequested = true
+            return
+        }
+        switcherIngestInFlight = true
+        defer { switcherIngestInFlight = false }
+        repeat {
+            switcherIngestRequested = false
+            await ingestSwitcherCacheOnce()
+        } while switcherIngestRequested && !stopping
+    }
+
+    /// Read cswap's cache now rather than on the loop's next pass — called
+    /// when the file changes (#241, #192). A switch through cswap shows up
+    /// here first: the roster names the account, and its readings are often
+    /// already in the file before Pacer has a lane for its token.
+    public func ingestSwitcherCacheNow() async {
+        await ingestSwitcherCache()
+        await publishStatus()
+    }
+
+    private func ingestSwitcherCacheOnce() async {
+        let contents = switcherCache()
+        let readings = contents.readings
+        await provisionSwitcherAccounts(contents.accounts)
         forgetSwitcherSchedule(
             exceptAccounts: Set(readings.map { Account.key(forOrg: $0.organizationId) }))
         guard !readings.isEmpty else { return }
@@ -880,11 +958,10 @@ public actor OAuthPoller: TokenPoolTesting {
             noteSwitcherActivity(account: key, with: reading)
 
             if let seen = lastSwitcherIngestAt[key], seen >= reading.fetchedAt { continue }
-            guard await isNewerThanStored(reading.fetchedAt, account: key) else {
-                lastSwitcherIngestAt[key] = reading.fetchedAt
-                continue
-            }
+            // Claimed before the store read suspends, so nothing that runs in
+            // that gap can take the same reading for new.
             lastSwitcherIngestAt[key] = reading.fetchedAt
+            guard await isNewerThanStored(reading.fetchedAt, account: key) else { continue }
 
             let snapshot = RateLimitSnapshot(
                 sampledAt: reading.fetchedAt,
@@ -921,6 +998,42 @@ public actor OAuthPoller: TokenPoolTesting {
                              isActive: activeAccountKey == key,
                              laneSource: .parked,
                              source: RateLimitSource.cswap)
+        }
+    }
+
+    /// Give every account cswap lists a row, readings or not (#241).
+    ///
+    /// The roster is the one place an account Pacer has never polled is named
+    /// before anyone switches to it, so this is what lets Settings and the
+    /// menu list it straight away. Creates only — `Account.ensure` never
+    /// touches a row that exists — and the in-memory set keeps an unchanged
+    /// roster from costing a store read on every pass.
+    private func provisionSwitcherAccounts(_ listed: [SwitcherUsageCache.ListedAccount]) async {
+        let missing = listed.filter {
+            !provisionedSwitcherAccounts.contains(Account.key(forOrg: $0.organizationId))
+        }
+        guard !missing.isEmpty else { return }
+        let container = self.container
+        let seeds = missing.map(Account.Seed.init)
+        let created: [String] = await MainActor.run {
+            let context = ModelContext(container)
+            var made: [String] = []
+            for seed in seeds where Account.ensure(seed, in: context).created {
+                made.append(seed.id)
+            }
+            if context.hasChanges {
+                do { try context.save() } catch {
+                    Log.write("OAuthPoller", "could not save accounts from the switcher's roster: \(error)")
+                    return []
+                }
+            }
+            return made
+        }
+        provisionedSwitcherAccounts.formUnion(seeds.map(\.id))
+        if !created.isEmpty {
+            Log.write("OAuthPoller",
+                      "listed \(created.count) account(s) from the switcher's roster before any reading: "
+                        + created.map { String($0.prefix(4)) }.joined(separator: ", "))
         }
     }
 
@@ -2022,16 +2135,41 @@ public actor OAuthPoller: TokenPoolTesting {
     ///
     /// Every sample now carries `accountId` and reads filter on it, so
     /// switching is a flag flip. The rows never move.
-    private func activateAccount(_ incoming: String) async -> String? {
+    ///
+    /// With a `seed`, a missing row is created first (`Account.ensure`), in the
+    /// same context and the same save as the flag flip, so no reader can see
+    /// the switch half-done: every row inactive and the new one absent.
+    ///
+    /// Saved explicitly. The flip used to rely on the throwaway context's
+    /// autosave, and what `publishStatus` mirrors into `UsageScope` is read
+    /// back from the store a moment later — it has to be there.
+    private func activateAccount(
+        _ incoming: String, seed: Account.Seed? = nil
+    ) async -> (organizationId: String?, created: Bool, changed: Bool) {
         let container = self.container
         return await MainActor.run {
-            let accounts = (try? ModelContext(container).fetch(FetchDescriptor<Account>())) ?? []
-            var incomingOrg: String?
-            for account in accounts {
-                account.isActive = (account.id == incoming)
-                if account.id == incoming { incomingOrg = account.organizationId }
+            let context = ModelContext(container)
+            var created = false
+            if let seed, seed.id == incoming {
+                created = Account.ensure(seed, in: context).created
             }
-            return incomingOrg
+            let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
+            var incomingOrg: String?
+            var changed = created
+            for account in accounts {
+                let active = (account.id == incoming)
+                if account.isActive != active {
+                    account.isActive = active
+                    changed = true
+                }
+                if active { incomingOrg = account.organizationId }
+            }
+            if context.hasChanges {
+                do { try context.save() } catch {
+                    Log.write("OAuthPoller", "could not save the active account: \(error)")
+                }
+            }
+            return (incomingOrg, created, changed)
         }
     }
 

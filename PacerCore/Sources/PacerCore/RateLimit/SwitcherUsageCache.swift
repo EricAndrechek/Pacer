@@ -77,27 +77,76 @@ public enum SwitcherUsageCache {
             .appendingPathComponent("usage.json")
     }
 
+    /// One account the switcher manages, whether or not it has a reading.
+    ///
+    /// The roster half of the file. `Reading` needs a successful fetch, and an
+    /// account cswap has just added — or one whose every fetch has been 429'd —
+    /// has none; it is still an account the user can switch to, and Pacer
+    /// should list it the moment it appears (#241).
+    public struct ListedAccount: Sendable, Equatable {
+        public let organizationId: String
+        public let emailAddress: String?
+        /// The key cswap files the account under — its slot number, when the
+        /// key is one.
+        public let slot: Int?
+
+        public init(organizationId: String, emailAddress: String?, slot: Int?) {
+            self.organizationId = organizationId
+            self.emailAddress = emailAddress
+            self.slot = slot
+        }
+    }
+
+    /// Everything one read of the file yields: who is listed, and what has
+    /// been fetched for them. One parse serves both.
+    public struct Contents: Sendable, Equatable {
+        public let accounts: [ListedAccount]
+        public let readings: [Reading]
+
+        public init(accounts: [ListedAccount], readings: [Reading]) {
+            self.accounts = accounts
+            self.readings = readings
+        }
+
+        public static let empty = Contents(accounts: [], readings: [])
+    }
+
     /// Every account the switcher has a successful reading for.
     ///
     /// Returns `[]` for anything unexpected — absent file, unreadable JSON, a
     /// schema that has moved on. This is a bonus source; it must never be able
     /// to take Pacer down with it.
     public static func readings(at url: URL) -> [Reading] {
-        guard let data = try? Data(contentsOf: url),
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let accounts = root["accounts"] as? [String: Any]
-        else { return [] }
+        read(at: url).readings
+    }
 
+    /// The roster and the readings from one read of the file. Tolerant in the
+    /// same way `readings(at:)` is: anything unexpected is `.empty`.
+    public static func read(at url: URL) -> Contents {
+        guard let data = try? Data(contentsOf: url) else { return .empty }
+        return parse(data)
+    }
+
+    /// `read(at:)` without the file, so the parse can be tested on bytes.
+    public static func parse(_ data: Data) -> Contents {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let accounts = root["accounts"] as? [String: Any]
+        else { return .empty }
+
+        var listed: [ListedAccount] = []
         var out: [Reading] = []
-        for (_, raw) in accounts {
+        for (slotKey, raw) in accounts {
             guard let account = raw as? [String: Any],
-                  let org = account["organizationUuid"] as? String, !org.isEmpty,
-                  // `fetchedAt` is when the *successful* fetch happened, which
-                  // is the timestamp the sample belongs at. `lastAttemptAt`
-                  // moves on a 429 that produced nothing, so it dates no sample
-                  // — but it is read separately above, because a request that
-                  // produced nothing still spent the budget.
-                  let fetchedAt = account["fetchedAt"] as? Double, fetchedAt > 0,
+                  let org = account["organizationUuid"] as? String, !org.isEmpty
+            else { continue }
+            let email = (account["email"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            listed.append(ListedAccount(organizationId: org, emailAddress: email, slot: Int(slotKey)))
+            // `fetchedAt` is when the *successful* fetch happened, which is the
+            // timestamp the sample belongs at. `lastAttemptAt` moves on a 429
+            // that produced nothing, so it dates no sample — but it is read
+            // separately below, because a request that produced nothing still
+            // spent the budget.
+            guard let fetchedAt = account["fetchedAt"] as? Double, fetchedAt > 0,
                   let good = account["lastGood"] as? [String: Any]
             else { continue }
             let attemptedAt = (account["lastAttemptAt"] as? Double).flatMap {
@@ -117,7 +166,9 @@ public enum SwitcherUsageCache {
                 sevenDay: window(good["seven_day"]),
                 scoped: (good["scoped"] as? [[String: Any]] ?? []).compactMap(scopedWindow)))
         }
-        return out.sorted { $0.organizationId < $1.organizationId }
+        return Contents(
+            accounts: listed.sorted { ($0.slot ?? .max, $0.organizationId) < ($1.slot ?? .max, $1.organizationId) },
+            readings: out.sorted { $0.organizationId < $1.organizationId })
     }
 
     private static func window(_ raw: Any?) -> Window? {

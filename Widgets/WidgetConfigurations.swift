@@ -98,7 +98,7 @@ enum PaceWindowResolver {
         // The account the widgets will draw, so the picker never offers a
         // window they cannot render.
         let rows = (try? context.fetch(
-            LimitScope.usageLimits(account: UsageScope.storedLimitAccountId, limit: 200))) ?? []
+            LimitScope.usageLimits(account: UsageScope.limitAccountId(in: context), limit: 200))) ?? []
         return rows.latestBatch()
             .filter {
                 ($0.modelId?.isEmpty == false)

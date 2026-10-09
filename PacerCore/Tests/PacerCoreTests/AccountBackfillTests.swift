@@ -25,9 +25,11 @@ private func makeSample(_ when: Date) -> TokenSample {
     )
 }
 
+/// An account Pacer has read usage for — what every row was before accounts
+/// were also created on sight (#241).
 private func makeAccount(_ id: String) -> Account {
     Account(id: id, organizationId: id, displayName: id,
-            isActive: true, firstSeenAt: at(0), lastSeenAt: at(0))
+            isActive: true, firstSeenAt: at(0), lastSeenAt: at(0), latestPolledAt: at(0))
 }
 
 @Suite("Account backfill")
@@ -61,6 +63,25 @@ struct AccountBackfillTests {
 
         let samples = try context.fetch(FetchDescriptor<TokenSample>())
         #expect(samples.allSatisfy { $0.accountId == nil })
+    }
+
+    /// A row made because a login or cswap's roster named an account is no
+    /// evidence about who ran the history before it; only a polled one is.
+    @Test("an account only seen, never polled, does not count")
+    func sightedAccountsDoNotCount() throws {
+        let context = ModelContext(try makeContainer())
+        context.insert(makeAccount("work"))
+        Account.ensure(Account.Seed(id: "glimpsed", organizationId: "glimpsed"), in: context)
+        for i in 0..<3 { context.insert(makeSample(at(Double(i) * 100))) }
+        try context.save()
+        #expect(try AccountBackfill.backfillIfUnambiguous(context: context, now: at(10_000))?
+            .accountId == "work")
+
+        let onlySighted = ModelContext(try makeContainer())
+        Account.ensure(Account.Seed(id: "glimpsed", organizationId: "glimpsed"), in: onlySighted)
+        onlySighted.insert(makeSample(at(0)))
+        try onlySighted.save()
+        #expect(try AccountBackfill.backfillIfUnambiguous(context: onlySighted) == nil)
     }
 
     @Test("no accounts means nothing to backfill to")

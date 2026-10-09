@@ -429,7 +429,9 @@ struct MenuBarLabel: View {
             // windows skipped, capped at 3, 5-hour fallback so it's never empty),
             // then hand the render the ordered utilization for each ring.
             let rings = MenuBarWindows.resolveRingWindows(keys: ringWindowKeys, windows: windows)
-            return .rings(rings.map { $0.usedPercentage ?? 0 })
+            // nil stays nil: a window with no reading draws as an empty grey
+            // track, not as a 0% ring in the green band (#241).
+            return .rings(rings.map(\.usedPercentage))
         case .fixed(.fiveHourPct):
             return .percent(prefix: fiveHourNeedsPrefix ? "5h " : nil,
                             pct: fiveHour?.usedPercentage)
@@ -495,8 +497,9 @@ struct MenuBarLabel: View {
             case symbol(name: String, band: UsageBand?)
             /// Activity-ring icon: 1–3 concentric rings, outer → inner. Each
             /// element is that ring's window utilization (0–100), which drives
-            /// both the ring fill and its per-ring band color.
-            case rings([Double])
+            /// both the ring fill and its per-ring band color; nil is a window
+            /// with no reading yet.
+            case rings([Double?])
             /// Window utilization chip; nil pct renders "—". `prefix` is the
             /// "5h " / "7d " disambiguator.
             case percent(prefix: String?, pct: Double?)
@@ -548,8 +551,9 @@ private struct MenuBarLabelContent: View, Equatable {
             // innermost stays legible; two rings keep the original 14pt so the
             // default icon is pixel-identical to before.
             ActivityRings(rings: percents.map { pct in
-                ActivityRings.Ring(progress: pct / 100,
-                                   color: UsageBand(percentage: pct).color)
+                guard let pct else { return ActivityRings.Ring(progress: 0, color: .secondary) }
+                return ActivityRings.Ring(progress: pct / 100,
+                                          color: UsageBand(percentage: pct).color)
             })
             .frame(width: percents.count >= 3 ? 17 : 14,
                    height: percents.count >= 3 ? 17 : 14)
@@ -573,12 +577,15 @@ private struct MenuBarLabelContent: View, Equatable {
         }
     }
 
-    /// Icon tint by band. `.primary` at green/nil so Pacer reads as a
-    /// healthy, active item next to Battery / Wi-Fi rather than greyed
-    /// out at the common low-usage state.
+    /// Icon tint by band. `.primary` at green so Pacer reads as a healthy,
+    /// active item next to Battery / Wi-Fi rather than greyed out at the
+    /// common low-usage state. nil — no reading for the driving window, as
+    /// for a login Pacer has only just seen (#241) — is `.secondary`, the
+    /// same grey as the chips' "—", so it never passes for 0%.
     private static func bandColor(_ band: UsageBand?) -> Color {
         switch band {
-        case .green, nil: return .primary
+        case nil:         return .secondary
+        case .green:      return .primary
         case .yellow:     return .yellow
         case .orange:     return .orange
         case .red:        return .red
@@ -1049,7 +1056,10 @@ struct MenuStatusContent: View {
                     }
                 }
             } else {
-                Text("collecting…")
+                // No reading at all — an account seen before its first poll
+                // (#241) — says so; a reading still missing its reset time
+                // keeps the old wording.
+                Text(window.usedPercentage == nil ? "no reading yet" : "collecting…")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)

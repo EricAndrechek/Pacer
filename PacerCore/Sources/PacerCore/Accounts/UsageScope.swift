@@ -217,6 +217,10 @@ public final class UsageScope {
     /// nil means every account combined.
     public private(set) var accountId: String?
     public private(set) var activeAccountId: String?
+    /// When this process last saw `activeAccountId` move to a different
+    /// account — the `since` of the API's `account` stream event. nil until
+    /// it has moved; a value restored from defaults at launch is not a move.
+    public private(set) var activeAccountSince: Date?
 
     private init() {
         accountId = PacerPreferences.store.string(forKey: Self.key)
@@ -236,6 +240,7 @@ public final class UsageScope {
     /// launch — for no gain, since the previous value is still the right one.
     public func setActiveAccount(_ id: String?) {
         guard let id, id != activeAccountId else { return }
+        activeAccountSince = Date()
         activeAccountId = id
         PacerPreferences.store.set(id, forKey: Self.activeKey)
     }
@@ -258,11 +263,26 @@ public final class UsageScope {
     ///
     /// A mirror is asserted, not diffed.
     public func republishActiveAccount(_ id: String) {
+        if id != activeAccountId { activeAccountSince = Date() }
         activeAccountId = id
         PacerPreferences.store.set(id, forKey: Self.activeKey)
     }
 
     public var isAll: Bool { accountId == nil }
+
+    /// Returns at the next write to `activeAccountId` — for long-lived
+    /// non-view observers (the API snapshot refresher, the widget reload
+    /// coordinator) that loop on it. A write of the same id returns too:
+    /// filter with `PacerAccountChange.Detector`.
+    public static func nextActiveAccountChange() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            withObservationTracking {
+                _ = UsageScope.shared.activeAccountId
+            } onChange: {
+                continuation.resume()
+            }
+        }
+    }
 
     public func select(_ accountId: String?) {
         self.accountId = accountId
@@ -313,7 +333,11 @@ public final class UsageScope {
     /// has not reached defaults yet. Falling back to `Account.isActive` in the
     /// store closes that window; nil now means genuinely no accounts, which is
     /// the single-account case where scoping is a no-op anyway.
-    public static func limitAccountId(in context: ModelContext) -> String? {
+    ///
+    /// `nonisolated` — a defaults read and a one-row fetch on the caller's own
+    /// context — so the widget extension's timeline providers, which run off
+    /// the main actor, take the same answer the menu bar does (#241).
+    public nonisolated static func limitAccountId(in context: ModelContext) -> String? {
         storedLimitAccountId ?? Account.activeId(in: context)
     }
 

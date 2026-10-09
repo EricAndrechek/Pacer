@@ -20,7 +20,11 @@ import PacerCore
 ///   the SSE snapshot, which is when the stream has always pushed;
 /// - an active-login change. Nothing posts one, so this watches
 ///   `UsageScope.activeAccountId` through Observation — the unscoped
-///   payload's limits are whichever login that names;
+///   payload's limits are whichever login that names. A real change (not a
+///   re-assertion of the same id) also pushes an SSE `account` event at once
+///   (`PacerAccountChange`) and makes the rebuild *urgent*: it skips the
+///   spacing between builds and is broadcast, so a stream client hears
+///   "the login moved" and then gets the new login's snapshot (#192);
 /// - a 15 s timer, for what changes with no event at all: a session ageing
 ///   out of "active", the day rolling over, an engine export going stale.
 ///
@@ -63,6 +67,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     private var inFlight = false
     private var pending = false
     private var pendingBroadcast = false
+    /// The next build follows an account change: no spacing before it.
+    private var pendingUrgent = false
+    private var onAccountChange: (@Sendable (PacerAccountChange) -> Void)?
     private var lastStartedAt: Date?
     private var announcedFirstBuild = false
     private var onBroadcast: (@Sendable (PacerAPISnapshot) -> Void)?
@@ -77,8 +84,11 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     // MARK: - Lifecycle
 
     /// Start refreshing; `onBroadcast` receives each snapshot the SSE stream
-    /// should push, on the build queue. Restarting replaces the previous run.
-    func start(onBroadcast: @escaping @Sendable (PacerAPISnapshot) -> Void) {
+    /// should push, on the build queue, and `onAccountChange` each change of
+    /// active login, on the main actor, before the rebuild it causes.
+    /// Restarting replaces the previous run.
+    func start(onBroadcast: @escaping @Sendable (PacerAPISnapshot) -> Void,
+               onAccountChange: @escaping @Sendable (PacerAccountChange) -> Void) {
         stop()
 
         let center = NotificationCenter.default
@@ -99,10 +109,17 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         newTimer.setEventHandler { [weak self] in self?.timerFired() }
 
         let watch = Task { @MainActor [weak self] in
+            var detector = PacerAccountChange.Detector(last: UsageScope.shared.activeAccountId)
             while !Task.isCancelled {
-                await Self.nextActiveAccountChange()
+                await UsageScope.nextActiveAccountChange()
                 guard !Task.isCancelled, let self else { return }
-                self.trigger()
+                let scope = UsageScope.shared
+                if let change = detector.observe(scope.activeAccountId,
+                                                 since: scope.activeAccountSince ?? Date()) {
+                    self.accountChanged(change)
+                } else {
+                    self.trigger()
+                }
             }
         }
 
@@ -115,6 +132,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             // else, and would otherwise wait for the next engine refit.
             pendingBroadcast = true
             self.onBroadcast = onBroadcast
+            self.onAccountChange = onAccountChange
             observers = newObservers
             timer = newTimer
             accountWatch = watch
@@ -131,7 +149,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             generation &+= 1
             pending = false
             pendingBroadcast = false
+            pendingUrgent = false
             onBroadcast = nil
+            onAccountChange = nil
             // Under the lock, so a build finishing now sees the new generation
             // and cannot put its snapshot back after this.
             cache.clear()
@@ -152,16 +172,33 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
     /// Ask for a rebuild. Cheap and callable from any thread: it never builds
     /// on the caller's thread and never waits on one in progress.
-    func trigger(broadcast: Bool = false) {
+    ///
+    /// `urgent` skips the spacing between builds — for an account change,
+    /// where the snapshot every subscriber holds just became the wrong
+    /// login's. It still never runs two builds at once: one in flight is
+    /// followed immediately by the urgent one rather than after the gap.
+    func trigger(broadcast: Bool = false, urgent: Bool = false) {
         let delay: TimeInterval? = lock.withLock {
             guard running else { return nil }
             pending = true
             if broadcast { pendingBroadcast = true }
+            if urgent { pendingUrgent = true }
             guard !inFlight else { return nil }
             inFlight = true
-            return delayBeforeNextBuild(now: Date())
+            return urgent ? 0 : delayBeforeNextBuild(now: Date())
         }
         if let delay { schedule(after: delay) }
+    }
+
+    /// The active login moved: tell stream subscribers now, then build and
+    /// push the new login's snapshot as soon as the build queue allows.
+    /// The event is encoded and handed over here, not after the build, so a
+    /// slow store delays the snapshot but never the news that it changed.
+    @MainActor
+    private func accountChanged(_ change: PacerAccountChange) {
+        let handler = lock.withLock { running ? onAccountChange : nil }
+        handler?(change)
+        trigger(broadcast: true, urgent: true)
     }
 
     private func timerFired() {
@@ -181,21 +218,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         buildQueue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.runBuild() }
     }
 
-    @MainActor
-    private static func nextActiveAccountChange() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            withObservationTracking {
-                _ = UsageScope.shared.activeAccountId
-            } onChange: {
-                continuation.resume()
-            }
-        }
-    }
-
     // MARK: - Build (on `buildQueue`)
 
     private func runBuild() {
-        let job: (generation: UInt64, broadcast: Bool)? = lock.withLock {
+        let job: (generation: UInt64, broadcast: Bool, urgent: Bool)? = lock.withLock {
             guard running, pending else {
                 inFlight = false
                 return nil
@@ -203,8 +229,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             pending = false
             let broadcast = pendingBroadcast
             pendingBroadcast = false
+            let urgent = pendingUrgent
+            pendingUrgent = false
             lastStartedAt = Date()
-            return (generation, broadcast)
+            return (generation, broadcast, urgent)
         }
         guard let job else { return }
 
@@ -239,7 +267,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             }
             var next: TimeInterval?
             if running && pending {
-                next = delayBeforeNextBuild(now: Date())
+                next = pendingUrgent ? 0 : delayBeforeNextBuild(now: Date())
             } else {
                 inFlight = false
             }
@@ -252,6 +280,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             case .success:
                 if outcome.first {
                     Log.write("HTTPServer", "snapshot ready in \(ms) ms")
+                } else if job.urgent {
+                    Log.write("HTTPServer", "snapshot for the new login built in \(ms) ms"
+                              + (outcome.broadcast != nil ? ", pushed" : ""))
                 } else if elapsed >= Self.slowBuild {
                     Log.write("HTTPServer", "snapshot build took \(ms) ms")
                 }

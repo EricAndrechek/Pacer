@@ -69,6 +69,37 @@ trail untouched. A missed switch self-corrects on the next cycle; a false
 switch splits one account's session across two and is undetectable
 afterwards.
 
+**A switch is pushed, not found (#192).** The trail used to be read only when a
+scan cycle ran — on transcript activity, or a 5-minute backstop on a quiet
+machine. `LoginChangeWatcher` now watches the three files a login change moves
+with kqueue vnode sources, and runs a *login pass* (the trail's half of a
+cycle: no transcript walk, no rollups) the moment one does:
+
+- **The config.** Rewritten every 5–15 s, so each rewrite goes through
+  `ConfigLoginIdentity`, which finds `oauthAccount` and parses only that
+  object. Only a different identity wakes the pass.
+- **The login keychain file.** Written by every app, so a write is checked
+  against the `Claude Code-credentials` item's modification date, asked with
+  `security find-generic-password` *without* `-w`: attributes only, no secret,
+  so nothing can prompt. Only a moved stamp wakes the pass, which then reads the
+  credential and judges the config again even if the file did not change —
+  that is what catches cswap when its keychain write lands after its config
+  write.
+- **cswap's cache.** Ingested at once: the roster and any readings.
+
+The stale-config veto is unchanged: the pass is the same `decide`, with the
+keychain read awaited instead of waiting for a later cycle.
+
+**An account exists from the moment its login is seen (#241).** `Account` rows
+used to be created only by a usage reading, so a login Pacer had never polled
+could be accepted by the trail and still activate nothing — every row inactive,
+the new one absent, the dashboard left on the account just signed out of.
+`Account.ensure` now creates the row from what the sighting carries (the org
+id, the email and org name from `oauthAccount`, or the email and slot from
+cswap's roster) — create-only, never overwriting, no readings — inside the same
+save that makes it active. Until its first reading lands, every rate-limit
+surface says so ("—", "no reading yet"); none shows 0%.
+
 ### Attribution by timestamp, and by root
 
 `SamplePersister` stamps each sample from the trail using **when the turn
@@ -373,6 +404,25 @@ Two details worth knowing:
   nobody could type it.
 - **An unknown id is a `400` naming the legal values**, not an empty `200` —
   which would be indistinguishable from an account that had a quiet month.
+
+**`/v1/stream` says when the login changes.** Besides the `snapshot` it has
+always sent on connect and after each engine refit, it pushes an `account`
+event the moment the active login changes, followed by a fresh `snapshot` as
+soon as one is built:
+
+```
+event: account
+data: {
+data:   "activeAccountId" : "<Account.id>",
+data:   "since" : "2026-10-09T12:00:00Z"
+data: }
+```
+
+Only on a change — never on connect, never when the same login is re-asserted
+— and `since` is when Pacer made it active. The account may not have a reading
+yet; its windows are then absent from the snapshot, not 0%. `PacerAccountChange`
+is the definition. A client that waits on a switch (#194's `pacer` CLI) can
+wake on this instead of polling.
 
 `pacer_rate_limit_*` carries an `account` label, so a scrape can see every
 login's headroom rather than only the active one's. **This changes an existing
