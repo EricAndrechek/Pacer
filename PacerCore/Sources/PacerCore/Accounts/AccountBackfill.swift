@@ -35,12 +35,20 @@ public enum AccountBackfill {
     /// `assign(range:)`, because for them the answer is genuinely unknown.
     ///
     /// Returns nil when it declines to act (no accounts, or more than one).
+    ///
+    /// "Seen" means read: an account Pacer has polled usage for. Accounts are
+    /// also created on sight now — the moment a login or cswap's roster names
+    /// one (#241) — and a row that exists only because a login was glimpsed is
+    /// no evidence that it was the *only* account behind years of history.
+    /// Counting polled rows keeps this exactly the decision it was when every
+    /// row came from a poll.
     @discardableResult
     public static func backfillIfUnambiguous(
         context: ModelContext,
         now: Date = Date()
     ) throws -> Result? {
-        let accounts = try context.fetch(FetchDescriptor<Account>())
+        let accounts = try context.fetch(FetchDescriptor<Account>(
+            predicate: #Predicate { $0.latestPolledAt != nil }))
         guard accounts.count == 1, let only = accounts.first else { return nil }
         return try assign(
             accountId: only.id,
