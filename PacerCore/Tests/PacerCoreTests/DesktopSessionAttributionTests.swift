@@ -133,6 +133,28 @@ struct DesktopSessionDirectoryTests {
         #expect(directory.recordedAccount(forSession: "filled") == desktopOrg)
     }
 
+    @Test("the id is read from the record's head, and from the whole file when it is not there")
+    func readsTheHeadThenFallsBack() throws {
+        let root = try tempDirectory("desktop-sessions")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent(desktopUser).appendingPathComponent(desktopOrg)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let id = { UUID().uuidString.lowercased() }
+        let (compact, late, pretty) = (id(), id(), id())
+        // Desktop's own layout: compact, the id second, megabytes after it.
+        try #"{"sessionId":"local_1","cliSessionId":"\#(compact)","remoteMcpServersConfig":"\#(String(repeating: "x", count: 200_000))"}"#
+            .write(to: folder.appendingPathComponent("local_1.json"), atomically: true, encoding: .utf8)
+        // The id only after the first 4 KB.
+        try #"{"blob":"\#(String(repeating: "y", count: DesktopSessionDirectory.headBytes))","cliSessionId":"\#(late)"}"#
+            .write(to: folder.appendingPathComponent("local_2.json"), atomically: true, encoding: .utf8)
+        // Pretty-printed, so the compact key never matches.
+        try "{\n  \"cliSessionId\" : \"\(pretty)\"\n}"
+            .write(to: folder.appendingPathComponent("local_3.json"), atomically: true, encoding: .utf8)
+
+        let directory = DesktopSessionDirectory(root: root)
+        #expect(directory.drainDiscovered() == [compact: desktopOrg, late: desktopOrg, pretty: desktopOrg])
+    }
+
     @Test("no folder, or no root at all, is simply no records")
     func absentFolder() throws {
         let missing = DesktopSessionDirectory(
