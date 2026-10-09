@@ -137,10 +137,13 @@ When that flag is set, `PacerAppDelegate` takes a separate path:
     each appearance change. Mac Blue itself, even pinned to one static frame,
     came out ~66k pixels different (up to 143 levels, thin edges) between runs
     hours apart.
-  - **System clock:** while the menu bar is photographed the runner's clock is
-    set to Fri 2026-09-18 09:41, so the bar's clock text cannot move the items
-    beside it. The helper puts real time back right after (and the workflow
-    runs an NTP sync as a safety net before any push).
+  - **System clock:** for the two menu bar scenes the runner's clock is set to
+    Fri 2026-09-18 09:41, so the bar's clock text cannot move the items beside
+    it. The app asks the helper to pin it *before* it installs its status item
+    and puts real time back after both scenes (the workflow also runs an NTP
+    sync as a safety net before any push). Pinned only for the photo, the menu
+    and the crop were placed against the runner's real date and the bar then
+    re-laid out under them: the item sat 1–3 pt off, by weekday (#238).
   - **What is compared:** the helper writes `<shot>.rects.json` (Pacer's status
     item, menu and any tooltip window, in image pixels) to
     `$PACER_SCREENSHOT_SIDECARS` (the runner's temp dir, not docs/), and

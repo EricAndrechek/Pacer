@@ -59,8 +59,8 @@ jobs:
               > "$RUNNER_TEMP/widget-fixtures.xcconfig"
           XCODE_XCCONFIG_FILE="$RUNNER_TEMP/widget-fixtures.xcconfig" make screenshots
 
-      # The capture pins the system clock to 9:41 while it photographs the menu
-      # bar and puts it back itself; this is for the run that died in between.
+      # The menu bar scenes pin the system clock to 9:41 and put it back
+      # themselves; this is for the run that died in between.
       # Before anything that needs a true clock (TLS, git push).
       - name: Make sure the clock is real again
         if: always()

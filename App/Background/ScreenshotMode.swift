@@ -267,8 +267,18 @@ enum ScreenshotMode {
         captureShareCard(container: container)
 
         // Last: the dark one switches the whole system to dark mode.
+        //
+        // The menu bar's clock is pinned to 9:41 before either scene installs
+        // the status item, and stays pinned across both. Everything this
+        // process places — the menu, and the rectangle the helper crops — is
+        // worked out from where the item sits *now*, so the bar has to be in
+        // its photographed state first. Pinned only for the photo, the bar
+        // re-laid out under an already-open menu and the item moved by however
+        // wide the runner's real date was (#238).
+        let clockPinned = await pinMenuBarClock(true)
         await captureRealMenuBar("menubar", dark: false, installStatusItem: installStatusItem)
         await captureRealMenuBar("menubar-dark", dark: true, installStatusItem: installStatusItem)
+        if clockPinned { _ = await pinMenuBarClock(false) }
 
         log("screenshots complete")
     }
@@ -1507,6 +1517,21 @@ enum ScreenshotMode {
     }
 
     @MainActor private static var menuWarmed = false
+
+    /// Ask the capture helper to pin the system clock (or put it back). CI
+    /// only, like the menu bar scenes it serves; elsewhere it does nothing and
+    /// returns false.
+    @MainActor
+    private static func pinMenuBarClock(_ pin: Bool) async -> Bool {
+        guard activatesForCapture, let dir = captureDirectory else { return false }
+        let ok = await helperRequest(dir, "clock", ["pin": pin], timeout: 20)
+        if !ok { note("could not \(pin ? "pin" : "restore") the system clock for the menu bar scenes") }
+        // The bar re-lays out around the new clock text. Each scene settles
+        // again after installing its item; this covers an item that already
+        // existed when the clock changed.
+        if ok && pin { await settle(seconds: 1) }
+        return ok
+    }
 
     /// Ask the capture helper for something and wait for it to be done.
     @MainActor
