@@ -65,6 +65,25 @@ public final class AccountTrailRecorder {
     /// Set by `accept`, so a caller can tell "accepted just now" from "was
     /// already the login" and log the moment. Cleared by `poll`.
     public private(set) var acceptedThisPoll: String?
+    /// Set when this poll's veto in `decide` rejected the config's identity
+    /// because a keychain read taken after the file first named it resolved to
+    /// another account. Cleared by `poll`. The caller pairs it with the
+    /// keychain item's stamp to remember the rejection (#243).
+    public private(set) var rejectedThisPoll: String?
+
+    /// The identity a held observation names, if one is waiting on a keychain
+    /// read. What the coordinator compares against its remembered rejection.
+    public var pendingAccountKey: String? { pendingObservation?.observation.accountKey }
+
+    /// Reject the held observation without a keychain read (#243): the caller
+    /// has proved, by an unchanged keychain item stamp, that the full read
+    /// which rejected this same identity still describes the keychain. The
+    /// outcome is what the veto would have produced, minus the discovery.
+    public func rejectPendingAsStale() {
+        rejectedThisPoll = pendingAccountKey
+        pendingObservation = nil
+        needsCredentialCheck = false
+    }
 
     /// How long an observation may wait for the credential to confirm or
     /// refute it before it is accepted anyway. Long enough for a throttled
@@ -163,6 +182,7 @@ public final class AccountTrailRecorder {
     ) -> String? {
         needsCredentialCheck = false
         acceptedThisPoll = nil
+        rejectedThisPoll = nil
         guard let (url, modified) = observer.currentConfig(
             forRoot: defaultRoot, homeDirectory: homeDirectory
         ) else { return nil }
@@ -263,6 +283,7 @@ public final class AccountTrailRecorder {
                        now: now, source: AccountActivation.sourceCredential,
                        evidence: "signed-in credential (keychain)")
             }
+            rejectedThisPoll = observed
             if lastRejectedKey != observed {
                 lastRejectedKey = observed
                 Log.write("AccountTrail",

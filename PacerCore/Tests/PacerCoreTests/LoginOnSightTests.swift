@@ -198,13 +198,17 @@ struct LoginChangeDetectionTests {
 private final class KeychainBox: @unchecked Sendable {
     private let lock = NSLock()
     private var _token: String
+    private var _reads = 0
     init(_ token: String) { _token = token }
+    /// How many times the keychain's secret was read — one per discovery.
+    var reads: Int { lock.lock(); defer { lock.unlock() }; return _reads }
     var token: String {
         get { lock.lock(); defer { lock.unlock() }; return _token }
         set { lock.lock(); _token = newValue; lock.unlock() }
     }
     func blob() -> Data {
-        try! JSONSerialization.data(withJSONObject: [
+        lock.lock(); _reads += 1; lock.unlock()
+        return try! JSONSerialization.data(withJSONObject: [
             "claudeAiOauth": [
                 "accessToken": token,
                 "expiresAt": Int64(Date().addingTimeInterval(3600).timeIntervalSince1970) * 1000,
@@ -235,7 +239,11 @@ struct LoginPassTests {
     /// A coordinator with a private home, an in-memory store and a fake
     /// keychain. The transport names the org from the token (`tok-a` →
     /// `org-a`) and counts requests, so a test can tell a poll happened.
-    private func rig(token: String) async throws -> Rig {
+    private func rig(
+        token: String,
+        stamp: @escaping @Sendable () -> String? = { nil },
+        recheckDelay: TimeInterval = 2
+    ) async throws -> Rig {
         let home = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("pacer-login-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -259,7 +267,9 @@ struct LoginPassTests {
             configuration: .init(watcherMode: .manual, probeStatsCache: false),
             resolver: ClaudePathResolver(environment: [:], homeDirectory: home),
             oauthClient: client,
-            homeDirectory: home)
+            homeDirectory: home,
+            keychainStamp: stamp,
+            fastRejectRecheckDelay: recheckDelay)
         // `UsageScope.shared` is process-wide and other suites assert on it
         // in parallel; what these tests check is the store, which is what the
         // mirror is reconciled from.
@@ -403,5 +413,223 @@ struct LoginPassTests {
         }
         #expect(samples.sorted() == ["org-a", "org-a"])   // 5h + 7d, once
         #expect(rig.requests.count == 0)
+    }
+}
+
+
+// MARK: - #243: a flip back to an already-rejected identity
+
+/// The keychain item's stamp, which a test moves by hand.
+private final class StampBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: String?
+    init(_ value: String?) { _value = value }
+    var value: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _value }
+        set { lock.lock(); _value = newValue; lock.unlock() }
+    }
+}
+
+@Suite("Fast reject of an already-rejected identity (#243)", .serialized)
+@ScanActor
+struct FlipFastRejectTests {
+
+    private struct Rig {
+        let home: URL
+        let container: ModelContainer
+        let coordinator: ScanCoordinator
+        let keychain: KeychainBox
+        let poller: OAuthPoller
+    }
+
+    private func rig(stamp: StampBox) async throws -> Rig {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pacer-flip-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let keychain = KeychainBox("tok-a")
+        let transport: OAuthClient.Transport = { request in
+            let auth = request.value(forHTTPHeaderField: "Authorization") ?? ""
+            let org = "org-" + String(auth.split(separator: "-").last ?? "")
+            let response = HTTPURLResponse(
+                url: OAuthClient.endpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["anthropic-organization-id": org])!
+            return (Data(#"{"five_hour":{"utilization":10}}"#.utf8), response)
+        }
+        let client = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .success(keychain.blob()) }),
+            transport: transport, desktopEnabled: { false })
+        let container = try PacerStore.makeInMemoryContainer()
+        // A huge recheck delay: the real timer never fires inside a test, and
+        // the follow-up is driven by hand so nothing sleeps.
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(watcherMode: .manual, probeStatsCache: false),
+            resolver: ClaudePathResolver(environment: [:], homeDirectory: home),
+            oauthClient: client,
+            homeDirectory: home,
+            keychainStamp: { stamp.value },
+            fastRejectRecheckDelay: 3600,
+            // No throttle between full reads, so a test can tell a full read
+            // from one that was skipped rather than merely deferred.
+            loginPassCredentialCheckInterval: 0)
+        let poller = try #require(coordinator.oauthPollerForTesting)
+        await poller.stopPublishingScopeForTesting()
+        return Rig(home: home, container: container, coordinator: coordinator,
+                   keychain: keychain, poller: poller)
+    }
+
+    private func writeConfig(_ home: URL, org: String) async throws {
+        // Distinct mtimes: each flip must read as a new write.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let url = home.appendingPathComponent(".claude.json")
+        try #"{"oauthAccount":{"organizationUuid":"\#(org)","accountUuid":"u-\#(org)","emailAddress":"\#(org)@example.com","organizationName":"\#(org) Inc"}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    private func openLogin(_ container: ModelContainer) -> String? {
+        let open = (try? ModelContext(container).fetch(FetchDescriptor<AccountActivation>(
+            predicate: #Predicate { $0.endedAt == nil && $0.rootPath == nil }))) ?? []
+        return open.first?.accountId
+    }
+
+    /// Signed into A with a poll behind it, then B written back stale and
+    /// rejected by a full read: the state every test starts from.
+    private func rejectB(_ rig: Rig) async throws {
+        _ = await rig.poller.runOnce()
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+        let before = rig.keychain.reads
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+        #expect(rig.keychain.reads == before + 1, "the first rejection is a full read")
+        #expect(rig.coordinator.rememberedRejectionForTesting == "org-b")
+    }
+
+    @Test("A, B, A, B with a constant stamp and the keychain on A is one discovery")
+    func flipStorm() async throws {
+        let rig = try await rig(stamp: StampBox("S1"))
+        try await rejectB(rig)
+        let afterFirst = rig.keychain.reads
+
+        for _ in 0..<3 {
+            try await writeConfig(rig.home, org: "org-a")
+            await rig.coordinator.followLoginChange(.config)
+            try await writeConfig(rig.home, org: "org-b")
+            await rig.coordinator.followLoginChange(.config)
+        }
+
+        #expect(rig.keychain.reads == afterFirst, "no further discovery for the same stale identity")
+        #expect(openLogin(rig.container) == "org-a")
+        #expect(rig.coordinator.fastRejectFollowUpPendingForTesting, "one follow-up, coalesced")
+    }
+
+    @Test("config first, then the keychain write and its watch event: accepted")
+    func configFirstKeychainEvent() async throws {
+        let stamp = StampBox("S1")
+        let rig = try await rig(stamp: stamp)
+        try await rejectB(rig)
+
+        // cswap writes the config naming B; the keychain has not moved yet.
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+
+        // Its keychain write lands and the watcher says so.
+        rig.keychain.token = "tok-b"
+        stamp.value = "S2"
+        await rig.coordinator.followLoginChange(.keychain)
+
+        #expect(openLogin(rig.container) == "org-b")
+        #expect(rig.coordinator.rememberedRejectionForTesting == nil)
+    }
+
+    @Test("config first, keychain event never arrives: the follow-up check accepts")
+    func configFirstNoKeychainEvent() async throws {
+        let stamp = StampBox("S1")
+        let rig = try await rig(stamp: stamp)
+        try await rejectB(rig)
+
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+        #expect(rig.coordinator.fastRejectFollowUpPendingForTesting)
+
+        // The keychain moves and no event is delivered.
+        rig.keychain.token = "tok-b"
+        stamp.value = "S2"
+        await rig.coordinator.runFastRejectFollowUp()
+
+        #expect(openLogin(rig.container) == "org-b")
+        #expect(!rig.coordinator.fastRejectFollowUpPendingForTesting)
+        await rig.coordinator.stop()
+    }
+
+    @Test("an unmoved stamp at the follow-up check does nothing more")
+    func followUpUnchangedStamp() async throws {
+        let rig = try await rig(stamp: StampBox("S1"))
+        try await rejectB(rig)
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        let reads = rig.keychain.reads
+
+        await rig.coordinator.runFastRejectFollowUp()
+
+        #expect(rig.keychain.reads == reads)
+        #expect(rig.coordinator.rememberedRejectionForTesting == "org-b")
+        #expect(openLogin(rig.container) == "org-a")
+        await rig.coordinator.stop()
+    }
+
+    @Test("an unreadable stamp disables the fast path")
+    func nilStamp() async throws {
+        let rig = try await rig(stamp: StampBox(nil))
+        _ = await rig.poller.runOnce()
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+
+        #expect(rig.coordinator.rememberedRejectionForTesting == nil, "nothing is remembered without a stamp")
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(!rig.coordinator.fastRejectFollowUpPendingForTesting)
+        await rig.coordinator.stop()
+    }
+
+    @Test("accepting an identity forgets the rejection; a later identity takes the full path")
+    func clearedOnAccept() async throws {
+        let rig = try await rig(stamp: StampBox("S1"))
+        try await rejectB(rig)
+
+        // A real switch to B that reaches Pacer through a read the scan path
+        // would take, not a keychain event: the pass accepts it on sight.
+        rig.keychain.token = "tok-b"
+        await rig.poller.refreshSignedInCredential()   // unresolved: no verdict, accepts
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-b")
+        #expect(rig.coordinator.rememberedRejectionForTesting == nil)
+        _ = await rig.poller.runOnce()                 // tok-b now resolves to org-b
+
+        // C names someone the keychain does not hold: a full read, not a fast reject.
+        let before = rig.keychain.reads
+        try await writeConfig(rig.home, org: "org-c")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(rig.keychain.reads == before + 1)
+        #expect(openLogin(rig.container) == "org-b")
+        #expect(rig.coordinator.rememberedRejectionForTesting == "org-c")
+        await rig.coordinator.stop()
     }
 }

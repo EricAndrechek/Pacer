@@ -856,7 +856,7 @@ public actor OAuthPoller: TokenPoolTesting {
 
         while !stopping && !Task.isCancelled {
             ensureLanes()
-            await ingestSwitcherCache()
+            _ = await ingestSwitcherCache()
             let activity = await activityProbe()
             lastActivityAt = activity
 
@@ -909,35 +909,57 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Strictly additive. A reading is dropped unless it is newer than what
     /// Pacer already holds for that account, so a stale cache can never walk a
     /// live series backwards, and an absent file is simply nothing.
-    private func ingestSwitcherCache() async {
+    private func ingestSwitcherCache() async -> SwitcherIngestTally {
         if switcherIngestInFlight {
             switcherIngestRequested = true
-            return
+            return SwitcherIngestTally()
         }
         switcherIngestInFlight = true
         defer { switcherIngestInFlight = false }
+        var tally = SwitcherIngestTally()
         repeat {
             switcherIngestRequested = false
-            await ingestSwitcherCacheOnce()
+            let once = await ingestSwitcherCacheOnce()
+            tally.readings += once.readings
+            tally.accounts += once.accounts
         } while switcherIngestRequested && !stopping
+        return tally
+    }
+
+    /// What one read of cswap's cache added, for the event-driven log line.
+    private struct SwitcherIngestTally {
+        var readings = 0
+        var accounts = 0
     }
 
     /// Read cswap's cache now rather than on the loop's next pass — called
     /// when the file changes (#241, #192). A switch through cswap shows up
     /// here first: the roster names the account, and its readings are often
     /// already in the file before Pacer has a lane for its token.
-    public func ingestSwitcherCacheNow() async {
-        await ingestSwitcherCache()
+    ///
+    /// Logs one line when the read recorded something new — readings and/or
+    /// accounts, with the ms since the write was seen — and nothing when it
+    /// recorded nothing: cswap rewrites its cache every poll, mostly with
+    /// data Pacer already holds, and a line per write would be noise.
+    public func ingestSwitcherCacheNow(seenAt: Date? = nil) async {
+        let tally = await ingestSwitcherCache()
         await publishStatus()
+        guard tally.readings > 0 || tally.accounts > 0 else { return }
+        var parts: [String] = []
+        if tally.readings > 0 { parts.append("\(tally.readings) reading(s)") }
+        if tally.accounts > 0 { parts.append("\(tally.accounts) new account(s)") }
+        let lag = seenAt.map { " (+\(Int(Date().timeIntervalSince($0) * 1000)) ms since the write was seen)" } ?? ""
+        Log.write("OAuthPoller", "switcher cache changed: recorded " + parts.joined(separator: ", ") + lag)
     }
 
-    private func ingestSwitcherCacheOnce() async {
+    private func ingestSwitcherCacheOnce() async -> SwitcherIngestTally {
+        var tally = SwitcherIngestTally()
         let contents = switcherCache()
         let readings = contents.readings
-        await provisionSwitcherAccounts(contents.accounts)
+        tally.accounts = await provisionSwitcherAccounts(contents.accounts)
         forgetSwitcherSchedule(
             exceptAccounts: Set(readings.map { Account.key(forOrg: $0.organizationId) }))
-        guard !readings.isEmpty else { return }
+        guard !readings.isEmpty else { return tally }
         for reading in readings {
             let key = Account.key(forOrg: reading.organizationId)
 
@@ -962,6 +984,7 @@ public actor OAuthPoller: TokenPoolTesting {
             // that gap can take the same reading for new.
             lastSwitcherIngestAt[key] = reading.fetchedAt
             guard await isNewerThanStored(reading.fetchedAt, account: key) else { continue }
+            tally.readings += 1
 
             let snapshot = RateLimitSnapshot(
                 sampledAt: reading.fetchedAt,
@@ -999,6 +1022,7 @@ public actor OAuthPoller: TokenPoolTesting {
                              laneSource: .parked,
                              source: RateLimitSource.cswap)
         }
+        return tally
     }
 
     /// Give every account cswap lists a row, readings or not (#241).
@@ -1008,11 +1032,12 @@ public actor OAuthPoller: TokenPoolTesting {
     /// menu list it straight away. Creates only — `Account.ensure` never
     /// touches a row that exists — and the in-memory set keeps an unchanged
     /// roster from costing a store read on every pass.
-    private func provisionSwitcherAccounts(_ listed: [SwitcherUsageCache.ListedAccount]) async {
+    @discardableResult
+    private func provisionSwitcherAccounts(_ listed: [SwitcherUsageCache.ListedAccount]) async -> Int {
         let missing = listed.filter {
             !provisionedSwitcherAccounts.contains(Account.key(forOrg: $0.organizationId))
         }
-        guard !missing.isEmpty else { return }
+        guard !missing.isEmpty else { return 0 }
         let container = self.container
         let seeds = missing.map(Account.Seed.init)
         let created: [String] = await MainActor.run {
@@ -1035,6 +1060,7 @@ public actor OAuthPoller: TokenPoolTesting {
                       "listed \(created.count) account(s) from the switcher's roster before any reading: "
                         + created.map { String($0.prefix(4)) }.joined(separator: ", "))
         }
+        return created.count
     }
 
     /// Tell the scheduler what cswap has spent on this account's tokens, and

@@ -380,7 +380,21 @@ public final class ScanCoordinator {
     /// because the watcher already filtered for a real identity change; long
     /// enough that a stale session flip-flopping the config cannot turn into
     /// a keychain read per rewrite.
-    private static let loginPassCredentialCheckInterval: TimeInterval = 2
+    private let loginPassCredentialCheckInterval: TimeInterval
+
+    /// The last identity a *full* keychain read rejected as a stale config
+    /// write, with the keychain item's stamp taken right after that read
+    /// (#243). Only `runLoginPass` sets it, only after it did the full read.
+    private var rememberedRejection: (key: String, stamp: String)?
+    /// Where the keychain item's stamp comes from. Injectable so tests can
+    /// move it; the default is nil in a test process (`KeychainItemStamp`),
+    /// and a nil stamp disables the fast reject.
+    private let keychainStamp: @Sendable () -> String?
+    /// How long after a fast reject the stamp is checked again.
+    private let fastRejectRecheckDelay: TimeInterval
+    /// The one pending follow-up check, so a flip storm schedules one, not
+    /// one per flip.
+    private var fastRejectFollowUp: Task<Void, Never>?
     /// Home directory the login lives under. The real one in the app; a
     /// temporary one in tests, so nothing reads the developer's own login.
     private let homeDirectory: URL
@@ -512,11 +526,17 @@ public final class ScanCoordinator {
         resolver: ClaudePathResolver = ClaudePathResolver(),
         oauthClient: OAuthClient? = nil,
         oauthPoolStore: TokenPoolStoring = EphemeralTokenPoolStore(),
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        keychainStamp: @escaping @Sendable () -> String? = { KeychainItemStamp.current() },
+        fastRejectRecheckDelay: TimeInterval = 2,
+        loginPassCredentialCheckInterval: TimeInterval = 2
     ) {
+        self.loginPassCredentialCheckInterval = loginPassCredentialCheckInterval
         self.container = container
         self.configuration = configuration
         self.homeDirectory = homeDirectory
+        self.keychainStamp = keychainStamp
+        self.fastRejectRecheckDelay = fastRejectRecheckDelay
         self.scanner = JSONLScanner()
         self.watcher = JSONLWatcher(mode: configuration.watcherMode)
         self.resolver = resolver
@@ -779,6 +799,8 @@ public final class ScanCoordinator {
         signedInCredential.setOnAccountChange(nil)
         loginWatcher?.stop()
         loginWatcher = nil
+        fastRejectFollowUp?.cancel()
+        fastRejectFollowUp = nil
         // Flush the dedup index unconditionally on the way out: writes are
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
@@ -883,7 +905,7 @@ public final class ScanCoordinator {
     /// queued folds into it.
     public func followLoginChange(_ signal: LoginChangeWatcher.Signal, seenAt: Date = Date()) async {
         if signal == .switcher {
-            await oauthPoller?.ingestSwitcherCacheNow()
+            await oauthPoller?.ingestSwitcherCacheNow(seenAt: seenAt)
             return
         }
         if signal == .keychain { loginPassKeychainMoved = true }
@@ -910,38 +932,56 @@ public final class ScanCoordinator {
     /// cycle.
     private func runLoginPass(keychainMoved: Bool, seenAt: Date) async {
         let recorder = trailRecorder()
+        // Whether this pass read the keychain in full, so a rejection it
+        // produces is one a full read stands behind (#243).
+        var fullRead = false
         if keychainMoved, let oauthPoller {
+            // The keychain moved, so whatever was remembered about it is void.
+            rememberedRejection = nil
             // The credential moved. Read it before judging anything, and judge
             // the config again even though the file may not have changed: a
             // switch whose keychain write landed after its config write was
             // rejected against the old token, and the file will not be
             // re-read until Claude Code next rewrites it.
             await oauthPoller.refreshSignedInCredential()
+            fullRead = true
             lastCredentialCheckAt = Date()
             recorder.rejudgeDefaultLogin()
         }
         var polled = recorder.poll(
             credential: signedInCredential.current, credentialExpected: oauthPoller != nil)
         if recorder.needsCredentialCheck, let oauthPoller {
-            let now = Date()
-            let wait = lastCredentialCheckAt.map {
-                Self.loginPassCredentialCheckInterval - now.timeIntervalSince($0)
-            } ?? 0
-            if wait <= 0 {
-                lastCredentialCheckAt = now
-                await oauthPoller.refreshSignedInCredential()
-                // Unchanged file, so this re-decides the held observation
-                // against the reading just taken.
-                polled = recorder.poll(credential: signedInCredential.current, credentialExpected: true)
+            if fastRejects(recorder) {
+                // Answered without a discovery; nothing more to do for it.
             } else {
-                // A read went out moments ago, before this write. Come back
-                // when the throttle allows one rather than leave the
-                // observation waiting for a cycle.
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                    await self?.followLoginChange(.config, seenAt: seenAt)
+                let now = Date()
+                let wait = lastCredentialCheckAt.map {
+                    loginPassCredentialCheckInterval - now.timeIntervalSince($0)
+                } ?? 0
+                if wait <= 0 {
+                    lastCredentialCheckAt = now
+                    await oauthPoller.refreshSignedInCredential()
+                    fullRead = true
+                    // Unchanged file, so this re-decides the held observation
+                    // against the reading just taken.
+                    polled = recorder.poll(credential: signedInCredential.current, credentialExpected: true)
+                } else {
+                    // A read went out moments ago, before this write. Come back
+                    // when the throttle allows one rather than leave the
+                    // observation waiting for a cycle.
+                    Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                        await self?.followLoginChange(.config, seenAt: seenAt)
+                    }
                 }
             }
+        }
+        if recorder.acceptedThisPoll != nil {
+            rememberedRejection = nil
+        } else if fullRead, let rejected = recorder.rejectedThisPoll {
+            // Read right after the full read, so it describes the keychain the
+            // rejection was judged against. A nil stamp remembers nothing.
+            rememberedRejection = keychainStamp().map { (rejected, $0) }
         }
         if let credential = signedInCredential.current { recorder.reconcile(with: credential) }
         let observedAccount = polled.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
@@ -960,6 +1000,81 @@ public final class ScanCoordinator {
             await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: seenAt)
         }
     }
+
+    /// Reject a held config identity without a keychain discovery, when a full
+    /// read already rejected this same identity and the keychain has not moved
+    /// since (#243).
+    ///
+    /// Cause: a stale Claude Code process (typically Desktop's embedded one)
+    /// rewrites a different `oauthAccount` into the shared config every few
+    /// seconds. Each flip back is a fresh observation the trail holds until
+    /// the keychain has been read since the write, and that read is a full
+    /// token discovery (the `security -w` item, parked logins, Desktop's cache
+    /// decrypt), up to every 2 s, always to reach the same rejection.
+    ///
+    /// All of these must hold, else the full path runs unchanged:
+    /// the config names exactly the remembered identity; a stamp read *now* is
+    /// non-nil and equals the remembered one; and the credential's account is
+    /// known and differs from that identity. A nil stamp (unreadable, or a
+    /// test process) disables this entirely, and an identity no full read
+    /// rejected is never fast-rejected.
+    ///
+    /// The stamp is re-read here rather than taken from the watcher's cached
+    /// one because of the race: a real switch can write the config *before*
+    /// the keychain item, and the watcher's stamp lags the item by its event
+    /// latency, so a cached stamp would call a switch "unchanged" exactly when
+    /// it is half-done. A fresh read can still precede the keychain write by
+    /// milliseconds, which is what the follow-up check below closes.
+    private func fastRejects(_ recorder: AccountTrailRecorder) -> Bool {
+        guard let remembered = rememberedRejection,
+              recorder.pendingAccountKey == remembered.key,
+              let stamp = keychainStamp()
+        else { return false }
+        guard stamp == remembered.stamp else {
+            // The keychain item moved since the rejection: it no longer holds.
+            rememberedRejection = nil
+            return false
+        }
+        guard let signedIn = signedInCredential.current?.accountKey,
+              signedIn != remembered.key
+        else { return false }
+        recorder.rejectPendingAsStale()
+        scheduleFastRejectFollowUp()
+        return true
+    }
+
+    /// One stamp check shortly after a fast reject, at most one pending.
+    ///
+    /// Config-first switch: the config changed to the remembered identity
+    /// first, the fast reject saw an unchanged stamp, and the keychain write
+    /// lands a moment later. Normally the keychain watcher's event runs the
+    /// full path; this is the guarantee for when that event is late or never
+    /// comes, so a real switch is never left stuck waiting on the 30 s scan
+    /// path or the 30-minute discovery.
+    private func scheduleFastRejectFollowUp() {
+        guard fastRejectFollowUp == nil else { return }
+        let delay = fastRejectRecheckDelay
+        fastRejectFollowUp = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.runFastRejectFollowUp()
+        }
+    }
+
+    /// The check itself. Unchanged stamp: nothing more. Moved, or unreadable:
+    /// forget the rejection and run the full path as a keychain move, which
+    /// re-judges the default login against a fresh read.
+    func runFastRejectFollowUp() async {
+        fastRejectFollowUp = nil
+        guard let remembered = rememberedRejection else { return }
+        if let stamp = keychainStamp(), stamp == remembered.stamp { return }
+        rememberedRejection = nil
+        await followLoginChange(.keychain)
+    }
+
+    /// Test seams for the fast reject.
+    var rememberedRejectionForTesting: String? { rememberedRejection?.key }
+    var fastRejectFollowUpPendingForTesting: Bool { fastRejectFollowUp != nil }
 
     /// Arm the login watcher (#192). Live mode only: tests drive
     /// `followLoginChange` themselves and must never watch the developer's
@@ -1257,6 +1372,7 @@ public final class ScanCoordinator {
         let credential = signedInCredential.current
         let polledAccount = recorder.poll(
             credential: credential, credentialExpected: oauthPoller != nil)
+        if recorder.acceptedThisPoll != nil { rememberedRejection = nil }
         if let credential { recorder.reconcile(with: credential) }
         if recorder.needsCredentialCheck, let oauthPoller {
             let now = Date()
