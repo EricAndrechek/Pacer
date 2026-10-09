@@ -84,7 +84,6 @@ struct EntrypointParsingTests {
 }
 
 @Suite("Desktop's session records")
-@ScanActor
 struct DesktopSessionDirectoryTests {
 
     @Test("each record maps its transcript session to the org folder it sits in")
@@ -246,7 +245,7 @@ struct DesktopScanAttributionTests {
         let coordinator = ScanCoordinator(
             container: container,
             configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false,
-                                 desktopSessionsRoot: sessionsRoot),
+                                 desktopSessions: DesktopSessionDirectory(root: sessionsRoot)),
             resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": configRoot.path]),
             homeDirectory: configRoot)
         return Rig(configRoot: configRoot, sessionsRoot: sessionsRoot,

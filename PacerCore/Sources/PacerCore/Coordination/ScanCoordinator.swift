@@ -229,11 +229,11 @@ public final class ScanCoordinator {
         /// widget extension and tests use) keeps every scan on
         /// `JSONLScanner`. See `BulkTranscriptImporter`.
         public var bulkImporter: BulkTranscriptImporter?
-        /// Where Claude Desktop keeps its Claude Code session records, which
-        /// say which account each Desktop session billed (#244). nil (the
-        /// default in tests) reads none, and leaves Desktop's turns
-        /// unattributed. See `DesktopSessionDirectory`.
-        public var desktopSessionsRoot: URL?
+        /// Claude Desktop's Claude Code session records, which say which
+        /// account each Desktop session billed (#244). The process's shared
+        /// reader by default, which reads nothing in tests; nil leaves
+        /// Desktop's turns unattributed. See `DesktopSessionDirectory`.
+        public var desktopSessions: DesktopSessionDirectory?
 
         public init(
             costMode: CostMode = .auto,
@@ -242,7 +242,7 @@ public final class ScanCoordinator {
             saveBatchSize: Int = 1_000,
             oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration(),
             bulkImporter: BulkTranscriptImporter? = nil,
-            desktopSessionsRoot: URL? = DesktopSessionDirectory.defaultRoot
+            desktopSessions: DesktopSessionDirectory? = .shared
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -250,7 +250,7 @@ public final class ScanCoordinator {
             self.saveBatchSize = saveBatchSize
             self.oauthPolling = oauthPolling
             self.bulkImporter = bulkImporter
-            self.desktopSessionsRoot = desktopSessionsRoot
+            self.desktopSessions = desktopSessions
         }
     }
 
@@ -372,7 +372,7 @@ public final class ScanCoordinator {
     private var accountTrailRecorder: AccountTrailRecorder?
     /// Claude Desktop's session records, read on first use and then only when
     /// a Desktop turn names a session not seen yet.
-    private lazy var desktopSessions = DesktopSessionDirectory(root: configuration.desktopSessionsRoot)
+    private var desktopSessions: DesktopSessionDirectory? { configuration.desktopSessions }
     /// The login this process last saw, so account-following reacts to a
     /// change rather than re-asserting the same answer every cycle.
     private var lastObservedLoginAccount: String?
@@ -1414,7 +1414,7 @@ public final class ScanCoordinator {
         // cycle (every session, on the first) have their stored turns moved
         // below; their accounts exist from now on, like any login seen.
         activePersister.desktopSessions = desktopSessions
-        let desktopRecorded = desktopSessions.drainDiscovered()
+        let desktopRecorded = desktopSessions?.drainDiscovered() ?? [:]
         ensureDesktopAccounts(Set(desktopRecorded.values))
 
         if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
@@ -2050,7 +2050,8 @@ public final class ScanCoordinator {
         persister: SamplePersister
     ) throws -> Int {
         let moved = try AccountBackfill.restamp(
-            corrections, trail: trail, desktopSessions: desktopSessions.accounts, context: context)
+            corrections, trail: trail, desktopSessions: desktopSessions?.accounts ?? [:],
+            context: context)
         guard !moved.isEmpty else { return 0 }
         persister.markSamplesForRebuild(moved)
         log("accounts: re-attributed \(moved.count) turn(s) after the trail was corrected")

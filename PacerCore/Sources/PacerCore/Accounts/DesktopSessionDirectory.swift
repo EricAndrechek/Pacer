@@ -22,16 +22,24 @@ import Foundation
 ///
 /// Only the org folder's name and that one field are read. A record's session
 /// and org never change, so each file is parsed once.
-@ScanActor
-public final class DesktopSessionDirectory {
+///
+/// **One reader per process, shared by reference** (`shared`): the scan
+/// attributes turns from it and the HTTP API binds sessions to it (#211), and
+/// two copies would each list the folder and could disagree. Every member is
+/// safe from any thread; a read that has to touch the disk does so under the
+/// lock, which only ever guards a directory listing and any new small files.
+public final class DesktopSessionDirectory: @unchecked Sendable {
     /// Where Desktop keeps its session records, or nil when Pacer should not
     /// look (tests, which must never read the developer's own Desktop).
-    nonisolated public static var defaultRoot: URL? {
+    public static var defaultRoot: URL? {
         guard !PacerPreferences.isTestProcess else { return nil }
         return FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Application Support/Claude/claude-code-sessions",
                        directoryHint: .isDirectory)
     }
+
+    /// The process's reader of `defaultRoot`.
+    public static let shared = DesktopSessionDirectory(root: defaultRoot)
 
     /// How long a session Desktop has no record for waits before its next
     /// turn reads the folder again. A record is written when a session starts,
@@ -39,11 +47,13 @@ public final class DesktopSessionDirectory {
     /// read) or a record Desktop has since deleted (gone for good). Either way
     /// one listing per session every few seconds is plenty, and costs a
     /// directory listing plus any new file.
-    nonisolated public static let missRefreshInterval: TimeInterval = 5
+    public static let missRefreshInterval: TimeInterval = 5
 
     private let root: URL?
+    private let lock = NSLock()
+    // Everything below is guarded by `lock`.
     /// `sessionId` → `Account.id`, for every record read so far.
-    public private(set) var accounts: [String: String] = [:]
+    private var accountsBySession: [String: String] = [:]
     /// Record files that yielded a session. Others are read again, since a
     /// record can be written before its `cliSessionId` is.
     private var readFiles: Set<String> = []
@@ -57,41 +67,61 @@ public final class DesktopSessionDirectory {
         self.root = root
     }
 
-    /// The account Desktop recorded for `sessionId`, without touching the disk.
+    /// Every recorded session and its account, as of the last read.
+    public var accounts: [String: String] {
+        lock.withLock {
+            loadIfNeededLocked()
+            return accountsBySession
+        }
+    }
+
+    /// The account Desktop recorded for `sessionId`, without reading anything
+    /// new.
     public func recordedAccount(forSession sessionId: String?) -> String? {
         guard let sessionId else { return nil }
-        loadIfNeeded()
-        return accounts[sessionId]
+        return lock.withLock {
+            loadIfNeededLocked()
+            return accountsBySession[sessionId]
+        }
     }
 
     /// The account for a session Desktop's Claude Code wrote, reading any new
     /// records first when it is not known yet.
     public func accountForDesktopSession(_ sessionId: String?, now: Date = Date()) -> String? {
         guard let sessionId else { return nil }
-        if let known = recordedAccount(forSession: sessionId) { return known }
-        if let last = lastMissRead[sessionId],
-           now.timeIntervalSince(last) < Self.missRefreshInterval { return nil }
-        lastMissRead[sessionId] = now
-        refresh()
-        return accounts[sessionId]
+        return lock.withLock {
+            loadIfNeededLocked()
+            if let known = accountsBySession[sessionId] { return known }
+            if let last = lastMissRead[sessionId],
+               now.timeIntervalSince(last) < Self.missRefreshInterval { return nil }
+            lastMissRead[sessionId] = now
+            refreshLocked()
+            return accountsBySession[sessionId]
+        }
     }
 
     /// Sessions that gained an account since the last call: what the caller
     /// re-stamps history for. On the first call that is every recorded session.
     public func drainDiscovered() -> [String: String] {
-        loadIfNeeded()
-        defer { discovered.removeAll() }
-        return discovered
-    }
-
-    public func loadIfNeeded() {
-        guard !loaded else { return }
-        loaded = true
-        refresh()
+        lock.withLock {
+            loadIfNeededLocked()
+            defer { discovered.removeAll() }
+            return discovered
+        }
     }
 
     /// Read every record not read before.
     public func refresh() {
+        lock.withLock { refreshLocked() }
+    }
+
+    private func loadIfNeededLocked() {
+        guard !loaded else { return }
+        loaded = true
+        refreshLocked()
+    }
+
+    private func refreshLocked() {
         guard let root else { return }
         let fm = FileManager.default
         for user in Self.subdirectories(of: root, fm) {
@@ -109,8 +139,8 @@ public final class DesktopSessionDirectory {
                     guard !readFiles.contains(path),
                           let sessionId = Self.cliSessionId(in: file) else { continue }
                     readFiles.insert(path)
-                    guard accounts[sessionId] != accountId else { continue }
-                    accounts[sessionId] = accountId
+                    guard accountsBySession[sessionId] != accountId else { continue }
+                    accountsBySession[sessionId] = accountId
                     discovered[sessionId] = accountId
                     lastMissRead[sessionId] = nil
                 }
