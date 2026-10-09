@@ -1233,5 +1233,42 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="JDzLFf1O/UNR9S8m7zuBOPNoJhFSovG1LZ28jJEizMa0H4+r73scgnCfi/xNgurnFD4/fg1ccazMikXJaH75Dg==" />
     </item>
+            <item>
+        <title>Version 0.7.3</title>
+        <description><![CDATA[<p>Account switches that show up in about a second, readings for the account you're on that stay fresh, a local API that keeps answering when your Mac is busy, and a Homebrew install.</p>
+<h2>Switching accounts shows up right away</h2>
+<p>After a <code class="notranslate">/login</code> or a <code class="notranslate">claude-swap</code> switch, Pacer used to notice only on its next scan, which could take a few seconds when you were busy and minutes when you weren't. A brand-new account didn't appear until Pacer had read its usage at least once, which took up to several minutes. Pacer now sees the switch the moment it happens. The dashboard, menu bar, Settings and the local API all move to the new account in about a second, and a new account appears as soon as you sign in.</p>
+<p>Until Pacer has read an account's usage, it says "no reading yet" instead of showing 0%. The rate-limit widget used to show a 0% ring there.</p>
+<h2>Readings for the account you're on stay fresh</h2>
+<ul>
+<li>When Claude Code renewed its login, Pacer could go up to 30 minutes without being able to read your usage. It now picks up the renewed login right away.</li>
+<li>Pacer and <code class="notranslate">claude-swap</code> could ask for the same account's usage at the same moment, and both got turned away, leaving the reading 14 minutes old. Pacer now takes <code class="notranslate">claude-swap</code>'s readings as its own and stays out of its way.</li>
+</ul>
+<h2>The local API keeps answering</h2>
+<p>With the local API turned on (Settings → Integrations), a slow moment on your Mac could stop it answering every request, including the pacing skill's. Sessions that pace themselves then carried on without a limit, just when it mattered most. The API now answers from numbers it keeps ready in memory, in a few milliseconds, and says how old they are.</p>
+<h2>The pacing skill</h2>
+<ul>
+<li>It now stops at the safe limit by default: as close to 100% as the age of the latest reading allows. Previously it stopped at 85% unless you set a limit yourself.</li>
+<li>It follows a <code class="notranslate">/login</code> switch while a session is waiting, instead of watching the account it started on.</li>
+</ul>
+<h2>Install with Homebrew</h2>
+<div class="highlight highlight-source-shell"><pre class="notranslate">brew install --cask ericandrechek/tap/pacer</pre></div>
+<p>Pacer still updates itself; Homebrew picks up each new version too.</p>
+<h2>Also</h2>
+<ul>
+<li>The dashboard could freeze for a moment while Pacer checked whether a usage limit had reset early. That check now runs in the background, and only when it can matter.</li>
+<li>While Claude Desktop keeps rewriting the shared Claude Code settings file, Pacer checks your login far less often.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Fri, 09 Oct 2026 17:31:35 +0000</pubDate>
+        <sparkle:version>1791566768</sparkle:version>
+        <sparkle:shortVersionString>0.7.3</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.3/Pacer-0.7.3.dmg"
+            length="22337885"
+            type="application/octet-stream"
+            sparkle:edSignature="NKLHJEV3YhOwoRaDbIIhMCTIoXt8ISzOxX2ZUBEvUsbpsV/7/eixnuQSq6Z3ge/9H8SzRwvamefNt7fyJ6KwBw==" />
+    </item>
         </channel>
 </rss>
