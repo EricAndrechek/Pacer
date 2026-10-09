@@ -104,19 +104,25 @@ public actor OAuthPoller: TokenPoolTesting {
         /// candidate discovery (picks up Desktop token rotation / new
         /// logins). Discovery also runs whenever no usable lane remains.
         public var laneRediscoverInterval: TimeInterval
+        /// Floor between discoveries triggered by the fast pool (the active
+        /// account's lanes) being empty. Without it a keychain that still
+        /// holds the expired token would be re-read on every loop pass.
+        public var emptyPoolRediscoverInterval: TimeInterval
 
         public init(
             scheduler: OAuthPollScheduler.Tuning = .init(),
             startupDelay: TimeInterval = 0,
             laneCooldownBase: TimeInterval = 300,
             laneCooldownMax: TimeInterval = 3600,
-            laneRediscoverInterval: TimeInterval = 1800
+            laneRediscoverInterval: TimeInterval = 1800,
+            emptyPoolRediscoverInterval: TimeInterval = 60
         ) {
             self.scheduler = scheduler
             self.startupDelay = startupDelay
             self.laneCooldownBase = laneCooldownBase
             self.laneCooldownMax = laneCooldownMax
             self.laneRediscoverInterval = laneRediscoverInterval
+            self.emptyPoolRediscoverInterval = emptyPoolRediscoverInterval
         }
 
         /// Per-lane floor for a non-active account's lanes.
@@ -188,6 +194,8 @@ public actor OAuthPoller: TokenPoolTesting {
         /// account's token drops to the slow secondary sweep and its readings
         /// are filed as some other account's).
         public let misclassifiedLaneCount: Int
+        /// Lanes the scheduler will poll ahead of its cadence gate (#214).
+        public let probeFirstLaneCount: Int
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -251,6 +259,9 @@ public actor OAuthPoller: TokenPoolTesting {
     /// successful poll (or a restore from persisted `Account.isActive`).
     private var activeAccountKey: String?
     private var lastDiscoveryAt: Date?
+    /// When discovery last ran because the fast pool was empty; throttles
+    /// that trigger (`Configuration.emptyPoolRediscoverInterval`).
+    private var lastEmptyPoolDiscoveryAt: Date?
     /// Where the signed-in credential's account is published for the
     /// attribution trail. nil in tests that do not exercise attribution.
     private let signedInCredential: SignedInCredentialMonitor?
@@ -394,7 +405,8 @@ public actor OAuthPoller: TokenPoolTesting {
                 guard lane.state.account != .unknown, let active = activeAccountKey else { return false }
                 let belongs = (lane.resolvedOrg == nil) || (Account.key(forOrg: lane.resolvedOrg) == active)
                 return belongs != (lane.state.account == .primary)
-            }.count
+            }.count,
+            probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count
         )
     }
 
@@ -531,7 +543,9 @@ public actor OAuthPoller: TokenPoolTesting {
         // token as unresolved, and an unresolved token cannot veto anything.
         await loadPersistedMetaIfNeeded()
         lastDiscoveryAt = nil
+        let before = lanes.count
         ensureLanes()
+        wakeIfNewLane(countBefore: before)
     }
 
     /// Read every token source now. Called when a credential setting changes
@@ -540,8 +554,20 @@ public actor OAuthPoller: TokenPoolTesting {
     public func rediscoverTokens() async {
         await loadPersistedMetaIfNeeded()
         lastDiscoveryAt = nil
+        let before = lanes.count
         ensureLanes()
+        wakeIfNewLane(countBefore: before)
         await publishStatus()
+    }
+
+    /// Cancel the loop's nap when discovery added a lane or marked one
+    /// `probeFirst`, so the loop re-decides now instead of when the nap ends
+    /// (#214). Never polls here: polling stays in the loop, because actor
+    /// reentrancy could otherwise interleave two polls.
+    private func wakeIfNewLane(countBefore: Int) {
+        if lanes.count > countBefore || lanes.contains(where: { $0.state.probeFirst }) {
+            notifyActivity()
+        }
     }
 
     /// Publish the account of the token the keychain holds, if a keychain
@@ -1104,28 +1130,85 @@ public actor OAuthPoller: TokenPoolTesting {
         }
         let noUsable = lanes.isEmpty
         let stale = lastDiscoveryAt.map { now.timeIntervalSince($0) >= configuration.laneRediscoverInterval } ?? true
+        var discovered = false
         if stale || noUsable {
-            // Hand the client our Desktop-origin tokens so its layered read
-            // can decide whether it even needs to touch Claude Desktop.
-            let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
-            let candidates = client.candidateCredentials(cachedDesktopTokens: cachedDesktop)
-            mergeCandidates(candidates)
-            lastDiscoveryAt = now
-            // Remember what the keychain holds *now*, so the attribution trail
-            // can tell a real switch (the keychain changed) from a stale
-            // `oauthAccount` written by some other Claude Code process (it
-            // did not).
-            liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
-            liveKeychainReadAt = liveKeychainToken == nil ? nil : now
-            publishSignedInCredential()
+            discoverLanes(now: now, full: true)
+            discovered = true
+        } else if emptyPoolDiscoveryDue(now) {
+            discoverLanes(now: now, full: false)
+            discovered = true
         }
-        // Drop lanes whose token has expired locally (server would 401).
+        dropExpiredLanes(now: now)
+        // The sweep can itself empty the fast pool: the token it just dropped
+        // was the active account's, and Claude Code has very likely already
+        // written its replacement. Look again in this pass rather than the
+        // next one (the throttle still applies).
+        if !discovered, emptyPoolDiscoveryDue(now) {
+            discoverLanes(now: now, full: false)
+            dropExpiredLanes(now: now)
+        }
+        sortLanes()
+        savePool()
+    }
+
+    /// True when no `.primary`/`.unknown` lane remains — the same set
+    /// `OAuthPollScheduler.decide` treats as usable — and the last
+    /// empty-pool discovery is older than the throttle.
+    ///
+    /// **Why this is separate from `noUsable`.** Secondary lanes (another
+    /// account's Desktop tokens) keep `lanes.isEmpty` false, so losing every
+    /// fast-pool lane used to wait out `laneRediscoverInterval`. On
+    /// 2026-10-07 the active account's only token expired at 18:14Z and the
+    /// lane was dropped; Claude Code refreshed it within seconds, but the next
+    /// discovery was 18:34Z, so the account every pacing decision reads went
+    /// 9-10 minutes stale (#212).
+    private func emptyPoolDiscoveryDue(_ now: Date) -> Bool {
+        guard !lanes.contains(where: { $0.state.account == .primary || $0.state.account == .unknown })
+        else { return false }
+        return lastEmptyPoolDiscoveryAt.map {
+            now.timeIntervalSince($0) >= configuration.emptyPoolRediscoverInterval
+        } ?? true
+    }
+
+    /// Re-read Claude's stores and merge what they offer into `lanes`.
+    ///
+    /// `full: false` is the once-a-minute empty-pool look: it never reads
+    /// `Claude Safe Storage`, and it leaves `lastDiscoveryAt` alone so the
+    /// scheduled full discovery still runs on time. At that cadence a
+    /// declined Desktop prompt would be back within the minute, every minute,
+    /// which is the prompt loop v0.3.9 removed. The token it is looking for is
+    /// Claude Code's, in the keychain, and reading that never prompts.
+    private func discoverLanes(now: Date, full: Bool) {
+        // Hand the client our Desktop-origin tokens so its layered read
+        // can decide whether it even needs to touch Claude Desktop.
+        let cachedDesktop = lanes.filter { $0.source == .desktop }.map { $0.credential }
+        let candidates = client.candidateCredentials(cachedDesktopTokens: cachedDesktop,
+                                                     allowDesktopKeyRead: full)
+        mergeCandidates(candidates)
+        if full { lastDiscoveryAt = now }
+        lastEmptyPoolDiscoveryAt = now
+        // Remember what the keychain holds *now*, so the attribution trail
+        // can tell a real switch (the keychain changed) from a stale
+        // `oauthAccount` written by some other Claude Code process (it
+        // did not).
+        liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
+        liveKeychainReadAt = liveKeychainToken == nil ? nil : now
+        // The token Claude Code is billing now, never polled: let the
+        // scheduler poll it ahead of the endpoint-cadence gate (#214).
+        if let live = liveKeychainToken,
+           let i = lanes.firstIndex(where: { $0.credential.accessToken == live }),
+           lanes[i].state.account == .unknown, lanes[i].state.lastPolledAt == nil {
+            lanes[i].state.probeFirst = true
+        }
+        publishSignedInCredential()
+    }
+
+    /// Drop lanes whose token has expired locally (server would 401).
+    private func dropExpiredLanes(now: Date) {
         lanes.removeAll { lane in
             if let exp = lane.credential.expiresAt, exp < now { return true }
             return false
         }
-        sortLanes()
-        savePool()
     }
 
     /// Persist the confirmed tokens (any account) to Pacer's keychain so
@@ -1227,6 +1310,7 @@ public actor OAuthPoller: TokenPoolTesting {
             return lastOutcome ?? .transport
         }
         lanes[idx].state.lastPolledAt = now
+        lanes[idx].state.probeFirst = false
 
         let previous = lastOutcome
         let previousLane = lastPolledLaneId

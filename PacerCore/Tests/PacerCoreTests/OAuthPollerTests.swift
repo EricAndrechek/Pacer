@@ -402,6 +402,34 @@ import Testing
         #expect(monitor.current?.since == since)
     }
 
+    /// #214: a new login's token must reach the scheduler as a first-poll
+    /// candidate the moment the keychain offers it, not after the idle gate.
+    @Test("a new keychain token is marked probeFirst by refreshSignedInCredential")
+    func newKeychainTokenIsProbeFirst() async throws {
+        let container = try Self.makeContainer()
+        let blob = LockedBox(Self.keychainBlob(token: "tokA"))
+        let kc = KeychainOAuth(rawReader: { .success(blob.value) })
+        let transport: OAuthClient.Transport = { _ in
+            try HTTPOutcome.success(
+                jsonBody: #"{"five_hour":{"utilization":10}}"#,
+                headers: ["anthropic-organization-id": "orgA"]).materialize()
+        }
+        let client = OAuthClient(keychain: kc, transport: transport, desktopEnabled: { false })
+        let poller = OAuthPoller(client: client, container: container,
+                                 configuration: .init(), clock: TestClock())
+        _ = await poller.runOnce()   // tokA polled, primary
+        #expect(await poller.snapshot().probeFirstLaneCount == 0)
+
+        blob.value = Self.keychainBlob(token: "tokB")
+        await poller.refreshSignedInCredential()
+        let snap = await poller.snapshot()
+        #expect(snap.laneCount == 2)
+        #expect(snap.probeFirstLaneCount == 1)
+
+        _ = await poller.runOnce()   // polls the never-polled lane
+        #expect(await poller.snapshot().probeFirstLaneCount == 0)
+    }
+
     /// The restart case, which is where this went wrong in the field.
     ///
     /// Lane classification is restored from persisted meta, and so is
@@ -741,5 +769,122 @@ final class TestClock: PollerClock, @unchecked Sendable {
 
         #expect(box.seen.contains { $0.contains("tok-after") },
                 "a switch must re-read Claude's stores rather than wait out the interval")
+    }
+}
+
+/// The active account's only lane expiring while another account's
+/// (secondary) lanes remain (#212). `lanes.isEmpty` stayed false, so the
+/// poller waited out the 30-minute rediscover interval before re-reading the
+/// keychain Claude Code had refreshed seconds after the expiry.
+@Suite struct ExpiredActiveLaneRediscoveryTests {
+
+    private final class Keychain: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _token: String
+        private var _expiresAt: Date
+        private var _reads = 0
+        init(token: String, expiresAt: Date) { _token = token; _expiresAt = expiresAt }
+        func offer(token: String, expiresAt: Date) {
+            lock.lock(); _token = token; _expiresAt = expiresAt; lock.unlock()
+        }
+        var reads: Int { lock.lock(); defer { lock.unlock() }; return _reads }
+        func read() -> Data {
+            lock.lock(); defer { lock.unlock() }
+            _reads += 1
+            return try! JSONSerialization.data(withJSONObject: [
+                "claudeAiOauth": [
+                    "accessToken": _token,
+                    "expiresAt": Int64(_expiresAt.timeIntervalSince1970) * 1000,
+                ]
+            ])
+        }
+    }
+
+    /// Org named by the token's last letter, as in `OAuthPollerTests`.
+    private static let orgByTokenTransport: OAuthClient.Transport = { request in
+        let token = request.value(forHTTPHeaderField: "Authorization") ?? ""
+        return try HTTPOutcome.success(
+            jsonBody: #"{"five_hour":{"utilization":10}}"#,
+            headers: ["anthropic-organization-id": "org" + String(token.suffix(1))]).materialize()
+    }
+
+    private static func makeContainer() throws -> ModelContainer {
+        try ModelContainer(
+            for: Heartbeat.self, TokenSample.self, DailyAggregate.self,
+            ProjectDailyAggregate.self, RateLimitSample.self, ExtraUsageSample.self,
+            UsageLimitSample.self, SessionInfo.self, ClaudeCodeMeta.self,
+            TokenLaneMeta.self, Account.self, AccountUsageArchive.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+
+    /// Active account orgA on the keychain token `tokA` (expires 5 min in),
+    /// plus orgB's long-lived token as a secondary lane.
+    private static func settledPoller(
+        keychain: Keychain, clock: TestClock, start: Date
+    ) async throws -> OAuthPoller {
+        let held = EphemeralCredentialStore(OAuthCredential(
+            accessToken: "tokB", expiresAt: start.addingTimeInterval(7200), subscriptionType: nil))
+        let client = OAuthClient(keychain: KeychainOAuth(rawReader: { .success(keychain.read()) }),
+                                 parkedCredentials: { [] },
+                                 transport: orgByTokenTransport,
+                                 desktopEnabled: { false }, heldStore: held)
+        // Interval far beyond the test, so only the empty-pool trigger can
+        // cause a second read.
+        let poller = OAuthPoller(client: client, container: try makeContainer(),
+                                 configuration: .init(laneRediscoverInterval: 86_400,
+                                                      emptyPoolRediscoverInterval: 60),
+                                 clock: clock)
+        _ = await poller.runOnce()
+        _ = await poller.runOnce()                 // classifies the second lane too
+        await poller.setActiveAccount(id: "orgA")  // tokB becomes secondary
+        return poller
+    }
+
+    @Test func aRefreshedActiveTokenIsPickedUpWithinTheThrottleNotTheInterval() async throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let clock = TestClock(start: start)
+        let keychain = Keychain(token: "tokA", expiresAt: start.addingTimeInterval(300))
+        let poller = try await Self.settledPoller(keychain: keychain, clock: clock, start: start)
+        #expect(await poller.snapshot().primaryLaneCount == 1)
+
+        // Claude Code refreshes the token; the old one then expires locally.
+        keychain.offer(token: "tokrA", expiresAt: start.addingTimeInterval(7200))
+        clock.advance(by: 301)
+        _ = await poller.runOnce()
+
+        let after = await poller.snapshot()
+        #expect(after.primaryLaneCount == 1, "the active account must have a fast-pool lane again")
+        #expect(after.laneCount == 2)
+    }
+
+    @Test func aKeychainStillOfferingTheExpiredTokenIsReadOncePerThrottle() async throws {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let clock = TestClock(start: start)
+        let keychain = Keychain(token: "tokA", expiresAt: start.addingTimeInterval(300))
+        let poller = try await Self.settledPoller(keychain: keychain, clock: clock, start: start)
+
+        clock.advance(by: 301)
+        let before = keychain.reads
+        _ = await poller.runOnce()
+        let perDiscovery = keychain.reads - before
+        #expect(perDiscovery > 0, "the pass that drops the lane rediscovers")
+
+        // 150 s of loop passes, 10 s apart: discoveries at +0 (above), +60, +120.
+        for _ in 0..<15 {
+            clock.advance(by: 10)
+            _ = await poller.runOnce()
+        }
+        let discoveries = (keychain.reads - before) / perDiscovery
+        #expect(discoveries == 3, "got \(discoveries) discoveries over 150 s")
+    }
+}
+
+private final class LockedBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Data
+    init(_ v: Data) { stored = v }
+    var value: Data {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); defer { lock.unlock() }; stored = newValue }
     }
 }

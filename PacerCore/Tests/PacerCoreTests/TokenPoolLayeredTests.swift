@@ -119,6 +119,28 @@ import Testing
         #expect(store.load() == Self.testKey) // fresh key cached
     }
 
+    /// The poller's once-a-minute empty-pool look (#212) passes
+    /// `allowDesktopKeyRead: false`: in exactly the state that would prompt,
+    /// it must not, or a declined prompt comes back every minute.
+    @Test func aSilentReadNeverReadsSafeStorage() {
+        let keyReads = KeyReadCounter()
+        let store = EphemeralDesktopKeyStore(Data("wrong".utf8))
+        let client = OAuthClient(
+            keychain: KeychainOAuth(rawReader: { .failure(.notFound) }),
+            desktop: DesktopOAuth(
+                keyReader: { keyReads.bump(); return .success(Self.testKey) },
+                cacheReader: { [self.blob(token: "desk-live")] }
+            ),
+            desktopEnabled: { true },
+            desktopKeyStore: store
+        )
+        let expired = OAuthCredential(accessToken: "old", expiresAt: Date().addingTimeInterval(-100), subscriptionType: nil)
+        let cands = client.candidateCredentials(cachedDesktopTokens: [expired], allowDesktopKeyRead: false)
+        #expect(!cands.contains { $0.credential.accessToken == "desk-live" })
+        #expect(keyReads.count == 0)
+        #expect(store.load() == Data("wrong".utf8))   // nothing re-cached
+    }
+
     @Test func firstEverReadReadsSafeStorageAndCachesKey() {
         let keyReads = KeyReadCounter()
         let store = EphemeralDesktopKeyStore(nil)   // never cached a key

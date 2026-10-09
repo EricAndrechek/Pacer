@@ -140,10 +140,17 @@ public struct OAuthPollScheduler: Sendable {
         public var cooldownUntil: Date?
         public var account: AccountStatus
 
+        /// The lane holds the token Claude Code is billing now, has never been
+        /// polled, and its account is unknown. `decide` polls it ahead of the
+        /// endpoint-cadence gate: the poll that says who is signed in (#214).
+        public var probeFirst: Bool
+
         public init(lastPolledAt: Date? = nil, cooldownUntil: Date? = nil,
                     externalNextPollAt: Date? = nil, externalLastPollAt: Date? = nil,
                     externalLastSuccessAt: Date? = nil,
-                    account: AccountStatus = .unknown) {
+                    account: AccountStatus = .unknown,
+                    probeFirst: Bool = false) {
+            self.probeFirst = probeFirst
             self.externalNextPollAt = externalNextPollAt
             self.externalLastPollAt = externalLastPollAt
             self.externalLastSuccessAt = externalLastSuccessAt
@@ -186,6 +193,21 @@ public struct OAuthPollScheduler: Sendable {
         let target: TimeInterval = active
             ? max(tuning.activeInterval, tuning.perTokenMinInterval / Double(max(usableIdx.count, 1)))
             : tuning.idleInterval
+
+        // The token Claude Code is billing now, never polled: poll it ahead of
+        // the endpoint-cadence gate. That gate spreads one account's polls
+        // across its tokens; it has no reason to hold back the first poll of
+        // the signed-in token, which spends only that token's own budget and
+        // is the poll that says who is signed in. On 2026-10-08 a new account
+        // was signed in at 19:06:58Z and not polled until 19:10:41Z, because
+        // the idle cadence (600 s from 19:00:40) held it (#214). The per-token
+        // rules (cooldown, external-client schedule) still apply via readyAt.
+        if let first = usableIdx.first(where: {
+            lanes[$0].probeFirst && lanes[$0].lastPolledAt == nil
+                && readyAt(lanes[$0], interval: tuning.perTokenMinInterval, now: now) <= now
+        }) {
+            return .poll(laneIndex: first)
+        }
 
         // When the endpoint-cadence gate next allows a poll: the most
         // recent poll of any usable lane + target. No prior poll ⇒ now.

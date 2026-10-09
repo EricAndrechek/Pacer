@@ -73,11 +73,13 @@ struct PaceScriptTests {
     /// Minimum HTTP server that answers one status to everything. Enough to
     /// prove the script tells "rejected" apart from "nothing listening".
     ///
-    /// Waits for the port to actually accept a connection rather than sleeping
-    /// a fixed interval and hoping. The fixed sleep passed on a warm laptop and
-    /// failed on a cold CI runner, where a Python interpreter takes longer to
-    /// start than the guess allowed — and the failure read as "the script did
-    /// not detect a 401", which is a lie about the thing under test.
+    /// Binds port 0 and reads back the port the OS chose. It used to pick a
+    /// random port in a fixed range and wait for *something* to accept on it,
+    /// which let two tests running in parallel pick the same port: the second
+    /// server failed to bind, the wait still succeeded against the first one,
+    /// and the test read another test's answer (an intermittent
+    /// `jsonSaysWhoseWindowsAndSinceWhen` failure). The port line is printed
+    /// after `HTTPServer` has bound and is listening, so no wait is needed.
     private final class StubServer {
         private let task: Process
         let base: String
@@ -87,60 +89,42 @@ struct PaceScriptTests {
         /// `file`, when given, is re-read on every request instead of `body`,
         /// so a test can change the answer while the script is running.
         init(status: Int, body: String, file: URL? = nil) throws {
-            var launched: (Process, Int)?
-            for _ in 0..<5 {
-                let port = Int.random(in: 49_200...49_900)
-                let payload = file.map { "open(\"\($0.path)\", \"rb\").read()" }
-                    ?? "b\"\"\"\(body)\"\"\""
-                let script = """
-                from http.server import BaseHTTPRequestHandler, HTTPServer
-                class H(BaseHTTPRequestHandler):
-                    def do_GET(self):
-                        self.send_response(\(status))
-                        self.send_header("Content-Type", "text/plain")
-                        self.end_headers()
-                        self.wfile.write(\(payload))
-                    def log_message(self, *a): pass
-                HTTPServer(("127.0.0.1", \(port)), H).serve_forever()
-                """
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                process.arguments = ["python3", "-c", script]
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                try process.run()
-                if Self.waitForPort(port, deadline: 10) {
-                    launched = (process, port)
-                    break
-                }
+            let payload = file.map { "open(\"\($0.path)\", \"rb\").read()" }
+                ?? "b\"\"\"\(body)\"\"\""
+            let script = """
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(\(status))
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(\(payload))
+                def log_message(self, *a): pass
+            server = HTTPServer(("127.0.0.1", 0), H)
+            print(server.server_port, flush=True)
+            server.serve_forever()
+            """
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["python3", "-c", script]
+            let out = Pipe()
+            process.standardOutput = out
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            var line = Data()
+            while !line.contains(UInt8(ascii: "\n")) {
+                let chunk = out.fileHandleForReading.availableData
+                if chunk.isEmpty { break }   // exited before it bound
+                line.append(chunk)
+            }
+            guard let port = String(data: line, encoding: .utf8)
+                .flatMap({ Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) })
+            else {
                 process.terminate()
+                throw StartFailure.neverListened
             }
-            guard let launched else { throw StartFailure.neverListened }
-            task = launched.0
-            base = "http://127.0.0.1:\(launched.1)"
-        }
-
-        /// True once something accepts a TCP connection on the port.
-        private static func waitForPort(_ port: Int, deadline seconds: TimeInterval) -> Bool {
-            let until = Date().addingTimeInterval(seconds)
-            while Date() < until {
-                let fd = socket(AF_INET, SOCK_STREAM, 0)
-                if fd >= 0 {
-                    var addr = sockaddr_in()
-                    addr.sin_family = sa_family_t(AF_INET)
-                    addr.sin_port = UInt16(port).bigEndian
-                    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-                    let connected = withUnsafePointer(to: &addr) {
-                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-                        }
-                    }
-                    close(fd)
-                    if connected { return true }
-                }
-                Thread.sleep(forTimeInterval: 0.1)
-            }
-            return false
+            task = process
+            base = "http://127.0.0.1:\(port)"
         }
 
         func stop() { task.terminate() }
