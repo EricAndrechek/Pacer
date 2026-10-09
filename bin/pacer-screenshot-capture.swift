@@ -153,7 +153,7 @@ func pinWallpaper(dark: Bool) {
 }
 
 struct Request: Decodable {
-    /// "window" (default), "menubar", or "appearance".
+    /// "window" (default), "menubar", "appearance" or "clock".
     var kind: String?
     var windowID: UInt32?
     var scale: Double?
@@ -163,6 +163,8 @@ struct Request: Decodable {
     /// one card of the real window.
     var crop: [Double]?
     var dark: Bool?
+    /// "clock": true pins the system clock, false puts real time back.
+    var pin: Bool?
     var done: String?
     // "widgetsim" / "gallery" (widgets.png — see captureWidgetSim).
     var debug: String?
@@ -176,6 +178,8 @@ func handle(_ request: Request) async throws {
     case "window": try await capture(request)
     case "menubar": try await captureMenuBar(request)
     case "appearance": try setDarkMode(request.dark ?? false)
+    case "clock":
+        if request.pin == false { restoreSystemClock() } else { pinSystemClock() }
     case "widgetsim": try await captureWidgetSim(request)
     case "gallery": try composeGallery(request)
     default: throw fail("unknown request kind \(request.kind ?? "-")")
@@ -205,10 +209,24 @@ func captureMenuBar(_ request: Request) async throws {
     guard let r = request.rect, r.count == 4, let png = request.png else { throw fail("menubar: rect and png required") }
     let rect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
     // The menu bar's clock reads 9:41 — Apple's own screenshot time — so its
-    // width cannot move the items beside it. Put back before anything else
-    // needs a true clock (TLS, git), even if this throws.
-    pinSystemClock()
-    defer { restoreSystemClock() }
+    // width cannot move the items beside it.
+    //
+    // The app pins it (a "clock" request) before it installs its status item,
+    // and puts it back after both menu bar scenes. Pinning only here was too
+    // late: the app had already placed the menu and computed this rectangle
+    // from where its item sat beside the runner's *real* clock, and pinning
+    // then re-laid out the bar under an open menu. Pacer's item slid by the
+    // difference between today's date and 2026-09-18 — 1172 on a Wednesday,
+    // 1175 on a Friday, against 1173 pinned — so every PR marked ready on a
+    // new weekday committed a shifted screenshot (#238).
+    //
+    // Pinning here remains as a fallback for an app that did not ask, with
+    // the same promise as before: real time back before anything needs it.
+    let pinnedHere = pinSystemClock()
+    if pinnedHere {
+        log("clock: WARNING pinned only at capture time; the menu was placed against the real clock and may sit off the item")
+    }
+    defer { if pinnedHere { restoreSystemClock() } }
     // The menu opens just after the request is written; let it finish animating,
     // and the bar redraw its clock.
     try await Task.sleep(for: .milliseconds(3500))
@@ -314,10 +332,13 @@ func sudo(_ args: [String]) -> Bool {
 
 /// Fri 2026-09-18 09:41 in the runner's own zone (`ScreenshotClock`'s date, so
 /// nothing in the shot says another day). CI only: it sets the machine's clock.
-func pinSystemClock() {
-    guard ProcessInfo.processInfo.environment["CI"] == "true", clockSaved == nil else { return }
+/// True when this call pinned it; false when it was already pinned (or not CI).
+@discardableResult
+func pinSystemClock() -> Bool {
+    guard ProcessInfo.processInfo.environment["CI"] == "true", clockSaved == nil else { return false }
     clockSaved = (Date(), ProcessInfo.processInfo.systemUptime)
     log("clock: pinning to 2026-09-18 09:41 (\(sudo(["date", "0918094126"]) ? "ok" : "FAILED"))")
+    return true
 }
 
 /// Real time back: the instant saved plus the monotonic time since, so the
