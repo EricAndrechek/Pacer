@@ -20,6 +20,7 @@
 #   bin/ship.sh wait-ci [<ref>]                 # block until CI on <ref> is green
 #   bin/ship.sh release <version>               # tag → watch Release run → verify
 #   bin/ship.sh verify <version>                # health-check a published release
+#   bin/ship.sh tap                             # ask the Homebrew tap to pin the latest release now
 #
 # `release` and `wait-ci` are the long-running ones — run them backgrounded
 # (they print a structured summary at the end) so nothing has to poll them.
@@ -350,6 +351,7 @@ case "$sub" in
   wait-ci)   cmd_wait_ci "$@" ;;
   release)   cmd_release "$@" ;;
   verify)    cmd_verify "$@" ;;
+  tap)       need gh; bump_tap ;;
   ""|-h|--help|help)
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     ;;
