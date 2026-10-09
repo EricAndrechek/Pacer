@@ -169,7 +169,10 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // process and cannot see the app's standard defaults. A widget
             // charting a different account from the window beside it would be
             // two answers to one question on one screen.
-            let account = UsageScope.storedLimitAccountId
+            // With the store's active flag as the fallback when the defaults
+            // mirror has nothing: an unscoped read there charts whichever
+            // account wrote last.
+            let account = UsageScope.limitAccountId(in: context)
             var descriptor = LimitScope.rateLimits(account: account, since: cutoff)
             descriptor.fetchLimit = 6000
             let rows = try context.fetch(descriptor)

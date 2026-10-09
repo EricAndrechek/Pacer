@@ -155,6 +155,16 @@ enum ScreenshotMode {
             return
         }
 
+        // Proof run for #241: an account that is active before its first
+        // rate-limit reading. Every rate-limit surface must say "no reading",
+        // never 0% and never the other account's number. Run with
+        // PACER_ISOLATED_DEFAULTS=1 — it sets the active-account mirror.
+        if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_NO_READING_ONLY"] == "1" {
+            await captureNoReadingScenes()
+            log("no-reading screenshots complete")
+            return
+        }
+
         if ProcessInfo.processInfo.environment["PACER_SCREENSHOT_MENUBAR_CHIPS_ONLY"] == "1" {
             await captureMenuBarChips(container: container)
             log("menubar-chips screenshots complete")
@@ -632,6 +642,116 @@ enum ScreenshotMode {
 
         await capture("at-limit-dropdown", width: nil, height: nil, scheme: .dark,
                       card: false, container: container) { MenuBarExperience() }
+    }
+
+    // MARK: - No-reading proof scenes (#241)
+
+    /// An account Pacer has just seen — created by the login watcher before
+    /// any usage reading exists for it — is the active login, while the other
+    /// account has a full set of readings. Renders each rate-limit surface for
+    /// that state, plus the same surfaces with a genuine 0% reading beside it,
+    /// so the two can be told apart:
+    ///   - `no-reading-menubar` / `zero-reading-menubar`: the status-item
+    ///     label (gauge icon + 5h + 7d chips) and the dropdown;
+    ///   - `no-reading-menubar-rings`: the activity-rings icon;
+    ///   - `no-reading-pace`: the dashboard's pace card;
+    ///   - `no-reading-widget-small` / `-medium`, `zero-reading-widget-medium`:
+    ///     the rate-limit gauges widget.
+    ///
+    /// Sets the active-account mirror, so it refuses to run against real
+    /// defaults: launch with `PACER_ISOLATED_DEFAULTS=1`.
+    private static func captureNoReadingScenes() async {
+        guard PacerPreferences.isTestProcess else {
+            log("⚠️ no-reading: run with PACER_ISOLATED_DEFAULTS=1 — this scene sets the active account")
+            return
+        }
+        let seen = fixtureOtherAccountId      // just signed in; no reading
+        let other = fixtureActiveAccountId    // signed out of; has readings
+        let now = Date()
+
+        func makeContainer(zeroReading: Bool) -> ModelContainer? {
+            guard let container = try? PacerStore.makeInMemoryContainer() else { return nil }
+            let ctx = ModelContext(container)
+            ctx.insert(Account(
+                id: other, organizationId: other, displayName: "Acme", isActive: false,
+                firstSeenAt: now.addingTimeInterval(-30 * 86_400), lastSeenAt: now,
+                subscriptionType: "max", emailAddress: "dev@acme.example",
+                latestFiveHourPct: 87, latestSevenDayPct: 64, latestPolledAt: now))
+            // What `Account.ensure` makes: identity and label, no readings.
+            ctx.insert(Account(
+                id: seen, organizationId: seen, displayName: "Globex", isActive: true,
+                firstSeenAt: now, lastSeenAt: now, emailAddress: "dev@globex.example"))
+            for (window, pct, reset) in [
+                ("five_hour", 87.0, now.addingTimeInterval(2 * 3_600)),
+                ("seven_day", 64.0, now.addingTimeInterval(3 * 86_400)),
+            ] {
+                ctx.insert(RateLimitSample(
+                    sampledAt: now.addingTimeInterval(-60), window: window,
+                    usedPercentage: pct, resetsAt: reset, source: "oauth", accountId: other))
+                if zeroReading {
+                    ctx.insert(RateLimitSample(
+                        sampledAt: now.addingTimeInterval(-30), window: window,
+                        usedPercentage: 0, resetsAt: nil, source: "oauth", accountId: seen))
+                }
+            }
+            do { try ctx.save() } catch { log("⚠️ no-reading: seed save failed: \(error)") }
+            RateLimitWriteSignal.shared.seed(from: ctx)
+            return container
+        }
+
+        guard let noReading = makeContainer(zeroReading: false),
+              let zeroReading = makeContainer(zeroReading: true) else {
+            log("⚠️ no-reading: container creation failed"); return
+        }
+        UsageScope.shared.republishActiveAccount(seen)
+        UsageScope.shared.selectEphemeral(nil)
+        screenshotEngine = nil
+        for window in NSApp.windows { window.orderOut(nil) }
+
+        let store = PacerSettings.store
+        store.set("icon,five_hour_pct,seven_day_pct", forKey: PacerSettings.Key.menuBarChips)
+        store.set(MenuBarWindows.autoDriverKey, forKey: PacerSettings.Key.menuBarIconDriver)
+        store.set(PacerSettings.MenuBarIconStyle.gaugeNeedle.rawValue,
+                  forKey: PacerSettings.Key.menuBarIconStyle)
+        await capture("no-reading-menubar", width: nil, height: nil, scheme: .dark,
+                      card: false, container: noReading) { MenuBarExperience() }
+        await capture("zero-reading-menubar", width: nil, height: nil, scheme: .dark,
+                      card: false, container: zeroReading) { MenuBarExperience() }
+
+        store.set("icon", forKey: PacerSettings.Key.menuBarChips)
+        store.set(PacerSettings.MenuBarIconStyle.activityRings.rawValue,
+                  forKey: PacerSettings.Key.menuBarIconStyle)
+        store.set("five_hour,seven_day", forKey: PacerSettings.Key.menuBarRingWindows)
+        await capture("no-reading-menubar-rings", width: nil, height: nil, scheme: .dark,
+                      card: false, container: noReading) {
+            HStack(spacing: 18) {
+                Spacer(minLength: 40)
+                MenuBarLabel()
+            }
+            .padding(.horizontal, 16)
+            .frame(width: 160, height: 30)
+            .background(Color.black.opacity(0.88))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .environment(\.colorScheme, .dark)
+        }
+
+        await capture("no-reading-pace", width: 1100, height: nil, scheme: .dark,
+                      card: true, container: noReading) { PaceChartCard() }
+
+        let empty = PaceGaugesEntry(date: now, fiveHour: nil, sevenDay: nil,
+                                    primaryKey: "five_hour", secondaryKey: "seven_day")
+        let zero = PaceGaugesEntry(date: now, fiveHour: .init(usedPct: 0, resetsAt: nil),
+                                   sevenDay: .init(usedPct: 0, resetsAt: nil),
+                                   primaryKey: "five_hour", secondaryKey: "seven_day")
+        await captureWidgetTile("no-reading-widget-small", w: 158, h: 158) {
+            PaceGaugesWidgetView(entry: empty, forcedFamily: .systemSmall)
+        }
+        await captureWidgetTile("no-reading-widget-medium", w: 348, h: 158) {
+            PaceGaugesWidgetView(entry: empty, forcedFamily: .systemMedium)
+        }
+        await captureWidgetTile("zero-reading-widget-medium", w: 348, h: 158) {
+            PaceGaugesWidgetView(entry: zero, forcedFamily: .systemMedium)
+        }
     }
 
     // MARK: - Menu-bar-polish proof scenes

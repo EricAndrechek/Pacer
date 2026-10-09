@@ -333,7 +333,11 @@ public final class UsageScope {
     /// has not reached defaults yet. Falling back to `Account.isActive` in the
     /// store closes that window; nil now means genuinely no accounts, which is
     /// the single-account case where scoping is a no-op anyway.
-    public static func limitAccountId(in context: ModelContext) -> String? {
+    ///
+    /// `nonisolated` — a defaults read and a one-row fetch on the caller's own
+    /// context — so the widget extension's timeline providers, which run off
+    /// the main actor, take the same answer the menu bar does (#241).
+    public nonisolated static func limitAccountId(in context: ModelContext) -> String? {
         storedLimitAccountId ?? Account.activeId(in: context)
     }
 

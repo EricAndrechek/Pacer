@@ -1483,7 +1483,9 @@ private struct PaceColumn: View {
                 title: "No usage in this window yet",
                 detail: "The window starts when you next use Claude.")
         } else {
-            Text("collecting…")
+            // No reading at all — an account seen before its first poll
+            // (#241) — says so, the same words as the menu and the widget.
+            Text(column.usedPct == nil ? "no reading yet" : "collecting…")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
                 .frame(height: 96)

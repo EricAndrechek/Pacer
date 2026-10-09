@@ -42,6 +42,11 @@ import PacerCore
 final class WidgetRefreshCoordinator {
 
     private var observer: NSObjectProtocol?
+    /// Follows the active login. The pace widgets draw the active login's
+    /// windows, and a switch writes no rate-limit rows — to a login Pacer has
+    /// never polled, none for a while (#241) — so without this they kept the
+    /// account just signed out of until its next poll.
+    private var accountWatch: Task<Void, Never>?
     /// One throttler per kind. Keyed by the widget's `kind` string so
     /// lookup is a single dictionary access on the hot path.
     private var throttlers: [String: Throttler] = [:]
@@ -57,6 +62,17 @@ final class WidgetRefreshCoordinator {
 
     func start() {
         guard observer == nil else { return }
+        accountWatch = Task { @MainActor [weak self] in
+            var detector = PacerAccountChange.Detector(last: UsageScope.shared.activeAccountId)
+            while !Task.isCancelled {
+                await UsageScope.nextActiveAccountChange()
+                guard !Task.isCancelled, let self else { return }
+                if detector.observe(UsageScope.shared.activeAccountId, since: Date()) != nil {
+                    self.request(kind: WidgetKinds.paceChart)
+                    self.request(kind: WidgetKinds.paceGauges)
+                }
+            }
+        }
         observer = NotificationCenter.default.addObserver(
             forName: .pacerScanCycleDidComplete,
             object: nil,
@@ -79,6 +95,9 @@ final class WidgetRefreshCoordinator {
     }
 
     func stop() {
+        // Parked on an observation; exits at the next change, without acting.
+        accountWatch?.cancel()
+        accountWatch = nil
         if let observer {
             NotificationCenter.default.removeObserver(observer)
             self.observer = nil
