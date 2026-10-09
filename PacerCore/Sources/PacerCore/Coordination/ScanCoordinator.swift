@@ -392,6 +392,7 @@ public final class ScanCoordinator {
     private let keychainStamp: @Sendable () -> String?
     /// How long after a fast reject the stamp is checked again.
     private let fastRejectRecheckDelay: TimeInterval
+    private let fastRejectLateRecheckDelay: TimeInterval
     /// The one pending follow-up check, so a flip storm schedules one, not
     /// one per flip.
     private var fastRejectFollowUp: Task<Void, Never>?
@@ -529,6 +530,7 @@ public final class ScanCoordinator {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         keychainStamp: @escaping @Sendable () -> String? = { KeychainItemStamp.current() },
         fastRejectRecheckDelay: TimeInterval = 2,
+        fastRejectLateRecheckDelay: TimeInterval = 10,
         loginPassCredentialCheckInterval: TimeInterval = 2
     ) {
         self.loginPassCredentialCheckInterval = loginPassCredentialCheckInterval
@@ -537,6 +539,7 @@ public final class ScanCoordinator {
         self.homeDirectory = homeDirectory
         self.keychainStamp = keychainStamp
         self.fastRejectRecheckDelay = fastRejectRecheckDelay
+        self.fastRejectLateRecheckDelay = fastRejectLateRecheckDelay
         self.scanner = JSONLScanner()
         self.watcher = JSONLWatcher(mode: configuration.watcherMode)
         self.resolver = resolver
@@ -1043,31 +1046,39 @@ public final class ScanCoordinator {
         return true
     }
 
-    /// One stamp check shortly after a fast reject, at most one pending.
+    /// Stamp checks shortly after a fast reject: one at `fastRejectRecheckDelay`
+    /// and, if the stamp still has not moved, one more at
+    /// `fastRejectLateRecheckDelay`. At most one pending at a time.
     ///
     /// Config-first switch: the config changed to the remembered identity
     /// first, the fast reject saw an unchanged stamp, and the keychain write
     /// lands a moment later. Normally the keychain watcher's event runs the
-    /// full path; this is the guarantee for when that event is late or never
+    /// full path; these are the guarantee for when that event is late or never
     /// comes, so a real switch is never left stuck waiting on the 30 s scan
-    /// path or the 30-minute discovery.
-    private func scheduleFastRejectFollowUp() {
+    /// path or the 30-minute discovery. The second check covers a keychain
+    /// write that trails the config by more than the first delay. Each is one
+    /// attributes-only `security` call (~40 ms), not a discovery.
+    private func scheduleFastRejectFollowUp(stage: Int = 0) {
         guard fastRejectFollowUp == nil else { return }
-        let delay = fastRejectRecheckDelay
+        let delay = stage == 0 ? fastRejectRecheckDelay : fastRejectLateRecheckDelay
         fastRejectFollowUp = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await self?.runFastRejectFollowUp()
+            await self?.runFastRejectFollowUp(stage: stage)
         }
     }
 
-    /// The check itself. Unchanged stamp: nothing more. Moved, or unreadable:
-    /// forget the rejection and run the full path as a keychain move, which
-    /// re-judges the default login against a fresh read.
-    func runFastRejectFollowUp() async {
+    /// The check itself. Moved, or unreadable: forget the rejection and run
+    /// the full path as a keychain move, which re-judges the default login
+    /// against a fresh read. Unchanged: after the first check, schedule the
+    /// late one; after the late one, nothing more.
+    func runFastRejectFollowUp(stage: Int = 0) async {
         fastRejectFollowUp = nil
         guard let remembered = rememberedRejection else { return }
-        if let stamp = keychainStamp(), stamp == remembered.stamp { return }
+        if let stamp = keychainStamp(), stamp == remembered.stamp {
+            if stage == 0 { scheduleFastRejectFollowUp(stage: 1) }
+            return
+        }
         rememberedRejection = nil
         await followLoginChange(.keychain)
     }

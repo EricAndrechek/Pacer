@@ -571,7 +571,7 @@ struct FlipFastRejectTests {
         await rig.coordinator.stop()
     }
 
-    @Test("an unmoved stamp at the follow-up check does nothing more")
+    @Test("an unmoved stamp schedules one late check, then nothing more")
     func followUpUnchangedStamp() async throws {
         let rig = try await rig(stamp: StampBox("S1"))
         try await rejectB(rig)
@@ -581,11 +581,39 @@ struct FlipFastRejectTests {
         await rig.coordinator.followLoginChange(.config)
         let reads = rig.keychain.reads
 
-        await rig.coordinator.runFastRejectFollowUp()
+        await rig.coordinator.runFastRejectFollowUp(stage: 0)
+        #expect(rig.coordinator.fastRejectFollowUpPendingForTesting, "the late check is armed")
+        await rig.coordinator.runFastRejectFollowUp(stage: 1)
+        #expect(!rig.coordinator.fastRejectFollowUpPendingForTesting, "and nothing after it")
 
         #expect(rig.keychain.reads == reads)
         #expect(rig.coordinator.rememberedRejectionForTesting == "org-b")
         #expect(openLogin(rig.container) == "org-a")
+        await rig.coordinator.stop()
+    }
+
+    @Test("a keychain write that trails the config past the first check is caught by the late one")
+    func lateKeychainWriteCaughtByLateCheck() async throws {
+        let stamp = StampBox("S1")
+        let rig = try await rig(stamp: stamp)
+        try await rejectB(rig)
+        try await writeConfig(rig.home, org: "org-a")
+        await rig.coordinator.followLoginChange(.config)
+        try await writeConfig(rig.home, org: "org-b")
+        await rig.coordinator.followLoginChange(.config)
+        #expect(openLogin(rig.container) == "org-a")
+
+        // First check: the keychain has not been written yet.
+        await rig.coordinator.runFastRejectFollowUp(stage: 0)
+        #expect(openLogin(rig.container) == "org-a")
+
+        // Then the real switch's keychain write lands, and no watcher event comes.
+        rig.keychain.token = "tok-b"
+        stamp.value = "S2"
+        await rig.coordinator.runFastRejectFollowUp(stage: 1)
+
+        #expect(openLogin(rig.container) == "org-b")
+        #expect(rig.coordinator.rememberedRejectionForTesting == nil)
         await rig.coordinator.stop()
     }
 
