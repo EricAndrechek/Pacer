@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "PacerCore", targets: ["PacerCore"]),
         .library(name: "PacerUI", targets: ["PacerUI"]),
+        .library(name: "PacerPace", targets: ["PacerPace"]),
     ],
     targets: [
         .target(
@@ -25,9 +26,20 @@ let package = Package(
             name: "PacerUI",
             dependencies: ["PacerCore"]
         ),
+        // The `pacer` command line's pacing commands (#194): a Swift port of
+        // `Skills/pacer/pace.sh`, kept as a library so `swift test` covers it
+        // and the CLI target is a thin `main`.
+        .target(
+            name: "PacerPace",
+            dependencies: ["PacerCore"]
+        ),
         .testTarget(
             name: "PacerCoreTests",
             dependencies: ["PacerCore", "PacerUI"]
+        ),
+        .testTarget(
+            name: "PacerPaceTests",
+            dependencies: ["PacerPace", "PacerCore"]
         ),
     ]
 )
