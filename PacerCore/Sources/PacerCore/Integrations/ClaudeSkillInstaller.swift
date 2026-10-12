@@ -106,12 +106,13 @@ public struct ClaudeSkillInstaller: Sendable {
     public let destination: URL
     /// Stamped into the manifest so "outdated" is a comparison, not a guess.
     public let version: String
-    /// The `pacer` command line inside the running app, which `pace.sh` runs
-    /// (#194). Linked beside the skill as `pacer`; nil leaves no link.
+    /// The `pacer` command line inside the running app (#194), which the
+    /// skill's instructions run. Linked beside the skill as `pacer`; nil
+    /// leaves no link.
     public let cli: URL?
 
-    /// The link's name inside the skill directory, which `pace.sh` looks for
-    /// next to itself.
+    /// The link's name inside the skill directory: the path every agent runs,
+    /// `~/.claude/skills/pacer/pacer pace …`.
     public static let cliLinkName = "pacer"
 
     /// Where the command line sits inside Pacer.app: the executable of a
@@ -179,6 +180,7 @@ public struct ClaudeSkillInstaller: Sendable {
         guard let files = sourceFiles() else { throw Error.noBundledSkill }
         let fm = FileManager.default
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let previous = readManifest()
 
         var hashes: [String: String] = [:]
         for relative in files {
@@ -195,6 +197,15 @@ public struct ClaudeSkillInstaller: Sendable {
                                  ofItemAtPath: to.path)
             hashes[relative] = Self.hash(data)
         }
+        // A file an older Pacer installed that this one no longer ships goes
+        // too — `pace.sh`, after the command line replaced it (#194) — or it
+        // would sit there working the old way. Only if unedited: a file the
+        // user changed is theirs, and stays.
+        for (relative, hash) in previous?.files ?? [:] where hashes[relative] == nil {
+            if hashOfInstalledFile(relative) == hash {
+                try? fm.removeItem(at: destination.appendingPathComponent(relative))
+            }
+        }
         try writeManifest(Manifest(version: version, files: hashes))
         linkCLI()
     }
@@ -207,7 +218,7 @@ public struct ClaudeSkillInstaller: Sendable {
     /// launch instead, so a moved or updated Pacer.app is followed.
     ///
     /// Only ever replaces a link. A real file named `pacer` there is someone
-    /// else's, and `pace.sh` falls back to the app in /Applications without it.
+    /// else's.
     @discardableResult
     public func linkCLI() -> Bool {
         guard let cli else { return false }

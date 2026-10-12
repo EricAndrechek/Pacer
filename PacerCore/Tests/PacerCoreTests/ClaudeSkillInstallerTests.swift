@@ -220,4 +220,24 @@ struct ClaudeSkillInstallerTests {
         try installer.uninstall()
         #expect(FileManager.default.fileExists(atPath: theirs.path), "uninstall takes back only what it put there")
     }
+    @Test func aFileAPacerNoLongerShipsIsRemovedUnlessEdited() throws {
+        let f = try Fixture(version: "1.0 (100)"); defer { f.cleanup() }
+        try "#!/bin/sh\nold\n".write(to: f.installer.source.appendingPathComponent("retired.sh"),
+                                      atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nmine\n".write(to: f.installer.source.appendingPathComponent("edited.sh"),
+                                       atomically: true, encoding: .utf8)
+        try f.installer.install()
+        try "#!/bin/sh\nmine, changed\n".write(to: f.installedFile("edited.sh"), atomically: true, encoding: .utf8)
+
+        // The next Pacer ships neither.
+        try FileManager.default.removeItem(at: f.installer.source.appendingPathComponent("retired.sh"))
+        try FileManager.default.removeItem(at: f.installer.source.appendingPathComponent("edited.sh"))
+        let newer = ClaudeSkillInstaller(source: f.installer.source, destination: f.installer.destination,
+                                         version: "2.0 (200)")
+        try newer.install()
+
+        #expect(!FileManager.default.fileExists(atPath: f.installedFile("retired.sh").path))
+        #expect(FileManager.default.fileExists(atPath: f.installedFile("edited.sh").path), "an edited file is the user's")
+        #expect(newer.status().state == .upToDate)
+    }
 }

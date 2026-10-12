@@ -15,6 +15,9 @@ import Testing
 ///   used it.
 /// - `wait` is not compared: its output depends on how the world changes
 ///   between polls. `PaceCommandTests` covers it case by case.
+/// - With nothing to read, the message says "no Pacer" rather than "API off":
+///   the port reads Pacer's data when the API is off, so exit 2 now means
+///   there is no Pacer at all. `renamed` maps the script's two sentences.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -107,7 +110,8 @@ struct PaceParityTests {
     @Test("pace.sh and the port agree", arguments: cases)
     func agree(_ c: Case) throws {
         let script = try runSteps(c) { box, args, env in
-            Self.runScript(args, env: env)
+            let r = Self.runScript(args, env: env)
+            return PaceResult(status: r.status, out: Self.renamed(r.out))
         }
         let port = try runSteps(c) { box, args, env in
             let capture = PaceCapture()
@@ -136,6 +140,15 @@ struct PaceParityTests {
             return Outcome(status: r.status, output: Self.normalised(r.out, box),
                            state: Self.normalised(box.stateText, box))
         }
+    }
+
+    /// The script's "API off" wording, as the port now says it.
+    static func renamed(_ text: String) -> String {
+        text.replacingOccurrences(
+                of: #"Pacer API unreachable at (\S+) — it is opt-in and likely just off \(Pacer → Settings → Integrations\)\. Proceed normally\."#,
+                with: "pace: no Pacer to read — nothing answered at $1 and Pacer's data could not be opened. Proceeding ungated.",
+                options: .regularExpression)
+            .replacingOccurrences(of: "pace: API off — proceeding ungated.", with: "pace: no Pacer — proceeding ungated.")
     }
 
     static func normalised(_ text: String, _ box: PaceSandbox) -> String {

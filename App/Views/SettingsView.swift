@@ -2827,7 +2827,7 @@ private struct ClaudeSkillCard: View {
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Needs only curl and awk.")
-                Text("~/.claude/skills/pacer/pace.sh report")
+                Text("~/.claude/skills/pacer/pacer pace report")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
                     .textSelection(.enabled)

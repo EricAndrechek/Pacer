@@ -55,7 +55,7 @@ public struct PacerSessionLookup: Codable, Sendable {
     /// For a session on the default login, that login's current account. It
     /// differs from `accountId` after a `/login` switch until the session
     /// writes a turn and Pacer scans it. That can be never for a session
-    /// sleeping in `pace.sh wait`, and pacing it on `accountId` waited out
+    /// sleeping in `pacer pace wait`, and pacing it on `accountId` waited out
     /// the old login's reset while the new one had headroom (#184).
     ///
     /// A session that bills an account of its own does not follow the CLI's
@@ -97,7 +97,7 @@ public struct PacerSessionLookup: Codable, Sendable {
 ///   turn carries an account the default login's trail would not have given it
 ///   at that instant.
 ///
-/// Telling these apart matters because `pace.sh` gates on `currentAccountId`
+/// Telling these apart matters because `pacer pace` gates on `currentAccountId`
 /// (#184). Following the CLI's login, a Desktop routine was paced against the
 /// CLI's windows.
 struct PacerSessionBinding {
@@ -197,7 +197,7 @@ public enum PacerSessionLookupBuilder {
 
     /// How far back `PacerAPISnapshot` carries sessions for `/v1/session`.
     /// A session gating is active by definition, but one asleep in
-    /// `pace.sh wait` asks again when it wakes, and that sleep can last a
+    /// `pacer pace wait` asks again when it wakes, and that sleep can last a
     /// whole 5-hour window. An older id falls back to the store.
     public static let snapshotWindow: TimeInterval = 6 * 60 * 60
 

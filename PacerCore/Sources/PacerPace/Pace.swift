@@ -55,8 +55,8 @@ public struct PaceResponse: Sendable {
 /// The `pace` commands of the `pacer` command line (#194): `accounts`,
 /// `sessions`, `report`, `json`, `gate`, `status` and `wait`.
 ///
-/// A port of the bash `pace.sh`, rule for rule; the shipped `pace.sh` is now
-/// a shim that runs this. Its exit codes, state files, flags, environment and
+/// A port of the bash `pace.sh`, rule for rule, which it replaced: the skill
+/// now runs `pacer pace`, and the script is gone. Its exit codes, state files, flags, environment and
 /// output are a contract that CLAUDE.md imports, prompts and `pace-guard.sh`
 /// depend on, so this keeps every one of them; `PaceParityTests` runs the
 /// frozen script (`Tests/PacerPaceTests/Oracle`) and this against the same
@@ -80,31 +80,31 @@ public enum Pace {
         }
     }
 
-    /// `pace.sh --help`.
+    /// `pacer pace --help`.
     public static let help = """
-    pace.sh — report Claude usage from Pacer's local API and gate heavy work
-    against every rate-limit window, so hitting a limit costs a resumable pause
-    rather than a lost run.
+    pacer pace — report Claude usage from Pacer and gate heavy work against
+    every rate-limit window, so hitting a limit costs a resumable pause rather
+    than a lost run. Reads Pacer's local API when it is on, its data when not.
 
     Design: ONE poller, MANY cheap readers.
-      - An orchestrator runs `gate` once per fan-out wave (a fresh HTTP read),
-        which writes a shared state file.
-      - The subagents only ever run `status` — a plain file read, no HTTP — so a
-        hundred of them cost Pacer nothing.
+      - An orchestrator runs `gate` once per fan-out wave (a fresh read of
+        Pacer), which writes a shared state file.
+      - The subagents only ever run `status` — a plain file read, Pacer is not
+        asked — so a hundred of them cost Pacer nothing.
       - On a trip, `wait` blocks (background-friendly) until the window resets,
         then exits so the launcher is re-invoked to resume.
 
     Subcommands:
-      accounts               every account: plan, live sessions, windows (HTTP)
-      sessions               where the live sessions are, with branches (HTTP)
-      report                 human table of every window (HTTP)
-      json                   machine JSON of the same (HTTP)
-      gate  [--cap N]        HTTP read + write state file; 0=go 10=paused
-                             2=api-off 4=misconfigured
-      status                 read state file only (no HTTP); 0=go 10=paused
-                             3=unknown or stale
+      accounts               every account: plan, live sessions, windows
+      sessions               where the live sessions are, with branches
+      report                 human table of every window
+      json                   machine JSON of the same
+      gate  [--cap N]        read Pacer + write state file; 0=go 10=paused
+                             2=no Pacer 4=misconfigured
+      status                 read state file only (Pacer not asked); 0=go
+                             10=paused 3=unknown or stale
       wait  [--cap N]        block until the tripping window resets; 0=resume
-                             20=beyond --max-wait (checkpoint & stop) 2=api-off
+                             20=beyond --max-wait (checkpoint & stop) 2=no Pacer
 
     Flags: --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
       15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
@@ -524,7 +524,7 @@ final class PaceRun {
         case "empty":
             io.out("pace: Pacer answered but reported no rate-limit windows yet — it may not have polled since launch. Proceeding ungated.\n")
         default:
-            io.out("Pacer API unreachable at \(api) — it is opt-in and likely just off (Pacer → Settings → Integrations). Proceed normally.\n")
+            io.out("pace: no Pacer to read — nothing answered at \(api) and Pacer's data could not be opened. Proceeding ungated.\n")
         }
     }
 
@@ -602,7 +602,7 @@ final class PaceRun {
         guard fetchRows() else {
             writeState("unknown", note: "not gating (\(fetchReason ?? "off"))")
             apiOffNote()
-            if (fetchReason ?? "off") == "off" { io.out("pace: API off — proceeding ungated.\n") }
+            if (fetchReason ?? "off") == "off" { io.out("pace: no Pacer — proceeding ungated.\n") }
             throw PaceExit(code: offExitCode)
         }
         try requireSelection()

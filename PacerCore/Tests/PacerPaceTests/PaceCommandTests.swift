@@ -7,7 +7,7 @@ import Testing
 /// expectations are the script's; the only change is that `wait` cases move
 /// the world from the injected sleep instead of from a background process
 /// racing a real clock.
-@Suite("pace: the pace.sh contract")
+@Suite("pace: the contract pace.sh had")
 struct PaceCommandTests {
 
     private static let metrics = PaceFixtures.metrics
@@ -97,7 +97,9 @@ struct PaceCommandTests {
         #expect(gate.out.contains("proceeding ungated"))
         let report = runPace(box, ["report", "--retries", "1"])
         #expect(report.status == 2)
-        #expect(report.out.contains("unreachable"))
+        // Was "unreachable": exit 2 now means no Pacer at all, since the
+        // command line reads Pacer's data when the API is off (#194).
+        #expect(report.out.contains("no Pacer to read"))
     }
 
     @Test func aWindowWithNoResetTimeStillReports() throws {

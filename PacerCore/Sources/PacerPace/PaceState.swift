@@ -3,9 +3,9 @@ import Foundation
 /// The verdict file `gate` writes and `status` reads: `~/.claude/pace/state.json`,
 /// or `state-<run>.json` when a run names itself.
 ///
-/// The format is `pace.sh`'s, byte for byte, because the two will share these
-/// files while `pace.sh` is being replaced, and the skill's SKILL.md documents
-/// the directory. Fields are read back the way `pace.sh` read them (the value
+/// The format is the bash `pace.sh`'s, byte for byte: a verdict written by the
+/// script before an update must still read after it, and the skill's SKILL.md
+/// documents the directory. Fields are read back the way `pace.sh` read them (the value
 /// between the 3rd and 4th quote on the line naming the key), not by a JSON
 /// decoder: a file someone edited by hand, or one cut short, still answers
 /// what it can.

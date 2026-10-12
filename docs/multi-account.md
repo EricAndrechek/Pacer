@@ -425,7 +425,7 @@ the caller cannot tell which is its own.
 
 It also reports `currentAccountId`, the login the session's *next* turn bills
 to. After a `/login` switch the session's recorded turns stay on the old login
-until it writes another, and a session asleep in `pace.sh wait` writes none, so
+until it writes another, and a session asleep in `pacer pace wait` writes none, so
 pacing reads `currentAccountId` and `wait` looks it up again on every poll.
 Only a session on the default login follows the CLI's switches (#211):
 

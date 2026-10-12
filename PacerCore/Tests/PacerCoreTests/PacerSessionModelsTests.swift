@@ -114,7 +114,7 @@ struct PacerSessionModelsTests {
     }
 
     /// The session's last turn was before a `/login` switch and it has written
-    /// none since (asleep in `pace.sh wait`). Its turn stays on the old login;
+    /// none since (asleep in `pacer pace wait`). Its turn stays on the old login;
     /// its next one goes to the new login.
     @MainActor
     @Test func aSwitchSinceTheLastTurnMovesTheCurrentAccount() throws {

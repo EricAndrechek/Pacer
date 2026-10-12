@@ -102,7 +102,7 @@ struct PaceOfflineTests {
         }
         #expect(offline.status == served.status)
         #expect(normal(offline.out) == normal(served.out))
-        #expect(!offline.out.contains("API off"))
+        #expect(!offline.out.contains("no Pacer"))
     }
 
     @MainActor
@@ -117,13 +117,13 @@ struct PaceOfflineTests {
     }
 
     @MainActor
-    @Test("no store, or not this machine: API off, exactly as before")
+    @Test("no store, or not this machine: no Pacer, exit 2 as before")
     func noFallback() throws {
         let container = try Self.store()
         let unopenable = PaceOffline { nil }
         let none = try Self.run(["gate"], api: Self.deadAPI, offline: unopenable)
         #expect(none.status == 2)
-        #expect(none.out.contains("API off"))
+        #expect(none.out.contains("no Pacer"))
 
         // A remote PACER_API is a question about that machine.
         let remote = try Self.run(["gate"], api: "http://pacer.invalid:7223", offline: Self.offline(container))
