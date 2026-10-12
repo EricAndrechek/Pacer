@@ -12,7 +12,8 @@ resume** protocol so a limit hit during a big parallel run costs a pause, not
 the run.
 
 All commands are `~/.claude/skills/pacer/pacer <cmd>`. The full path always
-works while the skill is installed; where `pacer` is on the PATH, plain
+works while the skill is installed. Where `pacer` is on the PATH (a Homebrew
+install, or Pacer → Settings → Integrations → Command line), plain
 `pacer <cmd>` is the same command.
 
 `pacer` is Pacer's command line. Pacer.app carries it and links it into this

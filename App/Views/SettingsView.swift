@@ -69,6 +69,7 @@ struct SettingsView: View {
                 SettingsSection("Integrations") {
                     APIServerCard()
                     ClaudeSkillCard()
+                    CommandLineCard()
                 }
             }
             .padding(.horizontal, 24)
@@ -2746,9 +2747,6 @@ private struct APIServerCard: View {
 /// then Pacer's own: a Sparkle update replaces the bundled copy and the next
 /// launch re-syncs an unmodified installation.
 private struct ClaudeSkillCard: View {
-    @AppStorage(PacerSettings.Key.apiEnabled, store: PacerSettings.store)
-    private var apiEnabled: Bool = false
-
     @State private var status: ClaudeSkillInstaller.Status?
     @State private var failure: String?
     @State private var busy = false
@@ -2777,17 +2775,6 @@ private struct ClaudeSkillCard: View {
                 if let failure {
                     Text(failure).font(.caption).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if isInstalled && !apiEnabled {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
-                        Text("The skill reads the local API, which is off. Turn it on above or the skill will report no data and tell the agent to proceed ungated.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
 
                 if isInstalled {
@@ -2826,7 +2813,7 @@ private struct ClaudeSkillCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Needs only curl and awk.")
+                Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Works with the local API on or off.")
                 Text("~/.claude/skills/pacer/pacer report")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
@@ -2851,7 +2838,7 @@ private struct ClaudeSkillCard: View {
 
     private var dotColor: Color {
         switch status?.state {
-        case .upToDate:                 return apiEnabled ? .green : .yellow
+        case .upToDate:                 return .green
         case .outdated, .modified:      return .yellow
         case .foreign:                  return .red
         default:                        return .secondary
@@ -2921,6 +2908,112 @@ private struct ClaudeSkillCard: View {
         #if canImport(AppKit)
         NSWorkspace.shared.activateFileViewerSelecting([status.destination])
         #endif
+    }
+}
+
+// MARK: - Command line
+
+/// `pacer` on the PATH for a DMG install (#257). Homebrew's cask links it
+/// itself; this card says so and steps aside. See `CommandLineToolInstaller`.
+private struct CommandLineCard: View {
+    @State private var state: CommandLineToolInstaller.State?
+    @State private var failure: String?
+    @State private var busy = false
+
+    private let installer = CommandLineToolInstaller.bundled()
+
+    var body: some View {
+        PacerCard("Command line", content: {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    Circle().fill(dotColor).frame(width: 8, height: 8)
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let failure {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    if state == .installed {
+                        Button("Remove") { run(installer.uninstallScript, after: installer.removeUserLink) }
+                            .pacerDenseControl()
+                            .disabled(busy)
+                    }
+                    if state == .notInstalled {
+                        Button("Install") { install() }
+                            .pacerDenseControl()
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(busy)
+                    }
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Puts `pacer` in /usr/local/bin so it runs in any terminal. Asks once for an administrator password.")
+                Text("pacer report")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+            }
+        })
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+    }
+
+    private var dotColor: Color {
+        switch state {
+        case .installed, .homebrew: return .green
+        case .foreign:              return .red
+        default:                    return .secondary
+        }
+    }
+
+    private var statusText: String {
+        switch state {
+        case nil:                     return "Checking…"
+        case .unavailable:            return "Not available in this build."
+        case .notInstalled:           return "Not on your PATH."
+        case .installed:              return "Installed · \(CommandLineToolInstaller.systemLinkPath)"
+        case .homebrew(let path):     return "Installed by Homebrew · \(path)"
+        case .foreign(let path):      return "Another pacer is at \(path). Pacer will not replace it."
+        }
+    }
+
+    private func refresh() { state = installer.state() }
+
+    private func install() {
+        do {
+            try installer.refreshUserLink()
+        } catch {
+            failure = "\(error)"
+            return
+        }
+        run(installer.installScript, after: {})
+    }
+
+    /// The one privileged step, off the main thread: the password dialog can
+    /// stay up for as long as the user likes, and the window must not freeze
+    /// behind it.
+    private func run(_ script: String, after: @escaping @Sendable () -> Void) {
+        busy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = AdminShell.run(script, prompt: "Pacer wants to link pacer into /usr/local/bin.")
+            if case .succeeded = outcome { after() }
+            await MainActor.run {
+                busy = false
+                switch outcome {
+                case .succeeded, .cancelled: failure = nil
+                case .failed(let message):   failure = message
+                }
+                refresh()
+            }
+        }
     }
 }
 

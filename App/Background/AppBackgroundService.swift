@@ -254,6 +254,17 @@ final class AppBackgroundService {
     /// and untouched — installing is a click the user makes once, and a file
     /// they have edited is theirs (see `ClaudeSkillInstaller`).
     private func refreshClaudeSkillIfInstalled() {
+        // `pacer` on the PATH (#257): the root-owned link never changes, the
+        // user-owned one it points through follows this app wherever it is.
+        Task.detached(priority: .utility) {
+            do {
+                if try CommandLineToolInstaller.bundled().refreshIfInstalled() {
+                    Log.write("Skill", "re-pointed the pacer command line at this app")
+                }
+            } catch {
+                Log.write("Skill", "pacer command line refresh failed: \(error)")
+            }
+        }
         guard let installer = ClaudeSkillInstaller.bundled() else { return }
         Task.detached(priority: .utility) {
             do {
