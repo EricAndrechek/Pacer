@@ -55,11 +55,12 @@ public struct PaceResponse: Sendable {
 /// The `pace` commands of the `pacer` command line (#194): `accounts`,
 /// `sessions`, `report`, `json`, `gate`, `status` and `wait`.
 ///
-/// A port of `Skills/pacer/pace.sh`, rule for rule. Its exit codes, state
-/// files, flags, environment and output are a contract that CLAUDE.md
-/// imports, prompts and `pace-guard.sh` depend on, so this keeps every one of
-/// them; `PaceParityTests` runs both against the same fixtures and compares.
-/// The deliberate differences are listed there.
+/// A port of the bash `pace.sh`, rule for rule; the shipped `pace.sh` is now
+/// a shim that runs this. Its exit codes, state files, flags, environment and
+/// output are a contract that CLAUDE.md imports, prompts and `pace-guard.sh`
+/// depend on, so this keeps every one of them; `PaceParityTests` runs the
+/// frozen script (`Tests/PacerPaceTests/Oracle`) and this against the same
+/// fixtures and compares. The deliberate differences are listed there.
 public enum Pace {
 
     /// Run one command line (`["gate", "--cap", "85"]`) and return its exit

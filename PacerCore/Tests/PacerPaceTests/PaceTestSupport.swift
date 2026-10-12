@@ -119,8 +119,8 @@ final class PaceStubServer {
     func stop() { task.terminate() }
 }
 
-/// The fixtures `PaceScriptTests` uses, shared by the port's tests and the
-/// parity harness.
+/// The fixtures the bash script's tests used, shared by the port's tests and
+/// the parity harness.
 enum PaceFixtures {
     /// One 5-hour block with headroom, a 7-day block, and a scoped per-model
     /// cap over any sane threshold, plus a second login.

@@ -174,4 +174,50 @@ struct ClaudeSkillInstallerTests {
         #expect(empty.status().state == .unavailable)
         #expect(throws: ClaudeSkillInstaller.Error.noBundledSkill) { try empty.install() }
     }
+    // MARK: - The command line beside the skill (#194)
+
+    private static func fakeCLI(in root: URL, _ name: String) throws -> URL {
+        let url = root.appendingPathComponent("apps/\(name)/Contents/Helpers/pacer")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    @Test func installLinksTheCommandLineAndLaunchesFollowTheApp() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        let first = try Self.fakeCLI(in: f.root, "A")
+        let installer = ClaudeSkillInstaller(source: f.installer.source, destination: f.installer.destination,
+                                             version: f.installer.version, cli: first)
+        try installer.install()
+        let link = f.installedFile(ClaudeSkillInstaller.cliLinkName)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == first.path)
+        // Not part of the skill's content: it never reads as an edit.
+        #expect(installer.status().state == .upToDate)
+
+        // The app moved. The next launch's refresh re-points the link, even
+        // though there is nothing to copy.
+        let moved = try Self.fakeCLI(in: f.root, "B")
+        let relaunched = ClaudeSkillInstaller(source: f.installer.source, destination: f.installer.destination,
+                                              version: f.installer.version, cli: moved)
+        #expect(try relaunched.refreshIfInstalled() == false)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == moved.path)
+
+        try relaunched.uninstall()
+        #expect(!FileManager.default.fileExists(atPath: f.installer.destination.path))
+    }
+
+    @Test func aPacerThatIsNotOurLinkIsLeftAlone() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        try f.installer.install()
+        let theirs = f.installedFile(ClaudeSkillInstaller.cliLinkName)
+        try "someone else's\n".write(to: theirs, atomically: true, encoding: .utf8)
+
+        let installer = ClaudeSkillInstaller(source: f.installer.source, destination: f.installer.destination,
+                                             version: f.installer.version, cli: try Self.fakeCLI(in: f.root, "A"))
+        #expect(installer.linkCLI() == false)
+        #expect(try String(contentsOf: theirs, encoding: .utf8) == "someone else's\n")
+        try installer.uninstall()
+        #expect(FileManager.default.fileExists(atPath: theirs.path), "uninstall takes back only what it put there")
+    }
 }

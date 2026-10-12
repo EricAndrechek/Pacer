@@ -26,9 +26,9 @@ let package = Package(
             name: "PacerUI",
             dependencies: ["PacerCore"]
         ),
-        // The `pacer` command line's pacing commands (#194): a Swift port of
-        // `Skills/pacer/pace.sh`, kept as a library so `swift test` covers it
-        // and the CLI target is a thin `main`.
+        // The `pacer` command line's pacing commands (#194): the Swift port of
+        // what was `Skills/pacer/pace.sh` (now a shim that runs it), kept as a
+        // library so `swift test` covers it and the CLI target is a thin `main`.
         .target(
             name: "PacerPace",
             dependencies: ["PacerCore"]
@@ -39,7 +39,9 @@ let package = Package(
         ),
         .testTarget(
             name: "PacerPaceTests",
-            dependencies: ["PacerPace", "PacerCore"]
+            dependencies: ["PacerPace", "PacerCore"],
+            // The frozen bash implementation the port is compared against.
+            exclude: ["Oracle"]
         ),
     ]
 )

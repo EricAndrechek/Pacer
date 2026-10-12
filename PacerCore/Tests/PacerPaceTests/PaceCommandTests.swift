@@ -2,10 +2,11 @@ import Foundation
 import Testing
 @testable import PacerPace
 
-/// `PaceScriptTests` (the executable spec of `pace.sh`), case for case, run
-/// against the Swift port. Fixtures and expectations are the script's; the
-/// only change is that `wait` cases move the world from the injected sleep
-/// instead of from a background process racing a real clock.
+/// The executable spec of `pace.sh` (once `PaceScriptTests`, run against the
+/// bash script), case for case, now the spec of `pacer pace`. Fixtures and
+/// expectations are the script's; the only change is that `wait` cases move
+/// the world from the injected sleep instead of from a background process
+/// racing a real clock.
 @Suite("pace: the pace.sh contract")
 struct PaceCommandTests {
 

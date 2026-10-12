@@ -7,9 +7,9 @@
 
 ## Claude Code usage pacing
 
-Pacer runs on this machine and serves live rate-limit state over a local HTTP
-API. The API is opt-in and may be off — **off means no signal, not no budget:
-proceed ungated.**
+Pacer runs on this machine and tracks live rate-limit state; `pace.sh` reads
+it whether or not Pacer's local API is on. Exit 2 means there is no Pacer to
+read — **no signal, not no budget: proceed ungated.**
 
 - **Where you stand:** `~/.claude/skills/pacer/pace.sh report` — every window,
   including per-model caps, for the account this session is signed into.

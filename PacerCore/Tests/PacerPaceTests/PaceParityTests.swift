@@ -24,7 +24,7 @@ struct PaceParityTests {
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // PacerCore
             .deletingLastPathComponent()   // repo root
-            .appendingPathComponent("Skills/pacer/pace.sh").path
+            .appendingPathComponent("PacerCore/Tests/PacerPaceTests/Oracle/pace.sh").path
     }
 
     /// Every field the parser reads, two logins, fractional percentages, a

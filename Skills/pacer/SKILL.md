@@ -1,6 +1,6 @@
 ---
 name: pacer
-description: Report Claude Code usage from Pacer — every rate-limit window, including per-model caps like Fable and each account on the machine — and pace heavy work against them, so hitting a limit during a long autonomous run or a large fan-out of subagents costs a resumable pause rather than the whole run. Use before and during long autonomous work or when fanning out many subagents/workflow agents, and whenever the user asks how much usage is left, how far through a window they are, when limits reset, or "will I hit my limit". Reads Pacer's local HTTP API on this machine; that API is opt-in and may be off, in which case gating is skipped and work proceeds.
+description: Report Claude Code usage from Pacer — every rate-limit window, including per-model caps like Fable and each account on the machine — and pace heavy work against them, so hitting a limit during a long autonomous run or a large fan-out of subagents costs a resumable pause rather than the whole run. Use before and during long autonomous work or when fanning out many subagents/workflow agents, and whenever the user asks how much usage is left, how far through a window they are, when limits reset, or "will I hit my limit". Reads Pacer on this machine, through its local API when that is on and its data directly when it is off; without Pacer, gating is skipped and work proceeds.
 ---
 
 # Pacer — pace agents and workflows against Claude's rate limits
@@ -13,8 +13,10 @@ the run.
 
 All commands are `~/.claude/skills/pacer/pace.sh <cmd>`.
 
-Needs `curl` and `awk`, both of which macOS already has. There is nothing to
-install: this skill ships inside Pacer.app and updates when Pacer does.
+`pace.sh` runs `pacer pace`, the command line inside Pacer.app. There is
+nothing to install: this skill ships inside Pacer.app and updates when Pacer
+does. With Pacer's local API on it reads the API; with it off it reads Pacer's
+data directly, so pacing works either way.
 
 ## 1. Just report where I'm at
 
@@ -98,24 +100,26 @@ Pacer only recomputes every **~5 min**, and you must not have 200 subagents
 each curling it. So it is **one poller, many cheap readers**:
 
 - **One poller** — the orchestrator runs `pace.sh gate` once per
-  fan-out *wave*. That is the single HTTP read; it writes a shared **state
-  file**.
+  fan-out *wave*. That is the single read of Pacer; it writes a shared
+  **state file**.
 - **Many cheap readers** — every subagent runs `pace.sh status`, a plain
-  **file read** (no HTTP), and obeys it.
+  **file read** (Pacer is not asked), and obeys it.
 
 Exit codes:
 
 | | 0 | 10 | 3 | 20 | 2 | 4 | 1 |
 |---|---|---|---|---|---|---|---|
-| `gate` | GO | PAUSE | — | — | API off | misconfigured | bad `--window` |
+| `gate` | GO | PAUSE | — | — | no Pacer | misconfigured | bad `--window` |
 | `status` | GO | PAUSE | unknown / stale | — | — | — | — |
-| `wait` | resume | — | — | far-off reset → checkpoint & stop | API off | misconfigured | bad `--window` |
+| `wait` | resume | — | — | far-off reset → checkpoint & stop | no Pacer | misconfigured | bad `--window` |
 
 Three of those are "no signal" rather than "no budget", and they are not the
 same as each other:
 
-- **2, API off** — Pacer's server is opt-in and is not running. Proceed
-  ungated; this is the ordinary case on a machine without Pacer.
+- **2, no Pacer** — there is nothing to read: Pacer is not installed, or its
+  command line could not be found or could not open Pacer's data. Not the
+  local API being off: with it off, `pace.sh` reads Pacer's data directly.
+  Proceed ungated; this is the ordinary case on a machine without Pacer.
 - **4, misconfigured** — Pacer answered and rejected the request, almost always
   a token set in Pacer but not in `PACE_TOKEN`. Proceed if you must, but **tell
   the user**: the run is unpaced and one line of configuration would fix it.
@@ -400,9 +404,9 @@ If a user asks how to make pacing automatic, that line is the answer.
   lines. It is also skipped in Cowork sessions on the desktop, which do not
   load user-scope imports resolving outside the working directory; the skill
   itself still works there.
-- **Pacer's API is opt-in.** If `report` says the API is unreachable, turn it on
-  in Pacer → Settings → Integrations → "Local API & metrics server". Everything
-  here degrades to "proceed ungated" while it is off.
+- **Pacer's API is opt-in, and pacing does not need it.** With it off,
+  `pace.sh` reads Pacer's data directly. Only with no Pacer at all does
+  everything here degrade to "proceed ungated".
 - A single Claude session **cannot `sleep` out a multi-hour reset** (the Bash
   tool caps out around 10 minutes) — that is why the wait runs as a
   *background* process whose **exit** wakes you.
@@ -411,7 +415,7 @@ If a user asks how to make pacing automatic, that line is the answer.
 - **Pacer restarting does not end a pause.** It installs its own silent updates,
   so any wait long enough to matter will meet a minute where nothing answers.
   `wait` holds the pause through that rather than reading it as headroom.
-- **"API off" ≠ "no budget left."** Off means no signal; proceed ungated.
+- **"No Pacer" ≠ "no budget left."** Exit 2 means no signal; proceed ungated.
 - Window labels come from the window's identity, so a per-model cap reads as
   the model name ("Fable"). If the server ever reports an opaque model id, the
   label is that id — `pace.sh json` always shows the full identity.
