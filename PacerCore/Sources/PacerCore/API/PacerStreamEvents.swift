@@ -42,6 +42,28 @@ public struct PacerAccountChange: Codable, Sendable, Equatable {
     /// Encoded the way every other API payload is (`pacerAPIEncodedJSON`).
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
 
+    /// Posted by `OAuthPoller` on its own executor the moment it makes a
+    /// different account active, before anything waits on the main actor
+    /// (#254). The stream used to learn of a switch only through
+    /// `UsageScope`, a main-actor value, so the event queued behind every
+    /// redraw the switch itself caused: 2.0 s on a real switch, against 0.4 s
+    /// for the activation. `object` is the poller, so a test can listen to
+    /// its own.
+    public static let didActivate = Notification.Name("PacerActiveLoginDidChange")
+
+    public func post(from sender: AnyObject?) {
+        NotificationCenter.default.post(name: Self.didActivate, object: sender,
+                                        userInfo: [Self.userInfoKey: self])
+    }
+
+    public init?(_ notification: Notification) {
+        guard let change = notification.userInfo?[Self.userInfoKey] as? PacerAccountChange
+        else { return nil }
+        self = change
+    }
+
+    private static let userInfoKey = "change"
+
     /// Decides when an observed active-account value is a change worth an
     /// event. The scope mirror is *asserted*, not diffed
     /// (`UsageScope.republishActiveAccount`), so the same id is written again

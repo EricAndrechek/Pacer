@@ -40,14 +40,30 @@ public final class RateLimitWriteSignal {
     /// The newest `sampledAt` seen. Informational; never a reload key.
     public private(set) var newest: Date?
 
+    /// The `generation` of each account's latest write, and of the latest
+    /// write that named no account (the launch seed), which counts for all.
+    ///
+    /// `generation` says *when* to look; this says *whose* history moved. The
+    /// pace chart re-read every account's series on every write, and one
+    /// account with nine polled tokens writes every few seconds: about 130
+    /// passes an hour, each a probe and a top-up per account, to fetch a few
+    /// rows for one of them (#239). Not observed: a view keys its reload on
+    /// `generation` and reads this inside the reload.
+    @ObservationIgnored private var ledger = RateLimitWriteLedger()
+
     private init() {}
 
     /// Record a write of rate-limit rows. `sampledAt` is the newest row in the
-    /// write, when there is one.
-    public func note(_ sampledAt: Date? = nil) {
+    /// write, when there is one; `account` is whose rows they are.
+    public func note(_ sampledAt: Date? = nil, account: String? = nil) {
         generation &+= 1
+        ledger.record(generation, account: account)
         if let sampledAt, newest.map({ sampledAt > $0 }) ?? true { newest = sampledAt }
     }
+
+    /// The `generation` at which `account`'s rows last changed. Unchanged
+    /// since a series was read means that series is still current.
+    public func generation(of account: String) -> UInt64 { ledger.generation(of: account) }
 
     /// Record rows that land behind ones already written (a fold or an
     /// adoption). Bumps `generation` too, so everything keyed on it reloads.
@@ -67,5 +83,23 @@ public final class RateLimitWriteSignal {
         scoped.fetchLimit = 1
         note((try? context.fetch(fixed))?.first?.sampledAt)
         note((try? context.fetch(scoped))?.first?.sampledAt)
+    }
+}
+
+/// Whose rows each write moved, by `RateLimitWriteSignal.generation`. A write
+/// that names no account (the launch seed) counts for every account, so it
+/// can only cause a fetch, never hide one.
+public struct RateLimitWriteLedger: Sendable, Equatable {
+    private var byAccount: [String: UInt64] = [:]
+    private var unattributed: UInt64 = 0
+
+    public init() {}
+
+    public mutating func record(_ generation: UInt64, account: String?) {
+        if let account { byAccount[account] = generation } else { unattributed = generation }
+    }
+
+    public func generation(of account: String) -> UInt64 {
+        max(byAccount[account] ?? 0, unattributed)
     }
 }

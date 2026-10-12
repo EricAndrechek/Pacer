@@ -55,6 +55,8 @@ struct PaceChartCard: View {
         var scoped: [ScopedSamplePoint] = []
         var windows: [ScopedWindowRow] = []
         var loadedThrough: Date?
+        /// See `PaceSeriesCache.Series.writeGeneration`.
+        var writeGeneration: UInt64?
         var id: String { accountId ?? "" }
     }
 
@@ -174,7 +176,8 @@ struct PaceChartCard: View {
                 let c = cache.series(for: target.accountId)
                 return AccountSeries(accountId: target.accountId, label: target.label,
                                      fixed: c.fixed, scoped: c.scoped, windows: c.windows,
-                                     loadedThrough: c.loadedThrough)
+                                     loadedThrough: c.loadedThrough,
+                                     writeGeneration: c.writeGeneration)
             }
             if seeded.allSatisfy({ $0.loadedThrough != nil }) {
                 _series = State(initialValue: seeded)
@@ -227,6 +230,16 @@ struct PaceChartCard: View {
     /// cannot fetch, so a changed value means read the whole window again.
     @State private var loadedHistory = RateLimitWriteSignal.shared.historyGeneration
 
+    /// When the last write-triggered reload started; nothing displays it.
+    @State private var lastReloadStartedAt: Date?
+
+    /// Least time between two write-triggered reloads. Writes arrive in
+    /// bursts (several tokens per account, polled seconds apart), and each
+    /// reload is fetches plus, when anything changed, a body over tens of
+    /// thousands of points (#239). Anchored on the last reload's *start*, so a
+    /// steady stream of writes delays one by at most this, never indefinitely.
+    static let reloadSpacing: TimeInterval = 2
+
     /// Load the two 8-day series **off the main actor**.
     ///
     /// This used to be `@MainActor` and fetch `@Model` rows straight into
@@ -265,12 +278,19 @@ struct PaceChartCard: View {
         isLoading = series.isEmpty
 
         var next: [AccountSeries] = []
+        // Whether anything drawn differs from `series`. When nothing does, the
+        // assignment is skipped: `AccountSeries` is not `Equatable`, so even an
+        // identical array re-runs the chart body over every point.
+        var changed = historyRewritten
+            || targets.map(\.accountId) != series.map(\.accountId)
+            || targets.map(\.label) != series.map(\.label)
         for target in targets {
             var entry = (historyRewritten ? nil : series.first { $0.accountId == target.accountId })
                 ?? AccountSeries(accountId: target.accountId, label: target.label)
             entry = AccountSeries(accountId: target.accountId, label: target.label,
                                   fixed: entry.fixed, scoped: entry.scoped,
-                                  windows: entry.windows, loadedThrough: entry.loadedThrough)
+                                  windows: entry.windows, loadedThrough: entry.loadedThrough,
+                                  writeGeneration: entry.writeGeneration)
 
             // Seed from the cross-rebuild cache before deciding what to fetch:
             // flipping back to an account already loaded this session becomes
@@ -282,11 +302,24 @@ struct PaceChartCard: View {
                     entry.scoped = cached.scoped
                     entry.windows = cached.windows
                     entry.loadedThrough = cached.loadedThrough
+                    entry.writeGeneration = cached.writeGeneration
                 }
             }
 
             let through = entry.loadedThrough
             let account = target.accountId
+            // Read before the fetch: a write landing during it bumps the
+            // generation past this, and the next reload fetches it.
+            let written = account.map { RateLimitWriteSignal.shared.generation(of: $0) }
+            // Nothing written for this account since its series was read, so a
+            // top-up would return nothing (#239). An unresolved account (nil)
+            // has no generation and always fetches.
+            if through != nil, let written, entry.writeGeneration == written {
+                fetchMillis.append((account.map { String($0.suffix(4)) } ?? "all",
+                                    "unchanged", 0, 0, ""))
+                next.append(entry)
+                continue
+            }
             let fetchStarted = Date()
             let loaded = await Task.detached(priority: .userInitiated) {
                 await Self.load(container: container, account: account, through: through)
@@ -313,24 +346,32 @@ struct PaceChartCard: View {
                 // re-materialize all of them to learn about three. Newest-first
                 // order is preserved by prepending, which is why the fetch is
                 // ordered the same way.
+                if !loaded.fixed.isEmpty || !loaded.scoped.isEmpty { changed = true }
                 if !loaded.fixed.isEmpty { entry.fixed = loaded.fixed + entry.fixed }
                 if !loaded.scoped.isEmpty { entry.scoped = loaded.scoped + entry.scoped }
-                if !loaded.windows.isEmpty { entry.windows = loaded.windows }
+                if !loaded.windows.isEmpty, loaded.windows != entry.windows {
+                    entry.windows = loaded.windows
+                    changed = true
+                }
                 // Drop what has aged out, so the window stays 8 days rather
                 // than growing for as long as Pacer is open.
+                let kept = entry.fixed.count + entry.scoped.count
                 entry.fixed.removeAll { $0.sampledAt < loaded.cutoff }
                 entry.scoped.removeAll { $0.sampledAt < loaded.cutoff }
+                if entry.fixed.count + entry.scoped.count != kept { changed = true }
             } else {
                 entry.fixed = loaded.fixed
                 entry.scoped = loaded.scoped
                 entry.windows = loaded.windows
+                changed = true
             }
 
             entry.loadedThrough = [entry.fixed.first?.sampledAt, entry.scoped.first?.sampledAt]
                 .compactMap { $0 }.max() ?? entry.loadedThrough
+            entry.writeGeneration = written
             PaceSeriesCache.shared.store(
                 .init(fixed: entry.fixed, scoped: entry.scoped, windows: entry.windows,
-                      loadedThrough: entry.loadedThrough),
+                      loadedThrough: entry.loadedThrough, writeGeneration: written),
                 for: target.accountId)
             next.append(entry)
         }
@@ -341,8 +382,12 @@ struct PaceChartCard: View {
         // it until the next write. The per-account cache above is still right.
         guard loadedScopeKey == key else { return }
         isLoading = false
-        series = next
+        if changed { series = next }
         PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
+        // A pass that read nothing from the store is the common case now, and
+        // logging each one would say so ~100 times an hour. Every pass that
+        // did read is still logged, so the line count stays the measure.
+        guard fetchMillis.contains(where: { $0.kind != "unchanged" }) else { return }
 
         // Built in steps: as one expression the type checker gives up.
         let totalMs = Int(Date().timeIntervalSince(started) * 1000)
@@ -351,7 +396,8 @@ struct PaceChartCard: View {
             return name + ":" + String(entry.fixed.count + entry.scoped.count)
         }
         let detail: [String] = fetchMillis.map { row in
-            "\(row.account) \(row.kind) \(row.rows)row \(row.ms)ms {\(row.detail)}"
+            row.kind == "unchanged" ? "\(row.account) unchanged"
+                : "\(row.account) \(row.kind) \(row.rows)row \(row.ms)ms {\(row.detail)}"
         }
         let summary = "loaded \(next.count) series in \(totalMs)ms"
             + " [" + retained.joined(separator: " ") + "]"
@@ -934,13 +980,24 @@ struct PaceChartCard: View {
                 }
             }
         }
-        // Reload the 8-day series when a NEW rate-limit sample lands (the
-        // poller writes roughly every five minutes), not on every context
-        // change. `.task(id:)` also fires once on appear, which seeds them.
+        // Reload the 8-day series when a NEW rate-limit sample lands, not on
+        // every context change. Any account's poll is a write, and an account
+        // with several tokens writes every few seconds, so `reload` fetches
+        // only the accounts that were written and these are spaced out (#239). `.task(id:)` also fires once on appear, which seeds them.
         // Recomputed with the reload signal rather than inside `reload`, so a
         // machine that *becomes* parallel — the second account's first usage of
         // the day — flips `scopeKey` and pulls the other account's columns in.
         .task(id: reloadSignal) {
+            // A newer write cancels this wait and starts its own, against the
+            // same anchor; see `reloadSpacing`.
+            if let last = lastReloadStartedAt {
+                let wait = Self.reloadSpacing - Date().timeIntervalSince(last)
+                if wait > 0 {
+                    try? await Task.sleep(for: .seconds(wait))
+                    if Task.isCancelled { return }
+                }
+            }
+            lastReloadStartedAt = Date()
             await reload()
         }
         .onChange(of: hasScoped) { _, scoped in

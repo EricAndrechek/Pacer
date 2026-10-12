@@ -36,6 +36,9 @@ final class PaceSeriesCache {
         /// Newest row already loaded; `nil` means "never loaded", which is the
         /// only case that reads all 8 days.
         var loadedThrough: Date?
+        /// `RateLimitWriteSignal.generation(of:)` when this was read; the same
+        /// value later means nothing new to fetch (#239).
+        var writeGeneration: UInt64?
     }
 
     private var byAccount: [String: Series] = [:]

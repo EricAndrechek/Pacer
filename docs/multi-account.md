@@ -419,11 +419,31 @@ keyed by the id Claude Code exports as `CLAUDE_CODE_SESSION_ID` — which is the
 same id that names the transcript Pacer parses. That closes two guesses at
 once: a per-model cap only gates work using that model, and a session's account
 is better read from its own recorded turns than inferred from a profile
-directory. A subagent has its own session id, so it resolves to the subagent.
+directory. A subagent shares its parent's session id, so `models` lists every
+model the session has run in the last fifteen minutes, and more than one means
+the caller cannot tell which is its own.
+
 It also reports `currentAccountId`, the login the session's *next* turn bills
 to. After a `/login` switch the session's recorded turns stay on the old login
 until it writes another, and a session asleep in `pace.sh wait` writes none, so
 pacing reads `currentAccountId` and `wait` looks it up again on every poll.
+Only a session on the default login follows the CLI's switches (#211):
+
+- **A Claude Desktop session** stays on the account Desktop recorded for it.
+- **A pinned profile's session** stays on that profile's account. A turn does
+  not record its root, but it shows: its account is not the one the default
+  login's trail gives that instant.
+
+Those two report no `currentAccountSince`. The pinned-profile test has one
+blind spot: a profile on the same account the default login held at that
+instant looks like the default login until its next turn.
+
+`/v1/session` is answered from the API snapshot for every session seen in the
+last six hours, so a store stall cannot slow a gate or send it to the wrong
+account. An older id is read from the store, as before. The snapshot reads
+those turns with raw SQLite (`RawSessionTurnReader`, pinned to the SwiftData
+path by a parity test). Through SwiftData the same read cost about 260 ms a
+build; raw, it is about 5 ms.
 
 **A session pinned to its own profile can ask about itself.** Under concurrent
 use the honest answer to "how much headroom do I have" is not the active

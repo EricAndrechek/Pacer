@@ -634,9 +634,11 @@ public actor OAuthPoller: TokenPoolTesting {
         // runs whenever there is a seed to provision from, not only on a change.
         var storeChanged = false
         if unchanged, seed != nil {
-            storeChanged = await activateAccount(id, seed: seed).changed
+            let activation = await activateAccount(id, seed: seed)
+            storeChanged = activation.changed
             if storeChanged {
                 Log.write("OAuthPoller", "account \(id.prefix(4)) active\(Self.sinceNote(seenAt))")
+                if activation.exists { announceActivation(id) }
             }
         }
         if !unchanged {
@@ -648,6 +650,9 @@ public actor OAuthPoller: TokenPoolTesting {
             Log.write("OAuthPoller",
                       "account \(id.prefix(4)) active\(activation.created ? " (new — no reading yet)" : "")"
                         + Self.sinceNote(seenAt))
+            // Before the lane rediscovery below, which can run a keychain
+            // subprocess: the news that the login moved waits for nothing.
+            if activation.exists { announceActivation(id) }
 
             // The login moved, so Claude Code has just written a *different*
             // token to the keychain — the one thing that makes the lane set
@@ -684,6 +689,18 @@ public actor OAuthPoller: TokenPoolTesting {
         }
         await saveAllLaneMeta()
         await publishStatus()
+    }
+
+    /// Tell off-main readers the store's active row is now `id`, from here
+    /// rather than through `UsageScope` (#254). That path is three main-actor
+    /// hops (the summaries fetch, the scope write, the observer's wake), and a
+    /// switch is exactly when the main actor is busiest: every surface redraws
+    /// for the new account. Only for a row that exists, the same rule
+    /// `publishStatus` keeps: an id the store does not know is not a login
+    /// anyone can be told about.
+    private func announceActivation(_ id: String) {
+        if publishesScope { UsageScope.mirrorActiveAccount(id) }
+        PacerAccountChange(activeAccountId: id, since: Date()).post(from: self)
     }
 
     /// " (+412 ms since seen)", for lining a switch up across the log (#192).
@@ -2020,7 +2037,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 // Every account's rows, not only the active one's: the pace
                 // chart and menu draw all of them. See `RateLimitWriteSignal`.
                 let written = captured.sampledAt
-                Task { @MainActor in RateLimitWriteSignal.shared.note(written) }
+                Task { @MainActor in RateLimitWriteSignal.shared.note(written, account: key) }
                 // For every account, carrying which one. Posting only for the
                 // active login left a widget scoped to the other account, and
                 // that account's engine, stale until something else wrote
@@ -2171,7 +2188,7 @@ public actor OAuthPoller: TokenPoolTesting {
     /// back from the store a moment later — it has to be there.
     private func activateAccount(
         _ incoming: String, seed: Account.Seed? = nil
-    ) async -> (organizationId: String?, created: Bool, changed: Bool) {
+    ) async -> (organizationId: String?, created: Bool, changed: Bool, exists: Bool) {
         let container = self.container
         return await MainActor.run {
             let context = ModelContext(container)
@@ -2182,20 +2199,24 @@ public actor OAuthPoller: TokenPoolTesting {
             let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
             var incomingOrg: String?
             var changed = created
+            var exists = false
             for account in accounts {
                 let active = (account.id == incoming)
                 if account.isActive != active {
                     account.isActive = active
                     changed = true
                 }
-                if active { incomingOrg = account.organizationId }
+                if active {
+                    incomingOrg = account.organizationId
+                    exists = true
+                }
             }
             if context.hasChanges {
                 do { try context.save() } catch {
                     Log.write("OAuthPoller", "could not save the active account: \(error)")
                 }
             }
-            return (incomingOrg, created, changed)
+            return (incomingOrg, created, changed, exists)
         }
     }
 
