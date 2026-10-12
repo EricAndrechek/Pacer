@@ -18,14 +18,18 @@ import Foundation
 /// Measured on a 1,697-file corpus, that case is 74.8 s through the line
 /// parser versus 12.4 s through DuckDB.
 public protocol BulkTranscriptImporter: Sendable {
-    /// Parse every `*.jsonl` under `roots`.
+    /// Parse every `*.jsonl` under the roots' `projects/` directories.
+    ///
+    /// Each entry must carry the `rootPath` the line parser would give it
+    /// (`ResolvedRoot.rootPath(forFile:among:)`): it is what separates a pinned
+    /// session profile from the default login in `AccountTrail`.
     ///
     /// Implementations must return entries **in ascending timestamp order**
     /// (the rollups' pending-sample lists and the session recomputer both
     /// assume arrival order) and must apply the same acceptance rules as
     /// `JSONLLineParser` — assistant turns only, no `<synthetic>` model,
     /// parseable timestamp, and the legacy summed-cache-creation fallback.
-    func importAll(roots: [URL], aliases: [String: String]) throws -> BulkImportResult
+    func importAll(roots: [ClaudePathResolver.ResolvedRoot], aliases: [String: String]) throws -> BulkImportResult
 }
 
 public struct BulkImportResult: Sendable {

@@ -1674,7 +1674,7 @@ public final class ScanCoordinator {
         if isFullScan, let importer = configuration.bulkImporter {
             do {
                 bulkResult = try bulkScan(importer: importer,
-                                          roots: resolvedRoots.map(\.projectsDirectory),
+                                          roots: resolvedRoots,
                                           aliases: aliases, sink: sink)
             } catch {
                 // Degrade to slow, never to broken: the line parser is always
@@ -2401,7 +2401,7 @@ public final class ScanCoordinator {
     /// the tail.
     private func bulkScan(
         importer: BulkTranscriptImporter,
-        roots: [URL],
+        roots: [ClaudePathResolver.ResolvedRoot],
         aliases: [String: String],
         sink: InsertSink
     ) throws -> JSONLScanner.ScanResult {

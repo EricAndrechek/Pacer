@@ -25,7 +25,7 @@ import Testing
 
         struct Boom: Error {}
 
-        func importAll(roots: [URL], aliases: [String: String]) throws -> BulkImportResult {
+        func importAll(roots: [ClaudePathResolver.ResolvedRoot], aliases: [String: String]) throws -> BulkImportResult {
             callCount += 1
             if let error { throw error }
             return BulkImportResult(entries: entries, fileMarks: [:], seconds: 0)
@@ -113,5 +113,68 @@ import Testing
             resolver: resolver)
         let report = try await coordinator.runOnce()
         #expect(report.persisterStats.inserted == 0)   // completed with no bulk path
+    }
+
+    /// The importer names each file's root the way the line parser does, so a
+    /// pinned session profile's turns keep their account through the bulk path
+    /// (#251). A stub that stamps `rootPath` via the shared join stands in for
+    /// the DuckDB importer, which cannot link into this target.
+    @MainActor
+    @Test func bulkEntriesAreAttributedByTheirRoot() async throws {
+        final class RootStampingImporter: BulkTranscriptImporter, @unchecked Sendable {
+            let at: Date
+            init(at: Date) { self.at = at }
+            func importAll(roots: [ClaudePathResolver.ResolvedRoot],
+                           aliases: [String: String]) throws -> BulkImportResult {
+                let entries = roots.enumerated().map { index, root -> ParsedUsageEntry in
+                    let file = root.projectsDirectory
+                        .appendingPathComponent("acme/s\(index).jsonl").path
+                    return ParsedUsageEntry(
+                        timestamp: at, model: "claude-opus-5",
+                        breakdown: TokenBreakdown(inputTokens: 1, outputTokens: 1,
+                                                  cacheReadTokens: 0,
+                                                  cacheCreation5mTokens: 0,
+                                                  cacheCreation1hTokens: 0),
+                        dedupKey: "m\(index):r",
+                        sessionId: "s\(index)", projectPath: "/code/acme",
+                        rootPath: ClaudePathResolver.ResolvedRoot.rootPath(
+                            forFile: file, among: roots))
+                }
+                return BulkImportResult(entries: entries, fileMarks: [:], seconds: 0)
+            }
+        }
+
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pacer-bulk-roots-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let main = base.appendingPathComponent("main"), pinned = base.appendingPathComponent("pinned")
+        for dir in [main, pinned] {
+            try FileManager.default.createDirectory(
+                at: dir.appendingPathComponent("projects"), withIntermediateDirectories: true)
+        }
+        let resolver = ClaudePathResolver(
+            environment: ["CLAUDE_CONFIG_DIR": "\(main.path),\(pinned.path)"])
+
+        let container = try PacerStore.makeInMemoryContainer()
+        let instant = Date(timeIntervalSince1970: 1_800_000_000)
+        let seed = ModelContext(container)
+        seed.insert(AccountActivation(
+            accountId: "work", startedAt: instant - 1_000, source: AccountActivation.sourceObserved))
+        seed.insert(AccountActivation(
+            accountId: "personal", startedAt: instant - 1_000, rootPath: pinned.path,
+            source: AccountActivation.sourceObserved))
+        try seed.save()
+
+        let coordinator = ScanCoordinator(
+            container: container,
+            configuration: .init(probeStatsCache: false,
+                                 bulkImporter: RootStampingImporter(at: instant)),
+            resolver: resolver)
+        _ = try await coordinator.runOnce()
+
+        let rows = try ModelContext(container).fetch(FetchDescriptor<TokenSample>())
+        let bySession = Dictionary(uniqueKeysWithValues: rows.map { ($0.sessionId, $0.accountId) })
+        #expect(bySession["s0"] == "work")
+        #expect(bySession["s1"] == "personal")
     }
 }
