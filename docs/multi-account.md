@@ -117,6 +117,52 @@ A pinned root that no activation covers resolves to **nil, never the default
 account** — those turns are known not to be the default account's, so
 "unknown" is the honest answer.
 
+### Claude Desktop's turns: Desktop's record, not the trail
+
+Claude Desktop runs its own Claude Code. It writes the transcripts into the
+same `~/.claude/projects` as the CLI, marked `"entrypoint":"claude-desktop"`,
+and bills **Desktop's** login. Desktop's login is often not the CLI's.
+Both of the trail's inputs point at the CLI here: the timestamp, and a root
+that is the default one. So until #244, Desktop's turns were counted against
+whichever account the CLI was on.
+
+Desktop records the answer for each session it runs:
+
+```
+~/Library/Application Support/Claude/claude-code-sessions/<user>/<org>/local_<id>.json
+```
+
+- The `<org>` folder is exactly `Account.id`.
+- The file's `cliSessionId` is the transcript's `sessionId`. Subagent
+  transcripts share it.
+
+`DesktopSessionDirectory` reads only those two things. Then:
+
+- **A session Desktop recorded belongs to Desktop's org**, whatever the trail
+  says. This holds even for older lines with no `entrypoint`.
+- **A `claude-desktop` turn with no record is unattributed**, never the CLI's
+  account. Desktop writes the record when a session starts, so a miss is
+  either a race (the folder is read again a few seconds later) or a record
+  Desktop has deleted.
+- **History is repaired from the same records.** The first scan cycle after
+  launch moves every stored turn of a recorded session to its org. So does
+  the first cycle after a record appears late. Both go through
+  `AccountBackfill.restampDesktopSessions` and the usual rollup rebuild. This
+  is a per-session statement made at the time, not a backfill guess.
+- **Trail corrections and manual reassigns never move a recorded Desktop
+  session.** The most common correction refutes a stale `oauthAccount` write,
+  and Desktop's own Claude Code makes those writes while it runs. That is
+  exactly when Desktop's turns are being written.
+- **Desktop's org gets an `Account` row on sight** (`Account.ensure`), like
+  any other login seen.
+
+A trail inferred from Desktop's tokens would not do this job. Desktop can hold
+tokens for more than one org, and its folder layout already shows a second
+org. A per-session record cannot be wrong about which session it describes.
+
+Desktop's agent mode (Cowork) keeps its transcripts inside Desktop's own
+folder, which Pacer does not scan yet. That is a separate gap: #250.
+
 ### The data model is always parallel; only the presentation adapts
 
 Activations may overlap. `AccountTrail.hasConcurrentAccounts` reads

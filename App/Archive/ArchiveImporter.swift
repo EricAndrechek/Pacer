@@ -70,7 +70,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
             json_extract_string(j, '$.cwd')                              AS cwd,
             json_extract_string(j, '$.version')                          AS cc_version,
             json_extract_string(j, '$.message.stop_reason') IS NOT NULL  AS is_complete,
-            COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error
+            COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error,
+            json_extract_string(j, '$.entrypoint')                       AS entrypoint
         FROM lines
         WHERE json_extract_string(j, '$.type') = 'assistant'
           AND json_extract_string(j, '$.message.model') IS NOT NULL
@@ -97,7 +98,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
         SELECT ts, model, input_tokens, output_tokens, cache_read,
                explicit_5m, explicit_1h, summed_cc, source_cost,
                message_id, request_id, session_id, cwd, cc_version,
-               is_complete, api_error
+               is_complete, api_error, entrypoint
         FROM ranked WHERE rn = 1
         """
     }
@@ -129,7 +130,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
         entries.reserveCapacity(64 * 1024)
 
         // Vectorized read. The row-at-a-time accessors are deprecated and
-        // allocate per value; at ~150k rows × 16 columns that difference is
+        // allocate per value; at ~150k rows × 17 columns that difference is
         // the whole point of moving the parse here in the first place.
         let chunkCount = duckdb_result_chunk_count(result)
         for chunkIndex in 0..<chunkCount {
@@ -145,6 +146,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
             let messageId = Column(chunk, 9), requestId = Column(chunk, 10)
             let sessionId = Column(chunk, 11), cwd = Column(chunk, 12), version = Column(chunk, 13)
             let complete = Column(chunk, 14), apiError = Column(chunk, 15)
+            let entrypoint = Column(chunk, 16)
 
             for row in 0..<rows {
                 guard let timestampText = ts.string(row),
@@ -183,6 +185,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
                         ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
                     originalProjectPath: rawCwd,
                     claudeCodeVersion: version.string(row),
+                    entrypoint: entrypoint.string(row),
                     isApiErrorMessage: apiError.bool(row),
                     isComplete: complete.bool(row)))
             }

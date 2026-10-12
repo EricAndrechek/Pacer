@@ -55,6 +55,15 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// Nil means the default login, which is the only case the trail can
     /// answer on time alone.
     public let rootPath: String?
+    /// Which client wrote the line: `"cli"`, `"claude-desktop"`, `"sdk-cli"`,
+    /// or nil on lines older than the field.
+    ///
+    /// Claude Desktop runs its own Claude Code and writes its transcripts into
+    /// the same `~/.claude/projects` as the CLI, but bills its own login, which
+    /// need not be the CLI's. The timestamp and the root both point at the
+    /// default login for those turns, so this is the only field on the line
+    /// that says they are not the CLI's. See `DesktopSessionDirectory`.
+    public let entrypoint: String?
     public let isApiErrorMessage: Bool
 
     /// Whether this line is the **finished** message rather than a
@@ -109,6 +118,7 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         originalProjectPath: String? = nil,
         claudeCodeVersion: String? = nil,
         rootPath: String? = nil,
+        entrypoint: String? = nil,
         isApiErrorMessage: Bool = false,
         isComplete: Bool = true
     ) {
@@ -123,8 +133,15 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         self.originalProjectPath = originalProjectPath
         self.claudeCodeVersion = claudeCodeVersion
         self.rootPath = rootPath
+        self.entrypoint = entrypoint
         self.isApiErrorMessage = isApiErrorMessage
     }
+
+    /// The `entrypoint` Claude Desktop's built-in Claude Code writes.
+    public static let desktopEntrypoint = "claude-desktop"
+
+    /// Whether Claude Desktop wrote this line rather than the CLI.
+    public var isFromDesktop: Bool { entrypoint == Self.desktopEntrypoint }
 }
 
 /// The five billable token categories Anthropic prices independently:
@@ -187,6 +204,7 @@ struct RawJSONLine: Decodable {
     let version: String?
     let costUSD: Double?
     let requestId: String?
+    let entrypoint: String?
     let isApiErrorMessage: Bool?
     let message: RawMessage?
 

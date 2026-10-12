@@ -377,6 +377,11 @@ public final class SamplePersister {
     /// exactly the honest answer for a Pacer that isn't watching the login.
     public var accountTrail: AccountTrail = .empty
 
+    /// Claude Desktop's own record of which account each of its sessions ran
+    /// under. Outranks the trail, which describes the CLI's login; see
+    /// `attributedAccount(for:at:)`. Nil attributes every turn by the trail.
+    public var desktopSessions: DesktopSessionDirectory?
+
     /// How long to let the index lag before rewriting it.
     ///
     /// The file is rewritten whole, so writing every cycle meant re-emitting
@@ -458,9 +463,7 @@ public final class SamplePersister {
         // pinned to its own `CLAUDE_CONFIG_DIR` is now separable, which is
         // the whole point: with two accounts live at once the timestamp
         // alone has two answers.
-        sample.accountId = accountTrail.accountId(
-            at: sample.sampledAt, rootPath: entry.rootPath
-        )
+        sample.accountId = attributedAccount(for: entry, at: sample.sampledAt)
         context.insert(sample)
         if sample.sampledAt > indexWatermark { indexWatermark = sample.sampledAt }
         indexNeedsWrite = true
@@ -946,6 +949,33 @@ public final class SamplePersister {
     /// the same reason `markEverySampleDirty` does: the existing rollup rows
     /// hold the old split, so the fast path's incremental add would compound
     /// it rather than replace it.
+    /// The account a new turn belongs to.
+    ///
+    /// A session Claude Desktop recorded belongs to the account Desktop
+    /// recorded, whatever the trail says: the trail follows the CLI's login,
+    /// and Desktop bills its own (#244). Older Desktop lines carry no
+    /// `entrypoint`, so the record is consulted for every turn, not only for
+    /// the marked ones.
+    ///
+    /// A turn marked as Desktop's with no record is left unattributed rather
+    /// than handed to the trail. The trail's answer is the CLI's account, which
+    /// is exactly the wrong one, and an unattributed row is visibly incomplete
+    /// where a misattributed one is invisibly false. If the record turns up
+    /// later, the coordinator re-stamps the session.
+    private func attributedAccount(for entry: ParsedUsageEntry, at instant: Date) -> String? {
+        if let desktopSessions {
+            if entry.isFromDesktop {
+                return desktopSessions.accountForDesktopSession(entry.sessionId)
+            }
+            if let recorded = desktopSessions.recordedAccount(forSession: entry.sessionId) {
+                return recorded
+            }
+        } else if entry.isFromDesktop {
+            return nil
+        }
+        return accountTrail.accountId(at: instant, rootPath: entry.rootPath)
+    }
+
     public func markSamplesForRebuild(_ samples: [TokenSample]) {
         for sample in samples {
             let pair = DateModelPair(date: sample.date, model: sample.model)

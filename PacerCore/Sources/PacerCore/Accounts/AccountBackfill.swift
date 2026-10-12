@@ -123,9 +123,16 @@ public enum AccountBackfill {
     /// correction whose range happens to cover it. A turn that a pinned profile bound to that same
     /// account could have written is left alone: samples do not record their
     /// root, and moving a pinned session's usage would be a new error.
+    ///
+    /// Claude Desktop's sessions are never moved by a trail correction.
+    /// `desktopSessions` names them, and Desktop's record is where their
+    /// account comes from. A correction is about the CLI's login, and the most
+    /// common one refutes a stale config write that Desktop itself made, which
+    /// is exactly when Desktop's turns are being written (#244).
     public static func restamp(
         _ corrections: [AccountTrailRecorder.Correction],
         trail: AccountTrail,
+        desktopSessions: [String: String] = [:],
         context: ModelContext
     ) throws -> [TokenSample] {
         var moved: [TokenSample] = []
@@ -137,9 +144,41 @@ public enum AccountBackfill {
                 $0.accountId == wrong && $0.sampledAt >= from && $0.sampledAt < to
             })
             for sample in try context.fetch(descriptor) {
+                if let sid = sample.sessionId, desktopSessions[sid] != nil { continue }
                 if trail.isPinned(correction.wrongAccount, at: sample.sampledAt) { continue }
                 guard trail.accountId(at: sample.sampledAt) == correction.rightAccount else { continue }
                 sample.accountId = correction.rightAccount
+                moved.append(sample)
+            }
+        }
+        return moved
+    }
+
+    /// Move every stored turn of each session onto the account Claude Desktop
+    /// recorded for it (`sessionId` → `Account.id`). Returns the moved samples
+    /// so the caller can rebuild the rollups they feed.
+    ///
+    /// This is how history is repaired: turns stored before Pacer read
+    /// Desktop's records were stamped with the CLI's account, and a session
+    /// whose record appeared after its first turns has those turns
+    /// unattributed. Either way the record is a statement made at the time
+    /// about that exact session, so unlike a backfill it involves no guess.
+    ///
+    /// One indexed fetch per session, and only rows that disagree come back,
+    /// so a session already right costs a query that returns nothing.
+    public static func restampDesktopSessions(
+        _ sessions: [String: String],
+        context: ModelContext
+    ) throws -> [TokenSample] {
+        var moved: [TokenSample] = []
+        for (sessionId, accountId) in sessions {
+            let sid: String? = sessionId
+            let account: String? = accountId
+            let descriptor = FetchDescriptor<TokenSample>(predicate: #Predicate {
+                $0.sessionId == sid && ($0.accountId == nil || $0.accountId != account)
+            })
+            for sample in try context.fetch(descriptor) {
+                sample.accountId = accountId
                 moved.append(sample)
             }
         }
