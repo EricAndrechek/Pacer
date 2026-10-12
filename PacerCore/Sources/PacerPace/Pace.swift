@@ -27,13 +27,18 @@ public struct PaceIO: @unchecked Sendable {
     }
 
     /// The real thing: stdout, stderr, the wall clock, URLSession and git.
-    public static var standard: PaceIO {
+    public static var standard: PaceIO { live(offline: nil) }
+
+    /// The real thing, and when nothing answers on Pacer's port, `offline`
+    /// answers from the store instead (#194). Only a transport failure falls
+    /// back: a 401, a 503 or a 404 is Pacer's answer, not its absence.
+    public static func live(offline: PaceOffline?) -> PaceIO {
         PaceIO(
             out: { FileHandle.standardOutput.write(Data($0.utf8)) },
             err: { FileHandle.standardError.write(Data($0.utf8)) },
             now: Date.init,
             sleep: { Thread.sleep(forTimeInterval: $0) },
-            get: PaceHTTP.get,
+            get: { request in PaceHTTP.get(request) ?? offline?.answer(request) },
             gitBranch: PaceHTTP.gitBranch)
     }
 }

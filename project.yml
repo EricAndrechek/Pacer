@@ -159,6 +159,15 @@ targets:
       - package: Sparkle
         product: Sparkle
       - target: PacerWidgets
+      # The `pacer` command line (#194), at Contents/Helpers/pacer. Unsigned
+      # here like everything else; bin/dev-install.sh and release.yml sign it
+      # with its own entitlements before the app's seal.
+      - target: pacer
+        embed: true
+        codeSign: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       # Static XCFramework — linked into the binary, so there's no dylib to
       # embed, re-sign, or subject to hardened-runtime library validation.
       - framework: Vendor/DuckDB.xcframework
@@ -205,3 +214,31 @@ targets:
       # picker on the configured widget shows no parameters, even
       # though everything compiles.
       - sdk: AppIntents.framework
+
+  # The `pacer` command line (#194). A thin `main` over the PacerPace library,
+  # which `swift test` covers. It carries Pacer's App Group so it can read the
+  # store when the local API is off, which is why it ships inside the app,
+  # signed by the same team, rather than as a separate download.
+  pacer:
+    type: tool
+    platform: macOS
+    sources:
+      - path: CLI
+        excludes:
+          - "pacer.entitlements"
+    settings:
+      base:
+        PRODUCT_NAME: pacer
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.cli
+        CODE_SIGN_ENTITLEMENTS: CLI/pacer.entitlements
+        # A tool has no bundle, so its identifier and version live in an
+        # Info.plist section inside the Mach-O. codesign takes the identifier
+        # from it, and so does anything that names the tool to the user.
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: PacerCore
+        product: PacerPace

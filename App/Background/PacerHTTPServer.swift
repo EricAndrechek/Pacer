@@ -377,19 +377,12 @@ final class PacerHTTPServer: @unchecked Sendable {
             // is what a time-series database wants. A *client* — the pacing
             // skill, in a session pinned to one profile — passes one and gets
             // only its own login's windows, without having to know that
-            // account's id.
-            let wanted: String?
-            switch snapshot.resolve(query) {
-            case .rejected(let message):
-                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
-            case .all: wanted = nil
-            case .scoped(let key): wanted = key
-            }
+            // account's id. The answer is shared with the `pacer` CLI's
+            // offline path (#194), so the two cannot drift.
             let now = Date()
-            let text = snapshot.metrics(account: wanted, now: now,
-                                        version: appVersion, build: appBuild).prometheusText()
-            respond(client, status: 200, contentType: "text/plain; version=0.0.4; charset=utf-8",
-                    body: Data(text.utf8), extraHeaders: Self.ageHeader(snapshot, now: now))
+            let answer = PacerOfflineAPI.metrics(snapshot: snapshot, query: query, now: now,
+                                                 version: appVersion, build: appBuild)
+            respond(client, answer, extraHeaders: answer.status == 200 ? Self.ageHeader(snapshot, now: now) : [:])
         case "/v1/stream":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }
             queue.async { [self] in startSSE(client) }
@@ -402,10 +395,8 @@ final class PacerHTTPServer: @unchecked Sendable {
             // yet) is asked of the store, exactly as before.
             let now = Date()
             if let id = query["id"], let snapshot = snapshots.current,
-               let session = snapshot.session(id: id, at: now),
-               let json = try? session.encodedJSON() {
-                return respond(client, status: 200, contentType: "application/json; charset=utf-8",
-                               body: Data(json.utf8), extraHeaders: Self.ageHeader(snapshot, now: now))
+               let answer = PacerOfflineAPI.sessionFromSnapshot(id: id, snapshot: snapshot, now: now) {
+                return respond(client, answer, extraHeaders: Self.ageHeader(snapshot, now: now))
             }
             enqueueStoreRoute(path: path, query: query, client: client)
         case "/v1/usage/daily", "/v1/usage/models", "/v1/sessions",
@@ -463,34 +454,14 @@ final class PacerHTTPServer: @unchecked Sendable {
             }
             respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
         case "/v1/sessions":
-            let within = query["within"].flatMap { Double($0) } ?? LiveSessionActivity.recentThreshold
-            let sessionAccount: String?
-            switch resolveAccount(query) {
-            case .rejected(let message):
-                return respond(client, status: 400, contentType: "text/plain", body: Data(message.utf8))
-            case .all: sessionAccount = nil
-            case .scoped(let key): sessionAccount = key
-            }
-            guard let sessions = try? PacerSessionLookupBuilder.list(
-                    withinSeconds: within, account: sessionAccount),
-                  let json = try? sessions.encodedJSON() else {
-                return respond(client, status: 503, contentType: "text/plain", body: Data("No data yet\n".utf8))
-            }
-            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+            respond(client, PacerOfflineAPI.sessions(query: query, resolve: resolveAccount) { within, account in
+                try PacerSessionLookupBuilder.list(withinSeconds: within, account: account)
+            })
         case "/v1/session":
-            guard let id = query["id"], !id.isEmpty else {
-                return respond(client, status: 400, contentType: "text/plain",
-                               body: Data("Pass ?id=<session id> (Claude Code sets CLAUDE_CODE_SESSION_ID)\n".utf8))
-            }
-            guard let session = (try? PacerSessionLookupBuilder.lookup(sessionId: id)) ?? nil,
-                  let json = try? session.encodedJSON() else {
-                // Not an error: a session Pacer has not yet parsed a turn from
-                // is a real state, and one a caller falls back from rather than
-                // retries.
-                return respond(client, status: 404, contentType: "text/plain",
-                               body: Data("No turns recorded for that session yet\n".utf8))
-            }
-            respond(client, status: 200, contentType: "application/json; charset=utf-8", body: Data(json.utf8))
+            // The snapshot was tried on the way in; this is the store half.
+            respond(client, PacerOfflineAPI.session(id: query["id"], snapshot: nil, now: Date()) { id in
+                try PacerSessionLookupBuilder.lookup(sessionId: id)
+            })
         case "/v1/limits/history":
             let hours = query["hours"].flatMap { Int($0) } ?? 24
             let historyAccount: String?
@@ -528,6 +499,12 @@ final class PacerHTTPServer: @unchecked Sendable {
     /// `queue`, which is what keeps `/healthz` answering meanwhile.
     private func readySnapshot() -> PacerAPISnapshot? {
         snapshots.current ?? snapshots.current(waitingUpTo: Self.firstSnapshotWait)
+    }
+
+    private func respond(_ client: ClientConnection, _ answer: PacerRouteAnswer,
+                         extraHeaders: [String: String] = [:]) {
+        respond(client, status: answer.status, contentType: answer.contentType,
+                body: Data(answer.body.utf8), extraHeaders: extraHeaders)
     }
 
     private func notReady(_ client: ClientConnection, body: String) {
