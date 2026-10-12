@@ -117,7 +117,7 @@ public struct ClaudeSkillInstaller: Sendable {
 
     /// Where the command line sits inside Pacer.app: the executable of a
     /// small app-like bundle, because that is what may use an App Group
-    /// container (see project.yml's `pacer` target).
+    /// container (see project.yml's `PacerCLI` target).
     public static let cliPathInApp = "Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer"
 
     public init(source: URL, destination: URL, version: String, cli: URL? = nil) {

@@ -163,7 +163,7 @@ targets:
       # Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer. Unsigned here like
       # everything else; bin/dev-install.sh and release.yml sign it with its
       # own entitlements before the app's seal.
-      - target: pacer
+      - target: PacerCLI
         embed: true
         codeSign: false
         copy:
@@ -229,7 +229,11 @@ targets:
   # containers; forums thread 721701). So: PacerCLI.app/Contents/MacOS/pacer,
   # run by path or through the skill's link; LSUIElement keeps it out of the
   # Dock if LaunchServices ever opens it.
-  pacer:
+  # Target and product are PacerCLI, never "pacer": on a case-insensitive
+  # disk `pacer.app`/`Pacer.app` and the targets' `pacer.build`/`Pacer.build`
+  # intermediates are one folder each, and the two targets trampled each
+  # other (an embed that copied the app into itself; on CI, a missing `.d`).
+  PacerCLI:
     type: application
     platform: macOS
     sources:
@@ -238,8 +242,6 @@ targets:
           - "pacer.entitlements"
     settings:
       base:
-        # Not "pacer": on a case-insensitive disk `pacer.app` and `Pacer.app`
-        # are one folder in the build products, and the copy recursed.
         PRODUCT_NAME: PacerCLI
         EXECUTABLE_NAME: pacer
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.cli

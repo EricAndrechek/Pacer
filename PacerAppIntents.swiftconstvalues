@@ -1,0 +1,1973 @@
+[
+  {
+    "typeName": "Pacer.GetUsageIntent",
+    "mangledTypeName": "5Pacer14GetUsageIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 49,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer14GetUsageIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer08GetUsageC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 50,
+        "valueKind": "RawLiteral",
+        "value": "Get 5-Hour Usage"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 51,
+        "valueKind": "RawLiteral",
+        "value": "Returns the current 5-hour rate-limit utilization as a percentage (0–100)."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 57,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetSevenDayUsageIntent",
+    "mangledTypeName": "5Pacer22GetSevenDayUsageIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 71,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer22GetSevenDayUsageIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer016GetSevenDayUsageC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 72,
+        "valueKind": "RawLiteral",
+        "value": "Get 7-Day Usage"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 73,
+        "valueKind": "RawLiteral",
+        "value": "Returns the current 7-day rate-limit utilization as a percentage (0–100)."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 76,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetTodayCostIntent",
+    "mangledTypeName": "5Pacer18GetTodayCostIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 90,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer18GetTodayCostIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer012GetTodayCostC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 91,
+        "valueKind": "RawLiteral",
+        "value": "Get Today's Cost"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 92,
+        "valueKind": "RawLiteral",
+        "value": "Returns today's Claude Code spend in USD."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 95,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetWeekCostIntent",
+    "mangledTypeName": "5Pacer17GetWeekCostIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 106,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer17GetWeekCostIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer011GetWeekCostC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 107,
+        "valueKind": "RawLiteral",
+        "value": "Get This Week's Cost"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 108,
+        "valueKind": "RawLiteral",
+        "value": "Returns the last 7 days of Claude Code spend in USD (rolling, includes today)."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 111,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetMonthCostIntent",
+    "mangledTypeName": "5Pacer18GetMonthCostIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 122,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer18GetMonthCostIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer012GetMonthCostC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 123,
+        "valueKind": "RawLiteral",
+        "value": "Get This Month's Cost"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 124,
+        "valueKind": "RawLiteral",
+        "value": "Returns this calendar month's Claude Code spend so far, in USD."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 127,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetTodayTokensIntent",
+    "mangledTypeName": "5Pacer20GetTodayTokensIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 138,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Int>",
+        "substitutedMangledTypeName": "5Pacer20GetTodayTokensIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Int",
+            "substitutedMangledTypeName": "Si"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer014GetTodayTokensC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 139,
+        "valueKind": "RawLiteral",
+        "value": "Get Today's Tokens"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 140,
+        "valueKind": "RawLiteral",
+        "value": "Returns today's total input + output token count (cache tokens excluded)."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 143,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetProjectedTodayCostIntent",
+    "mangledTypeName": "5Pacer27GetProjectedTodayCostIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 154,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Double>",
+        "substitutedMangledTypeName": "5Pacer27GetProjectedTodayCostIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Double",
+            "substitutedMangledTypeName": "Sd"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer021GetProjectedTodayCostC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 155,
+        "valueKind": "RawLiteral",
+        "value": "Get Projected Cost Today"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 156,
+        "valueKind": "RawLiteral",
+        "value": "Returns Pacer's projected end-of-day Claude Code spend in USD. Falls back to spend-so-far when there isn't enough history to project."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 159,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetFiveHourResetIntent",
+    "mangledTypeName": "5Pacer22GetFiveHourResetIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 175,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Foundation.Date>",
+        "substitutedMangledTypeName": "5Pacer22GetFiveHourResetIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Foundation.Date",
+            "substitutedMangledTypeName": "10Foundation4DateV"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer016GetFiveHourResetC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 176,
+        "valueKind": "RawLiteral",
+        "value": "Get 5-Hour Reset Time"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 177,
+        "valueKind": "RawLiteral",
+        "value": "Returns the date/time the current 5-hour rate-limit window rolls over."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 180,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetWillHitLimitIntent",
+    "mangledTypeName": "5Pacer21GetWillHitLimitIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 194,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.Bool>",
+        "substitutedMangledTypeName": "5Pacer21GetWillHitLimitIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.Bool",
+            "substitutedMangledTypeName": "Sb"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer015GetWillHitLimitC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 195,
+        "valueKind": "RawLiteral",
+        "value": "Will I Hit My Limit"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 196,
+        "valueKind": "RawLiteral",
+        "value": "Returns true if Pacer projects you'll reach 100% of any of your rate-limit windows before it resets."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 199,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetPaceStatusIntent",
+    "mangledTypeName": "5Pacer19GetPaceStatusIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 224,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.String>",
+        "substitutedMangledTypeName": "5Pacer19GetPaceStatusIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.String",
+            "substitutedMangledTypeName": "SS"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer013GetPaceStatusC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 225,
+        "valueKind": "RawLiteral",
+        "value": "Get Spending Pace"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 226,
+        "valueKind": "RawLiteral",
+        "value": "Returns how today's projected spend compares to your own norm: \"running hot\", \"about normal\", or \"quieter than usual\"."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 229,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.GetPacerSnapshotIntent",
+    "mangledTypeName": "5Pacer03GetA14SnapshotIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 244,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog & AppIntents.ReturnsValue<Swift.String>",
+        "substitutedMangledTypeName": "5Pacer03GetA14SnapshotIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog",
+          "AppIntents.ReturnsValue"
+        ],
+        "opaqueTypeSameTypeRequirements": [
+          {
+            "typeAliasName": "AppIntents.IntentResult.Value",
+            "substitutedTypeName": "Swift.String",
+            "substitutedMangledTypeName": "SS"
+          }
+        ]
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer03Getf8SnapshotC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 245,
+        "valueKind": "RawLiteral",
+        "value": "Get Usage Snapshot (JSON)"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 246,
+        "valueKind": "RawLiteral",
+        "value": "Returns the full Pacer usage snapshot as a JSON string: 5-hour and 7-day limits with reset times and projections, costs (today/week/month/all-time plus projections), token totals, spending pace, the running session, and data-source freshness. Pipe into \"Get Dictionary from Input\" to read any field. Schema is versioned for forward compatibility."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 255,
+        "valueKind": "RawLiteral",
+        "value": "false"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.RefreshScanIntent",
+    "mangledTypeName": "5Pacer17RefreshScanIntentV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 270,
+    "conformances": [
+      "AppIntents.AppIntent",
+      "AppIntents.PersistentlyIdentifiable",
+      "AppIntents._SupportsAppDependencies",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppIntent",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents.PersistentlyIdentifiable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "AppIntents._SupportsAppDependencies",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [
+      {
+        "typeAliasName": "PerformResult",
+        "substitutedTypeName": "some AppIntents.ProvidesDialog",
+        "substitutedMangledTypeName": "5Pacer17RefreshScanIntentV7performQryYaKFQOy_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ProvidesDialog"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      },
+      {
+        "typeAliasName": "SummaryContent",
+        "substitutedTypeName": "some AppIntents.ParameterSummary",
+        "substitutedMangledTypeName": "10AppIntents0A6IntentPAAE16parameterSummaryQrvpZQOy5Pacer011RefreshScanC0V_Qo_",
+        "opaqueTypeProtocolRequirements": [
+          "AppIntents.ParameterSummary"
+        ],
+        "opaqueTypeSameTypeRequirements": []
+      }
+    ],
+    "properties": [
+      {
+        "label": "title",
+        "type": "Foundation.LocalizedStringResource",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 271,
+        "valueKind": "RawLiteral",
+        "value": "Refresh Pacer Scan"
+      },
+      {
+        "label": "description",
+        "type": "AppIntents.IntentDescription",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 272,
+        "valueKind": "RawLiteral",
+        "value": "Triggers an immediate JSONL scan and project-attribution refresh. Use after editing project aliases from outside the app."
+      },
+      {
+        "label": "openAppWhenRun",
+        "type": "Swift.Bool",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 280,
+        "valueKind": "RawLiteral",
+        "value": "true"
+      }
+    ]
+  },
+  {
+    "typeName": "Pacer.PacerAppShortcuts",
+    "mangledTypeName": "5Pacer0A12AppShortcutsV",
+    "kind": "struct",
+    "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+    "line": 310,
+    "conformances": [
+      "AppIntents.AppShortcutsProvider",
+      "Swift.Sendable",
+      "Swift.SendableMetatype",
+      "Swift.BitwiseCopyable"
+    ],
+    "allConformances": [
+      {
+        "protocolName": "AppIntents.AppShortcutsProvider",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.Sendable",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.SendableMetatype",
+        "conformanceDefiningModule": "Pacer"
+      },
+      {
+        "protocolName": "Swift.BitwiseCopyable",
+        "conformanceDefiningModule": "Pacer"
+      }
+    ],
+    "associatedTypeAliases": [],
+    "properties": [
+      {
+        "label": "appShortcuts",
+        "type": "Swift.Array<AppIntents.AppShortcut>",
+        "mangledTypeName": "n/a - deprecated",
+        "isStatic": "true",
+        "isComputed": "false",
+        "file": "/Users/eric/Code/public-projects/Pacer/.worktrees/feat-pacer-cli-core/App/AppIntents/PacerAppIntents.swift",
+        "line": 311,
+        "valueKind": "Array",
+        "value": [
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetUsageIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetUsageIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetUsageIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Get my 5-hour "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " usage"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " 5-hour usage"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "How much "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " have I used"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "5-hour usage"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "gauge.with.dots.needle.50percent"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetSevenDayUsageIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetSevenDayUsageIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetSevenDayUsageIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Get my 7-day "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " usage"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " weekly usage"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "7-day usage"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "calendar"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetTodayCostIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetTodayCostIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetTodayCostIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "How much did I spend on "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " today"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " cost today"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "Today's cost"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "dollarsign.circle"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetWeekCostIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetWeekCostIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetWeekCostIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " cost this week"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "This week's cost"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "calendar.badge.clock"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetMonthCostIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetMonthCostIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetMonthCostIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " cost this month"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "This month's cost"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "calendar.circle"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetFiveHourResetIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetFiveHourResetIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetFiveHourResetIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "When does my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " limit reset"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "5-hour reset"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "clock.arrow.circlepath"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetWillHitLimitIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetWillHitLimitIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetWillHitLimitIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Will I hit my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " limit"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Am I going to run out of "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": ""
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "Will I hit my limit"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "exclamationmark.triangle"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetPaceStatusIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetPaceStatusIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetPaceStatusIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "What's my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " pace"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "Spending pace"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "speedometer"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.GetPacerSnapshotIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.GetPacerSnapshotIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.GetPacerSnapshotIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Get my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " snapshot"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Get my "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": " usage data"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "Usage snapshot"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "doc.text"
+                }
+              ]
+            }
+          },
+          {
+            "valueKind": "InitCall",
+            "value": {
+              "type": "AppIntents.AppShortcut",
+              "arguments": [
+                {
+                  "label": "intent",
+                  "type": "Pacer.RefreshScanIntent",
+                  "valueKind": "InitCall",
+                  "value": {
+                    "type": "Pacer.RefreshScanIntent",
+                    "arguments": []
+                  }
+                },
+                {
+                  "label": "phrases",
+                  "type": "Swift.Array<AppIntents.AppShortcutPhrase<Pacer.RefreshScanIntent>>",
+                  "valueKind": "Array",
+                  "value": [
+                    {
+                      "valueKind": "InterpolatedStringLiteral",
+                      "value": {
+                        "segments": [
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": "Refresh "
+                          },
+                          {
+                            "valueKind": "Enum",
+                            "value": {
+                              "name": "applicationName"
+                            }
+                          },
+                          {
+                            "valueKind": "RawLiteral",
+                            "value": ""
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "label": "shortTitle",
+                  "type": "Foundation.LocalizedStringResource",
+                  "valueKind": "RawLiteral",
+                  "value": "Refresh scan"
+                },
+                {
+                  "label": "systemImageName",
+                  "type": "Swift.String",
+                  "valueKind": "RawLiteral",
+                  "value": "arrow.clockwise"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+]
