@@ -18,13 +18,17 @@ import PacerCore
 ///   and the archive fold posts it too;
 /// - `.pacerEngineDidRecompute` — fresh projections. This one also re-sends
 ///   the SSE snapshot, which is when the stream has always pushed;
-/// - an active-login change. Nothing posts one, so this watches
-///   `UsageScope.activeAccountId` through Observation — the unscoped
-///   payload's limits are whichever login that names. A real change (not a
-///   re-assertion of the same id) also pushes an SSE `account` event at once
-///   (`PacerAccountChange`) and makes the rebuild *urgent*: it skips the
-///   spacing between builds and is broadcast, so a stream client hears
-///   "the login moved" and then gets the new login's snapshot (#192);
+/// - an active-login change — the unscoped payload's limits are whichever
+///   login is active. `OAuthPoller` posts `PacerAccountChange.didActivate`
+///   from its own executor the moment it flips the store (#254); the
+///   `UsageScope.activeAccountId` watch stays as a backstop for any write
+///   that does not come through the poller. Both go through one detector, so
+///   a change is announced once, by whichever arrives first — the poller,
+///   unless the main actor is idle. A real change (not a re-assertion of the
+///   same id) pushes an SSE `account` event at once and makes the rebuild
+///   *urgent*: it skips the spacing between builds and is broadcast, so a
+///   stream client hears "the login moved" and then gets the new login's
+///   snapshot (#192);
 /// - a 15 s timer, for what changes with no event at all: a session ageing
 ///   out of "active", the day rolling over, an engine export going stale.
 ///
@@ -70,6 +74,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// The next build follows an account change: no spacing before it.
     private var pendingUrgent = false
     private var onAccountChange: (@Sendable (PacerAccountChange) -> Void)?
+    /// Shared by the poller's announcement and the `UsageScope` watch.
+    private var accountDetector = PacerAccountChange.Detector(last: nil)
     private var lastStartedAt: Date?
     private var announcedFirstBuild = false
     private var onBroadcast: (@Sendable (PacerAPISnapshot) -> Void)?
@@ -85,7 +91,8 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
 
     /// Start refreshing; `onBroadcast` receives each snapshot the SSE stream
     /// should push, on the build queue, and `onAccountChange` each change of
-    /// active login, on the main actor, before the rebuild it causes.
+    /// active login, on whichever thread announced it (usually the poller's),
+    /// before the rebuild it causes.
     /// Restarting replaces the previous run.
     func start(onBroadcast: @escaping @Sendable (PacerAPISnapshot) -> Void,
                onAccountChange: @escaping @Sendable (PacerAccountChange) -> Void) {
@@ -101,6 +108,11 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             center.addObserver(forName: .pacerEngineDidRecompute, object: nil, queue: nil) {
                 [weak self] _ in self?.trigger(broadcast: true)
             },
+            center.addObserver(forName: PacerAccountChange.didActivate, object: nil, queue: nil) {
+                [weak self] note in
+                guard let change = PacerAccountChange(note) else { return }
+                self?.observeActiveLogin(change.activeAccountId, since: change.since)
+            },
         ]
 
         let newTimer = DispatchSource.makeTimerSource(queue: buildQueue)
@@ -109,17 +121,12 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         newTimer.setEventHandler { [weak self] in self?.timerFired() }
 
         let watch = Task { @MainActor [weak self] in
-            var detector = PacerAccountChange.Detector(last: UsageScope.shared.activeAccountId)
             while !Task.isCancelled {
                 await UsageScope.nextActiveAccountChange()
                 guard !Task.isCancelled, let self else { return }
                 let scope = UsageScope.shared
-                if let change = detector.observe(scope.activeAccountId,
-                                                 since: scope.activeAccountSince ?? Date()) {
-                    self.accountChanged(change)
-                } else {
-                    self.trigger()
-                }
+                self.observeActiveLogin(scope.activeAccountId,
+                                        since: scope.activeAccountSince ?? Date())
             }
         }
 
@@ -133,6 +140,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             pendingBroadcast = true
             self.onBroadcast = onBroadcast
             self.onAccountChange = onAccountChange
+            // The mirror, not `UsageScope.shared`: this is not the main actor,
+            // and the two agree at rest.
+            accountDetector = PacerAccountChange.Detector(last: UsageScope.storedActiveAccountId)
             observers = newObservers
             timer = newTimer
             accountWatch = watch
@@ -190,14 +200,26 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         if let delay { schedule(after: delay) }
     }
 
-    /// The active login moved: tell stream subscribers now, then build and
-    /// push the new login's snapshot as soon as the build queue allows.
-    /// The event is encoded and handed over here, not after the build, so a
-    /// slow store delays the snapshot but never the news that it changed.
-    @MainActor
-    private func accountChanged(_ change: PacerAccountChange) {
-        let handler = lock.withLock { running ? onAccountChange : nil }
-        handler?(change)
+    /// An active-login value, from the poller or the `UsageScope` watch.
+    /// A change tells stream subscribers now, then builds and pushes the new
+    /// login's snapshot as soon as the build queue allows. The event is
+    /// handed over here, not after the build, so a slow store delays the
+    /// snapshot but never the news that it changed. Anything else (the same
+    /// id re-asserted, or the second of the two sources to report a change)
+    /// is an ordinary rebuild request.
+    private func observeActiveLogin(_ id: String?, since: Date) {
+        typealias Decision = (change: PacerAccountChange?,
+                              handler: (@Sendable (PacerAccountChange) -> Void)?)
+        let decision: Decision? = lock.withLock {
+            guard running else { return nil }
+            return (accountDetector.observe(id, since: since), onAccountChange)
+        }
+        guard let decision else { return }
+        guard let change = decision.change else {
+            trigger()
+            return
+        }
+        decision.handler?(change)
         trigger(broadcast: true, urgent: true)
     }
 

@@ -34,6 +34,30 @@ public struct ClaudePathResolver: @unchecked Sendable {
     public struct ResolvedRoot: Sendable, Equatable, Hashable {
         public let root: URL
         public let projectsDirectory: URL
+
+        /// The `rootPath` `JSONLScanner` stamps on a turn read from `file`: the
+        /// config root (not the `projects/` directory) of the root the file
+        /// sits under, as `root.path` verbatim, because `AccountTrail` keys
+        /// its pinned spans on that exact string.
+        ///
+        /// A bulk importer sees only file paths, so it has to rediscover which
+        /// root each one belonged to; this is that join, kept here so it cannot
+        /// drift from the line parser's. Containment is decided on
+        /// `canonicalPathURL` paths plus a `/` boundary (so `projects-old` is
+        /// not under `projects`), and the longest matching `projects/` wins
+        /// when roots nest. nil when no root contains the file.
+        public static func rootPath(forFile file: String, among roots: [ResolvedRoot]) -> String? {
+            let filePath = URL(fileURLWithPath: file).canonicalPathURL.path
+            var best: (length: Int, root: String)?
+            for candidate in roots {
+                let directory = candidate.projectsDirectory.canonicalPathURL.path
+                let prefix = directory.hasSuffix("/") ? directory : directory + "/"
+                guard filePath.hasPrefix(prefix),
+                      best == nil || prefix.count > best!.length else { continue }
+                best = (prefix.count, candidate.root.path)
+            }
+            return best?.root
+        }
     }
 
     private let environment: [String: String]

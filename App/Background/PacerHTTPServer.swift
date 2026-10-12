@@ -74,8 +74,9 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 /// dependency in a notarized app. The app is not sandboxed, so binding a
 /// listening socket needs no extra entitlement.
 ///
-/// **Answers come from memory (#191).** `/metrics`, `/v1/snapshot` and
-/// `/v1/accounts` render a `PacerAPISnapshot` that `PacerAPISnapshotRefresher`
+/// **Answers come from memory (#191).** `/metrics`, `/v1/snapshot`,
+/// `/v1/accounts` and, for every session seen in the last six hours,
+/// `/v1/session` (#211) render a `PacerAPISnapshot` that `PacerAPISnapshotRefresher`
 /// rebuilds in the background, with every seconds-from-now field rebased to
 /// the moment of the request. A store that has slowed to tens of seconds per
 /// read makes those answers stale — by an age every answer carries — instead
@@ -92,8 +93,9 @@ final class PacerAPIServerStatus: ObservableObject, @unchecked Sendable {
 ///   behind another. The token is captured on `queue` when the work is
 ///   handed over, so routes never read `config`.
 /// - **`storeQueue`** runs the endpoints that still read the store
-///   (`/v1/session`, `/v1/sessions`, `/v1/limits/history`, `/v1/usage/*`,
-///   `/v1/predictions/history`), a few at a time — see its doc comment.
+///   (`/v1/sessions`, `/v1/limits/history`, `/v1/usage/*`,
+///   `/v1/predictions/history`, and `/v1/session` for an id the snapshot
+///   does not carry), a few at a time — see its doc comment.
 ///
 /// What routes share is lock-protected: the snapshot cache, the refresher's
 /// state and `scopeAnnouncedAt`. `NWConnection.send` is safe from any thread;
@@ -391,20 +393,40 @@ final class PacerHTTPServer: @unchecked Sendable {
         case "/v1/stream":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }
             queue.async { [self] in startSSE(client) }
-        case "/v1/usage/daily", "/v1/usage/models", "/v1/sessions", "/v1/session",
+        case "/v1/session":
+            guard Self.authorized(headers, token: token) else { return unauthorized(client) }
+            // Every live session is in the snapshot (#211). `pace.sh` asks this
+            // before every gate, so a store stall used to cost each gate its
+            // timeout and then pace it on the active login instead of its own.
+            // An id the snapshot lacks (older than its window, or no snapshot
+            // yet) is asked of the store, exactly as before.
+            let now = Date()
+            if let id = query["id"], let snapshot = snapshots.current,
+               let session = snapshot.session(id: id, at: now),
+               let json = try? session.encodedJSON() {
+                return respond(client, status: 200, contentType: "application/json; charset=utf-8",
+                               body: Data(json.utf8), extraHeaders: Self.ageHeader(snapshot, now: now))
+            }
+            enqueueStoreRoute(path: path, query: query, client: client)
+        case "/v1/usage/daily", "/v1/usage/models", "/v1/sessions",
              "/v1/limits/history", "/v1/predictions/history":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }
-            let enqueuedAt = Date()
-            storeQueue.addOperation { [self] in
-                guard Date().timeIntervalSince(enqueuedAt) < Self.storeQueueShedAfter else {
-                    return respond(client, status: 503, contentType: "text/plain",
-                                   body: Data("Busy, try again\n".utf8),
-                                   extraHeaders: ["Retry-After": "\(Self.retryAfterSeconds)"])
-                }
-                storeRoute(path: path, query: query, client: client)
-            }
+            enqueueStoreRoute(path: path, query: query, client: client)
         default:
             respond(client, status: 404, contentType: "text/plain", body: Data("Not Found\n".utf8))
+        }
+    }
+
+    /// Queue a store read, shed if it waited too long to start.
+    private func enqueueStoreRoute(path: String, query: [String: String], client: ClientConnection) {
+        let enqueuedAt = Date()
+        storeQueue.addOperation { [self] in
+            guard Date().timeIntervalSince(enqueuedAt) < Self.storeQueueShedAfter else {
+                return respond(client, status: 503, contentType: "text/plain",
+                               body: Data("Busy, try again\n".utf8),
+                               extraHeaders: ["Retry-After": "\(Self.retryAfterSeconds)"])
+            }
+            storeRoute(path: path, query: query, client: client)
         }
     }
 

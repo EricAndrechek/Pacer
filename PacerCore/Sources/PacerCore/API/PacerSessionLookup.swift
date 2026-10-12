@@ -49,18 +49,23 @@ public struct PacerSessionLookup: Codable, Sendable {
     public let models: [String]
     /// The account that turn was attributed to.
     public let accountId: String?
-    /// The account this session's next turn bills to: the default login's
-    /// current account. Nil when no login has been observed.
+    /// The account this session's next turn bills to. See
+    /// `PacerSessionBinding.current` for how it is decided.
     ///
-    /// Differs from `accountId` after a `/login` switch until the session
+    /// For a session on the default login, that login's current account. It
+    /// differs from `accountId` after a `/login` switch until the session
     /// writes a turn and Pacer scans it. That can be never for a session
     /// sleeping in `pace.sh wait`, and pacing it on `accountId` waited out
-    /// the old login's reset while the new one had headroom (#184). Every
-    /// session the lookup can find is on the default login, because pinned
-    /// profiles aren't scanned (see `AccountTrailRecorder.poll`).
+    /// the old login's reset while the new one had headroom (#184).
+    ///
+    /// A session that bills an account of its own does not follow the CLI's
+    /// switches (#211):
+    /// - a Claude Desktop session bills Desktop's login;
+    /// - a pinned profile's session bills that profile's login.
     public let currentAccountId: String?
     /// When the default login became `currentAccountId`: the last switch. A
-    /// loop can compare it between reads to see a switch happen.
+    /// loop can compare it between reads to see a switch happen. Nil for a
+    /// session bound to an account of its own, which no CLI switch moves.
     public let currentAccountSince: Date?
     public let projectPath: String?
     /// Last path component of `projectPath`, for display.
@@ -68,6 +73,71 @@ public struct PacerSessionLookup: Codable, Sendable {
     public let lastActiveAt: Date?
 
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
+
+    /// The same answer, stamped at `now`. Served from `PacerAPISnapshot`,
+    /// whose age travels in the response header instead.
+    func rebased(to now: Date) -> Self {
+        Self(schemaVersion: schemaVersion, generatedAt: now, sessionId: sessionId,
+             model: model, models: models, accountId: accountId,
+             currentAccountId: currentAccountId, currentAccountSince: currentAccountSince,
+             projectPath: projectPath, project: project, lastActiveAt: lastActiveAt)
+    }
+}
+
+/// Which account a session's next turn bills to, read once and shared by every
+/// lookup in a pass, so a snapshot build answers all the live sessions from
+/// one trail read.
+///
+/// The CLI's switches move only the sessions on the default login. Two kinds
+/// bill an account of their own:
+/// - **Claude Desktop's sessions** bill Desktop's login (#244). Desktop
+///   records which, per session (`DesktopSessionDirectory`).
+/// - **A pinned profile's sessions** (`cswap run`, `CLAUDE_CONFIG_DIR`) bill
+///   that profile's login. A turn does not record its root, but it shows: the
+///   turn carries an account the default login's trail would not have given it
+///   at that instant.
+///
+/// Telling these apart matters because `pace.sh` gates on `currentAccountId`
+/// (#184). Following the CLI's login, a Desktop routine was paced against the
+/// CLI's windows.
+struct PacerSessionBinding {
+    let trail: AccountTrail
+    /// `DesktopSessionDirectory.accounts`: recorded session → its account.
+    let desktopAccounts: [String: String]
+
+    static func load(context: ModelContext,
+                     desktop: DesktopSessionDirectory? = .shared) -> PacerSessionBinding {
+        PacerSessionBinding(trail: AccountParallelism.trail(context: context),
+                            desktopAccounts: desktop?.accounts ?? [:])
+    }
+
+    /// The account `sessionId`'s next turn bills to, and since when the
+    /// default login has been on it (nil for a session bound to its own
+    /// account), given the account and time of its newest turn.
+    ///
+    /// The pinned-profile test is inferential and has one blind spot: a
+    /// profile signed into the same account the default login held at that
+    /// instant looks like the default login, and follows a later CLI switch
+    /// until its next turn shows otherwise.
+    func current(sessionId: String, newestAccount: String?,
+                 newestAt: Date) -> (accountId: String?, since: Date?) {
+        if let desktop = desktopAccounts[sessionId] { return (desktop, nil) }
+        if let newestAccount, trail.accountId(at: newestAt) != newestAccount {
+            return (newestAccount, nil)
+        }
+        let login = trail.currentDefaultLogin
+        return (login?.accountId ?? newestAccount, login?.startedAt)
+    }
+}
+
+/// The columns a session lookup reads from one turn. The store fetch and the
+/// snapshot's raw read (`RawSessionTurnReader`) both produce these, so the
+/// rule over them is written once.
+struct PacerSessionTurn: Sendable, Equatable {
+    let sampledAt: Date
+    let model: String
+    let accountId: String?
+    let projectPath: String?
 }
 
 /// Who else is spending this account's budget right now.
@@ -125,6 +195,64 @@ public enum PacerSessionLookupBuilder {
                    sessionId: sessionId, now: now)
     }
 
+    /// How far back `PacerAPISnapshot` carries sessions for `/v1/session`.
+    /// A session gating is active by definition, but one asleep in
+    /// `pace.sh wait` asks again when it wakes, and that sleep can last a
+    /// whole 5-hour window. An older id falls back to the store.
+    public static let snapshotWindow: TimeInterval = 6 * 60 * 60
+
+    /// Every session seen within `snapshotWindow`, answered by the same rule
+    /// as `lookup(sessionId:)` (`answer(sessionId:turns:binding:now:)`), from
+    /// one read of the window's turns rather than one fetch per session.
+    ///
+    /// The read is raw SQLite (`RawSessionTurnReader`): through SwiftData it
+    /// cost ~260 ms a build on a real store, and the snapshot is rebuilt every
+    /// few seconds while anything is happening. When the raw read is not
+    /// possible (an in-memory store) or fails, each session is fetched the
+    /// ordinary way.
+    ///
+    /// The window read starts `concurrencyWindow` before `snapshotWindow`, so a
+    /// session whose newest turn is at the window's edge still has every turn
+    /// its `models` can count. Past that, a session's older turns cannot
+    /// change its answer.
+    nonisolated static func live(context: ModelContext, storeURL: URL?,
+                                 binding: PacerSessionBinding,
+                                 now: Date) -> [String: PacerSessionLookup] {
+        let liveSince = now.addingTimeInterval(-snapshotWindow)
+        if let storeURL,
+           let rows = RawSessionTurnReader.turns(
+               storeURL: storeURL, since: liveSince.addingTimeInterval(-concurrencyWindow)) {
+            var bySession: [String: [PacerSessionTurn]] = [:]
+            for (sessionId, turn) in rows where !sessionId.isEmpty {
+                // Newest first already; the same cap the store fetch applies.
+                if bySession[sessionId, default: []].count < lookupTurnLimit {
+                    bySession[sessionId, default: []].append(turn)
+                }
+            }
+            var out: [String: PacerSessionLookup] = [:]
+            for (sessionId, turns) in bySession {
+                guard let newest = turns.first, newest.sampledAt >= liveSince,
+                      let found = answer(sessionId: sessionId, turns: turns,
+                                         binding: binding, now: now) else { continue }
+                out[sessionId] = found
+            }
+            return out
+        }
+
+        var descriptor = FetchDescriptor<AccountSessionInfo>(
+            predicate: #Predicate { $0.lastSeenAt >= liveSince },
+            sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
+        descriptor.fetchLimit = 200
+        var out: [String: PacerSessionLookup] = [:]
+        for row in (try? context.fetch(descriptor)) ?? [] where out[row.sessionId] == nil {
+            if let found = lookup(context: context, sessionId: row.sessionId,
+                                  binding: binding, now: now) {
+                out[row.sessionId] = found
+            }
+        }
+        return out
+    }
+
     /// Every session seen within `withinSeconds`, newest first.
     ///
     /// Reads the per-account session table so each row can name the account
@@ -139,22 +267,25 @@ public enum PacerSessionLookupBuilder {
     }
 
     nonisolated static func list(container: ModelContainer, withinSeconds: TimeInterval,
-                                 account: String?, now: Date) throws -> PacerSessionList {
+                                 account: String?, now: Date,
+                                 desktop: DesktopSessionDirectory? = .shared) throws -> PacerSessionList {
         let context = ModelContext(container)
         let cutoff = now.addingTimeInterval(-max(0, withinSeconds))
         var descriptor = FetchDescriptor<AccountSessionInfo>(
             predicate: #Predicate { $0.lastSeenAt >= cutoff },
             sortBy: [SortDescriptor(\.lastSeenAt, order: .reverse)])
         descriptor.fetchLimit = 200
-        let currentLogin = AccountParallelism.trail(context: context).currentDefaultLogin?.accountId
+        let binding = PacerSessionBinding.load(context: context, desktop: desktop)
         // One row per session, its newest: a session that spans a switch has a
         // row for each login, and listed both (#190).
         var seen = Set<String>()
         let rows = ((try? context.fetch(descriptor)) ?? [])
             .filter { seen.insert($0.sessionId).inserted }
         func current(_ row: AccountSessionInfo) -> String {
-            LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now) == .active
-                ? (currentLogin ?? row.accountId) : row.accountId
+            guard LiveSessionActivity.from(lastSeen: row.lastSeenAt, now: now) == .active
+            else { return row.accountId }
+            return binding.current(sessionId: row.sessionId, newestAccount: row.accountId,
+                                   newestAt: row.lastSeenAt).accountId ?? row.accountId
         }
 
         // One lookup for every project involved, rather than one per session.
@@ -192,9 +323,16 @@ public enum PacerSessionLookupBuilder {
 
     nonisolated static func lookup(container: ModelContainer, sessionId: String,
                                    now: Date) throws -> PacerSessionLookup? {
+        let context = ModelContext(container)
+        return lookup(context: context, sessionId: sessionId,
+                      binding: .load(context: context), now: now)
+    }
+
+    nonisolated static func lookup(context: ModelContext, sessionId: String,
+                                   binding: PacerSessionBinding,
+                                   now: Date) -> PacerSessionLookup? {
         let trimmed = sessionId.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
-        let context = ModelContext(container)
 
         // Newest first, and a handful rather than one: the top row can be a
         // `<synthetic>` turn, Claude Code's sentinel for non-billable internal
@@ -203,13 +341,27 @@ public enum PacerSessionLookupBuilder {
         var descriptor = FetchDescriptor<TokenSample>(
             predicate: #Predicate { $0.sessionId == trimmed },
             sortBy: [SortDescriptor(\.sampledAt, order: .reverse)])
-        // Enough rows to see a fan-out, not so many that an on-demand API
-        // call walks a long session. A parent and its subagents interleave
-        // within seconds of each other, so the models in flight show up in
-        // the newest handful either way.
-        descriptor.fetchLimit = 200
-        let rows = (try? context.fetch(descriptor)) ?? []
-        guard let newest = rows.first else { return nil }
+        descriptor.fetchLimit = lookupTurnLimit
+        let turns = ((try? context.fetch(descriptor)) ?? []).map {
+            PacerSessionTurn(sampledAt: $0.sampledAt, model: $0.model,
+                             accountId: $0.accountId, projectPath: $0.projectPath)
+        }
+        return answer(sessionId: trimmed, turns: turns, binding: binding, now: now)
+    }
+
+    /// Enough turns to see a fan-out, not so many that an on-demand API call
+    /// walks a long session. A parent and its subagents interleave within
+    /// seconds of each other, so the models in flight show up in the newest
+    /// handful either way.
+    static let lookupTurnLimit = 200
+
+    /// The lookup's rule, over a session's newest turns (newest first, at most
+    /// `lookupTurnLimit`). Both the store fetch and the snapshot's raw read
+    /// feed it, so the two answers cannot drift apart.
+    nonisolated static func answer(sessionId: String, turns: [PacerSessionTurn],
+                                   binding: PacerSessionBinding,
+                                   now: Date) -> PacerSessionLookup? {
+        guard let newest = turns.first else { return nil }
 
         // Distinct models on recent turns, newest first. `<synthetic>` is
         // Claude Code's sentinel for non-billable internal traffic, which
@@ -217,22 +369,23 @@ public enum PacerSessionLookupBuilder {
         let cutoff = newest.sampledAt.addingTimeInterval(-concurrencyWindow)
         var seen = Set<String>()
         var models: [String] = []
-        for row in rows where row.sampledAt >= cutoff {
-            guard row.model != JSONLLineParser.syntheticModelSentinel,
-                  !row.model.isEmpty else { continue }
-            if seen.insert(row.model).inserted { models.append(row.model) }
+        for turn in turns where turn.sampledAt >= cutoff {
+            guard turn.model != JSONLLineParser.syntheticModelSentinel,
+                  !turn.model.isEmpty else { continue }
+            if seen.insert(turn.model).inserted { models.append(turn.model) }
         }
         let path = newest.projectPath
-        let login = AccountParallelism.trail(context: context).currentDefaultLogin
+        let current = binding.current(sessionId: sessionId, newestAccount: newest.accountId,
+                                      newestAt: newest.sampledAt)
         return PacerSessionLookup(
             schemaVersion: 1,
             generatedAt: now,
-            sessionId: trimmed,
+            sessionId: sessionId,
             model: models.first,
             models: models,
             accountId: newest.accountId,
-            currentAccountId: login?.accountId ?? newest.accountId,
-            currentAccountSince: login?.startedAt,
+            currentAccountId: current.accountId,
+            currentAccountSince: current.since,
             projectPath: path,
             project: path.map { URL(fileURLWithPath: $0).lastPathComponent },
             lastActiveAt: newest.sampledAt)

@@ -50,8 +50,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
             .joined(separator: ", ")
         return """
         WITH lines AS (
-            SELECT json AS j FROM read_ndjson_objects([\(sources)],
-                ignore_errors = true, maximum_object_size = 67108864)
+            SELECT json AS j, filename AS fname FROM read_ndjson_objects([\(sources)],
+                ignore_errors = true, maximum_object_size = 67108864, filename = true)
         ),
         turns AS (
         SELECT
@@ -70,7 +70,9 @@ struct ArchiveImporter: BulkTranscriptImporter {
             json_extract_string(j, '$.cwd')                              AS cwd,
             json_extract_string(j, '$.version')                          AS cc_version,
             json_extract_string(j, '$.message.stop_reason') IS NOT NULL  AS is_complete,
-            COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error
+            COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error,
+            json_extract_string(j, '$.entrypoint')                       AS entrypoint,
+            fname
         FROM lines
         WHERE json_extract_string(j, '$.type') = 'assistant'
           AND json_extract_string(j, '$.message.model') IS NOT NULL
@@ -97,7 +99,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
         SELECT ts, model, input_tokens, output_tokens, cache_read,
                explicit_5m, explicit_1h, summed_cc, source_cost,
                message_id, request_id, session_id, cwd, cc_version,
-               is_complete, api_error
+               is_complete, api_error, entrypoint, fname
         FROM ranked WHERE rn = 1
         """
     }
@@ -105,7 +107,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
     /// Import every transcript under `roots` (each root being a `projects/`
     /// directory). `aliases` is threaded through so project paths canonicalize
     /// identically to the live path.
-    func importAll(roots: [URL], aliases: [String: String] = [:]) throws -> BulkImportResult {
+    func importAll(roots: [ClaudePathResolver.ResolvedRoot], aliases: [String: String] = [:]) throws -> BulkImportResult {
         let started = Date()
         var db: duckdb_database?
         var con: duckdb_connection?
@@ -115,7 +117,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
               duckdb_connect(db, &con) == DuckDBSuccess else { throw ImportError.openFailed }
         defer { duckdb_disconnect(&con); duckdb_close(&db) }
 
-        let globs = roots.map { $0.appendingPathComponent("**/*.jsonl").path }
+        let globs = roots.map { $0.projectsDirectory.appendingPathComponent("**/*.jsonl").path }
         var result = duckdb_result()
         let sql = Self.extractionSQL(globs: globs)
         guard sql.withCString({ duckdb_query(con, $0, &result) }) == DuckDBSuccess else {
@@ -127,9 +129,10 @@ struct ArchiveImporter: BulkTranscriptImporter {
 
         var entries: [ParsedUsageEntry] = []
         entries.reserveCapacity(64 * 1024)
+        var rootByFile: [String: String?] = [:]
 
         // Vectorized read. The row-at-a-time accessors are deprecated and
-        // allocate per value; at ~150k rows × 16 columns that difference is
+        // allocate per value; at ~150k rows × 17 columns that difference is
         // the whole point of moving the parse here in the first place.
         let chunkCount = duckdb_result_chunk_count(result)
         for chunkIndex in 0..<chunkCount {
@@ -145,6 +148,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
             let messageId = Column(chunk, 9), requestId = Column(chunk, 10)
             let sessionId = Column(chunk, 11), cwd = Column(chunk, 12), version = Column(chunk, 13)
             let complete = Column(chunk, 14), apiError = Column(chunk, 15)
+            let entrypoint = Column(chunk, 16), fileName = Column(chunk, 17)
 
             for row in 0..<rows {
                 guard let timestampText = ts.string(row),
@@ -166,6 +170,16 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     return "\(mid):\(rid)"
                 }()
                 let rawCwd = cwd.string(row)
+                // The root the line parser would have stamped (see
+                // `rootPath(forFile:among:)`), without which a pinned
+                // profile's turns are attributed by the default login's
+                // trail. One lookup per file, not per row.
+                let rootPath: String? = fileName.string(row).flatMap { file in
+                    if let known = rootByFile[file] { return known }
+                    let found = ClaudePathResolver.ResolvedRoot.rootPath(forFile: file, among: roots)
+                    rootByFile[file] = .some(found)
+                    return found
+                }
 
                 entries.append(ParsedUsageEntry(
                     timestamp: timestamp,
@@ -183,6 +197,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
                         ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
                     originalProjectPath: rawCwd,
                     claudeCodeVersion: version.string(row),
+                    rootPath: rootPath,
+                    entrypoint: entrypoint.string(row),
                     isApiErrorMessage: apiError.bool(row),
                     isComplete: complete.bool(row)))
             }
@@ -194,7 +210,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
         entries.sort { $0.timestamp < $1.timestamp }
 
         return BulkImportResult(entries: entries,
-                                fileMarks: Self.fileMarks(roots: roots),
+                                fileMarks: Self.fileMarks(roots: roots.map(\.projectsDirectory)),
                                 seconds: Date().timeIntervalSince(started))
     }
 

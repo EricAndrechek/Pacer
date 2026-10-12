@@ -39,6 +39,11 @@ public struct PacerAPISnapshot: Sendable {
     /// Open pinned config roots → the account signed into each, for
     /// `?config_dir=`.
     public let configRoots: [String: String]
+    /// `/v1/session?id=` for every session seen within
+    /// `PacerSessionLookupBuilder.snapshotWindow`, keyed by session id (#211).
+    /// `pace.sh` asks this before every gate. Answered from the store, a stall
+    /// cost each gate its 5 s timeout and then paced it on the wrong account.
+    public let sessions: [String: PacerSessionLookup]
 
     public init(builtAt: Date, unscoped: PacerSnapshotPayload,
                 byAccount: [String: PacerSnapshotPayload],
@@ -46,7 +51,8 @@ public struct PacerAPISnapshot: Sendable {
                 todayModels: [PacerDailyUsage.Row],
                 todayModelsByAccount: [String: [PacerDailyUsage.Row]],
                 limits: [String: PacerSnapshotPayload.Limits],
-                configRoots: [String: String]) {
+                configRoots: [String: String],
+                sessions: [String: PacerSessionLookup] = [:]) {
         self.builtAt = builtAt
         self.unscoped = unscoped
         self.byAccount = byAccount
@@ -55,6 +61,7 @@ public struct PacerAPISnapshot: Sendable {
         self.todayModelsByAccount = todayModelsByAccount
         self.limits = limits
         self.configRoots = configRoots
+        self.sessions = sessions
     }
 
     // MARK: - Build
@@ -68,8 +75,10 @@ public struct PacerAPISnapshot: Sendable {
     }
 
     /// Test seam, and the real work: one short-lived context for the whole
-    /// pass, created here so it never leaves the calling thread.
+    /// pass, created here so it never leaves the calling thread. `desktop` is
+    /// what binds Claude Desktop's sessions to Desktop's account.
     nonisolated static func build(container: ModelContainer, activeAccountId: String?,
+                                  desktop: DesktopSessionDirectory? = .shared,
                                   now: Date) throws -> PacerAPISnapshot {
         let context = ModelContext(container)
         let accounts = PacerAccountsBuilder.list(context: context, now: now)
@@ -114,7 +123,18 @@ public struct PacerAPISnapshot: Sendable {
             todayModels: PacerUsageBuilder.todayByModel(context: context, account: nil, now: now),
             todayModelsByAccount: todayByAccount,
             limits: limits,
-            configRoots: configRoots)
+            configRoots: configRoots,
+            sessions: PacerSessionLookupBuilder.live(
+                context: context, storeURL: Self.fileURL(of: container),
+                binding: .load(context: context, desktop: desktop), now: now))
+    }
+
+    /// The store's file, for the raw reads that skip SwiftData; nil for an
+    /// in-memory store, which has none.
+    static func fileURL(of container: ModelContainer) -> URL? {
+        guard let configuration = container.configurations.first,
+              !configuration.isStoredInMemoryOnly else { return nil }
+        return configuration.url
     }
 
     /// The per-account rollup key for a list row: its id, except the
@@ -135,6 +155,13 @@ public struct PacerAPISnapshot: Sendable {
     public func payload(account: String?, at now: Date) -> PacerSnapshotPayload? {
         guard let account else { return unscoped.rebased(to: now) }
         return byAccount[account]?.rebased(to: now)
+    }
+
+    /// `/v1/session?id=`'s answer at `now`, or nil for a session the snapshot
+    /// does not carry: older than its window, or not parsed yet. The caller
+    /// asks the store then, as before.
+    public func session(id: String, at now: Date) -> PacerSessionLookup? {
+        sessions[id.trimmingCharacters(in: .whitespaces)]?.rebased(to: now)
     }
 
     /// `/v1/accounts`' answer at `now`.

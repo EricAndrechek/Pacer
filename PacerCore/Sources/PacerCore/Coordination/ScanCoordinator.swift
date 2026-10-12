@@ -229,6 +229,11 @@ public final class ScanCoordinator {
         /// widget extension and tests use) keeps every scan on
         /// `JSONLScanner`. See `BulkTranscriptImporter`.
         public var bulkImporter: BulkTranscriptImporter?
+        /// Claude Desktop's Claude Code session records, which say which
+        /// account each Desktop session billed (#244). The process's shared
+        /// reader by default, which reads nothing in tests; nil leaves
+        /// Desktop's turns unattributed. See `DesktopSessionDirectory`.
+        public var desktopSessions: DesktopSessionDirectory?
 
         public init(
             costMode: CostMode = .auto,
@@ -236,7 +241,8 @@ public final class ScanCoordinator {
             probeStatsCache: Bool = true,
             saveBatchSize: Int = 1_000,
             oauthPolling: OAuthPoller.Configuration = OAuthPoller.Configuration(),
-            bulkImporter: BulkTranscriptImporter? = nil
+            bulkImporter: BulkTranscriptImporter? = nil,
+            desktopSessions: DesktopSessionDirectory? = .shared
         ) {
             self.costMode = costMode
             self.watcherMode = watcherMode
@@ -244,6 +250,7 @@ public final class ScanCoordinator {
             self.saveBatchSize = saveBatchSize
             self.oauthPolling = oauthPolling
             self.bulkImporter = bulkImporter
+            self.desktopSessions = desktopSessions
         }
     }
 
@@ -363,6 +370,9 @@ public final class ScanCoordinator {
     /// trail that gives every `TokenSample` its `accountId`. Lazily built
     /// because it needs the scan context, which is born on `@ScanActor`.
     private var accountTrailRecorder: AccountTrailRecorder?
+    /// Claude Desktop's session records, read on first use and then only when
+    /// a Desktop turn names a session not seen yet.
+    private var desktopSessions: DesktopSessionDirectory? { configuration.desktopSessions }
     /// The login this process last saw, so account-following reacts to a
     /// change rather than re-asserting the same answer every cycle.
     private var lastObservedLoginAccount: String?
@@ -1399,6 +1409,13 @@ public final class ScanCoordinator {
         let trailCorrections = recorder.drainCorrections() + (reassign?.corrections ?? [])
         let observedAccount = polledAccount.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         activePersister.accountTrail = recorder.trail()
+        // Claude Desktop's sessions bill Desktop's login, not the CLI's, and
+        // Desktop records which one (#244). Sessions recorded since the last
+        // cycle (every session, on the first) have their stored turns moved
+        // below; their accounts exist from now on, like any login seen.
+        activePersister.desktopSessions = desktopSessions
+        let desktopRecorded = desktopSessions?.drainDiscovered() ?? [:]
+        ensureDesktopAccounts(Set(desktopRecorded.values))
 
         if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
             Task { await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: nil) }
@@ -1428,6 +1445,9 @@ public final class ScanCoordinator {
         // re-read them and mark their buckets again.
         logCarriedOverMarks(activePersister.carryOverUnfinishedMarks())
         // After the carry-over, so its count is only what a dead pass left.
+        if !desktopRecorded.isEmpty {
+            try restampDesktopSessions(desktopRecorded, persister: activePersister)
+        }
         if !trailCorrections.isEmpty {
             let moved = try restampAccounts(
                 trailCorrections, trail: recorder.trail(), persister: activePersister)
@@ -1654,7 +1674,7 @@ public final class ScanCoordinator {
         if isFullScan, let importer = configuration.bulkImporter {
             do {
                 bulkResult = try bulkScan(importer: importer,
-                                          roots: resolvedRoots.map(\.projectsDirectory),
+                                          roots: resolvedRoots,
                                           aliases: aliases, sink: sink)
             } catch {
                 // Degrade to slow, never to broken: the line parser is always
@@ -2029,11 +2049,40 @@ public final class ScanCoordinator {
         trail: AccountTrail,
         persister: SamplePersister
     ) throws -> Int {
-        let moved = try AccountBackfill.restamp(corrections, trail: trail, context: context)
+        let moved = try AccountBackfill.restamp(
+            corrections, trail: trail, desktopSessions: desktopSessions?.accounts ?? [:],
+            context: context)
         guard !moved.isEmpty else { return 0 }
         persister.markSamplesForRebuild(moved)
         log("accounts: re-attributed \(moved.count) turn(s) after the trail was corrected")
         return moved.count
+    }
+
+    /// Move the stored turns of sessions Claude Desktop has just been found to
+    /// have recorded onto the account it recorded, and rebuild what they feed.
+    /// On the first cycle that is every Desktop session, which repairs history
+    /// stamped with the CLI's account before #244.
+    private func restampDesktopSessions(
+        _ sessions: [String: String],
+        persister: SamplePersister
+    ) throws {
+        let moved = try AccountBackfill.restampDesktopSessions(sessions, context: context)
+        guard !moved.isEmpty else { return }
+        persister.markSamplesForRebuild(moved)
+        let sessionCount = Set(moved.compactMap(\.sessionId)).count
+        log("accounts: re-attributed \(moved.count) Claude Desktop turn(s) in "
+            + "\(sessionCount) session(s) to the account Desktop recorded")
+    }
+
+    /// Give every account a Desktop session ran under a row, so the turns
+    /// attributed to it have somewhere to show. Create-only (`Account.ensure`).
+    private func ensureDesktopAccounts(_ accountIds: Set<String>) {
+        for id in accountIds {
+            let seed = Account.Seed(id: Account.key(forOrg: id), organizationId: id)
+            if Account.ensure(seed, in: context).created {
+                log("accounts: \(id.prefix(4)) first seen as Claude Desktop's account")
+            }
+        }
     }
 
     /// Apply `account-reassign.json` if it exists beside this store. Returns
@@ -2352,7 +2401,7 @@ public final class ScanCoordinator {
     /// the tail.
     private func bulkScan(
         importer: BulkTranscriptImporter,
-        roots: [URL],
+        roots: [ClaudePathResolver.ResolvedRoot],
         aliases: [String: String],
         sink: InsertSink
     ) throws -> JSONLScanner.ScanResult {

@@ -268,6 +268,18 @@ public final class UsageScope {
         PacerPreferences.store.set(id, forKey: Self.activeKey)
     }
 
+    /// Write only the App Group mirror, from any thread.
+    ///
+    /// The poller calls this the moment it flips the store's active row, so
+    /// readers that never touch the main actor (the API snapshot build,
+    /// `storedActiveAccountId`) see the new login at once rather than after
+    /// the redraws the switch causes (#254). `setActiveAccount` follows on
+    /// the main actor and updates the observable value; writing the same id
+    /// twice is harmless, and the store is still what both mirror.
+    public nonisolated static func mirrorActiveAccount(_ id: String) {
+        PacerPreferences.store.set(id, forKey: activeKey)
+    }
+
     public var isAll: Bool { accountId == nil }
 
     /// Returns at the next write to `activeAccountId` — for long-lived
