@@ -302,7 +302,7 @@ public struct PacerMetrics: Sendable {
     /// decimal point (`7200`, not `7200.0`); fractional values use Swift's
     /// round-trippable `Double` description (no thousands separators, no
     /// exponent for the ranges we emit).
-    private static func renderValue(_ value: Double) -> String {
+    public static func renderValue(_ value: Double) -> String {
         guard value.isFinite else { return "0" }
         if value == value.rounded() && abs(value) < 1e15 {
             return String(Int64(value))

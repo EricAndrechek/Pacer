@@ -149,6 +149,7 @@ echo "    built: ${BUILD_OUTPUT}"
 SIGN_IDENTITY="${PACER_SIGN_IDENTITY}"
 APP_ENTITLEMENTS="${REPO_ROOT}/App/Pacer.entitlements"
 WIDGETS_ENTITLEMENTS="${REPO_ROOT}/Widgets/PacerWidgets.entitlements"
+CLI_ENTITLEMENTS="${REPO_ROOT}/CLI/pacer.entitlements"
 
 # When building under a non-default Team ID, the App Group string in the
 # entitlements must be re-prefixed to that team: macOS resolves the group
@@ -159,14 +160,18 @@ WIDGETS_ENTITLEMENTS="${REPO_ROOT}/Widgets/PacerWidgets.entitlements"
 # tracked .entitlements files stay clean.
 APP_ENTITLEMENTS_SIGN="${APP_ENTITLEMENTS}"
 WIDGETS_ENTITLEMENTS_SIGN="${WIDGETS_ENTITLEMENTS}"
+CLI_ENTITLEMENTS_SIGN="${CLI_ENTITLEMENTS}"
 if [ "${PACER_TEAM_ID}" != "${DEFAULT_TEAM_ID}" ]; then
     ENT_TMP="$(mktemp -d)"
     APP_ENTITLEMENTS_SIGN="${ENT_TMP}/Pacer.entitlements"
     WIDGETS_ENTITLEMENTS_SIGN="${ENT_TMP}/PacerWidgets.entitlements"
+    CLI_ENTITLEMENTS_SIGN="${ENT_TMP}/pacer.entitlements"
     sed "s/${DEFAULT_TEAM_ID}\.com\.ericandrechek\.pacer/${PACER_TEAM_ID}.com.ericandrechek.pacer/g" \
         "${APP_ENTITLEMENTS}" > "${APP_ENTITLEMENTS_SIGN}"
     sed "s/${DEFAULT_TEAM_ID}\.com\.ericandrechek\.pacer/${PACER_TEAM_ID}.com.ericandrechek.pacer/g" \
         "${WIDGETS_ENTITLEMENTS}" > "${WIDGETS_ENTITLEMENTS_SIGN}"
+    sed "s/${DEFAULT_TEAM_ID}\.com\.ericandrechek\.pacer/${PACER_TEAM_ID}.com.ericandrechek.pacer/g" \
+        "${CLI_ENTITLEMENTS}" > "${CLI_ENTITLEMENTS_SIGN}"
     echo "==> Templated App Group prefix -> ${PACER_TEAM_ID}.com.ericandrechek.pacer"
 fi
 echo
@@ -234,6 +239,15 @@ done
 # Widget extension binary, then the .appex itself.
 sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
 sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex"
+
+# The `pacer` command line (#194), an app-like bundle with its own App Group
+# entitlement so it can read the store when the local API is off. Inside-out:
+# its resource bundle, then the bundle (which seals its executable), then,
+# below, the outer app.
+CLI_APP="${BUILD_OUTPUT}/Contents/Helpers/PacerCLI.app"
+[ -e "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle" ] && \
+    sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
+sign "${CLI_ENTITLEMENTS_SIGN}" "${CLI_APP}"
 
 # Outer app bundle last, so its signature covers everything inside.
 sign "${APP_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}"

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  The same Team-ID-prefixed App Group as the app and the widget, so the
+	  command line can read the shared store when the local API is off
+	  (#194). The prefix is what keeps Sequoia's "would like to access data
+	  from other apps" prompt quiet; see docs/research/tcc-app-management.md.
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>YZXWMJ5VBY.com.ericandrechek.pacer</string>
+	</array>
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
+</dict>
+</plist>

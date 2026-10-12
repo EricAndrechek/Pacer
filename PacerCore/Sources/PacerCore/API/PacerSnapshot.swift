@@ -145,7 +145,7 @@ public struct PacerSnapshotPayload: Codable, Sendable {
             /// When the reading behind `usedPercent` was taken, and how old it
             /// was when this snapshot was built. A consumer that stops "just
             /// before the limit" needs both the burn and how stale the number
-            /// is: the usage has kept climbing since (pace.sh's safe limit).
+            /// is: the usage has kept climbing since (pace's safe limit).
             public let sampledAt: Date?
             public let sampleAgeSeconds: Int?
 

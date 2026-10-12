@@ -206,7 +206,7 @@ public enum PacerAccountsBuilder {
     /// does not exist.
     ///
     /// A unique prefix of at least `minimumPrefix` characters also resolves,
-    /// because `pace.sh accounts` prints ids cut to 8 and that is what people
+    /// because `pacer accounts` prints ids cut to 8 and that is what people
     /// paste back. Before that, the 8-character id it showed answered 400 (#184).
     public nonisolated static func resolve(_ raw: String) throws -> String {
         try resolve(parameter: raw, known: knownAccountIds())

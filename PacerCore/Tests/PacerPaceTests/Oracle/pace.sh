@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 #
+# FROZEN TEST ORACLE — not shipped, not run by anyone but PaceParityTests.
+# This is the last bash implementation of pace.sh, kept as the reference the
+# Swift port (`pacer`, PacerPace) is compared against case by case. The
+# shipped Skills/pacer/pace.sh is now a shim that runs `pacer` (#194).
+# Do not fix bugs here: a deliberate difference belongs in the port and in
+# PaceParityTests' list of them.
+#
 # pace.sh — report Claude usage from Pacer's local API and gate heavy work
 # against every rate-limit window, so hitting a limit costs a resumable pause
 # rather than a lost run.

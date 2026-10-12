@@ -4,7 +4,7 @@ import Testing
 @testable import PacerCore
 
 // #211: `/v1/session` is answered from the API snapshot for every live
-// session, so a store stall no longer costs `pace.sh` its timeout and then the
+// session, so a store stall no longer costs `pacer` its timeout and then the
 // wrong account. And a session that bills an account of its own (Claude
 // Desktop's, a pinned profile's) no longer follows the CLI's switches.
 // Fictional org ids throughout.

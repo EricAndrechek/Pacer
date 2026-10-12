@@ -7,20 +7,20 @@
 
 ## Claude Code usage pacing
 
-Pacer runs on this machine and serves live rate-limit state over a local HTTP
-API. The API is opt-in and may be off — **off means no signal, not no budget:
-proceed ungated.**
+Pacer runs on this machine and tracks live rate-limit state; `pacer` reads
+it whether or not Pacer's local API is on. Exit 2 means there is no Pacer to
+read — **no signal, not no budget: proceed ungated.**
 
-- **Where you stand:** `~/.claude/skills/pacer/pace.sh report` — every window,
+- **Where you stand:** `~/.claude/skills/pacer/pacer report` — every window,
   including per-model caps, for the account this session is signed into.
 - **Before a long autonomous run or a many-agent fan-out, pace it.** Use the
   **`pacer`** skill and follow its protocol: gate once per wave, cheap `status`
   file-reads in every subagent, checkpoint to a resume manifest on a trip, and
   a backgrounded waiter whose exit wakes you. A rate limit should cost a
   resumable pause, not the run.
-- **A window is account-wide.** `pace.sh accounts` shows how many accounts
+- **A window is account-wide.** `pacer accounts` shows how many accounts
   there are, each one's plan, and how many sessions are already drawing on it;
-  `pace.sh sessions` shows where they are. Concurrency is already inside a burn
+  `pacer sessions` shows where they are. Concurrency is already inside a burn
   rate rather than added to it, but every live session is another claim on the
   same percentage.
 - **Pass `--model auto`** so a per-model cap only gates work that actually uses

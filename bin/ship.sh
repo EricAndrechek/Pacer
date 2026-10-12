@@ -292,6 +292,32 @@ PY
     warn "skipped EdDSA crypto-verify (need uv + a signature/pubkey); asset+length checks still cover integrity"
   fi
 
+  # The `pacer` command line inside the shipped app (#194): present, signed by
+  # the team, and carrying the App Group it needs to read the store with the
+  # local API off. Mounted read-only and hidden from Finder; nothing on screen.
+  if [ -n "$encurl" ]; then
+    local tmp mnt cli
+    tmp="$(mktemp -d)"; mnt="${tmp}/mnt"
+    if curl -fsSL -o "${tmp}/Pacer.dmg" "$encurl" \
+       && hdiutil attach -nobrowse -readonly -quiet -mountpoint "$mnt" "${tmp}/Pacer.dmg"; then
+      cli="${mnt}/Pacer.app/Contents/Helpers/PacerCLI.app"
+      if [ ! -x "${cli}/Contents/MacOS/pacer" ]; then
+        bad "the app has no Contents/Helpers/PacerCLI.app"; rc=1
+      elif ! codesign --verify --strict \
+             -R='anchor apple generic and certificate leaf[subject.OU] = "YZXWMJ5VBY"' "$cli" 2>/dev/null; then
+        bad "Contents/Helpers/PacerCLI.app is not signed by the team"; rc=1
+      elif ! codesign -d --entitlements - "$cli" 2>/dev/null | grep -q 'YZXWMJ5VBY.com.ericandrechek.pacer'; then
+        bad "Contents/Helpers/PacerCLI.app lacks the App Group entitlement"; rc=1
+      else
+        ok "pacer command line present, team-signed, with the App Group"
+      fi
+      hdiutil detach -quiet "$mnt" || true
+    else
+      warn "could not download or mount the DMG to check the pacer command line"
+    fi
+    rm -rf "$tmp"
+  fi
+
   # The Homebrew cask. A warning, not a failure: the tap pins it itself once
   # the release is out (the "Homebrew tap" workflow asks it to; its autobump
   # verifies the DMG first), and a stale cask doesn't make the release wrong.

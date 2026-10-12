@@ -159,6 +159,16 @@ targets:
       - package: Sparkle
         product: Sparkle
       - target: PacerWidgets
+      # The `pacer` command line (#194), at
+      # Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer. Unsigned here like
+      # everything else; bin/dev-install.sh and release.yml sign it with its
+      # own entitlements before the app's seal.
+      - target: PacerCLI
+        embed: true
+        codeSign: false
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       # Static XCFramework — linked into the binary, so there's no dylib to
       # embed, re-sign, or subject to hardened-runtime library validation.
       - framework: Vendor/DuckDB.xcframework
@@ -205,3 +215,45 @@ targets:
       # picker on the configured widget shows no parameters, even
       # though everything compiles.
       - sdk: AppIntents.framework
+
+  # The `pacer` command line (#194). A thin `main` over the PacerPace library,
+  # which `swift test` covers. It carries Pacer's App Group so it can read the
+  # store when the local API is off, which is why it ships inside the app,
+  # signed by the same team, rather than as a separate download.
+  #
+  # An app-like bundle (`PacerCLI.app/Contents/MacOS/pacer`), not a bare tool:
+  # Apple lists who may use an App Group container as "main executables
+  # packaged in bundled structures, app extensions, App Clips, and XPC
+  # Services", and tells a standalone executable to "wrap it in an app-like
+  # structure" (developer.apple.com/documentation/xcode/accessing-app-group-
+  # containers; forums thread 721701). So: PacerCLI.app/Contents/MacOS/pacer,
+  # run by path or through the skill's link; LSUIElement keeps it out of the
+  # Dock if LaunchServices ever opens it.
+  # Target and product are PacerCLI, never "pacer": on a case-insensitive
+  # disk `pacer.app`/`Pacer.app` and the targets' `pacer.build`/`Pacer.build`
+  # intermediates are one folder each, and the two targets trampled each
+  # other (an embed that copied the app into itself; on CI, a missing `.d`).
+  PacerCLI:
+    type: application
+    platform: macOS
+    sources:
+      - path: CLI
+        excludes:
+          - "pacer.entitlements"
+    settings:
+      base:
+        PRODUCT_NAME: PacerCLI
+        EXECUTABLE_NAME: pacer
+        PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.cli
+        CODE_SIGN_ENTITLEMENTS: CLI/pacer.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Pacer command line
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Eric Andrechek"
+        MARKETING_VERSION: "0.3.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SKIP_INSTALL: YES
+    dependencies:
+      - package: PacerCore
+        product: PacerPace

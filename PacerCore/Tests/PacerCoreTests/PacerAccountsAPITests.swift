@@ -353,7 +353,7 @@ struct PlanLabelTests {
 
     // MARK: - Short ids (#184)
 
-    /// `pace.sh accounts` prints ids cut to 8 characters, and that is what
+    /// `pacer accounts` prints ids cut to 8 characters, and that is what
     /// people paste back into `PACE_ACCOUNT`.
     @Test func aUniquePrefixResolvesToTheFullId() throws {
         let known = ["74598a77-aaaa", "e34c1364-bbbb", "e34d0000-cccc"]

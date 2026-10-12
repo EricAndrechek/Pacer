@@ -8,7 +8,7 @@ import SwiftData
 /// store while the request waited, on the one queue every request shared. On
 /// 2026-10-07, under heavy memory pressure, store reads took tens of seconds:
 /// `/metrics` went from milliseconds to no answer at all, every request queued
-/// behind it — `/healthz` included — and every session's `pace.sh` gate failed
+/// behind it — `/healthz` included — and every session's `pacer` gate failed
 /// open, so pacing vanished exactly when the machine was busiest. Answering
 /// from a value built in the background means a slow store makes answers
 /// *stale*, never *absent*, and how stale is on every answer.
@@ -41,7 +41,7 @@ public struct PacerAPISnapshot: Sendable {
     public let configRoots: [String: String]
     /// `/v1/session?id=` for every session seen within
     /// `PacerSessionLookupBuilder.snapshotWindow`, keyed by session id (#211).
-    /// `pace.sh` asks this before every gate. Answered from the store, a stall
+    /// `pacer` asks this before every gate. Answered from the store, a stall
     /// cost each gate its 5 s timeout and then paced it on the wrong account.
     public let sessions: [String: PacerSessionLookup]
 

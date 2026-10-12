@@ -209,6 +209,7 @@ jobs:
           IDENTITY="Developer ID Application: Eric Andrechek (${APPLE_TEAM_ID})"
           APP_ENT="App/Pacer.entitlements"
           WIDGET_ENT="Widgets/PacerWidgets.entitlements"
+          CLI_ENT="CLI/pacer.entitlements"
 
           sign() {
             local ent="$1" target="$2"
@@ -250,10 +251,20 @@ jobs:
           sign "${WIDGET_ENT}" "${APP_PATH}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
           sign "${WIDGET_ENT}" "${APP_PATH}/Contents/PlugIns/PacerWidgets.appex"
 
+          # The `pacer` command line (#194), with its own App Group
+          # entitlement so it can read the store with the local API off.
+          # Required, not optional: a release without it would ship a skill
+          # shim with nothing to run.
+          CLI_APP="${APP_PATH}/Contents/Helpers/PacerCLI.app"
+          [ -e "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle" ] && \
+            sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
+          sign "${CLI_ENT}" "${CLI_APP}"
+
           # Outer app bundle.
           sign "${APP_ENT}" "${APP_PATH}"
 
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/PacerCLI.app"
           echo "APP_PATH=${APP_PATH}" >> "${GITHUB_ENV}"
 
       - name: Build DMG

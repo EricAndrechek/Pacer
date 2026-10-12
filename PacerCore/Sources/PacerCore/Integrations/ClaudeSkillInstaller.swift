@@ -106,11 +106,25 @@ public struct ClaudeSkillInstaller: Sendable {
     public let destination: URL
     /// Stamped into the manifest so "outdated" is a comparison, not a guess.
     public let version: String
+    /// The `pacer` command line inside the running app (#194), which the
+    /// skill's instructions run. Linked beside the skill as `pacer`; nil
+    /// leaves no link.
+    public let cli: URL?
 
-    public init(source: URL, destination: URL, version: String) {
+    /// The link's name inside the skill directory: the path every agent runs,
+    /// `~/.claude/skills/pacer/pacer …`.
+    public static let cliLinkName = "pacer"
+
+    /// Where the command line sits inside Pacer.app: the executable of a
+    /// small app-like bundle, because that is what may use an App Group
+    /// container (see project.yml's `PacerCLI` target).
+    public static let cliPathInApp = "Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer"
+
+    public init(source: URL, destination: URL, version: String, cli: URL? = nil) {
         self.source = source
         self.destination = destination
         self.version = version
+        self.cli = cli
     }
 
     /// The real installer for a running app. `nil` when the bundle carries no
@@ -124,10 +138,12 @@ public struct ClaudeSkillInstaller: Sendable {
         let root = home ?? FileManager.default.homeDirectoryForCurrentUser
         let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
+        let cli = bundle.bundleURL.appendingPathComponent(cliPathInApp)
         return ClaudeSkillInstaller(
             source: source,
             destination: root.appendingPathComponent(".claude/skills/\(skillName)", isDirectory: true),
-            version: "\(short) (\(build))")
+            version: "\(short) (\(build))",
+            cli: FileManager.default.isExecutableFile(atPath: cli.path) ? cli : nil)
     }
 
     // MARK: - Status
@@ -164,6 +180,7 @@ public struct ClaudeSkillInstaller: Sendable {
         guard let files = sourceFiles() else { throw Error.noBundledSkill }
         let fm = FileManager.default
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let previous = readManifest()
 
         var hashes: [String: String] = [:]
         for relative in files {
@@ -180,7 +197,40 @@ public struct ClaudeSkillInstaller: Sendable {
                                  ofItemAtPath: to.path)
             hashes[relative] = Self.hash(data)
         }
+        // A file an older Pacer installed that this one no longer ships goes
+        // too — `pace.sh`, after the command line replaced it (#194) — or it
+        // would sit there working the old way. Only if unedited: a file the
+        // user changed is theirs, and stays.
+        for (relative, hash) in previous?.files ?? [:] where hashes[relative] == nil {
+            if hashOfInstalledFile(relative) == hash {
+                try? fm.removeItem(at: destination.appendingPathComponent(relative))
+            }
+        }
         try writeManifest(Manifest(version: version, files: hashes))
+        linkCLI()
+    }
+
+    /// Point `pacer` beside the skill at the running app's command line.
+    ///
+    /// A link, not a copy: the tool is signed into Pacer's App Group, and a
+    /// copy would be one more binary to keep current. Not in the manifest's
+    /// hashes, because it is not content anyone edits; re-pointed at every
+    /// launch instead, so a moved or updated Pacer.app is followed.
+    ///
+    /// Only ever replaces a link. A real file named `pacer` there is someone
+    /// else's.
+    @discardableResult
+    public func linkCLI() -> Bool {
+        guard let cli else { return false }
+        let fm = FileManager.default
+        let link = destination.appendingPathComponent(Self.cliLinkName)
+        if let existing = try? fm.destinationOfSymbolicLink(atPath: link.path) {
+            if existing == cli.path { return false }
+            try? fm.removeItem(at: link)
+        } else if fm.fileExists(atPath: link.path) {
+            return false
+        }
+        return (try? fm.createSymbolicLink(at: link, withDestinationURL: cli)) != nil
     }
 
     /// Remove exactly the files this installer wrote, then the directory if
@@ -193,6 +243,8 @@ public struct ClaudeSkillInstaller: Sendable {
             try? fm.removeItem(at: path)
         }
         try? fm.removeItem(at: destination.appendingPathComponent(Self.manifestName))
+        let link = destination.appendingPathComponent(Self.cliLinkName)
+        if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil { try? fm.removeItem(at: link) }
         // Only if the user has not left something of their own behind.
         if let remaining = try? fm.contentsOfDirectory(atPath: destination.path),
            remaining.isEmpty {
@@ -208,7 +260,16 @@ public struct ClaudeSkillInstaller: Sendable {
     /// when the path belongs to something else.
     @discardableResult
     public func refreshIfInstalled() throws -> Bool {
-        guard status().needsRefresh else { return false }
+        let state = status().state
+        guard case .outdated = state else {
+            // Up to date or edited, the skill is still ours, and the app it
+            // should run may have moved.
+            switch state {
+            case .upToDate, .modified: linkCLI()
+            default: break
+            }
+            return false
+        }
         try install()
         return true
     }
