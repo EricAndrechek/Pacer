@@ -2037,7 +2037,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 // Every account's rows, not only the active one's: the pace
                 // chart and menu draw all of them. See `RateLimitWriteSignal`.
                 let written = captured.sampledAt
-                Task { @MainActor in RateLimitWriteSignal.shared.note(written) }
+                Task { @MainActor in RateLimitWriteSignal.shared.note(written, account: key) }
                 // For every account, carrying which one. Posting only for the
                 // active login left a widget scoped to the other account, and
                 // that account's engine, stale until something else wrote
