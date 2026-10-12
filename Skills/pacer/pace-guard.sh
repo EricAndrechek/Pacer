@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # pace-guard.sh — run `claude` only once Pacer says a usage window has
-# headroom. A thin wrapper over `pacer pace wait`: the long waiting happens out
+# headroom. A thin wrapper over `pacer wait`: the long waiting happens out
 # here in the shell, because a single Claude session cannot sleep for hours.
 #
 # Usage:  pace-guard.sh [claude args...]
@@ -17,10 +17,10 @@ ARGS=(wait)
 [ -n "${PACE_THRESHOLD:-}" ] && ARGS+=(--cap "$PACE_THRESHOLD")
 [ -n "${PACE_WINDOW:-}" ] && ARGS+=(--window "$PACE_WINDOW")
 
-"$HERE/pacer" pace "${ARGS[@]}"; code=$?
+"$HERE/pacer" "${ARGS[@]}"; code=$?
 case "$code" in
   0|2) exec claude "$@" ;;   # headroom restored, or no Pacer (cannot gate) → go
   20)  echo "pace-guard: the blocker resets further out than --max-wait — not launching."
        echo "            Resume later; run: $0 $*" ; exit 20 ;;
-  *)   echo "pace-guard: pacer pace wait exited $code — not launching." ; exit "$code" ;;
+  *)   echo "pace-guard: pacer wait exited $code — not launching." ; exit "$code" ;;
 esac

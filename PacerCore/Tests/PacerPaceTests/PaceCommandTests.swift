@@ -3,7 +3,7 @@ import Testing
 @testable import PacerPace
 
 /// The executable spec of `pace.sh` (once `PaceScriptTests`, run against the
-/// bash script), case for case, now the spec of `pacer pace`. Fixtures and
+/// bash script), case for case, now the spec of `pacer`. Fixtures and
 /// expectations are the script's; the only change is that `wait` cases move
 /// the world from the injected sleep instead of from a background process
 /// racing a real clock.

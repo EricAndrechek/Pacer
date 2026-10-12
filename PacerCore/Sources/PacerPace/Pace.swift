@@ -56,7 +56,7 @@ public struct PaceResponse: Sendable {
 /// `sessions`, `report`, `json`, `gate`, `status` and `wait`.
 ///
 /// A port of the bash `pace.sh`, rule for rule, which it replaced: the skill
-/// now runs `pacer pace`, and the script is gone. Its exit codes, state files, flags, environment and
+/// now runs `pacer`, and the script is gone. Its exit codes, state files, flags, environment and
 /// output are a contract that CLAUDE.md imports, prompts and `pace-guard.sh`
 /// depend on, so this keeps every one of them; `PaceParityTests` runs the
 /// frozen script (`Tests/PacerPaceTests/Oracle`) and this against the same
@@ -80,9 +80,9 @@ public enum Pace {
         }
     }
 
-    /// `pacer pace --help`.
+    /// `pacer --help`.
     public static let help = """
-    pacer pace — report Claude usage from Pacer and gate heavy work against
+    pacer — report Claude usage from Pacer and gate heavy work against
     every rate-limit window, so hitting a limit costs a resumable pause rather
     than a lost run. Reads Pacer's local API when it is on, its data when not.
 

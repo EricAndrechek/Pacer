@@ -218,7 +218,7 @@ struct PacerAPISnapshotTests {
             ([:], .all),
             (["account": ""], .all),
             (["account": Self.home], .scoped(Self.home)),
-            // A unique prefix, as `pacer pace accounts` prints them (#184).
+            // A unique prefix, as `pacer accounts` prints them (#184).
             (["account": "74598a77"], .scoped(Self.work)),
             (["account": " e34c "], .scoped(Self.home)),
             (["account": "unattributed"], .scoped(AccountDailyAggregate.unattributedKey)),

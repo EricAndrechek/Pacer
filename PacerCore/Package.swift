@@ -27,7 +27,7 @@ let package = Package(
             dependencies: ["PacerCore"]
         ),
         // The `pacer` command line's pacing commands (#194): the Swift port of
-        // what was `Skills/pacer/pace.sh` (replaced by `pacer pace`), kept as a
+        // what was `Skills/pacer/pace.sh` (replaced by `pacer`), kept as a
         // library so `swift test` covers it and the CLI target is a thin `main`.
         .target(
             name: "PacerPace",

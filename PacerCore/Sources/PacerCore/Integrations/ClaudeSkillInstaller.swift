@@ -112,7 +112,7 @@ public struct ClaudeSkillInstaller: Sendable {
     public let cli: URL?
 
     /// The link's name inside the skill directory: the path every agent runs,
-    /// `~/.claude/skills/pacer/pacer pace …`.
+    /// `~/.claude/skills/pacer/pacer …`.
     public static let cliLinkName = "pacer"
 
     /// Where the command line sits inside Pacer.app: the executable of a

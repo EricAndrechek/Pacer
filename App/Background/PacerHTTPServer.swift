@@ -155,11 +155,11 @@ final class PacerHTTPServer: @unchecked Sendable {
 
     static let storeConcurrency = 4
     /// How long a cached endpoint waits for the first snapshot on a cold
-    /// start before answering 503. Under `pacer pace`'s 5 s client timeout, so
+    /// start before answering 503. Under `pacer`'s 5 s client timeout, so
     /// the client hears the 503 rather than giving up first.
     private static let firstSnapshotWait: TimeInterval = 3
     /// A store read that waited this long for a slot is answered 503 without
-    /// running: its client has almost certainly given up (`pacer pace` waits
+    /// running: its client has almost certainly given up (`pacer` waits
     /// 5 s), and doing the read anyway is how a backlog never drains.
     private static let storeQueueShedAfter: TimeInterval = 10
     private static let retryAfterSeconds = 5
@@ -388,7 +388,7 @@ final class PacerHTTPServer: @unchecked Sendable {
             queue.async { [self] in startSSE(client) }
         case "/v1/session":
             guard Self.authorized(headers, token: token) else { return unauthorized(client) }
-            // Every live session is in the snapshot (#211). `pacer pace` asks this
+            // Every live session is in the snapshot (#211). `pacer` asks this
             // before every gate, so a store stall used to cost each gate its
             // timeout and then pace it on the active login instead of its own.
             // An id the snapshot lacks (older than its window, or no snapshot

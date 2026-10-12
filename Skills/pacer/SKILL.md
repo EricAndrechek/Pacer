@@ -11,7 +11,9 @@ Fable weekly window — and gives an orchestrator a **checkpoint → sleep →
 resume** protocol so a limit hit during a big parallel run costs a pause, not
 the run.
 
-All commands are `~/.claude/skills/pacer/pacer pace <cmd>`.
+All commands are `~/.claude/skills/pacer/pacer <cmd>`. The full path always
+works while the skill is installed; where `pacer` is on the PATH, plain
+`pacer <cmd>` is the same command.
 
 `pacer` is Pacer's command line. Pacer.app carries it and links it into this
 folder when it installs the skill, so there is nothing to install: the skill
@@ -22,7 +24,7 @@ either way.
 ## 1. Just report where I'm at
 
 ```
-$ ~/.claude/skills/pacer/pacer pace report
+$ ~/.claude/skills/pacer/pacer report
 5h           15% used · +33%/h now (+0 avg) · resets in 4h 48m  (Thu 6:39 PM)
 7d           81% used · +7%/h now (+2 avg) · resets in 3d 16h  (Mon 5:59 AM)
 Fable        99% used · +8%/h now (+2 avg) · full in 6h 24m · resets in 3d 16h
@@ -60,7 +62,7 @@ the question a fan-out turns on is not "how fast is it going" but "how many
 ways is it already split, and what happens if I add ten more".
 
 ```
-$ pacer pace accounts
+$ pacer accounts
 2 accounts
 
   427af130   max · active login
@@ -73,7 +75,7 @@ $ pacer pace accounts
 ```
 
 ```
-$ pacer pace sessions
+$ pacer sessions
 active  74598a77  grafana (main)          claude-opus-5     /Users/…/grafana
 active  74598a77  Pacer (feat/pacing)     claude-opus-5     /Users/…/Pacer  ← git@github.com:…
 recent  74598a77  core (main)             claude-fable-5-1  /Users/…/chtypes/core
@@ -100,10 +102,10 @@ Three things that changes:
 Pacer only recomputes every **~5 min**, and you must not have 200 subagents
 each curling it. So it is **one poller, many cheap readers**:
 
-- **One poller** — the orchestrator runs `pacer pace gate` once per
+- **One poller** — the orchestrator runs `pacer gate` once per
   fan-out *wave*. That is the single read of Pacer; it writes a shared
   **state file**.
-- **Many cheap readers** — every subagent runs `pacer pace status`, a plain
+- **Many cheap readers** — every subagent runs `pacer status`, a plain
   **file read** (Pacer is not asked), and obeys it.
 
 Exit codes:
@@ -145,13 +147,13 @@ at 95% has nothing to say to an Opus agent, and pausing one for it is a pause
 nobody needed. So pass the model your work will actually use:
 
 ```
-$ pacer pace gate                          # every window binds — the safe reading
+$ pacer gate                          # every window binds — the safe reading
 pace: PAUSE — Fable at 99% >= safe limit 98%, resets in 3d 17h.
 
-$ pacer pace gate --model opus             # Fable is not this agent's problem
+$ pacer gate --model opus             # Fable is not this agent's problem
 pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
 
-$ pacer pace gate --model auto             # ask Pacer what this session runs
+$ pacer gate --model auto             # ask Pacer what this session runs
 pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
 ```
 
@@ -168,7 +170,7 @@ session has more than one model in flight, `auto` will not guess: it binds only
 the account-wide windows and says so.
 
 ```
-$ pacer pace gate --model auto              # Fable orchestrator, Sonnet builders
+$ pacer gate --model auto              # Fable orchestrator, Sonnet builders
 pace: GO — 5h 12%, 7d 32% (safe limit 5h 97%, 7d 99%). [model ambiguous (claude-fable-5-1,
 claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
 ```
@@ -198,8 +200,8 @@ re-gate) rather than letting an Opus wave inherit a Fable pause. So gate once
 per model your fan-out uses, and give each group its own run name:
 
 ```
-PACE_RUN=opus-wave  pacer pace gate --model opus
-PACE_RUN=fable-wave pacer pace gate --model fable
+PACE_RUN=opus-wave  pacer gate --model opus
+PACE_RUN=fable-wave pacer gate --model fable
 ```
 
 ## 5. Gate on the forecast, not just the level
@@ -208,7 +210,7 @@ The default asks "am I about to run out". `--eta` asks the better question for a
 long wave — **"will this wave finish before I run out"**:
 
 ```
-$ pacer pace gate --eta 90m
+$ pacer gate --eta 90m
 pace: PAUSE — 5h at 40% is projected to fill in 45m (horizon 1h 30m).
 ```
 
@@ -221,9 +223,9 @@ how long your wave runs.
 
 For a big fan-out:
 
-1. **Pre-flight:** `pacer pace report` so you and the user see the starting
+1. **Pre-flight:** `pacer report` so you and the user see the starting
    headroom.
-2. **Before each wave:** `pacer pace gate --model <yours> --eta <wave length>`.
+2. **Before each wave:** `pacer gate --model <yours> --eta <wave length>`.
    - exit 0 → spawn the wave; give every subagent the clause in §7.
    - exit 10 → do **not** spawn; go to step 4.
 3. Keep waves small enough to finish in a few minutes, so a mid-wave trip is
@@ -238,7 +240,7 @@ For a big fan-out:
    background (`run_in_background: true`):
 
    ```
-   ~/.claude/skills/pacer/pacer pace wait
+   ~/.claude/skills/pacer/pacer wait
    ```
 
    It blocks *across turns* until there is headroom again, then **exits —
@@ -264,7 +266,7 @@ For a big fan-out:
 ## 7. The clause to paste into EVERY subagent prompt
 
 > **Usage gating:** before you start, and before any expensive step, run
-> `~/.claude/skills/pacer/pacer pace status --model <MODEL>`
+> `~/.claude/skills/pacer/pacer status --model <MODEL>`
 > (with the same `PACE_RUN` the orchestrator used). If it prints `paused` (exit 10):
 > immediately commit your work-in-progress in this worktree
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
@@ -282,7 +284,7 @@ windows rather than the builder's own cap. You chose the model; say it.
 
 **In a Workflow script** (the deterministic `Workflow` tool): gate *between
 stages* instead — before each `parallel()`/`pipeline()` wave, run an `agent()`
-that calls `pacer pace gate` and returns its verdict; if paused, stop enqueuing,
+that calls `pacer gate` and returns its verdict; if paused, stop enqueuing,
 return the partial results plus the manifest, and **end the workflow cleanly**
 so it can be resumed with `resumeFromRunId` after the reset. Do not hold a
 workflow open for hours.
@@ -309,9 +311,9 @@ One JSON file per run: `~/.claude/pace/resume-<run>.json`, or
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
 
-**`~/.claude/pace/` is `pacer pace`'s store, and it holds exactly two kinds of
+**`~/.claude/pace/` is `pacer`'s store, and it holds exactly two kinds of
 file:**
-- the state files `pacer pace gate` writes (`state*.json`);
+- the state files `pacer gate` writes (`state*.json`);
 - one resume manifest per run (`resume-<run>.json`).
 
 Write nothing else there: no notes, plans, scripts, logs or directories.
@@ -419,4 +421,4 @@ If a user asks how to make pacing automatic, that line is the answer.
 - **"No Pacer" ≠ "no budget left."** Exit 2 means no signal; proceed ungated.
 - Window labels come from the window's identity, so a per-model cap reads as
   the model name ("Fable"). If the server ever reports an opaque model id, the
-  label is that id — `pacer pace json` always shows the full identity.
+  label is that id — `pacer json` always shows the full identity.
