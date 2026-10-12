@@ -177,7 +177,7 @@ struct ClaudeSkillInstallerTests {
     // MARK: - The command line beside the skill (#194)
 
     private static func fakeCLI(in root: URL, _ name: String) throws -> URL {
-        let url = root.appendingPathComponent("apps/\(name)/Contents/Helpers/pacer")
+        let url = root.appendingPathComponent("apps/\(name)/" + ClaudeSkillInstaller.cliPathInApp)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try "#!/bin/sh\n".write(to: url, atomically: true, encoding: .utf8)

@@ -300,14 +300,14 @@ PY
     tmp="$(mktemp -d)"; mnt="${tmp}/mnt"
     if curl -fsSL -o "${tmp}/Pacer.dmg" "$encurl" \
        && hdiutil attach -nobrowse -readonly -quiet -mountpoint "$mnt" "${tmp}/Pacer.dmg"; then
-      cli="${mnt}/Pacer.app/Contents/Helpers/pacer"
-      if [ ! -x "$cli" ]; then
-        bad "the app has no Contents/Helpers/pacer"; rc=1
+      cli="${mnt}/Pacer.app/Contents/Helpers/PacerCLI.app"
+      if [ ! -x "${cli}/Contents/MacOS/pacer" ]; then
+        bad "the app has no Contents/Helpers/PacerCLI.app"; rc=1
       elif ! codesign --verify --strict \
              -R='anchor apple generic and certificate leaf[subject.OU] = "YZXWMJ5VBY"' "$cli" 2>/dev/null; then
-        bad "Contents/Helpers/pacer is not signed by the team"; rc=1
+        bad "Contents/Helpers/PacerCLI.app is not signed by the team"; rc=1
       elif ! codesign -d --entitlements - "$cli" 2>/dev/null | grep -q 'YZXWMJ5VBY.com.ericandrechek.pacer'; then
-        bad "Contents/Helpers/pacer lacks the App Group entitlement"; rc=1
+        bad "Contents/Helpers/PacerCLI.app lacks the App Group entitlement"; rc=1
       else
         ok "pacer command line present, team-signed, with the App Group"
       fi

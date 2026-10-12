@@ -255,13 +255,16 @@ jobs:
           # entitlement so it can read the store with the local API off.
           # Required, not optional: a release without it would ship a skill
           # shim with nothing to run.
-          sign "${CLI_ENT}" "${APP_PATH}/Contents/Helpers/pacer"
+          CLI_APP="${APP_PATH}/Contents/Helpers/PacerCLI.app"
+          [ -e "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle" ] && \
+            sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
+          sign "${CLI_ENT}" "${CLI_APP}"
 
           # Outer app bundle.
           sign "${APP_ENT}" "${APP_PATH}"
 
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
-          codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/pacer"
+          codesign --verify --strict --verbose=2 "${APP_PATH}/Contents/Helpers/PacerCLI.app"
           echo "APP_PATH=${APP_PATH}" >> "${GITHUB_ENV}"
 
       - name: Build DMG

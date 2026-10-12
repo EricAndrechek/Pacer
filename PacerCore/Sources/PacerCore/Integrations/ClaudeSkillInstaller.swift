@@ -114,6 +114,11 @@ public struct ClaudeSkillInstaller: Sendable {
     /// next to itself.
     public static let cliLinkName = "pacer"
 
+    /// Where the command line sits inside Pacer.app: the executable of a
+    /// small app-like bundle, because that is what may use an App Group
+    /// container (see project.yml's `pacer` target).
+    public static let cliPathInApp = "Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer"
+
     public init(source: URL, destination: URL, version: String, cli: URL? = nil) {
         self.source = source
         self.destination = destination
@@ -132,7 +137,7 @@ public struct ClaudeSkillInstaller: Sendable {
         let root = home ?? FileManager.default.homeDirectoryForCurrentUser
         let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
-        let cli = bundle.bundleURL.appendingPathComponent("Contents/Helpers/pacer")
+        let cli = bundle.bundleURL.appendingPathComponent(cliPathInApp)
         return ClaudeSkillInstaller(
             source: source,
             destination: root.appendingPathComponent(".claude/skills/\(skillName)", isDirectory: true),

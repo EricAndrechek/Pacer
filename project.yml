@@ -159,9 +159,10 @@ targets:
       - package: Sparkle
         product: Sparkle
       - target: PacerWidgets
-      # The `pacer` command line (#194), at Contents/Helpers/pacer. Unsigned
-      # here like everything else; bin/dev-install.sh and release.yml sign it
-      # with its own entitlements before the app's seal.
+      # The `pacer` command line (#194), at
+      # Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer. Unsigned here like
+      # everything else; bin/dev-install.sh and release.yml sign it with its
+      # own entitlements before the app's seal.
       - target: pacer
         embed: true
         codeSign: false
@@ -219,8 +220,17 @@ targets:
   # which `swift test` covers. It carries Pacer's App Group so it can read the
   # store when the local API is off, which is why it ships inside the app,
   # signed by the same team, rather than as a separate download.
+  #
+  # An app-like bundle (`PacerCLI.app/Contents/MacOS/pacer`), not a bare tool:
+  # Apple lists who may use an App Group container as "main executables
+  # packaged in bundled structures, app extensions, App Clips, and XPC
+  # Services", and tells a standalone executable to "wrap it in an app-like
+  # structure" (developer.apple.com/documentation/xcode/accessing-app-group-
+  # containers; forums thread 721701). So: PacerCLI.app/Contents/MacOS/pacer,
+  # run by path or through the skill's link; LSUIElement keeps it out of the
+  # Dock if LaunchServices ever opens it.
   pacer:
-    type: tool
+    type: application
     platform: macOS
     sources:
       - path: CLI
@@ -228,14 +238,17 @@ targets:
           - "pacer.entitlements"
     settings:
       base:
-        PRODUCT_NAME: pacer
+        # Not "pacer": on a case-insensitive disk `pacer.app` and `Pacer.app`
+        # are one folder in the build products, and the copy recursed.
+        PRODUCT_NAME: PacerCLI
+        EXECUTABLE_NAME: pacer
         PRODUCT_BUNDLE_IDENTIFIER: com.ericandrechek.pacer.cli
         CODE_SIGN_ENTITLEMENTS: CLI/pacer.entitlements
-        # A tool has no bundle, so its identifier and version live in an
-        # Info.plist section inside the Mach-O. codesign takes the identifier
-        # from it, and so does anything that names the tool to the user.
         GENERATE_INFOPLIST_FILE: YES
-        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Pacer command line
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Eric Andrechek"
         MARKETING_VERSION: "0.3.0"
         CURRENT_PROJECT_VERSION: "1"
         SKIP_INSTALL: YES

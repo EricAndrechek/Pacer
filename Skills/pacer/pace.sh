@@ -8,7 +8,7 @@
 #   1. $PACER_CLI, when set (and then only there);
 #   2. `pacer` beside this script, which Pacer links when it installs the skill
 #      and re-points at every launch;
-#   3. /Applications/Pacer.app/Contents/Helpers/pacer.
+#   3. the one inside /Applications/Pacer.app.
 #
 # Without one there is nothing to read, so this exits 2 — "no data source" —
 # which every caller already treats as "proceed ungated".
@@ -18,7 +18,7 @@ dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${PACER_CLI:-}" ]; then
   candidates=("$PACER_CLI")
 else
-  candidates=("$dir/pacer" "/Applications/Pacer.app/Contents/Helpers/pacer")
+  candidates=("$dir/pacer" "/Applications/Pacer.app/Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer")
 fi
 for cli in "${candidates[@]}"; do
   [ -x "$cli" ] && exec "$cli" pace "$@"

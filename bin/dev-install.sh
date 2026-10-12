@@ -240,9 +240,14 @@ done
 sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex/Contents/MacOS/PacerWidgets"
 sign "${WIDGETS_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/PlugIns/PacerWidgets.appex"
 
-# The `pacer` command line (#194), with its own App Group entitlement so it
-# can read the store when the local API is off. Before the outer seal.
-sign "${CLI_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}/Contents/Helpers/pacer"
+# The `pacer` command line (#194), an app-like bundle with its own App Group
+# entitlement so it can read the store when the local API is off. Inside-out:
+# its resource bundle, then the bundle (which seals its executable), then,
+# below, the outer app.
+CLI_APP="${BUILD_OUTPUT}/Contents/Helpers/PacerCLI.app"
+[ -e "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle" ] && \
+    sign "" "${CLI_APP}/Contents/Resources/PacerCore_PacerCore.bundle"
+sign "${CLI_ENTITLEMENTS_SIGN}" "${CLI_APP}"
 
 # Outer app bundle last, so its signature covers everything inside.
 sign "${APP_ENTITLEMENTS_SIGN}" "${BUILD_OUTPUT}"
