@@ -384,9 +384,10 @@ struct PaceChartCard: View {
         isLoading = false
         if changed { series = next }
         PaceSeriesCache.shared.storeTargets(targets, forPickedScope: UsageScope.shared.accountId)
-        // A pass that fetched nothing is the common case now, and logging each
-        // one would be ~100 lines an hour saying so.
-        guard changed else { return }
+        // A pass that read nothing from the store is the common case now, and
+        // logging each one would say so ~100 times an hour. Every pass that
+        // did read is still logged, so the line count stays the measure.
+        guard fetchMillis.contains(where: { $0.kind != "unchanged" }) else { return }
 
         // Built in steps: as one expression the type checker gives up.
         let totalMs = Int(Date().timeIntervalSince(started) * 1000)
