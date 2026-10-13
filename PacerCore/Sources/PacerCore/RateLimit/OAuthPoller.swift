@@ -314,10 +314,12 @@ public actor OAuthPoller: TokenPoolTesting {
     private var sleeper: Task<Void, Never>?
     private var stopping = false
     /// Whether `publishStatus` writes the process-wide `UsageScope` mirror.
-    /// Always in the app. A test that drives activations turns it off, because
-    /// `UsageScope.shared` is one object for the whole test process and the
-    /// suites that assert on it run in parallel with everything else.
-    private var publishesScope = true
+    /// Always in the app. Off by default in a test process: `UsageScope.shared`
+    /// and its App Group mirror are one value for the whole process, and a
+    /// poller in any parallel suite writing it would clobber the suites that
+    /// assert on it (#260). The tests that assert the mirror call
+    /// `UsageScope` / `reconcileScopeMirror` directly.
+    private var publishesScope = !PacerPreferences.isTestProcess
 
     func stopPublishingScopeForTesting() { publishesScope = false }
 
@@ -361,8 +363,11 @@ public actor OAuthPoller: TokenPoolTesting {
         // thousands of rows on first run and polling must not wait on it. In
         // steady state it is a handful of index probes.
         let container = self.container
+        let publishesScope = self.publishesScope
         Task.detached {
-            await Self.reconcileScopeMirror(container: container)
+            // Same gate as every other scope write: it repairs the shared
+            // mirror, so a test-process poller must not run it (#260).
+            if publishesScope { await Self.reconcileScopeMirror(container: container) }
             await Self.foldArchiveIntoLiveTables(container: container)
         }
         loopTask = Task { [weak self] in
