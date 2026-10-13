@@ -1302,5 +1302,23 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="bprc7gWOcAay87n+xexMNaWxcV22ycb0HE/ouByku+1C0E7HvnDkIZEbFRPctzPHeXaTZIb6K/bjf0ab552uAA==" />
     </item>
+            <item>
+        <title>Version 0.7.5</title>
+        <description><![CDATA[<p>Two fixes to <code class="notranslate">pacer wait</code>, the command the pacing skill uses to sit out a limit.</p>
+<h2><code class="notranslate">wait</code> keeps the rules that paused it</h2>
+<p>The skill's routine is to check (<code class="notranslate">pacer gate</code>) and, if told to pause, run <code class="notranslate">pacer wait</code>. A pause because a window was <em>projected</em> to fill within your horizon (<code class="notranslate">--eta</code>), or because it passed a limit you set yourself (<code class="notranslate">--cap</code>), was followed by a <code class="notranslate">wait</code> that judged only the default limit, so it resumed at once and the run went straight back into the pause. <code class="notranslate">wait</code> now uses the same <code class="notranslate">--cap</code>, <code class="notranslate">--eta</code>, <code class="notranslate">--model</code> and <code class="notranslate">--window</code> as the check that paused, unless you give it your own, and says which it took.</p>
+<h2><code class="notranslate">wait</code> notices an account switch in about a second</h2>
+<p><code class="notranslate">wait</code> checked Pacer every 15 seconds. It now listens for Pacer's news and looks the moment something changes, so switching to an account with room resumes your run in about a second. With Pacer's local API off it checks on the same 15-second interval as before.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 13 Oct 2026 09:39:54 +0000</pubDate>
+        <sparkle:version>1791883974</sparkle:version>
+        <sparkle:shortVersionString>0.7.5</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.5/Pacer-0.7.5.dmg"
+            length="24975387"
+            type="application/octet-stream"
+            sparkle:edSignature="42mv7siEeZTghbnusO22skXwaC5lM8hHQJLuP0nEKkdhmOVXmkLUzkeeCqMmxTPrA7IqZJHpDVbr7jP+i5NwAA==" />
+    </item>
         </channel>
 </rss>
