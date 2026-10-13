@@ -69,6 +69,7 @@ struct SettingsView: View {
                 SettingsSection("Integrations") {
                     APIServerCard()
                     ClaudeSkillCard()
+                    CommandLineCard()
                 }
             }
             .padding(.horizontal, 24)
@@ -2686,7 +2687,10 @@ private struct APIServerCard: View {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(["/v1/snapshot", "/v1/accounts", "/v1/session",
                                  "/v1/limits/history", "/metrics", "/v1/stream"], id: \.self) { path in
-                            Text("http://\(savedHost):\(savedPort)\(path)")
+                            // Verbatim: interpolated into a localized `Text`, the
+                            // port is formatted as a number ("7,223"), and the
+                            // URL someone copies does not work.
+                            Text(verbatim: "http://\(savedHost):\(savedPort)\(path)")
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
@@ -2701,7 +2705,7 @@ private struct APIServerCard: View {
                     .padding(.top, 2)
                 Text("`GET /v1/accounts` lists accounts. `/v1/usage/daily` and `/v1/usage/models` report every account unless you pass `?account=<id>`; the dashboard's scope switcher does not affect them.")
                 Text("`GET /v1/limits/history?hours=24&bucket=15m` is every window's utilization over time, with a cycle index so a reset is never read as a slope.")
-                Text("curl -s http://127.0.0.1:\(savedPort)/v1/snapshot\(savedToken.isEmpty ? "" : " -H 'Authorization: Bearer \(savedToken)'")")
+                Text(verbatim: "curl -s http://127.0.0.1:\(savedPort)/v1/snapshot\(savedToken.isEmpty ? "" : " -H 'Authorization: Bearer \(savedToken)'")")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
                     .textSelection(.enabled)
@@ -2746,9 +2750,6 @@ private struct APIServerCard: View {
 /// then Pacer's own: a Sparkle update replaces the bundled copy and the next
 /// launch re-syncs an unmodified installation.
 private struct ClaudeSkillCard: View {
-    @AppStorage(PacerSettings.Key.apiEnabled, store: PacerSettings.store)
-    private var apiEnabled: Bool = false
-
     @State private var status: ClaudeSkillInstaller.Status?
     @State private var failure: String?
     @State private var busy = false
@@ -2777,17 +2778,6 @@ private struct ClaudeSkillCard: View {
                 if let failure {
                     Text(failure).font(.caption).foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if isInstalled && !apiEnabled {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
-                        Text("The skill reads the local API, which is off. Turn it on above or the skill will report no data and tell the agent to proceed ungated.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
 
                 if isInstalled {
@@ -2826,7 +2816,7 @@ private struct ClaudeSkillCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Needs only curl and awk.")
+                Text("Teaches Claude Code to read your usage from Pacer and pace a long run against it: report every window, gate a fan-out of subagents on one cheap shared read, and wait out a reset instead of losing the run. Works with the local API on or off.")
                 Text("~/.claude/skills/pacer/pacer report")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
@@ -2851,7 +2841,7 @@ private struct ClaudeSkillCard: View {
 
     private var dotColor: Color {
         switch status?.state {
-        case .upToDate:                 return apiEnabled ? .green : .yellow
+        case .upToDate:                 return .green
         case .outdated, .modified:      return .yellow
         case .foreign:                  return .red
         default:                        return .secondary
@@ -2921,6 +2911,163 @@ private struct ClaudeSkillCard: View {
         #if canImport(AppKit)
         NSWorkspace.shared.activateFileViewerSelecting([status.destination])
         #endif
+    }
+}
+
+// MARK: - Command line
+
+/// `pacer` on the PATH for a DMG install (#257). Homebrew's cask links it
+/// itself; this card says so and steps aside. See `CommandLineToolInstaller`.
+private struct CommandLineCard: View {
+    @State private var state: CommandLineToolInstaller.State?
+    @State private var failure: String?
+    @State private var busy = false
+    /// Read by value in `body`: the action waiting on the heads-up before
+    /// macOS's password dialog.
+    @State private var pending: Privileged?
+
+    private enum Privileged: Identifiable {
+        case install, remove
+        var id: Self { self }
+    }
+
+    private let installer = CommandLineToolInstaller.bundled()
+
+    var body: some View {
+        PacerCard("Command line", content: {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    Circle().fill(dotColor).frame(width: 8, height: 8)
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let failure {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    if state == .installed {
+                        Button("Remove") { remove() }
+                            .pacerDenseControl()
+                            .disabled(busy)
+                    }
+                    if state == .notInstalled {
+                        Button("Install") { install() }
+                            .pacerDenseControl()
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(busy)
+                    }
+                }
+            }
+        }, footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(installer.needsPrivileges
+                     ? "Puts `pacer` in /usr/local/bin so it runs in any terminal. Asks once for an administrator password."
+                     : "Puts `pacer` in /usr/local/bin so it runs in any terminal.")
+                Text("pacer report")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+            }
+        })
+        .onAppear(perform: refresh)
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+        // macOS's dialog for a privileged script says it cannot verify the
+        // script is free of malware, for any app that runs one (VS Code's
+        // "Install 'code' command" included). Said here first, so it is
+        // expected rather than alarming.
+        .alert(pending == .remove ? "Remove pacer from /usr/local/bin?" : "Install pacer in /usr/local/bin?",
+               isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+               presenting: pending) { action in
+            Button("Continue") {
+                switch action {
+                case .install: run(installer.installScript, after: {})
+                case .remove:  run(installer.uninstallScript, after: installer.removeUserLink)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("macOS will ask for your administrator password and say it cannot verify the script. The script only adds or removes the link /usr/local/bin/pacer.")
+        }
+    }
+
+    private var dotColor: Color {
+        switch state {
+        case .installed, .homebrew: return .green
+        case .foreign:              return .red
+        default:                    return .secondary
+        }
+    }
+
+    private var statusText: String {
+        switch state {
+        case nil:                     return "Checking…"
+        case .unavailable:            return "Not available in this build."
+        case .notInstalled:           return "Not on your PATH."
+        case .installed:              return "Installed · \(CommandLineToolInstaller.systemLinkPath)"
+        case .homebrew(let path):     return "Installed by Homebrew · \(path)"
+        case .foreign(let path):      return "Another pacer is at \(path). Pacer will not replace it."
+        }
+    }
+
+    private func refresh() { state = installer.state() }
+
+    /// No password when /usr/local/bin is already the user's; otherwise the
+    /// heads-up, then macOS's dialog.
+    private func install() {
+        do {
+            try installer.refreshUserLink()
+            guard installer.needsPrivileges else {
+                try installer.installWithoutPrivileges()
+                failure = nil
+                refresh()
+                return
+            }
+        } catch {
+            failure = "\(error)"
+            refresh()
+            return
+        }
+        pending = .install
+    }
+
+    private func remove() {
+        guard installer.needsPrivileges else {
+            do {
+                try installer.uninstallWithoutPrivileges()
+                installer.removeUserLink()
+                failure = nil
+            } catch {
+                failure = "\(error)"
+            }
+            refresh()
+            return
+        }
+        pending = .remove
+    }
+
+    /// The one privileged step, off the main thread: the password dialog can
+    /// stay up for as long as the user likes, and the window must not freeze
+    /// behind it.
+    private func run(_ script: String, after: @escaping @Sendable () -> Void) {
+        busy = true
+        Task.detached(priority: .userInitiated) {
+            let outcome = AdminShell.run(script, prompt: "Pacer wants to link pacer into /usr/local/bin.")
+            if case .succeeded = outcome { after() }
+            await MainActor.run {
+                busy = false
+                switch outcome {
+                case .succeeded, .cancelled: failure = nil
+                case .failed(let message):   failure = message
+                }
+                refresh()
+            }
+        }
     }
 }
 

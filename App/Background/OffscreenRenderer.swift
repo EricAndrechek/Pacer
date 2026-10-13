@@ -71,6 +71,18 @@ enum OffscreenRenderer {
         // sent me looking for a bug the live app did not have. A renderer that
         // under-waits does not fail — it lies.
         await settle(seconds: 5.0)
+        // Measure again now the page has loaded. The size above was taken at
+        // mount, before any card's state arrived; a card that grows when it
+        // does (the skill card going from "Checking…" to its full layout)
+        // pushed everything below it out of the frame, and the last card of
+        // Settings rendered as missing rather than as cut off.
+        hosting.layoutSubtreeIfNeeded()
+        let loaded = hosting.fittingSize
+        if abs(ceil(loaded.height) - size.height) >= 1 {
+            let grown = NSSize(width: size.width, height: ceil(loaded.height))
+            window.setContentSize(grown)
+            hosting.frame = NSRect(origin: .zero, size: grown)
+        }
         hosting.layoutSubtreeIfNeeded()
         hosting.displayIfNeeded()
         await settle(seconds: 1.0)
