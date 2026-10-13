@@ -317,6 +317,31 @@ struct PaceCommandTests {
         #expect(runPace(box, ["gate", "--cap", "85", "--model", "opus", "--eta", "10m"]).status == 0)
     }
 
+    /// #258: the skill's protocol is gate, then on PAUSE a bare `wait`. A
+    /// gate that paused on its horizon used to be followed by a wait judging
+    /// the safe limit alone, which "resumed" at once.
+    @Test func aBareWaitKeepsTheHorizonThePauseWasFor() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--model", "opus", "--eta", "90m"]).status == 10)
+
+        // Still projected to fill inside 90m on the first look; then the
+        // projection clears.
+        let wait = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.metrics.replacingOccurrences(of: "will_hit{", with: "will_hit_old{")) }
+        })
+        #expect(wait.status == 0)
+        #expect(wait.out.contains("waiting by the gate's settings (--cap 85, --eta 1h 30m, --model opus)"), "\(wait.out)")
+        #expect(wait.out.contains("projected to fill"), "it waited instead of resuming at once")
+    }
+
+    @Test func aWaitsOwnFlagsBeatTheGates() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--model", "opus", "--eta", "90m"]).status == 10)
+        let wait = runPace(box, ["wait", "--cap", "85", "--model", "opus", "--eta", "10m"])
+        #expect(wait.status == 0)
+        #expect(!wait.out.contains("waiting by the gate's settings"))
+    }
+
     @Test func anUnreadableDurationIsAnErrorNotAZero() throws {
         let box = try PaceSandbox(metrics: Self.metrics)
         let result = runPace(box, ["gate", "--eta", "soon"])

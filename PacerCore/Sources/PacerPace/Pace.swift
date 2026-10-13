@@ -32,12 +32,22 @@ public struct PaceIO: @unchecked Sendable {
     /// The real thing, and when nothing answers on Pacer's port, `offline`
     /// answers from the store instead (#194). Only a transport failure falls
     /// back: a 401, a 503 or a 404 is Pacer's answer, not its absence.
-    public static func live(offline: PaceOffline?) -> PaceIO {
-        PaceIO(
+    ///
+    /// A sleep (only `wait` and the retry backoff sleep) returns early when
+    /// Pacer's stream pushes an event (#256); see `PaceStream`.
+    public static func live(offline: PaceOffline?,
+                            environment: [String: String] = ProcessInfo.processInfo.environment) -> PaceIO {
+        var base = environment["PACER_API"].flatMap { $0.isEmpty ? nil : $0 } ?? "http://127.0.0.1:7223"
+        if base.hasSuffix("/") { base.removeLast() }
+        let stream = PaceStream(apiBase: base,
+                                token: environment["PACE_TOKEN"].flatMap { $0.isEmpty ? nil : $0 })
+        return PaceIO(
             out: { FileHandle.standardOutput.write(Data($0.utf8)) },
             err: { FileHandle.standardError.write(Data($0.utf8)) },
             now: Date.init,
-            sleep: { Thread.sleep(forTimeInterval: $0) },
+            sleep: { seconds in
+                if let stream { stream.sleep(seconds) } else { Thread.sleep(forTimeInterval: seconds) }
+            },
             get: { request in PaceHTTP.get(request) ?? offline?.answer(request) },
             gitBranch: PaceHTTP.gitBranch)
     }
@@ -135,6 +145,9 @@ final class PaceRun {
     private var statePath: String
     private var account: String
     private var cap: PaceRules.Cap = .safe
+    /// Which of the gating settings were given (flag, or PACE_MODEL). A
+    /// `wait` takes the rest from the gate that paused (#258).
+    private var given: Set<String> = []
     private var interval = 300
     private var intervalSet = false
     private var window = "all"
@@ -172,6 +185,7 @@ final class PaceRun {
             ?? "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace/state\(run.map { "-\($0)" } ?? "").json"
         account = environment["PACE_ACCOUNT"] ?? ""
         model = environment["PACE_MODEL"] ?? ""
+        if !model.isEmpty { given.insert("model") }
         retries = environment["PACE_RETRIES"].flatMap { Int($0) } ?? 3
         token = environment["PACE_TOKEN"].flatMap { $0.isEmpty ? nil : $0 }
         want = environment["PACE_ACCOUNT"] ?? ""
@@ -188,11 +202,11 @@ final class PaceRun {
                 return v
             }
             switch flag {
-            case "--cap":      let v = try value(); cap = v == "safe" ? .safe : .value(v)
+            case "--cap":      let v = try value(); cap = v == "safe" ? .safe : .value(v); given.insert("cap")
             case "--interval": interval = try integer(try value(), flag); intervalSet = true
-            case "--window":   window = try value()
-            case "--model":    model = try value()
-            case "--eta":      eta = try duration(try value())
+            case "--window":   window = try value(); given.insert("window")
+            case "--model":    model = try value(); given.insert("model")
+            case "--eta":      eta = try duration(try value()); given.insert("eta")
             case "--account":  account = try value()
             case "--max-wait": maxWait = try integer(try value(), flag)
             case "--max-age":  maxAge = try integer(try value(), flag)
@@ -509,7 +523,7 @@ final class PaceRun {
     private func writeState(_ status: String, trip: String = "", percent: String? = nil,
                             resets: String? = nil, note: String) {
         PaceStateFile(path: statePath).write(.init(
-            status: status, tripWindow: trip, model: model, cap: cap,
+            status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
             usedPercent: percent, resetsIn: resets, note: note), now: io.now())
     }
 
@@ -659,7 +673,38 @@ final class PaceRun {
         }
     }
 
+    /// What a `wait` was not told, it takes from the verdict it is waiting
+    /// out (#258). A gate that paused on `--eta 1h` or `--cap 85`, followed by
+    /// a bare `wait` as the skill's protocol says, used to judge by the safe
+    /// limit alone and "resume" at once, so an orchestrator looped gate →
+    /// pause → wait → resume → gate. Flags and PACE_MODEL still win.
+    private func inheritFromGate() {
+        let state = PaceStateFile(path: statePath)
+        guard state.exists else { return }
+        var taken: [String] = []
+        if !given.contains("cap"), let raw = state.bare("cap"), !raw.isEmpty, !raw.contains("safe") {
+            cap = .value(raw)
+            taken.append("--cap \(raw)")
+        }
+        if !given.contains("eta"), let raw = state.bare("eta"), let seconds = Int(raw), seconds > 0 {
+            eta = seconds
+            taken.append("--eta \(PaceFormat.human(seconds))")
+        }
+        if !given.contains("model"), let m = state.quoted("model"), !m.isEmpty {
+            model = m
+            taken.append("--model \(m)")
+        }
+        if !given.contains("window"), let w = state.quoted("window"), !w.isEmpty, w != "all" {
+            window = w
+            taken.append("--window \(w)")
+        }
+        if !taken.isEmpty {
+            io.out("pace: waiting by the gate's settings (\(taken.joined(separator: ", "))).\n")
+        }
+    }
+
     private func cmdWait() throws {
+        inheritFromGate()
         var waiting = false, everRead = false, fails = 0
         var startedOn = ""
         // A switch restores headroom at once and Pacer sees it within

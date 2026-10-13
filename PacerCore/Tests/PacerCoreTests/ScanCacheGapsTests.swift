@@ -91,7 +91,7 @@ import Testing
         ])
         defer { try? FileManager.default.removeItem(at: root) }
         let container = try makeGapsContainer()
-        let coordinator = makeCoordinator(container: container, root: root)
+        let coordinator = await makeCoordinator(container: container, root: root)
 
         let line = coordinator.formatReport(try await coordinator.runOnce())
 
@@ -123,7 +123,7 @@ import Testing
         let root = try makeGapsFixtureRoot(lines: [partial])
         defer { try? FileManager.default.removeItem(at: root) }
         let container = try makeGapsContainer()
-        let coordinator = makeCoordinator(container: container, root: root)
+        let coordinator = await makeCoordinator(container: container, root: root)
         let first = try await coordinator.runOnce()
         #expect(first.persisterStats.inserted == 1)
 
@@ -160,7 +160,7 @@ import Testing
         let root = try makeGapsFixtureRoot(lines: [earlier])
         defer { try? FileManager.default.removeItem(at: root) }
         let container = try makeGapsContainer()
-        let coordinator = makeCoordinator(container: container, root: root)
+        let coordinator = await makeCoordinator(container: container, root: root)
         _ = try await coordinator.runOnce()   // seeds the session's cached totals
 
         let partial = makeGapsLine(timestamp: when, messageId: "m1", requestId: "r1",
@@ -219,8 +219,15 @@ private func rebuiltSessionTotals(_ container: ModelContainer) async throws -> S
 }
 
 @ScanActor
-private func makeCoordinator(container: ModelContainer, root: URL) -> ScanCoordinator {
-    ScanCoordinator(
+private func makeCoordinator(container: ModelContainer, root: URL) async -> ScanCoordinator {
+    // The coordinator forgets every session rollup when `SampleCostCache`'s
+    // generation moves between cycles (#260). That cache is process-wide and
+    // its first load bumps the generation, so a parallel suite warming it
+    // between this test's two cycles silently turned the fast path into a
+    // full rebuild. Warm it before the first cycle so the generation is
+    // already settled (reloading identical prices never bumps it again).
+    await SampleCostCache.reload()
+    return ScanCoordinator(
         container: container,
         configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
         resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": root.path]))
