@@ -1270,5 +1270,37 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="NKLHJEV3YhOwoRaDbIIhMCTIoXt8ISzOxX2ZUBEvUsbpsV/7/eixnuQSq6Z3ge/9H8SzRwvamefNt7fyJ6KwBw==" />
     </item>
+            <item>
+        <title>Version 0.7.4</title>
+        <description><![CDATA[<p>A <code class="notranslate">pacer</code> command for your terminal, pacing that works with the local API off, Claude Desktop's usage on the right account, and a lighter dashboard.</p>
+<h2><code class="notranslate">pacer</code> on the command line</h2>
+<p>Pacer now carries a <code class="notranslate">pacer</code> command. <code class="notranslate">pacer report</code> shows every rate-limit window for the account you're on, and <code class="notranslate">pacer gate</code>, <code class="notranslate">pacer wait</code> and the rest are the pacing skill's commands.</p>
+<ul>
+<li><strong>Homebrew</strong> installs put <code class="notranslate">pacer</code> on your PATH.</li>
+<li><strong>Downloaded</strong> installs: Settings → Integrations → Command line → <strong>Install</strong>. If <code class="notranslate">/usr/local/bin</code> is already yours, that's it; otherwise macOS asks once for your administrator password. Pacer keeps the command pointing at the app if you move it.</li>
+</ul>
+<h2>Pacing works with the local API off</h2>
+<p>The pacing skill used to read Pacer only through its local API, which is off by default, so for most people it said "proceeding ungated" and paced nothing. It now reads Pacer's data directly when the API is off, with the same answers either way.</p>
+<p>The skill's script is gone: it runs <code class="notranslate">~/.claude/skills/pacer/pacer &lt;command&gt;</code> now (or plain <code class="notranslate">pacer &lt;command&gt;</code> where it's on your PATH). Pacer updates the installed skill for you. A session that already had the old instructions loaded finds <code class="notranslate">pace.sh</code> missing until it reloads the skill.</p>
+<h2>Claude Desktop's usage on the right account</h2>
+<p>Claude Desktop's built-in Claude Code bills Desktop's login, but Pacer counted its turns against whichever account your terminal was signed into. They now go to the account Desktop recorded, including past turns. Totals across all accounts don't change; per-account numbers do.</p>
+<h2>Also</h2>
+<ul>
+<li>The pace chart re-read every account's history whenever any account's usage was read, about 130 times an hour. It now reads only the account that changed, which cut its background work from minutes an hour to seconds.</li>
+<li>A session's account and model, as the pacing skill asks for them, come back instantly even when your Mac is busy, and sessions from Claude Desktop or a second Claude login are paced on their own account.</li>
+<li>After an account switch, the local API's event stream announces it in under half a second instead of about two.</li>
+<li>Settings showed the local API's port as "7,223", so a copied URL didn't work. It's "7223" again.</li>
+</ul>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 13 Oct 2026 08:26:39 +0000</pubDate>
+        <sparkle:version>1791879535</sparkle:version>
+        <sparkle:shortVersionString>0.7.4</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.4/Pacer-0.7.4.dmg"
+            length="24967471"
+            type="application/octet-stream"
+            sparkle:edSignature="bprc7gWOcAay87n+xexMNaWxcV22ycb0HE/ouByku+1C0E7HvnDkIZEbFRPctzPHeXaTZIb6K/bjf0ab552uAA==" />
+    </item>
         </channel>
 </rss>
