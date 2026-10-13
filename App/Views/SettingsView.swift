@@ -2922,6 +2922,14 @@ private struct CommandLineCard: View {
     @State private var state: CommandLineToolInstaller.State?
     @State private var failure: String?
     @State private var busy = false
+    /// Read by value in `body`: the action waiting on the heads-up before
+    /// macOS's password dialog.
+    @State private var pending: Privileged?
+
+    private enum Privileged: Identifiable {
+        case install, remove
+        var id: Self { self }
+    }
 
     private let installer = CommandLineToolInstaller.bundled()
 
@@ -2943,7 +2951,7 @@ private struct CommandLineCard: View {
                 HStack(spacing: 8) {
                     Spacer(minLength: 8)
                     if state == .installed {
-                        Button("Remove") { run(installer.uninstallScript, after: installer.removeUserLink) }
+                        Button("Remove") { remove() }
                             .pacerDenseControl()
                             .disabled(busy)
                     }
@@ -2957,7 +2965,9 @@ private struct CommandLineCard: View {
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Puts `pacer` in /usr/local/bin so it runs in any terminal. Asks once for an administrator password.")
+                Text(installer.needsPrivileges
+                     ? "Puts `pacer` in /usr/local/bin so it runs in any terminal. Asks once for an administrator password."
+                     : "Puts `pacer` in /usr/local/bin so it runs in any terminal.")
                 Text("pacer report")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
@@ -2967,6 +2977,23 @@ private struct CommandLineCard: View {
         .onAppear(perform: refresh)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
+        // macOS's dialog for a privileged script says it cannot verify the
+        // script is free of malware, for any app that runs one (VS Code's
+        // "Install 'code' command" included). Said here first, so it is
+        // expected rather than alarming.
+        .alert(pending == .remove ? "Remove pacer from /usr/local/bin?" : "Install pacer in /usr/local/bin?",
+               isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+               presenting: pending) { action in
+            Button("Continue") {
+                switch action {
+                case .install: run(installer.installScript, after: {})
+                case .remove:  run(installer.uninstallScript, after: installer.removeUserLink)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("macOS will ask for your administrator password and say it cannot verify the script. The script only adds or removes the link /usr/local/bin/pacer.")
+        }
     }
 
     private var dotColor: Color {
@@ -2990,14 +3017,38 @@ private struct CommandLineCard: View {
 
     private func refresh() { state = installer.state() }
 
+    /// No password when /usr/local/bin is already the user's; otherwise the
+    /// heads-up, then macOS's dialog.
     private func install() {
         do {
             try installer.refreshUserLink()
+            guard installer.needsPrivileges else {
+                try installer.installWithoutPrivileges()
+                failure = nil
+                refresh()
+                return
+            }
         } catch {
             failure = "\(error)"
+            refresh()
             return
         }
-        run(installer.installScript, after: {})
+        pending = .install
+    }
+
+    private func remove() {
+        guard installer.needsPrivileges else {
+            do {
+                try installer.uninstallWithoutPrivileges()
+                installer.removeUserLink()
+                failure = nil
+            } catch {
+                failure = "\(error)"
+            }
+            refresh()
+            return
+        }
+        pending = .remove
     }
 
     /// The one privileged step, off the main thread: the password dialog can

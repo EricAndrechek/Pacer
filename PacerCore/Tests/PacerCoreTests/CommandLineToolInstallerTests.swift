@@ -126,4 +126,36 @@ struct CommandLineToolInstallerTests {
     @Test func quotingSurvivesQuotesAndSpaces() {
         #expect(CommandLineToolInstaller.quoted("/a b/it's") == #"'/a b/it'\''s'"#)
     }
+    @Test func aWritableBinNeedsNoPassword() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        let installer = f.installer(cli: try f.app("A"))
+        // The fixture's usr/local does not exist yet, but its parent is ours.
+        #expect(installer.needsPrivileges == false)
+        try installer.refreshUserLink()
+        try installer.installWithoutPrivileges()
+        #expect(installer.state() == .installed)
+        try installer.uninstallWithoutPrivileges()
+        #expect(installer.state() == .notInstalled)
+    }
+
+    @Test func aRootOwnedBinNeedsAPassword() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        let installer = f.installer(cli: try f.app("A"))
+        let bin = installer.systemLink.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: bin.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.path) }
+        #expect(installer.needsPrivileges)
+        #expect(throws: (any Error).self) { try installer.installWithoutPrivileges() }
+    }
+
+    @Test func removingWithoutAPasswordLeavesAForeignPacer() throws {
+        let f = try Fixture(); defer { f.cleanup() }
+        let installer = f.installer(cli: try f.app("A"))
+        try FileManager.default.createDirectory(at: installer.systemLink.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try "theirs\n".write(to: installer.systemLink, atomically: true, encoding: .utf8)
+        try installer.uninstallWithoutPrivileges()
+        #expect(FileManager.default.fileExists(atPath: installer.systemLink.path))
+    }
 }

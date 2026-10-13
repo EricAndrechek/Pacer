@@ -3,10 +3,13 @@ import Foundation
 /// Puts `pacer` on the PATH for an install that did not come from Homebrew
 /// (#257), so `pacer report` works in any terminal.
 ///
-/// Homebrew's cask links it into its own `bin`. A DMG install has no PATH
-/// folder it may write to: `/usr/local/bin` is root-owned on Apple Silicon and
-/// `~/.local/bin` is not on macOS's default PATH. So this asks for an
-/// administrator password **once**, on the user's click, and links
+/// Homebrew's cask links it into its own `bin`. A DMG install needs
+/// `/usr/local/bin`, the one folder on macOS's default PATH a link can go in
+/// (`~/.local/bin` is not on it). That folder is often the user's own already
+/// (Homebrew on Intel, many developer tools), and then this needs no password
+/// at all. Only when it is root-owned (a fresh Apple Silicon Mac) does it ask
+/// for an administrator password, once, on the user's click. Either way it
+/// links
 ///
 ///     /usr/local/bin/pacer → ~/Library/Application Support/Pacer/bin/pacer
 ///                          → <the running app>/Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer
@@ -116,7 +119,41 @@ public struct CommandLineToolInstaller: Sendable {
         }
     }
 
-    // MARK: - The root-owned link, as shell for the one privileged step
+    // MARK: - The link on the PATH
+
+    /// Whether installing (or removing) needs an administrator password:
+    /// `/usr/local/bin` is not writable by this user, or does not exist and
+    /// cannot be made. Settings says so before macOS asks.
+    public var needsPrivileges: Bool {
+        // The nearest folder that exists decides: the link's own, or the one
+        // `createDirectory` would have to make it in.
+        let fm = FileManager.default
+        var dir = systemLink.deletingLastPathComponent()
+        while dir.path != "/" {
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dir.path, isDirectory: &isDir) {
+                return !(isDir.boolValue && fm.isWritableFile(atPath: dir.path))
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        return true
+    }
+
+    /// Link without a password, when `needsPrivileges` is false. Like the
+    /// script, it never replaces anything already there.
+    public func installWithoutPrivileges() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: systemLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: systemLink, withDestinationURL: userLink)
+    }
+
+    /// Remove the link without a password, only if it is ours.
+    public func uninstallWithoutPrivileges() throws {
+        guard state() == .installed else { return }
+        try FileManager.default.removeItem(at: systemLink)
+    }
+
+    // MARK: - The same, as shell for the privileged step
 
     /// Creates `/usr/local/bin` if needed and the link. `ln -s` without `-f`
     /// fails rather than replace anything that appeared since the check.
