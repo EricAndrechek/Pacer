@@ -244,6 +244,8 @@ For a big fan-out:
    ~/.claude/skills/pacer/pacer wait
    ```
 
+   It judges by the same `--cap`, `--eta`, `--model` and `--window` as the
+   gate that paused (they are in the state file), unless you pass your own.
    It blocks *across turns* until there is headroom again, then **exits —
    which re-invokes you**. Two things can end the wait, and it says which:
 

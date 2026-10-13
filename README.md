@@ -148,6 +148,12 @@ exactly as it always has.
   updates when Pacer does. One optional line in your `CLAUDE.md` makes it the
   default for long runs, and because that line is a pointer rather than a copy,
   it never needs re-pasting.
+- **`pacer` in your terminal.** `pacer report` shows every window for the
+  account you're on; `pacer gate` and `pacer wait` are what the skill paces
+  with, for your own scripts too. It reads Pacer directly, so the local API
+  can stay off. A Homebrew install puts `pacer` on your PATH; with the
+  download, Settings → Integrations → Command line does it (no password if
+  `/usr/local/bin` is already yours).
 - **Export.** Send daily totals, daily-by-model, or per-project numbers to a
   CSV for your own spreadsheets.
 
@@ -245,6 +251,7 @@ see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 | `PacerWidgets` | WidgetKit extension — reads the shared App Group store directly. |
 | `PacerCore` | Shared Swift package — parsers, models, scan coordinator, recomputers. |
 | `Skills/pacer` | The Claude Code skill, copied into `Pacer.app/Contents/Resources` and installed into `~/.claude/skills/` on request. `ClaudeSkillInstaller` re-syncs it after an app update. |
+| `PacerCLI.app` | The `pacer` command line, at `Pacer.app/Contents/Helpers/PacerCLI.app/Contents/MacOS/pacer`: an app-like bundle signed into the App Group, so it can read the store with the local API off. Its logic is the `PacerPace` library in `PacerCore`. |
 
 ### Building from source
 

@@ -18,6 +18,9 @@ import Testing
 /// - With nothing to read, the message says "no Pacer" rather than "API off":
 ///   the port reads Pacer's data when the API is off, so exit 2 now means
 ///   there is no Pacer at all. `renamed` maps the script's two sentences.
+/// - The state file also records the gate's `eta` and `window`, so a later
+///   `wait` judges by the same rules (#258); `withoutAddedKeys` drops those
+///   two lines from the port's file before comparing.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -118,7 +121,7 @@ struct PaceParityTests {
             let io = PaceIO(out: capture.append, err: capture.append, now: Date.init,
                             sleep: { _ in }, get: PaceHTTP.get, gitBranch: { _ in nil })
             return PaceResult(status: Pace.run(args, environment: env, io: io), out: capture.text)
-        }
+        }.map { Outcome(status: $0.status, output: $0.output, state: Self.withoutAddedKeys($0.state)) }
         #expect(port.count == script.count)
         for (i, (s, p)) in zip(script, port).enumerated() {
             #expect(p.status == s.status, "step \(i): exit \(p.status), pace.sh \(s.status)\n\(s.output)")
@@ -140,6 +143,13 @@ struct PaceParityTests {
             return Outcome(status: r.status, output: Self.normalised(r.out, box),
                            state: Self.normalised(box.stateText, box))
         }
+    }
+
+    /// The port's state file minus the keys the script never wrote.
+    static func withoutAddedKeys(_ state: String) -> String {
+        state.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.contains("\"eta\": ") && !$0.contains("\"window\": ") }
+            .joined(separator: "\n")
     }
 
     /// The script's "API off" wording, as the port now says it.

@@ -17,6 +17,10 @@ struct PaceStateFile {
         let tripWindow: String
         let model: String
         let cap: PaceRules.Cap
+        /// The gate's `--eta` horizon in seconds (0 = none) and `--window`,
+        /// so a later `wait` judges by the same rules (#258).
+        var eta: Int = 0
+        var window: String = "all"
         let usedPercent: String?
         let resetsIn: String?
         let note: String
@@ -39,6 +43,8 @@ struct PaceStateFile {
           "tripWindow": "\(v.tripWindow)",
           "model": "\(v.model)",
           "cap": \(cap),
+          "eta": \(v.eta),
+          "window": "\(v.window)",
           "usedPercent": \(v.usedPercent ?? "null"),
           "resetsInSeconds": \(v.resetsIn ?? "null"),
           "note": "\(v.note)",
