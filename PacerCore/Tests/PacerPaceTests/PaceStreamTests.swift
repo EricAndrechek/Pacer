@@ -12,13 +12,13 @@ struct PaceStreamTests {
     private final class StubStream {
         let process = Process()
         let base: String
-        init(event: String, delay: Double) throws {
+        init(event: String, delay: Double, status: Int = 200) throws {
             let script = """
             import http.server, socketserver, sys, time
             class H(http.server.BaseHTTPRequestHandler):
                 def log_message(self, *a): pass
                 def do_GET(self):
-                    self.send_response(200)
+                    self.send_response(\(status))
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
                     self.wfile.write(b": hello\\n\\n"); self.wfile.flush()
@@ -55,6 +55,15 @@ struct PaceStreamTests {
     func ignoresOtherEvents() throws {
         let stub = try StubStream(event: "keepalive-ish", delay: 0.2)
         let stream = try #require(PaceStream(apiBase: stub.base, token: nil))
+        let started = Date()
+        stream.sleep(1.5)
+        #expect(Date().timeIntervalSince(started) >= 1.4)
+    }
+
+    @Test("a rejected stream (a 401) wakes nothing")
+    func aRejectedStreamIsNoStream() throws {
+        let stub = try StubStream(event: "account", delay: 0.2, status: 401)
+        let stream = try #require(PaceStream(apiBase: stub.base, token: "wrong"))
         let started = Date()
         stream.sleep(1.5)
         #expect(Date().timeIntervalSince(started) >= 1.4)
