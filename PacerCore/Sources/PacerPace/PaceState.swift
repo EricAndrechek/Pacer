@@ -1,7 +1,10 @@
 import Foundation
 
-/// The verdict file `gate` writes and `status` reads: `~/.claude/pace/state.json`,
-/// or `state-<run>.json` when a run names itself.
+/// The verdict file `gate` writes and `status` reads, in `~/.claude/pace/`:
+/// `state-<run>.json` when a run names itself (`PACE_RUN`), else
+/// `state-session-<first 8 of CLAUDE_CODE_SESSION_ID>.json` in a Claude Code
+/// session (#265), else `state.json`. `PACE_STATE` or `--state` names any
+/// other path.
 ///
 /// The format is the bash `pace.sh`'s, byte for byte: a verdict written by the
 /// script before an update must still read after it, and the skill's SKILL.md
@@ -66,6 +69,37 @@ struct PaceStateFile {
     }
 
     var exists: Bool { FileManager.default.fileExists(atPath: path) }
+
+    /// The part of a session id a default state file is named by: its first
+    /// 8 characters, and only ones safe in a file name. Nil without an id.
+    static func sessionTag(_ id: String?) -> String? {
+        guard let id else { return nil }
+        let safe = id.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
+        return safe.isEmpty ? nil : String(safe.prefix(8))
+    }
+
+    /// How long another session's default verdict is kept. Any verdict is
+    /// stale after `--max-age` (15 minutes by default), so a week is only
+    /// about not deleting the file of a session that is still around.
+    static let sessionFileLifetime: TimeInterval = 7 * 86_400
+
+    /// Remove other sessions' default state files (and their refresh locks)
+    /// untouched for `sessionFileLifetime`. One file per Claude Code session
+    /// would otherwise accumulate for ever. Only `state-session-*` files:
+    /// named runs and `state.json` are somebody's choice and stay.
+    static func pruneSessionFiles(beside path: String, now: Date) {
+        let dir = (path as NSString).deletingLastPathComponent
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return }
+        for name in names where name.hasPrefix("state-session-") && name.hasSuffix(".json") {
+            let file = (dir as NSString).appendingPathComponent(name)
+            guard file != path,
+                  let modified = (try? fm.attributesOfItem(atPath: file))?[.modificationDate] as? Date,
+                  now.timeIntervalSince(modified) > sessionFileLifetime else { continue }
+            try? fm.removeItem(atPath: file)
+            try? fm.removeItem(atPath: file + ".lock")
+        }
+    }
 
     private var text: String? { try? String(contentsOfFile: path, encoding: .utf8) }
 

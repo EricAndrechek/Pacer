@@ -261,6 +261,97 @@ struct PaceCommandTests {
             atPath: home.appendingPathComponent(".claude/pace/state-alpha.json").path))
     }
 
+    // MARK: - One verdict per session by default (#265)
+
+    private func paceHome(_ box: PaceSandbox) throws -> URL {
+        let home = box.dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
+    }
+
+    @Test func aSessionGetsItsOwnDefaultStateFile() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let mine = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa-bbbb-cccc-1234567890ab"]
+        // A test gate in one session...
+        #expect(runPace(box, ["gate", "--cap", "50"], unsetState: true, extra: mine).status == 10)
+        let file = home.appendingPathComponent(".claude/pace/state-session-0f3c9a12.json")
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(runPace(box, ["status"], unsetState: true, extra: mine).status == 10)
+        // ...pauses nobody else.
+        let other = runPace(box, ["status"], unsetState: true,
+                            extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "77aa0000-1111"])
+        #expect(other.status == 3)
+        #expect(other.out.contains("state-session-77aa0000.json"), "\(other.out)")
+        #expect(!FileManager.default.fileExists(
+            atPath: home.appendingPathComponent(".claude/pace/state.json").path))
+    }
+
+    @Test func aNamedRunOrPathStillBeatsTheSessionDefault() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let session = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"]
+        var run = session
+        run["PACE_RUN"] = "alpha"
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true, extra: run)
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude/pace/state-alpha.json").path))
+        let named = box.dir.appendingPathComponent("named.json")
+        var state = session
+        state["PACE_STATE"] = named.path
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true, extra: state)
+        #expect(FileManager.default.fileExists(atPath: named.path))
+        let flag = box.dir.appendingPathComponent("flag.json")
+        _ = runPace(box, ["gate", "--cap", "85", "--state", flag.path], unsetState: true, extra: session)
+        #expect(FileManager.default.fileExists(atPath: flag.path))
+        #expect(!FileManager.default.fileExists(
+            atPath: home.appendingPathComponent(".claude/pace/state-session-0f3c9a12.json").path))
+    }
+
+    @Test func withoutASessionTheDefaultIsStillStateJSON() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true,
+                    extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": ""])
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude/pace/state.json").path))
+    }
+
+    @Test func aSessionIdIsCutToEightFileNameSafeCharacters() {
+        #expect(PaceStateFile.sessionTag("0f3c9a12-aaaa-bbbb") == "0f3c9a12")
+        #expect(PaceStateFile.sessionTag("../../etc/passwd") == "etcpassw")
+        #expect(PaceStateFile.sessionTag("ab") == "ab")
+        #expect(PaceStateFile.sessionTag("") == nil)
+        #expect(PaceStateFile.sessionTag("/./") == nil)
+        #expect(PaceStateFile.sessionTag(nil) == nil)
+    }
+
+    @Test func aGatePrunesOtherSessionsLongStaleDefaults() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let dir = home.appendingPathComponent(".claude/pace")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let longAgo = Date().addingTimeInterval(-8 * 86_400)
+        func file(_ name: String, old: Bool) throws -> URL {
+            let url = dir.appendingPathComponent(name)
+            try "{}\n".write(to: url, atomically: true, encoding: .utf8)
+            if old { try fm.setAttributes([.modificationDate: longAgo], ofItemAtPath: url.path) }
+            return url
+        }
+        let gone = try file("state-session-deadbeef.json", old: true)
+        let goneLock = try file("state-session-deadbeef.json.lock", old: true)
+        let recent = try file("state-session-cafe0001.json", old: false)
+        let named = try file("state-alpha.json", old: true)
+        let shared = try file("state.json", old: true)
+        let manifest = try file("resume-alpha.json", old: true)
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true,
+                    extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"])
+        #expect(!fm.fileExists(atPath: gone.path))
+        #expect(!fm.fileExists(atPath: goneLock.path))
+        for kept in [recent, named, shared, manifest] {
+            #expect(fm.fileExists(atPath: kept.path), "\(kept.lastPathComponent) is not a stale session default")
+        }
+    }
+
     // MARK: - Which windows bind whom
 
     @Test func aPerModelCapDoesNotGateAnotherModelsWork() throws {

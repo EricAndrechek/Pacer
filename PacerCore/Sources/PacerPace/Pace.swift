@@ -139,7 +139,10 @@ public enum Pace {
       --max-age S            how old a verdict may be before `status` calls
                              it stale; default 900
       --retries N            reads of Pacer before giving up; default 3
-      --state FILE           the state file
+      --state FILE           the state file; default state-session-<id>.json
+                             in ~/.claude/pace for a Claude Code session,
+                             state-<PACE_RUN>.json for a named run, else
+                             state.json
 
     Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
       PACE_SESSION_API (override just the session lookup's base URL),
@@ -162,6 +165,9 @@ final class PaceRun {
     private var apiBase: String
     private var api: String { apiBase + "/metrics" }
     private var statePath: String
+    /// The state file is this session's default one (#265), which `gate`
+    /// may prune old siblings of; not one a caller named.
+    private var stateIsSessionDefault = false
     private var account: String
     private var cap: PaceRules.Cap = .safe
     /// Points below each window's safe limit to stop at (#263).
@@ -206,8 +212,21 @@ final class PaceRun {
         if base.hasSuffix("/") { base.removeLast() }
         apiBase = base
         let run = environment["PACE_RUN"].flatMap { $0.isEmpty ? nil : $0 }
-        statePath = environment["PACE_STATE"].flatMap { $0.isEmpty ? nil : $0 }
-            ?? "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace/state\(run.map { "-\($0)" } ?? "").json"
+        let dir = "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace"
+        if let path = environment["PACE_STATE"].flatMap({ $0.isEmpty ? nil : $0 }) {
+            statePath = path
+        } else if let run {
+            statePath = "\(dir)/state-\(run).json"
+        } else if let session = PaceStateFile.sessionTag(environment["CLAUDE_CODE_SESSION_ID"]) {
+            // One verdict per session by default (#265). A shared file let a
+            // test `gate --cap 50` in one session pause every session on the
+            // machine. Subagents run under their parent's session id, so a
+            // session's own lanes still share one verdict.
+            statePath = "\(dir)/state-session-\(session).json"
+            stateIsSessionDefault = true
+        } else {
+            statePath = "\(dir)/state.json"
+        }
         account = environment["PACE_ACCOUNT"] ?? ""
         model = environment["PACE_MODEL"] ?? ""
         if !model.isEmpty { given.insert("model") }
@@ -237,7 +256,7 @@ final class PaceRun {
             case "--max-wait": maxWait = try integer(try value(), flag)
             case "--max-age":  maxAge = try integer(try value(), flag)
             case "--retries":  retries = try integer(try value(), flag)
-            case "--state":    statePath = try value()
+            case "--state":    statePath = try value(); stateIsSessionDefault = false
             case "-h", "--help":
                 io.out(Pace.help)
                 throw PaceExit(code: 0)
@@ -670,6 +689,7 @@ final class PaceRun {
     }
 
     private func cmdGate() throws {
+        if stateIsSessionDefault { PaceStateFile.pruneSessionFiles(beside: statePath, now: io.now()) }
         guard fetchRows() else {
             writeState("unknown", note: "not gating (\(fetchReason ?? "off"))")
             apiOffNote()
