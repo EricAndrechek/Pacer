@@ -90,6 +90,9 @@ public enum Pace {
         }
     }
 
+    /// For the "unknown subcommand" message.
+    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap"]
+
     /// `pacer --help`.
     public static let help = """
     pacer — report Claude usage from Pacer and gate heavy work against
@@ -111,23 +114,36 @@ public enum Pace {
       json                   machine JSON of the same
       gate  [--cap N]        read Pacer + write state file; 0=go 10=paused
                              2=no Pacer 4=misconfigured
+      safecap                the limit gate applies to each binding window,
+                             one per line (label, percent), for scripts
       status                 read state file only (Pacer not asked); 0=go
                              10=paused 3=unknown or stale
       wait  [--cap N]        block until the tripping window resets; 0=resume
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer
 
-    Flags: --model NAME|auto|all (which per-model caps bind; default auto where
-      CLAUDE_CODE_SESSION_ID is set, else all), --eta DURATION (also pause when
-      a window is projected to fill within it; default off),
-      --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
-      15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
-      substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
-      21600 = 6h), --max-age S (default 900; how old a state file may be before
-      `status` calls it stale), --retries N (default 3), --state FILE
+    Flags:
+      --model NAME|auto|all  which per-model caps bind (account-wide windows
+                             always do); default auto where
+                             CLAUDE_CODE_SESSION_ID is set, else all
+      --cap N                pause at N% (default: each window's safe limit,
+                             see `safecap`)
+      --margin N             stop N points below each window's safe limit;
+                             with --cap, the lower of the two wins
+      --eta DURATION         also pause when a window is projected to fill
+                             within DURATION (90m, 2h); default off
+      --window SEL           a label or identity substring (5h, 7d, fable);
+                             default all
+      --account ID|all       whose windows; default this session's login
+      --interval S           how often `wait` looks; default 15, floor 5
+      --max-wait S           longest reset `wait` sleeps for; default 21600
+      --max-age S            how old a verdict may be before `status` calls
+                             it stale; default 900
+      --retries N            reads of Pacer before giving up; default 3
+      --state FILE           the state file
 
     Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
       PACE_SESSION_API (override just the session lookup's base URL),
-      PACE_MODEL, PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
+      PACE_MODEL, PACE_MARGIN, PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
       orchestrations on one machine do not overwrite each other's verdict)
 
     """
@@ -148,6 +164,8 @@ final class PaceRun {
     private var statePath: String
     private var account: String
     private var cap: PaceRules.Cap = .safe
+    /// Points below each window's safe limit to stop at (#263).
+    private var margin = 0
     /// Which of the gating settings were given (flag, or PACE_MODEL). A
     /// `wait` takes the rest from the gate that paused (#258).
     private var given: Set<String> = []
@@ -210,6 +228,7 @@ final class PaceRun {
             }
             switch flag {
             case "--cap":      let v = try value(); cap = v == "safe" ? .safe : .value(v); given.insert("cap")
+            case "--margin":   margin = try points(try value(), flag); given.insert("margin")
             case "--interval": interval = try integer(try value(), flag); intervalSet = true
             case "--window":   window = try value(); given.insert("window")
             case "--model":    model = try value(); given.insert("model")
@@ -226,6 +245,10 @@ final class PaceRun {
             }
         }
         if interval < 5 { interval = 5 }
+        if !given.contains("margin"), let raw = env["PACE_MARGIN"], !raw.isEmpty {
+            margin = try points(raw, "PACE_MARGIN")
+            given.insert("margin")
+        }
 
         // A caller that names no model, in a session Pacer can identify, is
         // asking about that session (#264). "Every window binds" paused Opus
@@ -254,8 +277,9 @@ final class PaceRun {
         case "json":     try cmdJSON()
         case "gate":     try cmdGate()
         case "status":   try cmdStatus()
+        case "safecap":  try cmdSafecap()
         case "wait":     try cmdWait()
-        default: try die("unknown subcommand '\(sub)' (report|json|accounts|sessions|gate|status|wait)")
+        default: try die("unknown subcommand '\(sub)' (\(Pace.subcommands.joined(separator: "|")))")
         }
     }
 
@@ -266,6 +290,13 @@ final class PaceRun {
 
     private func integer(_ text: String, _ flag: String) throws -> Int {
         guard let v = Int(text) else { try die("\(flag) takes a whole number, not '\(text)'") }
+        return v
+    }
+
+    /// A margin: whole points, none negative. A margin that raised the limit
+    /// above the safe one would be a cap, and `--cap` already says that.
+    private func points(_ text: String, _ name: String) throws -> Int {
+        guard let v = Int(text), v >= 0 else { try die("\(name) takes a whole number of points, 0 or more, not '\(text)'") }
         return v
     }
 
@@ -520,20 +551,24 @@ final class PaceRun {
         if trip.why == "eta" {
             return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% is projected to fill in \(PaceFormat.human(trip.hitEta)) (horizon \(PaceFormat.human(eta)))"
         }
-        switch cap {
-        case .safe:
-            return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= safe limit \(PaceFormat.awkNumber(trip.limit))%"
-        case .value(let text):
-            return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= cap \(text)%"
-        }
+        let at = "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= "
+        if case .value(let text) = cap, !trip.fromSafe { return at + "cap \(text)%" }
+        if margin > 0 { return at + "safe limit \(trip.safe)% − \(margin)" }
+        return at + "safe limit \(PaceFormat.awkNumber(trip.limit))%"
     }
 
+    /// What the verdict was judged against: the safe limit per window (less
+    /// any margin, `5h 97% − 3`), a cap, or with both, the cap and the
+    /// margined safe limits, of which each window takes the lower.
     private func capNote() -> String {
+        let safe = "safe limit " + bindingRows.map {
+            "\($0.label) \(PaceRules.safeLimit($0))%" + (margin > 0 ? " − \(margin)" : "")
+        }.joined(separator: ", ")
         switch cap {
         case .safe:
-            return "safe limit " + bindingRows.map { "\($0.label) \(PaceRules.safeLimit($0))%" }.joined(separator: ", ")
+            return safe
         case .value(let text):
-            return "cap \(text)%"
+            return margin > 0 ? "cap \(text)%, \(safe)" : "cap \(text)%"
         }
     }
 
@@ -545,7 +580,7 @@ final class PaceRun {
                             resets: String? = nil, note: String) {
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
-            modelAuto: modelAuto, usedPercent: percent, resetsIn: resets,
+            modelAuto: modelAuto, margin: margin, usedPercent: percent, resetsIn: resets,
             note: note + autoNoteText()), now: io.now())
     }
 
@@ -642,7 +677,7 @@ final class PaceRun {
             throw PaceExit(code: offExitCode)
         }
         try requireSelection()
-        guard let trip = PaceRules.evaluate(bindingRows, cap: cap, horizon: eta) else {
+        guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
             writeState("go", note: "\(summary()) (\(capNote()))")
             io.out("pace: GO — \(summary()) (\(capNote())).\(autoNoteText())\(scopeCaveat())\n")
             throw PaceExit(code: 0)
@@ -670,6 +705,13 @@ final class PaceRun {
         let gatedModel = state.quoted("model") ?? ""
         if !model.isEmpty, model != "all", gatedModel != model {
             io.out("unknown: last gate was for '\(gatedModel.isEmpty ? "every model" : gatedModel)', not '\(model)' — re-gate.\n")
+            throw PaceExit(code: 3)
+        }
+        // So is a margin: a verdict gated at the safe limit says nothing about
+        // a caller who wanted to stop three points short of it (#263).
+        let gatedMargin = state.bare("margin").flatMap { Int($0) } ?? 0
+        if given.contains("margin"), gatedMargin != margin {
+            io.out("unknown: last gate was with margin \(gatedMargin), not \(margin) — re-gate.\n")
             throw PaceExit(code: 3)
         }
         let status = state.quoted("status") ?? ""
@@ -707,6 +749,10 @@ final class PaceRun {
         if !given.contains("cap"), let raw = state.bare("cap"), !raw.isEmpty, !raw.contains("safe") {
             cap = .value(raw)
             taken.append("--cap \(raw)")
+        }
+        if !given.contains("margin"), let raw = state.bare("margin"), let points = Int(raw), points > 0 {
+            margin = points
+            taken.append("--margin \(points)")
         }
         if !given.contains("eta"), let raw = state.bare("eta"), let seconds = Int(raw), seconds > 0 {
             eta = seconds
@@ -767,7 +813,7 @@ final class PaceRun {
             let nowOn = rows.first?.account ?? ""
             if startedOn.isEmpty { startedOn = nowOn }
             try requireSelection()
-            guard let trip = PaceRules.evaluate(bindingRows, cap: cap, horizon: eta) else {
+            guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
                 // Why the headroom came back matters: a reset is the window
                 // rolling over, a switch is another login's window entirely.
                 if !startedOn.isEmpty, nowOn != startedOn {
@@ -792,6 +838,20 @@ final class PaceRun {
             }
             waiting = true
             io.sleep(TimeInterval(interval))
+        }
+    }
+
+    /// The limit `gate` would apply to each binding window, one per line
+    /// (`5h         97`), for scripts (#263): the safe limit, less `--margin`,
+    /// capped by `--cap`. The model note goes to stderr so stdout stays two
+    /// columns.
+    private func cmdSafecap() throws {
+        guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
+        try requireSelection()
+        if !autoNote.isEmpty { io.err("pace: \(autoNote)\n") }
+        for row in bindingRows {
+            io.out(Self.pad(row.label, 10) + " "
+                   + PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)) + "\n")
         }
     }
 

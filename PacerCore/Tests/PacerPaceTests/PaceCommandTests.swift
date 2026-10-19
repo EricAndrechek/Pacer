@@ -618,6 +618,124 @@ struct PaceCommandTests {
         #expect(result.out.contains("Fable"))
     }
 
+    // MARK: - --margin and safecap (#263)
+
+    /// 5h at 95%, burning 36%/h on a fresh reading: safe limit 97. 7d at 50%,
+    /// no burn measured: 98.
+    private static let margined = """
+    pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.95
+    pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+    pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 36
+    pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 0
+    pacer_rate_limit_used_ratio{account="org",window="seven_day"} 0.50
+    pacer_rate_limit_reset_seconds{account="org",window="seven_day"} 300000
+    pacer_account_info{account="org",name="o",active="true"} 1
+    """
+
+    @Test func aMarginStopsThatManyPointsShortOfEachSafeLimit() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let plain = runPace(box, ["gate"])
+        #expect(plain.status == 0)
+        #expect(plain.out.contains("(safe limit 5h 97%, 7d 98%)"), "\(plain.out)")
+        let one = runPace(box, ["gate", "--margin", "1"])
+        #expect(one.status == 0)
+        #expect(one.out.contains("(safe limit 5h 97% − 1, 7d 98% − 1)"), "\(one.out)")
+        let three = runPace(box, ["gate", "--margin", "3"])
+        #expect(three.status == 10)
+        #expect(three.out.contains("5h at 95% >= safe limit 97% − 3"), "\(three.out)")
+        #expect(box.stateText.contains("\"margin\": 3"))
+        #expect(box.stateText.contains("safe limit 97% − 3"))
+    }
+
+    @Test func aMarginWithACapTakesTheLowerOfTheTwo() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        // A cap alone replaces the safe limit, as it always did.
+        #expect(runPace(box, ["gate", "--cap", "96"]).status == 0)
+        // min(99, 97 − 3) = 94: the margined safe limit trips.
+        let safer = runPace(box, ["gate", "--cap", "99", "--margin", "3"])
+        #expect(safer.status == 10)
+        #expect(safer.out.contains("safe limit 97% − 3"), "\(safer.out)")
+        // min(90, 97 − 1) = 90: the cap trips, and says so.
+        let capped = runPace(box, ["gate", "--cap", "90", "--margin", "1"])
+        #expect(capped.status == 10)
+        #expect(capped.out.contains("5h at 95% >= cap 90%"), "\(capped.out)")
+        let go = runPace(box, ["gate", "--cap", "99", "--margin", "1", "--window", "7d"])
+        #expect(go.status == 0)
+        #expect(go.out.contains("(cap 99%, safe limit 7d 98% − 1)"), "\(go.out)")
+    }
+
+    /// #263's case: under a burst the safe limit falls below a fixed cap, and
+    /// only the margin keeps tracking it.
+    @Test func underABurstAMarginStillStopsWhereAFixedCapWouldNot() throws {
+        let box = try PaceSandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.92
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 120
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 0
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        #expect(runPace(box, ["gate", "--cap", "94"]).status == 0)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+    }
+
+    @Test func paceMarginSetsTheMarginOnce() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let result = runPace(box, ["gate"], extra: ["PACE_MARGIN": "3"])
+        #expect(result.status == 10)
+        #expect(result.out.contains("− 3"))
+        #expect(runPace(box, ["gate", "--margin", "0"], extra: ["PACE_MARGIN": "3"]).status == 0,
+                "the flag beats the environment")
+    }
+
+    @Test func aMarginMustBeWholePointsAndNotNegative() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        for bad in ["-1", "two", "1.5"] {
+            let result = runPace(box, ["gate", "--margin", bad])
+            #expect(result.status == 1, "\(bad)")
+            #expect(result.out.contains("whole number of points"))
+        }
+        #expect(runPace(box, ["gate"], extra: ["PACE_MARGIN": "x"]).status == 1)
+    }
+
+    @Test func statusRefusesAVerdictGatedWithAnotherMargin() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+        #expect(runPace(box, ["status"]).status == 10)
+        #expect(runPace(box, ["status", "--margin", "3"]).status == 10)
+        let other = runPace(box, ["status", "--margin", "0"])
+        #expect(other.status == 3)
+        #expect(other.out.contains("margin 3, not 0"), "\(other.out)")
+        #expect(runPace(box, ["status"], extra: ["PACE_MARGIN": "1"]).status == 3)
+    }
+
+    @Test func aBareWaitKeepsTheGatesMargin() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+        let wait = runPace(box, ["wait", "--max-wait", "60"])
+        #expect(wait.out.contains("--margin 3"), "\(wait.out)")
+        #expect(wait.status == 20)
+    }
+
+    @Test func safecapPrintsTheLimitTheGateWouldApply() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let plain = runPace(box, ["safecap"])
+        #expect(plain.status == 0)
+        #expect(plain.out == "5h         97\n7d         98\n", "\(plain.out)")
+        #expect(runPace(box, ["safecap", "--margin", "3"]).out == "5h         94\n7d         95\n")
+        #expect(runPace(box, ["safecap", "--cap", "90", "--margin", "1"]).out == "5h         90\n7d         90\n")
+        #expect(runPace(box, ["safecap", "--window", "7d"]).out == "7d         98\n")
+        #expect(runPace(box, ["safecap", "--window", "1h"]).status == 1, "a selector matching nothing is an error")
+    }
+
+    @Test func safecapListsOnlyTheWindowsThatBindTheModel() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["safecap"]).out.contains("Fable"))
+        let opus = runPace(box, ["safecap", "--model", "opus"])
+        #expect(opus.status == 0)
+        #expect(!opus.out.contains("Fable"))
+        #expect(opus.out.contains("5h"))
+    }
+
     // MARK: - No --model in a known session is --model auto (#264)
 
     @Test func noModelInAKnownSessionGatesAsAuto() throws {

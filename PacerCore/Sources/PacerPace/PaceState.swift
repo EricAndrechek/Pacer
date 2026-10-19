@@ -24,6 +24,8 @@ struct PaceStateFile {
         /// The model was resolved from `auto` (#264): a later `wait` resolves
         /// it again instead of keeping what the session ran then.
         var modelAuto = false
+        /// Points below the safe limit the gate stopped at (#263).
+        var margin = 0
         let usedPercent: String?
         let resetsIn: String?
         let note: String
@@ -49,6 +51,7 @@ struct PaceStateFile {
           "eta": \(v.eta),
           "window": "\(v.window)",
           "autoModel": \(v.modelAuto),
+          "margin": \(v.margin),
           "usedPercent": \(v.usedPercent ?? "null"),
           "resetsInSeconds": \(v.resetsIn ?? "null"),
           "note": "\(v.note)",

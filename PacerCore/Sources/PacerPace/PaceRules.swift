@@ -107,6 +107,17 @@ enum PaceRules {
         }
     }
 
+    /// The limit one window trips at (#263): its safe limit less `margin`;
+    /// a `--cap` alone replaces the safe limit, as it always has; with both,
+    /// whichever is lower. A fixed cap cannot say "the safe limit plus a
+    /// buffer": at a heavy burn the safe limit falls below it, and the cap
+    /// lets a session run past where the default would have stopped it.
+    static func limit(_ row: PaceRow, cap: Cap, margin: Int) -> Double {
+        let safe = Double(safeLimit(row) - margin)
+        guard let capped = cap.number else { return safe }
+        return margin > 0 ? min(capped, safe) : capped
+    }
+
     struct Trip: Equatable, Sendable {
         let label: String
         let percentText: String
@@ -114,15 +125,24 @@ enum PaceRules {
         let why: String          // "cap" or "eta"
         let hitEta: String?
         let limit: Double
+        /// Which window, on which account, so a `wait` can follow this one
+        /// window rather than whatever trips next.
+        var identity = ""
+        var account = ""
+        /// The window's safe limit when judged, and whether `limit` came from
+        /// it (less any margin) rather than from `--cap`.
+        var safe = 0
+        var fromSafe = true
     }
 
     /// The binding window that is at or over its limit — or, with a horizon,
     /// projected to fill inside it — and resets soonest. Nil means headroom.
-    static func evaluate(_ rows: [PaceRow], cap: Cap, horizon: Int) -> Trip? {
+    static func evaluate(_ rows: [PaceRow], cap: Cap, margin: Int = 0, horizon: Int) -> Trip? {
         var best: Trip?
         var bestSeconds = 0.0
         for row in rows {
-            let limit = cap.number ?? Double(safeLimit(row))
+            let safe = safeLimit(row)
+            let limit = limit(row, cap: cap, margin: margin)
             // A reset already due describes the window that just ended: Pacer
             // polls every few minutes, so for a while its last reading still
             // says "85%, resets in 0m".
@@ -139,7 +159,9 @@ enum PaceRules {
             let s = row.resetsIn.map(PaceFormat.number) ?? 9_999_999
             if best == nil || s < bestSeconds {
                 best = Trip(label: row.label, percentText: row.percentText, resetsIn: row.resetsIn,
-                            why: why, hitEta: row.hitEta, limit: limit)
+                            why: why, hitEta: row.hitEta, limit: limit,
+                            identity: row.identity, account: row.account, safe: safe,
+                            fromSafe: cap.number.map { limit < $0 } ?? true)
                 bestSeconds = s
             }
         }

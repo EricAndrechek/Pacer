@@ -20,8 +20,11 @@ import Testing
 ///   there is no Pacer at all. `renamed` maps the script's two sentences.
 /// - The state file also records the gate's `eta` and `window`, so a later
 ///   `wait` judges by the same rules (#258), and whether its model came from
-///   `auto` (#264), so that `wait` asks again; `withoutAddedKeys` drops those
-///   lines from the port's file before comparing.
+///   `auto` (#264), so that `wait` asks again, and the gate's `--margin`
+///   (#263); `withoutAddedKeys` drops those lines from the port's file
+///   before comparing.
+/// - The port has subcommands the script did not (`safecap`, #263), so its
+///   "unknown subcommand" message lists more; `renamed` maps the list.
 /// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
 ///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:
 ///   the harness runs without a session id, where both bind every window.
@@ -150,7 +153,7 @@ struct PaceParityTests {
     }
 
     /// The keys the script never wrote.
-    static let addedKeys = ["eta", "window", "autoModel"]
+    static let addedKeys = ["eta", "window", "autoModel", "margin"]
 
     /// The port's state file minus the keys the script never wrote.
     static func withoutAddedKeys(_ state: String) -> String {
@@ -166,6 +169,8 @@ struct PaceParityTests {
                 with: "pace: no Pacer to read — nothing answered at $1 and Pacer's data could not be opened. Proceeding ungated.",
                 options: .regularExpression)
             .replacingOccurrences(of: "pace: API off — proceeding ungated.", with: "pace: no Pacer — proceeding ungated.")
+            .replacingOccurrences(of: "(report|json|accounts|sessions|gate|status|wait)",
+                                  with: "(\(Pace.subcommands.joined(separator: "|")))")
     }
 
     static func normalised(_ text: String, _ box: PaceSandbox) -> String {
