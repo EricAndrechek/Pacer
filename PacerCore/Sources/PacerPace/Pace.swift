@@ -116,7 +116,10 @@ public enum Pace {
       wait  [--cap N]        block until the tripping window resets; 0=resume
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer
 
-    Flags: --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
+    Flags: --model NAME|auto|all (which per-model caps bind; default auto where
+      CLAUDE_CODE_SESSION_ID is set, else all), --eta DURATION (also pause when
+      a window is projected to fill within it; default off),
+      --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
       15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
       substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
       21600 = 6h), --max-age S (default 900; how old a state file may be before
@@ -124,7 +127,7 @@ public enum Pace {
 
     Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
       PACE_SESSION_API (override just the session lookup's base URL),
-      PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
+      PACE_MODEL, PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
       orchestrations on one machine do not overwrite each other's verdict)
 
     """
@@ -154,6 +157,10 @@ final class PaceRun {
     private var maxWait = 21_600
     private var maxAge = 900
     private var model: String
+    /// The model was `auto` before it was resolved, so a verdict records
+    /// that and a later `wait` or refresh asks again rather than reusing
+    /// what this session ran at gate time.
+    private var modelAuto = false
     private var eta = 0
     private var retries: Int
     private var token: String?
@@ -219,6 +226,18 @@ final class PaceRun {
             }
         }
         if interval < 5 { interval = 5 }
+
+        // A caller that names no model, in a session Pacer can identify, is
+        // asking about that session (#264). "Every window binds" paused Opus
+        // and Sonnet work on a Fable cap that never constrained it: 73 false
+        // PAUSEs in a fortnight on one machine. `auto` binds what certainly
+        // applies, and still falls back to every window when Pacer has not
+        // seen the session. `status` is a file read and keeps judging the
+        // verdict it finds; `--model all` asks for every window explicitly.
+        if model.isEmpty, !given.contains("model"), sub != "status",
+           let id = env["CLAUDE_CODE_SESSION_ID"], !id.isEmpty {
+            model = "auto"
+        }
 
         // Which account you are is not a function of which model you run: an
         // orchestrator passing `--model opus` once got no session lookup, fell
@@ -331,20 +350,22 @@ final class PaceRun {
         return out
     }
 
-    /// `--model auto` means "whatever this session is running".
+    /// `--model auto` means "whatever this session is running". The note
+    /// always reads `model auto: …`, so a verdict reached by default says so.
     private func resolveAutoModel() {
         guard model == "auto" else { return }
+        modelAuto = true
         if sessionModels.count > 1 {
             // A parent and its subagents at once, and nothing here says which
             // one is asking: bind what certainly applies and nothing else.
             model = PaceRules.ambiguousModel
-            autoNote = "model ambiguous (\(sessionModels.joined(separator: ","))) — account-wide windows only; pass --model to gate on yours"
+            autoNote = "model auto: ambiguous (\(sessionModels.joined(separator: ","))) — account-wide windows only; pass --model to gate on yours"
         } else if !sessionModel.isEmpty {
             model = sessionModel
-            autoNote = "model \(model) (detected)"
+            autoNote = "model auto: detected \(model)"
         } else {
             model = ""
-            autoNote = "model unknown — every window binds"
+            autoNote = "model auto: unknown — every window binds"
         }
     }
 
@@ -486,7 +507,7 @@ final class PaceRun {
         throw PaceExit(code: 1)
     }
 
-    private func autoNoteText() -> String { autoNote.isEmpty ? "" : " [\(autoNote)]" }
+    private func autoNoteText() -> String { autoNote.isEmpty ? "" : " (\(autoNote))" }
 
     /// Whose numbers these are, when that had to be inferred.
     private func scopeCaveat() -> String {
@@ -524,7 +545,8 @@ final class PaceRun {
                             resets: String? = nil, note: String) {
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
-            usedPercent: percent, resetsIn: resets, note: note), now: io.now())
+            modelAuto: modelAuto, usedPercent: percent, resetsIn: resets,
+            note: note + autoNoteText()), now: io.now())
     }
 
     /// What went wrong, and how loudly: `off` is ordinary; `auth` and `http`
@@ -554,7 +576,7 @@ final class PaceRun {
     private func cmdReport() throws {
         guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
         try requireSelection()
-        if !autoNote.isEmpty { io.out("pace:\(autoNoteText())\n") }
+        if !autoNote.isEmpty { io.out("pace: \(autoNote)\n") }
         let multi = Set(rows.map(\.account)).count > 1
         let now = io.now()
         for row in selectedRows {
@@ -690,9 +712,19 @@ final class PaceRun {
             eta = seconds
             taken.append("--eta \(PaceFormat.human(seconds))")
         }
-        if !given.contains("model"), let m = state.quoted("model"), !m.isEmpty {
-            model = m
-            taken.append("--model \(m)")
+        if !given.contains("model") {
+            if state.bare("autoModel") == "true" {
+                // Asked again, not reused: which models the session runs
+                // changes while it waits.
+                model = "auto"
+                resolveAutoModel()
+                taken.append("--model auto")
+            } else if let m = state.quoted("model"), !m.isEmpty {
+                model = m
+                modelAuto = false
+                autoNote = ""
+                taken.append("--model \(m)")
+            }
         }
         if !given.contains("window"), let w = state.quoted("window"), !w.isEmpty, w != "all" {
             window = w

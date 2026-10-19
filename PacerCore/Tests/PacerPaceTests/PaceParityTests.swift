@@ -19,8 +19,12 @@ import Testing
 ///   the port reads Pacer's data when the API is off, so exit 2 now means
 ///   there is no Pacer at all. `renamed` maps the script's two sentences.
 /// - The state file also records the gate's `eta` and `window`, so a later
-///   `wait` judges by the same rules (#258); `withoutAddedKeys` drops those
-///   two lines from the port's file before comparing.
+///   `wait` judges by the same rules (#258), and whether its model came from
+///   `auto` (#264), so that `wait` asks again; `withoutAddedKeys` drops those
+///   lines from the port's file before comparing.
+/// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
+///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:
+///   the harness runs without a session id, where both bind every window.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -145,10 +149,13 @@ struct PaceParityTests {
         }
     }
 
+    /// The keys the script never wrote.
+    static let addedKeys = ["eta", "window", "autoModel"]
+
     /// The port's state file minus the keys the script never wrote.
     static func withoutAddedKeys(_ state: String) -> String {
         state.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.contains("\"eta\": ") && !$0.contains("\"window\": ") }
+            .filter { line in !addedKeys.contains { line.contains("\"\($0)\": ") } }
             .joined(separator: "\n")
     }
 

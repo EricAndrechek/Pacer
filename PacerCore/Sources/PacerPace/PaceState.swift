@@ -21,6 +21,9 @@ struct PaceStateFile {
         /// so a later `wait` judges by the same rules (#258).
         var eta: Int = 0
         var window: String = "all"
+        /// The model was resolved from `auto` (#264): a later `wait` resolves
+        /// it again instead of keeping what the session ran then.
+        var modelAuto = false
         let usedPercent: String?
         let resetsIn: String?
         let note: String
@@ -45,6 +48,7 @@ struct PaceStateFile {
           "cap": \(cap),
           "eta": \(v.eta),
           "window": "\(v.window)",
+          "autoModel": \(v.modelAuto),
           "usedPercent": \(v.usedPercent ?? "null"),
           "resetsInSeconds": \(v.resetsIn ?? "null"),
           "note": "\(v.note)",

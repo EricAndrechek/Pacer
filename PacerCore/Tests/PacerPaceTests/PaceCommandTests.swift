@@ -618,6 +618,72 @@ struct PaceCommandTests {
         #expect(result.out.contains("Fable"))
     }
 
+    // MARK: - No --model in a known session is --model auto (#264)
+
+    @Test func noModelInAKnownSessionGatesAsAuto() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base])
+        // The Fable cap at 95% does not bind Opus work.
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.contains("(model auto: detected claude-opus-5)"), "\(result.out)")
+        #expect(box.stateText.contains("\"autoModel\": true"))
+        #expect(box.stateText.contains("model auto: detected claude-opus-5"))
+    }
+
+    @Test func noModelWithoutASessionStillBindsEveryWindow() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["gate", "--cap", "85"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(!result.out.contains("model auto"))
+        #expect(box.stateText.contains("\"autoModel\": false"))
+    }
+
+    @Test func noModelInASessionPacerHasNotSeenBindsEveryWindowAndSaysSo() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try PaceStubServer(status: 404, body: "No turns recorded\n")
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "unknown", "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(result.out.contains("(model auto: unknown — every window binds)"), "\(result.out)")
+    }
+
+    @Test func modelAllStillBindsEveryWindowInAKnownSession() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85", "--model", "all"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(!result.out.contains("model auto"))
+    }
+
+    @Test func aBareWaitAsksAgainWhenTheGateWasAuto() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-fable-5-1"])
+        defer { server.stop() }
+        let env = ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base]
+        #expect(runPace(box, ["gate", "--cap", "85"], extra: env).status == 10)
+        let wait = runPace(box, ["wait", "--interval", "5", "--max-wait", "60"], extra: env)
+        #expect(wait.out.contains("--model auto"), "\(wait.out)")
+        #expect(wait.status == 20)
+    }
+
+    @Test func aBareStatusInAKnownSessionJudgesTheVerdictItFinds() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--model", "opus"]).status == 0)
+        let status = runPace(box, ["status"], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                                      "PACE_SESSION_API": "http://127.0.0.1:9"])
+        #expect(status.status == 0, "\(status.out)")
+        #expect(status.out == "go\n")
+    }
+
     @Test func aSingleAccountNeedsNoActiveMarker() throws {
         let box = try PaceSandbox(metrics: """
         pacer_rate_limit_used_ratio{account="solo",window="five_hour"} 0.66
