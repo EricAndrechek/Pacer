@@ -2,10 +2,11 @@ import Foundation
 import Testing
 @testable import PacerCore
 
-/// Shadow candidates: they score into the record from day one, but the
-/// promotion floor keeps a thin (lucky) record off the screen.
-@Suite("Shadow model candidates")
-struct ShadowModelTests {
+/// Newer roster members (Kalman, recent-rate) compete on their record like
+/// every other model: there is no separate promotion floor any more, because
+/// the record backfill gives a new model the same depth of record on install.
+@Suite("Model candidates")
+struct ModelCandidateTests {
 
     static var utc: Calendar {
         var c = Calendar(identifier: .gregorian)
@@ -25,29 +26,15 @@ struct ShadowModelTests {
         }
     }
 
-    @Test func shadowCannotBePromotedBelowItsFloor() {
-        // Kalman wins every period, but with only 10 < 15 scored periods the
-        // gate holds and the established rival is selected.
-        let recs = records(method: "kalman-trend", rival: "recency-weighted", periods: 10)
-        let pick = EngineSelfEval.bestMethod(
-            from: recs, provisionalMinPeriods: ["kalman-trend": 15])
-        #expect(pick == "recency-weighted")
+    @Test func aNewModelThatWinsItsRecordIsSelectedAtTheCommonFloor() {
+        // Two scored periods is the floor for every model; Kalman wins both.
+        let recs = records(method: "kalman-trend", rival: "recency-weighted", periods: 2)
+        #expect(EngineSelfEval.bestMethod(from: recs) == "kalman-trend")
     }
 
-    @Test func shadowPromotesOnceFloorIsMetAndItWins() {
-        let recs = records(method: "kalman-trend", rival: "recency-weighted", periods: 15)
-        let pick = EngineSelfEval.bestMethod(
-            from: recs, provisionalMinPeriods: ["kalman-trend": 15])
-        #expect(pick == "kalman-trend")
-    }
-
-    @Test func shadowFloorsCoverKalmanEverywhereAndDiurnalOnFiveHourOnly() {
-        let fiveH = UsageIntelligenceEngine.rlShadowFloors(.fiveHour)
-        let sevenD = UsageIntelligenceEngine.rlShadowFloors(.sevenDay)
-        #expect(fiveH["kalman-trend"] == EngineParams.current.shadowPromotionMinPeriods)
-        #expect(fiveH["diurnal-rate"] == EngineParams.current.shadowPromotionMinPeriods)
-        #expect(sevenD["kalman-trend"] == EngineParams.current.shadowPromotionMinPeriods)
-        #expect(sevenD["diurnal-rate"] == nil)   // established on 7d, not a shadow
+    @Test func belowTheCommonFloorNothingIsSelected() {
+        let recs = records(method: "kalman-trend", rival: "recency-weighted", periods: 1)
+        #expect(EngineSelfEval.bestMethod(from: recs) == nil)
     }
 
     @Test func kalmanIsInTheDefaultRosterSoItAccumulatesRecord() {

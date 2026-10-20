@@ -14,12 +14,12 @@ uv run pacer_replay.py --source usagelimit --identity "weekly_scoped|Fable|"
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
 uv run sweep.py --selection        # rate-limit selection knobs (#305), harness-only until adopted
-uv run weekly_check.py            # the standing check (drift/promotions/sweep)
+uv run weekly_check.py            # the standing check (drift/sweep)
 uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
 
-`weekly_check.py` is the loop's heartbeat: replay vs `baselines.json`,
-shadow-promotion progress from the app's own record, and the default sweep —
+`weekly_check.py` is the loop's heartbeat: replay vs `baselines.json` and the
+default sweep —
 one line appended to `reports/log.jsonl` every run, a macOS notification only
 when something is actionable. Deterministic, no LLM in the loop.
 
@@ -61,9 +61,8 @@ parity — if either side drifts, CI fails.
 
 Replayed **per account**, each on its own record and activity prior, the way the
 app fits them since #303 (a rate-limit window belongs to one account; pooling
-them was the all-accounts engine's bug): cycle segmentation, all six burn-trajectory models (including the
-shadow Kalman + diurnal), record-driven selection with shadow promotion
-floors, live-value anchoring, stratified additive conformal bands with the
+them was the all-accounts engine's bug): cycle segmentation, all seven burn-trajectory models, record-driven
+selection (one floor for every model), live-value anchoring, stratified additive conformal bands with the
 gated quantiles. Not replayed (yet): the EOD/month cost surfaces and their
 pool selection — extend `Params` + `replay_window` when those knobs need
 sweeping.

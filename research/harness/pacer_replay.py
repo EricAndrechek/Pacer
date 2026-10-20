@@ -1,8 +1,8 @@
 """Replay Pacer's rate-limit prediction pipeline over the real store, walk-forward.
 
 Faithful Python ports of the Swift engine's pieces (BurnTrajectory models,
-DiurnalBurnModel, stratified additive conformal, method selection with shadow
-floors), driven by the same raw RateLimitSample rows the app reads. Every
+DiurnalBurnModel, stratified additive conformal, record-driven method
+selection), driven by the same raw RateLimitSample rows the app reads. Every
 prediction is made using only data that existed at prediction time, then
 scored against the realized cycle:
 
@@ -60,14 +60,12 @@ class Params:
     pool_recency_window: int = 30
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
-    shadow_promotion_min_periods: int = 15
     conformal_block_min_cycles: int = 40
     # Rate-limit selection knobs (#305). Not in `canonical()` until a value is
     # adopted, so the defaults (today's rule) keep the version tag unchanged.
     rl_select_by_phase: bool = False         # select early (<50%) and late cuts separately
     rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
     rl_tie_relative: float = 0.0             # tie band relative to the best; 0 = absolute 1.5 pp
-    shadow_promotion_min_periods_weekly: int = 15   # the shadow floor on weekly-scale windows
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -81,7 +79,6 @@ class Params:
             f"poolRecencyWindow={self.pool_recency_window}",
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
-            f"shadowPromotionMinPeriods={self.shadow_promotion_min_periods}",
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
         ])
 
@@ -635,11 +632,10 @@ MODEL_COMPLEXITY = {
     "linear-recent": 1, "recency-weighted": 2, "saturating": 3,
     "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3, "recent-rate": 1,
 }
-SHADOW_IDS = {"five_hour": {"kalman-trend", "diurnal-rate", "recent-rate"}, "seven_day": {"kalman-trend", "recent-rate"}}
 
 # Mirror of Swift's WindowSpec.isWeeklyScale (24h threshold). Windows at least a
-# day long are weekly-cadence: diurnal is an established candidate (not a shadow)
-# and cold-start selection defaults to it; shorter ones are session-cadence.
+# day long are weekly-cadence: cold-start selection defaults to the diurnal
+# model and selection ranks on the mean error; shorter ones are session-cadence.
 # The fixed 5h/7d windows sit on either side, so their behaviour is unchanged.
 WEEKLY_SCALE_THRESHOLD = 24 * 3600.0
 
@@ -656,13 +652,6 @@ def headline_key(duration: float) -> str:
     that matter, such as an early cut undershooting a capped cycle.
     Session-cadence windows keep the median."""
     return "meanAbsErrorPP" if is_weekly_scale(duration) else "medianAbsErrorPP"
-
-
-def shadow_ids(duration: float) -> set[str]:
-    """Kalman is a shadow everywhere; diurnal is a shadow on session-cadence
-    windows only (mirror of UsageIntelligenceEngine.rlShadowFloors(duration:))."""
-    base = {"kalman-trend", "recent-rate"}
-    return base if is_weekly_scale(duration) else base | {"diurnal-rate"}
 
 
 def scoped_duration(group: str, reset_spacings: list[float] | None = None) -> float:
@@ -801,11 +790,10 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
 
 
 def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[str, list[tuple[float, float]]]],
-                  shadow_set: set[str], params: Params, weekly: bool = False, phase: str | None = None):
+                  params: Params, weekly: bool = False, phase: str | None = None):
     """Port of UsageIntelligenceEngine.resolveModel (#301): the chosen model if
-    it fits this moment, else the best-recorded model that does — promoted
-    models before unpromoted shadows, then the lowest typical error, then the
-    simpler one. Returns (model id, projection), or (None, None) if nothing
+    it fits this moment, else the best-recorded model that does — the lowest
+    typical error, then the simpler one. Returns (model id, projection), or (None, None) if nothing
     fits. The app used to show nothing when its selection declined (and the
     harness skipped those cases), while the chart drew a stand-in."""
     proj = roster[chosen](partial, params) if chosen in roster else None
@@ -815,8 +803,7 @@ def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[
     def rank(mid: str):
         per = record.get(mid, {})
         err = typical(method_errors(per, params, phase), weekly)
-        unpromoted = mid in shadow_set and len(per) < shadow_floor(params, weekly)
-        return (1 if unpromoted else 0, err, MODEL_COMPLEXITY.get(mid, 3))
+        return (err, MODEL_COMPLEXITY.get(mid, 3))
 
     best = None
     for mid, fit in roster.items():          # roster order breaks full ties, as in Swift
@@ -852,10 +839,6 @@ def typical(errs: list[float], weekly: bool) -> float:
     return errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
 
 
-def shadow_floor(params: Params, weekly: bool) -> int:
-    return params.shadow_promotion_min_periods_weekly if weekly else params.shadow_promotion_min_periods
-
-
 CLAIM_USED_FLOOR = 50.0   # BurnRate.warningUsedFloor
 
 
@@ -870,16 +853,15 @@ def hit_claimable(raw_at_reset: float, used_now: float, q10: float | None) -> bo
     return raw_at_reset + min(q10, 0.0) >= 100.0 if q10 is not None else raw_at_reset >= 100.0
 
 
-def best_method(record: dict[str, dict[str, list[tuple[float, float]]]], shadow_set: set[str], params: Params,
+def best_method(record: dict[str, dict[str, list[tuple[float, float]]]], params: Params,
                 weekly: bool = False, phase: str | None = None) -> str | None:
     """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
     mean on weekly-scale windows — EngineSelfEval.typicalError / headline_key),
     over `method_errors` (phase and recency, #305); ties within the band (1.5 pp,
-    or `rl_tie_relative` of the best) to the simpler model; shadow floors applied."""
+    or `rl_tie_relative` of the best) to the simpler model; one floor for every model."""
     scored = []
     for mid, per_period in record.items():
-        floor = shadow_floor(params, weekly) if mid in shadow_set else 2
-        if len(per_period) < floor:
+        if len(per_period) < 2:
             continue
         errs = method_errors(per_period, params, phase)
         if not errs:
@@ -924,7 +906,6 @@ def replay_window(window: str, samples, activity_grid, params: Params,
     if duration is None:
         duration = WINDOW_SECONDS[window]
     weekly = is_weekly_scale(duration)
-    shadow_set = shadow_ids(duration)
     cycles = segment(samples, duration)
     completed = cycles[:-1] if cycles else []   # last group = current/live
     scores: list[CaseScore] = []
@@ -943,7 +924,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
         default = "diurnal-rate" if weekly else "recency-weighted"
-        chosen_by_phase = {ph: best_method(record, shadow_set, params, weekly, ph) or default
+        chosen_by_phase = {ph: best_method(record, params, weekly, ph) or default
                            for ph in ("early", "late")}
         chosen = chosen_by_phase["early"]
         # Calibrators for whichever model resolves at a cut, built on demand.
@@ -956,7 +937,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 continue
             partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
             ph = phase_of(cf)
-            shown, proj = resolve_model(roster, chosen_by_phase[ph], partial, record, shadow_set, params, weekly, ph)
+            shown, proj = resolve_model(roster, chosen_by_phase[ph], partial, record, params, weekly, ph)
             if proj is None:
                 continue
             if shown not in residual_cache:

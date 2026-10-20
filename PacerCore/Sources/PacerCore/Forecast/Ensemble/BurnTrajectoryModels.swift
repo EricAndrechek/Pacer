@@ -45,8 +45,8 @@ extension BurnTrajectory {
     /// of samples at a 20% cut, and that short window is noisy early. Measured
     /// as a no-model control on the owner's store it beat the shipping 5-hour
     /// pipeline (median 3.00 vs 3.59 pp, 4/4 folds), and raising the lookback
-    /// fraction did not reproduce it. It enters as a shadow and earns display
-    /// through the record.
+    /// fraction did not reproduce it. It competes through the record like
+    /// every other model.
     public struct RecentRate: Model {
         public let id = "recent-rate"
         public let complexity = 1
@@ -116,11 +116,7 @@ extension BurnTrajectory {
         }
     }
 
-    /// Local-level + trend Kalman filter — a SHADOW candidate: scored into
-    /// the per-user record from day one like every roster member, but
-    /// display-promotion requires the shadow floor
-    /// (`EngineParams.shadowPromotionMinPeriods`) — see
-    /// `EngineSelfEval.bestMethod`. Tests whether optimal recursive smoothing
+    /// Local-level + trend Kalman filter. Tests whether optimal recursive smoothing
     /// beats the recency-weighted regression at tracking the live burn slope;
     /// projection is the filtered level carried forward at the filtered slope.
     public struct KalmanTrend: Model {

@@ -48,7 +48,6 @@ SELECTION_GRID = {
     "rl_select_by_phase": [False, True],
     "rl_selection_recency": [0, 30, 15],
     "rl_tie_relative": [0.0, 0.05, 0.10, 0.25],
-    "shadow_promotion_min_periods_weekly": [15, 4],
 }
 FULL_GRID = {
     "linear_recent_lookback_fraction": [0.15, 0.2, 0.3, 0.4, 0.5],

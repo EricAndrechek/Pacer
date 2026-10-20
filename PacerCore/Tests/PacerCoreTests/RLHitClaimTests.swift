@@ -37,9 +37,15 @@ struct RLHitClaimTests {
         return EngineFeatures.build(now: now, calendar: utc, daily: [], hourly: [], rate: rate, lastArrivalAt: nil)
     }
 
+    /// The fixture's overshoot numbers describe `linear-recent`, so the fit is
+    /// pinned to it: these tests are about the claim gate, not selection.
+    static func fit(_ f: EngineFeatures) -> UsageIntelligenceEngine.Fit {
+        UsageIntelligenceEngine.makeFit(f, rlSelection: ["five_hour": "linear-recent"])
+    }
+
     static func confirmedFit(_ f: EngineFeatures) -> UsageIntelligenceEngine.Fit {
-        let once = UsageIntelligenceEngine.carryClaimStreaks(f, into: UsageIntelligenceEngine.makeFit(f), from: .init())
-        return UsageIntelligenceEngine.carryClaimStreaks(f, into: UsageIntelligenceEngine.makeFit(f), from: once)
+        let once = UsageIntelligenceEngine.carryClaimStreaks(f, into: fit(f), from: .init())
+        return UsageIntelligenceEngine.carryClaimStreaks(f, into: fit(f), from: once)
     }
 
     @Test func aBurstAModelUsuallyOvershootsDoesNotGoRed() throws {
@@ -83,7 +89,7 @@ struct RLHitClaimTests {
         #expect(o.hitWithheld == .slowEndResetsFirst)
 
         let steep = Self.features(liveUsed: 55)
-        let once = UsageIntelligenceEngine.carryClaimStreaks(steep, into: UsageIntelligenceEngine.makeFit(steep), from: .init())
+        let once = UsageIntelligenceEngine.carryClaimStreaks(steep, into: Self.fit(steep), from: .init())
         let first = try #require(UsageIntelligenceEngine.burnOutlook(steep, once, windowKey: "five_hour"))
         #expect(first.hitWithheld == .unconfirmed)
         let confirmed = try #require(UsageIntelligenceEngine.burnOutlook(steep, Self.confirmedFit(steep), windowKey: "five_hour"))

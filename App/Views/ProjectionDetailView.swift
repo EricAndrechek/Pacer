@@ -114,8 +114,7 @@ struct ProjectionCompareModal: View {
                     durationSeconds: duration,
                     actual: data.points,
                     trajectories: overlays,
-                    accuracy: accuracy,
-                    shadowFloors: UsageIntelligenceEngine.rlShadowFloors(duration: duration)
+                    accuracy: accuracy
                 )
             } else if loaded && actualsLoaded {
                 Text("Not enough data to compare models yet.")
@@ -201,12 +200,9 @@ struct ProjectionDetailView: View {
     let actual: [PaceChartView.Data.Point]
     let trajectories: [BurnTrajectory.ScoredTrajectory]
     /// Per-method scored record for this window (completed cycles + median
-    /// miss) — powers the shadow-progress captions and the selected model's
-    /// earned-record footer. Nil until the engine has scored a cycle.
+    /// miss) — powers the selected model's earned-record footer. Nil until
+    /// the engine has scored a cycle.
     let accuracy: EngineSelfEval.Accuracy?
-    /// Shadow candidates for this window → the completed-cycle floor each
-    /// must clear before the engine may pick it for display.
-    let shadowFloors: [String: Int]
 
     /// Stable per-model colors for the lines and the legend swatches.
     private static let palette: [String: Color] = [
@@ -556,24 +552,6 @@ struct ProjectionDetailView: View {
 
     // MARK: - Accuracy table
 
-    /// Completed scored cycles for one method, from the persisted record.
-    private func scoredPeriods(_ modelId: String) -> Int {
-        accuracy?.methods.first(where: { $0.method == modelId })?.periods ?? 0
-    }
-
-    /// Shadow candidates are promotion-gated: they accumulate a scored record
-    /// like everyone else but can't drive the dashboard until they've banked
-    /// enough completed cycles AND win on realized error. Say so quietly, so
-    /// a new model visibly earns its place instead of appearing from nowhere.
-    /// Past the floor the caption collapses to "eligible" (and disappears on
-    /// a selected row — "on the dashboard" already says it graduated).
-    private func shadowCaption(_ st: BurnTrajectory.ScoredTrajectory) -> String? {
-        guard let floor = shadowFloors[st.modelId] else { return nil }
-        let periods = scoredPeriods(st.modelId)
-        guard periods < floor else { return st.isSelected ? nil : "eligible" }
-        return "earning trust — \(periods) of \(floor) cycles"
-    }
-
     /// The selected model's earned record — how many completed cycles back
     /// it. The miss itself already sits in the row's "within ±N%" column
     /// (no number twice); the footer adds the depth of evidence behind the
@@ -612,11 +590,6 @@ struct ProjectionDetailView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(BurnTrajectory.displayName(st.modelId))
                             .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
-                        if let caption = shadowCaption(st) {
-                            Text("\(Image(systemName: "flask")) \(caption)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
-                        }
                         if let reason = st.unavailableReason {
                             Text("can't project yet · \(reason)")
                                 .font(.system(size: 10))

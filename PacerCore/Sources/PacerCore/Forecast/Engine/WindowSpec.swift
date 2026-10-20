@@ -49,9 +49,6 @@ public struct WindowSpec: Sendable, Equatable {
     /// Windows at least a day long are treated as **weekly-cadence**; shorter
     /// ones as **session-cadence**. This single boundary replaces every 5h-vs-7d
     /// branch the rate-limit path used to make:
-    ///   - the diurnal model is an *established* candidate on weekly-cadence
-    ///     windows but a *promotion-gated shadow* on session-cadence ones
-    ///     (`rlShadowFloors`);
     ///   - cold-start selection defaults to the diurnal shape on weekly-cadence
     ///     windows, recency-weighted on session-cadence ones (`makeFit`);
     ///   - the descriptive burn slope reads a 24 h lookback on weekly-cadence
