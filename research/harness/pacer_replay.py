@@ -340,6 +340,12 @@ class Partial:
     cycle_start: float
     resets_at: float
 
+    def __post_init__(self) -> None:
+        # Port of PartialCycle.init: a window opens at 0%, a reading, not a
+        # guess, so it is counted when the first real reading comes later.
+        if self.samples and self.samples[0][0] > self.cycle_start + 1:
+            self.samples = [(self.cycle_start, 0.0)] + list(self.samples)
+
     def hours(self, at: float) -> float:
         return (at - self.cycle_start) / 3600.0
 
@@ -1060,13 +1066,17 @@ def parity_fixture() -> dict:
         lambda f: 60.0 * f,                                   # plain ramp
         lambda f: 10.0 * f if f < 0.45 else 4.5 + 70.0 * (f - 0.45),  # late spike
         lambda f: min(100.0, 180.0 * f),                      # runs past the cap
+        lambda f: 30.0 * f ** 0.5,                            # sparse polls from 4 min in: the 0% anchor
     ]
     cycles, rows = [], []
     for ci, shape in enumerate(shapes):
         start = base + ci * duration
         reset = start + duration
-        samples = [(start + k * step, round(shape(k * step / duration), 4))
-                   for k in range(int(duration / step) + 1)]
+        if ci == 3:   # read every 6 minutes, first at +4 min (a background account)
+            times = [start + 240 + k * 360 for k in range(int((duration - 240) / 360) + 1)]
+        else:
+            times = [start + k * step for k in range(int(duration / step) + 1)]
+        samples = [(t, round(shape((t - start) / duration), 4)) for t in times]
         cyc = Cycle(samples, start, reset)
         cycles.append({"cycleStart": start, "resetsAt": reset, "samples": samples})
         roster = model_roster(None)
