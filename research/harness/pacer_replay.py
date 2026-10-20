@@ -801,9 +801,16 @@ def replay_window(window: str, samples, activity_grid, params: Params,
             lo = gated_quantile(strat, 0.1, params.conformal_min_residuals)
             hi = gated_quantile(strat, 0.9, params.conformal_min_residuals)
             band_stated = lo is not None and hi is not None
-            covered = (min(point + lo, point + hi) <= truth <= max(point + lo, point + hi)) if band_stated else None
-            pb10 = pinball(truth, point + lo, 0.1) if band_stated else None
-            pb90 = pinball(truth, point + hi, 0.9) if band_stated else None
+            # Scored as displayed (UsageIntelligenceEngine.clampPct with the
+            # meter as the floor, #273): the band can't start below the usage
+            # already recorded or end above 100. Unclamped, the same bands
+            # scored 2.2x worse on pinball for mass outside the possible range.
+            if band_stated:
+                b_lo = min(100.0, max(partial.used_now, point + lo))
+                b_hi = max(b_lo, min(100.0, max(partial.used_now, point + hi)))
+            covered = (b_lo <= truth <= b_hi) if band_stated else None
+            pb10 = pinball(truth, b_lo, 0.1) if band_stated else None
+            pb90 = pinball(truth, b_hi, 0.9) if band_stated else None
             # Hit probability: weighted share of residual-shifted outcomes ≥100
             # (conformal predictive), falling back to the deterministic call.
             if kish_n(strat) >= params.conformal_min_residuals:
