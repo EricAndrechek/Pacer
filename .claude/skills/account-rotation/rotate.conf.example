@@ -1,0 +1,33 @@
+# Rotation thresholds. rotate.sh re-reads this file every loop, so a change
+# here takes effect within a minute, with no restart. Plain bash assignments.
+
+EARLY=2            # switch this many points before the active account's safe limit
+WEEK_MAX=90        # leave at, and never switch onto, this 7d %
+STAGGER=9000       # 2.5 h: when the active window has this little left, start an idle one
+MIN_SWITCH_GAP=300 # at most one switch per 5 min; never back to the slot just left within it
+                   # unless that slot's 5h window has reset since
+
+# A target needs room (5h points below ITS OWN switch point) for
+# BRIDGE_MIN_MINUTES at the active account's recent burn, and never less than
+# BRIDGE_MIN_PTS. Replaces ROOM_BELOW and GAP (2026-10-20): the controller needs
+# no quota, so it can always switch back, but a bridge onto a few points
+# released every waiting session at once and filled in minutes (22:03Z, 22:08Z).
+BRIDGE_MIN_PTS=6
+BRIDGE_MIN_MINUTES=20
+BURN_UNKNOWN=40    # %/h assumed when Pacer gives no burn for the active account
+
+# Use it or lose it: switch to an account whose running 5h window resets within
+# EXPIRE_WINDOW seconds while it still has room for BRIDGE_MIN_MINUTES of burn
+# (at least EXPIRE_MIN_PTS), if that reset comes before the active's own.
+EXPIRE_WINDOW=2700 # 45 min
+EXPIRE_MIN_PTS=8
+
+# Per-slot 7d ceiling, overriding WEEK_MAX for that slot, e.g. WEEK_MAX_1=80.
+# Slots never chosen as a target (space-separated), e.g. EXCLUDE="4".
+EXCLUDE=""
+
+# Reserve: one slot past its WEEK_MAX may be spent up to RESERVE_WEEK_MAX, only
+# to unblock a 5h limit when nothing else has room. Off unless the owner names one
+# (it was account 3 for the week of 2026-10-07 and overshot to 100%).
+RESERVE_SLOT=""
+RESERVE_WEEK_MAX=97
