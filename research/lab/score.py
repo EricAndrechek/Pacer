@@ -18,6 +18,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json")
     ap.add_argument("--match", default="")
+    ap.add_argument("--by", choices=["headline", "mean"], default="headline")
     a = ap.parse_args()
     c = lab.cases()
     names = sorted(p.stem for p in lab.PREDS.glob("*.parquet") if not p.stem.endswith(".choices"))
@@ -27,12 +28,13 @@ def main() -> None:
     for window in lab.WINDOWS:
         b = base.get(window)
         print(f"\n== {window} — headline {'mean' if lab.weekly(window) else 'median'} |shown − final| (pp)")
-        rows = sorted(((n, t[window]) for n, t in table.items() if window in t), key=lambda r: r[1]["headline"])
+        rows = sorted(((n, t[window]) for n, t in table.items() if window in t), key=lambda r: r[1][a.by])
         for n, r in rows:
             wins = sum(1 for x, y in zip(r["folds"], b["folds"]) if x < y) if b and len(r["folds"]) == len(b["folds"]) else "-"
             cov = f"cov {r['coverage80']:.2f}" if "coverage80" in r else "        "
             gain = f"{(1 - r['headline'] / b['headline']) * 100:+5.1f}%" if b else ""
-            print(f"  {n:44s} {r['headline']:6.2f} {gain}  {cov}  share {r['share']:.2f}  folds "
+            other = r["mean"] if not lab.weekly(window) else r["median"]
+            print(f"  {n:44s} {r['headline']:6.2f} {gain} ({'mean' if not lab.weekly(window) else 'med'} {other:5.2f})  {cov}  share {r['share']:.2f}  folds "
                   + " ".join(f"{x:5.2f}" for x in r["folds"]) + f"  beats rule-current {wins}/4")
     if a.json:
         with open(a.json, "w") as f:
