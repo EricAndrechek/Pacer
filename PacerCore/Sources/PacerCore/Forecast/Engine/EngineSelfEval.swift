@@ -197,6 +197,11 @@ public enum EngineSelfEval {
     static func isCurrentRLBucket(_ bucket: String) -> Bool {
         bucket.hasSuffix("|\(rlBucketVersion)")
     }
+    /// The cut fraction of an RL bucket (`cut=0.20|v2` → 0.2).
+    static func rlCutFraction(_ bucket: String) -> Double? {
+        guard bucket.hasPrefix("cut=") else { return nil }
+        return Double(bucket.dropFirst(4).prefix { $0 != "|" })
+    }
 
     // MARK: - Rate-limit outlook self-eval
 
@@ -304,8 +309,15 @@ public enum EngineSelfEval {
     /// cycle across scans (matches `BurnTrajectory.segment`).
     static func periodKeyRL(_ reset: Date) -> String {
         let rounded = Date(timeIntervalSince1970: (reset.timeIntervalSince1970 / 60).rounded() * 60)
-        return ISO8601DateFormatter().string(from: rounded)
+        return periodFormatter.string(from: rounded)
     }
+
+    /// The reset instant a `periodKeyRL` names.
+    static func periodDateRL(_ key: String) -> Date? { periodFormatter.date(from: key) }
+
+    /// Thread-safe for formatting and parsing (Apple documents it); see
+    /// AGENTS.md on `ISO8601DateFormatter` and Sendable.
+    nonisolated(unsafe) private static let periodFormatter = ISO8601DateFormatter()
 
     // MARK: - Stats
 
