@@ -41,8 +41,9 @@ extension BurnTrajectory {
 
     /// The meter's rise over the last hour (a day on weekly-scale windows),
     /// extrapolated from the latest reading (#272). An endpoint difference, not
-    /// a fit: `LinearRecent` fits the last 30% of the elapsed cycle, 18 minutes
-    /// of samples at a 20% cut, and that short window is noisy early. Measured
+    /// a fit: `LinearRecent` fits a line through the last 30% of the window's
+    /// length (90 minutes on a 5-hour window), which early in a cycle is every
+    /// reading since the reset. Measured
     /// as a no-model control on the owner's store it beat the shipping 5-hour
     /// pipeline (median 3.00 vs 3.59 pp, 4/4 folds), and raising the lookback
     /// fraction did not reproduce it. It competes through the record like

@@ -152,6 +152,22 @@ public enum EngineSelfEval {
             /// compare-models sheet displays as "fit ±N pp".
             public let typicalAbsError: Double
             public let periods: Int
+            /// The same statistic split by how far through the window the
+            /// call was made: the compare sheet's per-model record. Empty on
+            /// surfaces whose buckets carry no cut.
+            public var byStage: [StageStat] = []
+        }
+        /// Early, middle or late in the window: cuts 0.2–0.4, 0.5–0.7 and
+        /// 0.8–0.9 of the rate-limit grid (`rlCutFractions`).
+        public enum Stage: String, Sendable, CaseIterable {
+            case early, middle, late
+            init(cut: Double) { self = cut < 0.45 ? .early : cut < 0.75 ? .middle : .late }
+        }
+        public struct StageStat: Sendable, Equatable {
+            public let stage: Stage
+            public let typicalAbsError: Double
+            /// Scored calls behind the number (cycles × cuts in the stage).
+            public let scores: Int
         }
         public let surface: String
         public let methods: [MethodStat]
@@ -165,10 +181,19 @@ public enum EngineSelfEval {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let methods = byMethod.map { method, rows -> Accuracy.MethodStat in
             let periods = Set(rows.map { $0.periodKey }).count
+            var stageErrors: [Accuracy.Stage: [Double]] = [:]
+            for r in rows {
+                guard let cut = rlCutFraction(r.bucket) else { continue }
+                stageErrors[Accuracy.Stage(cut: cut), default: []].append(abs(r.predicted - r.truth))
+            }
+            let byStage = Accuracy.Stage.allCases.compactMap { stage -> Accuracy.StageStat? in
+                guard let errs = stageErrors[stage], !errs.isEmpty else { return nil }
+                return .init(stage: stage, typicalAbsError: typicalError(errs, weekly: weekly), scores: errs.count)
+            }
             return .init(method: method,
                          medianAbsPctError: median(rows.map { $0.absPctError }),
                          typicalAbsError: typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly),
-                         periods: periods)
+                         periods: periods, byStage: byStage)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
     }
