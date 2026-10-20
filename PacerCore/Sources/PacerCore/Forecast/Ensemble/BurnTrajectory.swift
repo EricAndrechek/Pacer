@@ -34,7 +34,19 @@ public enum BurnTrajectory {
         public let cycleStart: Date
         public let resetsAt: Date
         public init(samples: [Sample], now: Date, cycleStart: Date, resetsAt: Date) {
-            self.samples = samples.filter { $0.at <= now }.sorted { $0.at < $1.at }
+            var seen = samples.filter { $0.at <= now }.sorted { $0.at < $1.at }
+            // A window opens at 0%: that is a reading, not a guess. Counting
+            // it lets a model draw a line from the window's first poll. An
+            // account read every 5–10 minutes otherwise had no forecast for
+            // the first 10–20 minutes of every window: a line needs two
+            // readings, and only 45% of 5-hour windows had them by minute 6.
+            // Measured on the owner's store, the anchored line beats both a
+            // flat meter and the account's typical final from minute 6, and
+            // costs ≤ 0.5 pp from minute 15 on.
+            if let first = seen.first, first.at > cycleStart.addingTimeInterval(1) {
+                seen.insert(Sample(at: cycleStart, usedPercentage: 0), at: 0)
+            }
+            self.samples = seen
             self.now = now
             self.cycleStart = cycleStart
             self.resetsAt = resetsAt
