@@ -14,6 +14,7 @@ uv run pacer_replay.py --source usagelimit --identity "weekly_scoped|Fable|"
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
 uv run sweep.py --selection        # rate-limit selection knobs (#305), harness-only until adopted
+uv run selection_strategies.py    # rules vs a rule-picker vs combining models (~25 s)
 uv run weekly_check.py            # the standing check (drift/sweep)
 uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
