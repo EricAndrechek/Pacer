@@ -21,7 +21,7 @@ def main() -> None:
     a = ap.parse_args()
     c = lab.cases()
     names = sorted(p.stem for p in lab.PREDS.glob("*.parquet") if not p.stem.endswith(".choices"))
-    names = [n for n in names if a.match in n] + (["rule-current"] if a.match and "rule-current" not in names else [])
+    names = [n for n in names if a.match in n or n == "rule-current"]
     table = {n: lab.score(n, c) for n in dict.fromkeys(names)}
     base = table.get("rule-current", {})
     for window in lab.WINDOWS:
