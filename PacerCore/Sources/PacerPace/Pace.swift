@@ -621,11 +621,13 @@ final class PaceRun {
     }
 
     private func writeState(_ status: String, trip: String = "", percent: String? = nil,
-                            resets: String? = nil, note: String) {
+                            resets: String? = nil, note: String, tripped: PaceRules.Trip? = nil) {
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
             modelAuto: modelAuto, margin: margin, usedPercent: percent, resetsIn: resets,
-            note: note + autoNoteText()), now: io.now())
+            note: note + autoNoteText(),
+            tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
+            tripLimit: tripped?.limit), now: io.now())
     }
 
     /// What went wrong, and how loudly: `off` is ordinary; `auth` and `http`
@@ -728,7 +730,7 @@ final class PaceRun {
             throw PaceExit(code: 0)
         }
         writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                   note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))")
+                   note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))", tripped: trip)
         io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\n")
         throw PaceExit(code: 10)
     }
@@ -936,10 +938,58 @@ final class PaceRun {
         return taken
     }
 
+    /// The gate's own trip, when this wait judges by the gate's rules and the
+    /// window binds it (#267). A wait started just after a gate must not
+    /// release because the safe limit moved in between; one told another
+    /// cap, margin, horizon or window is asking its own question.
+    private func seededAnchor() -> PaceRules.Anchor? {
+        let state = PaceStateFile(path: statePath)
+        guard state.exists, state.quoted("status") == "paused",
+              let identity = state.quoted("tripIdentity"), !identity.isEmpty,
+              let limit = state.bare("tripLimit").flatMap(Double.init),
+              let percent = state.bare("usedPercent").flatMap(Double.init) else { return nil }
+        let recordedCap = state.bare("cap") ?? ""
+        let sameCap: Bool
+        switch cap {
+        case .safe: sameCap = recordedCap.contains("safe")
+        case .value(let text): sameCap = recordedCap == text
+        }
+        guard sameCap,
+              (state.bare("margin").flatMap { Int($0) } ?? 0) == margin,
+              (state.bare("eta").flatMap { Int($0) } ?? 0) == eta,
+              (state.quoted("window") ?? "all") == window else { return nil }
+        let label = state.quoted("tripWindow") ?? PaceRules.label(forIdentity: identity)
+        guard PaceRules.watches(label: label, identity: identity, window: window),
+              PaceRules.binds(windowModel: PaceRules.model(forIdentity: identity), wanted: model) else { return nil }
+        var resetsAt: Date?
+        if let stamp = state.quoted("updatedAt"), let written = PaceFormat.isoFormatter.date(from: stamp),
+           let resets = state.bare("resetsInSeconds").flatMap(Double.init) {
+            resetsAt = written.addingTimeInterval(resets)
+        }
+        let fromSafe = cap.number.map { limit < $0 } ?? true
+        let trip = PaceRules.Trip(
+            label: label, percentText: PaceFormat.awkNumber(percent), resetsIn: nil,
+            why: percent >= limit ? "cap" : "eta", hitEta: nil, limit: limit,
+            identity: identity, account: state.quoted("tripAccount") ?? "",
+            safe: Int(limit) + (fromSafe ? margin : 0), fromSafe: fromSafe)
+        return PaceRules.Anchor(trip: trip, resetsAt: resetsAt)
+    }
+
+    private func anchor(_ trip: PaceRules.Trip) -> PaceRules.Anchor {
+        PaceRules.Anchor(trip: trip, resetsAt: trip.resetsIn.map { io.now().addingTimeInterval(PaceFormat.number($0)) })
+    }
+
+    /// Seconds until the anchored window resets, as the state file and the
+    /// messages print them.
+    private func remaining(_ anchor: PaceRules.Anchor) -> String? {
+        anchor.resetsAt.map { String(max(0, Int(ceil($0.timeIntervalSince(io.now()))))) }
+    }
+
     private func cmdWait() throws {
         inheritFromGate()
-        var waiting = false, everRead = false, fails = 0
-        var startedOn = ""
+        var held = PaceRules.Anchor?.none
+        if let seeded = seededAnchor() { held = seeded }
+        var announced = false, overruled = false, everRead = false, fails = 0
         // A switch restores headroom at once and Pacer sees it within
         // seconds, so a waiter looks more often than a reading changes (#184).
         if !intervalSet { interval = 15 }
@@ -965,35 +1015,93 @@ final class PaceRun {
             }
             everRead = true
             fails = 0
-            let nowOn = rows.first?.account ?? ""
-            if startedOn.isEmpty { startedOn = nowOn }
             try requireSelection()
-            guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
-                // Why the headroom came back matters: a reset is the window
-                // rolling over, a switch is another login's window entirely.
-                if !startedOn.isEmpty, nowOn != startedOn {
-                    writeState("go", note: "account switched — headroom on \(nowOn.prefix(8)) (\(summary()))")
-                    io.out("pace: account switched (\(startedOn.prefix(8)) → \(nowOn.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
-                } else {
+            let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta)
+            let accounts = Set(rows.map(\.account))
+            let nowOn = accounts.count == 1 ? accounts.first ?? "" : ""
+
+            var current: PaceRules.Anchor
+            if let anchored = held {
+                current = anchored
+            } else {
+                // Headroom at the first look: no pause to wait out.
+                guard let trip else {
                     writeState("go", note: "headroom restored (\(summary()))")
-                    if waiting { io.out("pace: reset — headroom restored (\(summary())). Resume.\n") }
+                    throw PaceExit(code: 0)
                 }
-                throw PaceExit(code: 0)
+                current = anchor(trip)
+                held = current
             }
-            if let secs = trip.resetsIn.flatMap(PaceFormat.integer), secs > maxWait {
-                writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                           note: "manual: \(trip.label) resets in \(PaceFormat.human(trip.resetsIn)) (> max-wait \(PaceFormat.human(maxWait))) — checkpoint & stop")
-                io.out("pace: \(tripReason(trip)) and resets in \(PaceFormat.human(trip.resetsIn)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(trip.resetsIn, now: io.now())).\n")
+            // Only three things end a pause, and the message names which:
+            // the window's cycle reset, the session moved to another login,
+            // or its usage really fell. A safe limit that rose is none of them.
+            let switched = !nowOn.isEmpty && !current.trip.account.isEmpty && nowOn != current.trip.account
+            let release = switched ? nil : PaceRules.release(current, rows: rows, now: io.now(), horizon: eta)
+            if switched || release != nil {
+                guard let trip else {
+                    try resume(from: current, switched: switched ? nowOn : nil, release: release)
+                }
+                // Cleared, and the gate's rules still trip: wait that out.
+                if switched {
+                    io.out("pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
+                }
+                current = anchor(trip)
+                held = current
+                announced = switched
+                overruled = false
+            }
+            // How it reads now, where this poll has the window: the anchor
+            // keeps the limit and the reset, the reading the rest.
+            let shown = (trip?.identity == current.trip.identity && trip?.account == current.trip.account)
+                ? trip! : current.trip
+            let left = remaining(current) ?? shown.resetsIn
+            if let secs = left.flatMap(PaceFormat.integer), secs > maxWait {
+                writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
+                           note: "manual: \(current.trip.label) resets in \(PaceFormat.human(left)) (> max-wait \(PaceFormat.human(maxWait))) — checkpoint & stop",
+                           tripped: current.trip)
+                io.out("pace: \(tripReason(shown)) and resets in \(PaceFormat.human(left)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(left, now: io.now())).\n")
                 throw PaceExit(code: 20)
             }
-            writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                       note: "waiting for \(trip.label) reset (~\(PaceFormat.human(trip.resetsIn)))")
-            if !waiting {
-                io.out("pace: \(tripReason(trip)) — waiting ~\(PaceFormat.human(trip.resetsIn)) for reset (\(PaceFormat.clock(trip.resetsIn, now: io.now())))…\n")
+            writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
+                       note: "waiting for \(current.trip.label) reset (~\(PaceFormat.human(left)))", tripped: current.trip)
+            if !announced {
+                io.out("pace: \(tripReason(shown)) — waiting ~\(PaceFormat.human(left)) for reset (\(PaceFormat.clock(left, now: io.now())))…\n")
+                announced = true
             }
-            waiting = true
+            if trip == nil, !overruled,
+               let row = rows.first(where: { $0.identity == current.trip.identity && $0.account == current.trip.account }) {
+                io.out("pace: \(row.label) at \(PaceFormat.percent(row.percentText))% would pass the limit now (\(PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)))%), but it paused at \(PaceFormat.awkNumber(current.trip.limit))% — holding until that window resets or falls below it.\n")
+                overruled = true
+            }
             io.sleep(TimeInterval(interval))
         }
+    }
+
+    /// The pause is over: say why, record it, exit 0.
+    private func resume(from anchor: PaceRules.Anchor, switched newAccount: String?,
+                        release: PaceRules.Release?) throws -> Never {
+        let label = anchor.trip.label
+        if let newAccount {
+            // Why the headroom came back matters: a reset is the window
+            // rolling over, a switch is another login's window entirely.
+            writeState("go", note: "account switched — headroom on \(newAccount.prefix(8)) (\(summary()))")
+            io.out("pace: account switched (\(anchor.trip.account.prefix(8)) → \(newAccount.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
+        } else {
+            switch release ?? .reset {
+            case .reset:
+                writeState("go", note: "reset — \(label) rolled over (\(summary()))")
+                io.out("pace: reset — the \(label) window rolled over; headroom restored (\(summary())). Resume.\n")
+            case .drop:
+                let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
+                let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"
+                writeState("go", note: "\(label) fell to \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary()))")
+                io.out("pace: usage fell — \(label) at \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary())). Resume.\n")
+            case .forecast:
+                writeState("go", note: "\(label) no longer projected to fill within \(PaceFormat.human(eta)) (\(summary()))")
+                io.out("pace: forecast cleared — \(label) is no longer projected to fill within \(PaceFormat.human(eta)) (\(summary())). Resume.\n")
+            }
+        }
+        throw PaceExit(code: 0)
     }
 
     /// The limit `gate` would apply to each binding window, one per line

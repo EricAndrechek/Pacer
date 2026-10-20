@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 
 /// One rate-limit window of one account, as `pace.sh` held it in its row
 /// format: the parsed percentage, and the other fields as Pacer wrote them
@@ -47,9 +48,13 @@ enum PaceRules {
 
     /// `--window`: a case-insensitive substring of the label or the identity.
     static func selected(_ rows: [PaceRow], window: String) -> [PaceRow] {
+        rows.filter { watches(label: $0.label, identity: $0.identity, window: window) }
+    }
+
+    static func watches(label: String, identity: String, window: String) -> Bool {
         let sel = window.lowercased()
-        if sel.isEmpty || sel == "all" { return rows }
-        return rows.filter { $0.label.lowercased().contains(sel) || $0.identity.lowercased().contains(sel) }
+        if sel.isEmpty || sel == "all" { return true }
+        return label.lowercased().contains(sel) || identity.lowercased().contains(sel)
     }
 
     /// Stands for "which model I am is not knowable here". Only windows that
@@ -133,6 +138,66 @@ enum PaceRules {
         /// it (less any margin) rather than from `--cap`.
         var safe = 0
         var fromSafe = true
+    }
+
+    /// What a paused `wait` is waiting out (#267): the window that tripped,
+    /// on which account, when its cycle resets, and the limit it tripped at.
+    /// Held for the whole wait because the safe limit is not: it rises as
+    /// paused sessions cut the burn, so re-judging every poll let the 97%
+    /// that paused at a safe limit of 97 "reset" a few polls later at 98,
+    /// with nothing reset.
+    struct Anchor: Equatable, Sendable {
+        var trip: Trip
+        let resetsAt: Date?
+    }
+
+    /// Why an anchored window no longer holds a wait.
+    enum Release: Equatable, Sendable {
+        /// Its cycle rolled over.
+        case reset
+        /// Its usage fell below the limit it paused at.
+        case drop
+        /// A forecast pause (`--eta`): it is no longer projected to fill.
+        case forecast
+    }
+
+    /// How long a window's cycle is, to tell "the next cycle" from jitter in
+    /// one cycle's reset instant. Unknown kinds take the shortest window
+    /// there is: a later cycle is at least that far off, and one cycle's
+    /// reset never drifts by half of it.
+    static func cycleLength(identity: String) -> TimeInterval {
+        if let fixed = PaceMath.windowDuration(for: identity) { return fixed }
+        let kind = identity.split(separator: "|", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        if kind.contains("week") || kind.contains("seven") { return 7 * 86_400 }
+        if kind.contains("day") || kind.contains("daily") { return 86_400 }
+        return 5 * 3_600
+    }
+
+    /// Whether the anchored window has cleared in `rows`: its reset is due
+    /// or past, a reading belongs to a later cycle (never `resetsAt ==`: the
+    /// instant jitters, AGENTS.md rule 9), or its usage fell below the
+    /// anchored limit (for a forecast pause, under it and no longer projected
+    /// within `horizon`). Nil while it holds. A window missing from the
+    /// reading holds until its reset: absent is not empty.
+    static func release(_ anchor: Anchor, rows: [PaceRow], now: Date, horizon: Int) -> Release? {
+        if let resetsAt = anchor.resetsAt, now >= resetsAt { return .reset }
+        guard let row = rows.first(where: {
+            $0.identity == anchor.trip.identity && $0.account == anchor.trip.account
+        }) else { return nil }
+        if let secs = row.resetsIn.map(PaceFormat.number) {
+            // A reset already due: the reading describes the window that ended.
+            if secs <= 0 { return .reset }
+            if let resetsAt = anchor.resetsAt,
+               !RateLimitCycle.contains(sampleReset: now.addingTimeInterval(secs), resets: resetsAt,
+                                        duration: cycleLength(identity: row.identity)) {
+                return .reset
+            }
+        }
+        guard row.percent < anchor.trip.limit else { return nil }
+        guard anchor.trip.why == "eta" else { return .drop }
+        let projected = horizon > 0 && PaceFormat.number(row.willHit) == 1
+            && row.hitEta.map { PaceFormat.number($0) <= Double(horizon) } == true
+        return projected ? nil : .forecast
     }
 
     /// The binding window that is at or over its limit — or, with a horizon,

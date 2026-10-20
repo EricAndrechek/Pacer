@@ -20,9 +20,11 @@ import Testing
 ///   there is no Pacer at all. `renamed` maps the script's two sentences.
 /// - The state file also records the gate's `eta` and `window`, so a later
 ///   `wait` judges by the same rules (#258), and whether its model came from
-///   `auto` (#264), so that `wait` asks again, and the gate's `--margin`
-///   (#263); `withoutAddedKeys` drops those lines from the port's file
-///   before comparing.
+///   `auto` (#264), so that `wait` asks again, the gate's `--margin`
+///   (#263), and for a pause, which window tripped on which account at what
+///   limit, so a `wait` holds that window until it clears (#267);
+///   `withoutAddedKeys` drops those lines from the port's file before
+///   comparing.
 /// - `status` re-gates a stale, expired or missing verdict (#266); the
 ///   script only reported it. The port's `status` steps run with
 ///   `--no-refresh`, which is the script's pure file read, so what they
@@ -158,7 +160,7 @@ struct PaceParityTests {
     }
 
     /// The keys the script never wrote.
-    static let addedKeys = ["eta", "window", "autoModel", "margin"]
+    static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit"]
 
     /// The port's state file minus the keys the script never wrote.
     static func withoutAddedKeys(_ state: String) -> String {

@@ -729,6 +729,187 @@ struct PaceCommandTests {
         #expect(result.status == 0)
         #expect(result.out.contains("holding the pause"))
         #expect(!result.out.contains("proceeding ungated"))
+        // 97% to 4% inside one cycle, with no reset time on the reading: a
+        // drop below the pause's 85%, and said as one.
+        #expect(result.out.contains("usage fell — 5h at 4%, below the 85% it paused at"), "\(result.out)")
+    }
+
+    // MARK: - wait resumes on a reset, a switch or a real drop, nothing else (#267)
+
+    /// 5h at 97% with a burn that puts the safe limit at 97; then the burn
+    /// falls as paused sessions stop, and the safe limit rises to 99.
+    private static func burning(_ ratio: String = "0.97", burn: String = "36",
+                                resets: String = "3600") -> String {
+        """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} \(ratio)
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} \(resets)
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org-work",window="five_hour"} \(burn)
+        pacer_rate_limit_sample_age_seconds{account="org-work",window="five_hour"} 0
+        pacer_rate_limit_used_ratio{account="org-work",window="seven_day"} 0.26
+        pacer_rate_limit_reset_seconds{account="org-work",window="seven_day"} 300000
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        """
+    }
+
+    /// The bug, as it happened: a pause at 5h 97% "reset" while still at 97%
+    /// because the safe limit rose.
+    @Test func aRisingSafeLimitIsNotAReset() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.burning(burn: "12")) }
+            // The next cycle: 3%, resetting five hours out.
+            if n == 4 { try? box.setMetrics(Self.burning("0.03", burn: "12", resets: "18000")) }
+        })
+        #expect(result.status == 0, "\(result.out)")
+        #expect(polls == 4, "it resumed before the window reset:\n\(result.out)")
+        #expect(result.out.contains("5h at 97% >= safe limit 97%"), "\(result.out)")
+        #expect(result.out.contains("would pass the limit now (99%), but it paused at 97%"), "\(result.out)")
+        #expect(result.out.contains("pace: reset — the 5h window rolled over; headroom restored (5h 3%, 7d 26%). Resume."),
+                "\(result.out)")
+        #expect(box.stateText.contains("reset — 5h rolled over"))
+    }
+
+    @Test func aWaitAfterAGateHoldsTheGatesTrip() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        let gate = runPace(box, ["gate"])
+        #expect(gate.status == 10)
+        #expect(box.stateText.contains("\"tripIdentity\": \"five_hour\""))
+        #expect(box.stateText.contains("\"tripAccount\": \"org-work\""))
+        #expect(box.stateText.contains("\"tripLimit\": 97"))
+        // Between the gate and the wait, the burn falls: on its own rules the
+        // wait would see headroom at its first look and leave at once.
+        try box.setMetrics(Self.burning(burn: "12"))
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 2 { try? box.setMetrics(Self.burning("0.95", burn: "12")) }
+        })
+        #expect(result.status == 0)
+        #expect(polls == 2, "\(result.out)")
+        #expect(result.out.contains("pace: usage fell — 5h at 95%, below the 97% it paused at (5h 95%, 7d 26%). Resume."),
+                "\(result.out)")
+        #expect(!result.out.contains("pace: reset"), "nothing reset:\n\(result.out)")
+    }
+
+    @Test func aDueResetEndsThePause() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            // Pacer's last reading of the window that just ended.
+            if n == 1 { try? box.setMetrics(Self.burning(resets: "-5")) }
+        })
+        #expect(result.status == 0)
+        #expect(result.out.contains("reset — the 5h window rolled over"), "\(result.out)")
+    }
+
+    @Test func aSwitchToASpentLoginDoesNotResume() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--cap", "85", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 {
+                try? box.setMetrics("""
+                pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.99
+                pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 900
+                pacer_account_info{account="org-home",name="h",active="true"} 1
+                """)
+            }
+            if n == 3 {
+                try? box.setMetrics("""
+                pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.04
+                pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 18000
+                pacer_account_info{account="org-home",name="h",active="true"} 1
+                """)
+            }
+        })
+        #expect(result.status == 0)
+        #expect(polls == 3, "\(result.out)")
+        #expect(result.out.contains("account switched (org-work → org-home), but 5h at 99% >= cap 85%"), "\(result.out)")
+        #expect(result.out.contains("reset — the 5h window rolled over"), "\(result.out)")
+    }
+
+    @Test func aWaitToldOtherRulesIgnoresTheGatesTrip() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        #expect(runPace(box, ["gate"]).status == 10)
+        // --cap 99 is this wait's own question, and 97% answers it.
+        let result = runPace(box, ["wait", "--cap", "99"])
+        #expect(result.status == 0)
+        #expect(!result.out.contains("waiting"), "\(result.out)")
+    }
+
+    // MARK: - The release rule itself (#267)
+
+    private static let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private static func row(_ percent: Double, resets: String?, willHit: String = "0",
+                            hitEta: String? = nil) -> PaceRow {
+        PaceRow(account: "org", identity: "five_hour", label: "5h", model: "", percent: percent,
+                resetsIn: resets, hitEta: hitEta, burn: nil, willHit: willHit, recentBurn: nil, sampleAge: nil)
+    }
+
+    private static func anchored(limit: Double, why: String = "cap", resetsIn: TimeInterval? = 3600) -> PaceRules.Anchor {
+        PaceRules.Anchor(
+            trip: PaceRules.Trip(label: "5h", percentText: "97", resetsIn: nil, why: why, hitEta: nil,
+                                 limit: limit, identity: "five_hour", account: "org"),
+            resetsAt: resetsIn.map { t0.addingTimeInterval($0) })
+    }
+
+    @Test func releaseHoldsAtTheSameUsageWhateverTheLimitNowIs() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "3500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+        #expect(PaceRules.release(a, rows: [Self.row(98, resets: "3500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+    }
+
+    @Test func releaseOnARealDrop() {
+        #expect(PaceRules.release(Self.anchored(limit: 97), rows: [Self.row(96.5, resets: "3500")],
+                                  now: Self.t0.addingTimeInterval(100), horizon: 0) == .drop)
+    }
+
+    @Test func releaseOnAResetByTheClockByADueReadingOrByALaterCycle() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "1")], now: Self.t0.addingTimeInterval(3600), horizon: 0) == .reset)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "0")], now: Self.t0.addingTimeInterval(100), horizon: 0) == .reset)
+        // The next cycle's reset, five hours after this one's.
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "21500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == .reset)
+    }
+
+    @Test func aJitteringResetInstantIsTheSameCycle() {
+        // The server re-serializes resets_at on every response; seconds of
+        // drift are the same cycle (AGENTS.md rule 9).
+        let a = Self.anchored(limit: 97)
+        for resets in ["3497", "3503", "3500.4"] {
+            #expect(PaceRules.release(a, rows: [Self.row(97, resets: resets)], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil,
+                    "\(resets)")
+        }
+    }
+
+    @Test func aWindowMissingFromTheReadingHoldsUntilItsReset() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+        #expect(PaceRules.release(a, rows: [], now: Self.t0.addingTimeInterval(3600), horizon: 0) == .reset)
+        let other = PaceRow(account: "org-other", identity: "five_hour", label: "5h", model: "", percent: 1,
+                            resetsIn: "3500", hitEta: nil, burn: nil, willHit: "0", recentBurn: nil, sampleAge: nil)
+        #expect(PaceRules.release(a, rows: [other], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil,
+                "another account's window is not this one")
+    }
+
+    @Test func aForecastPauseEndsWhenTheForecastClears() {
+        let a = Self.anchored(limit: 85, why: "eta")
+        let projected = Self.row(40, resets: "3500", willHit: "1", hitEta: "1800")
+        #expect(PaceRules.release(a, rows: [projected], now: Self.t0.addingTimeInterval(100), horizon: 5400) == nil)
+        let cleared = Self.row(40, resets: "3500", willHit: "0")
+        #expect(PaceRules.release(a, rows: [cleared], now: Self.t0.addingTimeInterval(100), horizon: 5400) == .forecast)
+        let farOff = Self.row(40, resets: "3500", willHit: "1", hitEta: "9000")
+        #expect(PaceRules.release(a, rows: [farOff], now: Self.t0.addingTimeInterval(100), horizon: 5400) == .forecast)
+    }
+
+    @Test func cycleLengthsByIdentity() {
+        #expect(PaceRules.cycleLength(identity: "five_hour") == 18_000)
+        #expect(PaceRules.cycleLength(identity: "seven_day") == 604_800)
+        #expect(PaceRules.cycleLength(identity: "weekly_scoped|Fable|") == 604_800)
+        #expect(PaceRules.cycleLength(identity: "daily|claude-opus-5|web") == 86_400)
+        #expect(PaceRules.cycleLength(identity: "something||cli") == 18_000)
     }
 
     // MARK: - Knowing what you are

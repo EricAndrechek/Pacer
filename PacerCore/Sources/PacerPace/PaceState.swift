@@ -32,6 +32,11 @@ struct PaceStateFile {
         let usedPercent: String?
         let resetsIn: String?
         let note: String
+        /// For a pause: the window that tripped, on which account, at what
+        /// limit, so a `wait` holds that one window until it clears (#267).
+        var tripIdentity = ""
+        var tripAccount = ""
+        var tripLimit: Double?
     }
 
     /// Written to a temporary file and renamed into place, so a reader never
@@ -57,6 +62,9 @@ struct PaceStateFile {
           "margin": \(v.margin),
           "usedPercent": \(v.usedPercent ?? "null"),
           "resetsInSeconds": \(v.resetsIn ?? "null"),
+          "tripIdentity": "\(v.tripIdentity)",
+          "tripAccount": "\(v.tripAccount)",
+          "tripLimit": \(v.tripLimit.map(PaceFormat.awkNumber) ?? "null"),
           "note": "\(v.note)",
           "updatedAt": "\(PaceFormat.utcStamp(now))"
         }
