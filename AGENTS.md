@@ -297,11 +297,15 @@ Rules that follow from it:
 
 - **Open every PR as a draft** (`gh pr create --draft`) once the work is
   pushable. CI runs on drafts.
-- **Mark it ready only on the owner's go-ahead to ship.** Marking it ready runs
+- **Mark it ready yourself once CI is green and the branch is installed with
+  `make install`** for the owner to use — his review is using that build, so
+  there is no go-ahead to wait for (since 2026-10-20). Only one branch can be
+  installed at a time; parallel PRs queue their installs. Marking it ready runs
   `.github/workflows/screenshots.yml`, which renders the README images on a
   `macos-26` runner and pushes a `docs: regenerate README screenshots` commit
   onto the PR branch — the owner reviews that commit before anything merges.
-- **Merge only after that review**, and always squash. A commit pushed by the
+- **Merge only on the owner's explicit yes**, after that review, and always
+  squash. A change after his review resets it. A commit pushed by the
   workflow's token triggers no CI run of its own; `main` is unprotected, so this
   does not block the merge, but say so when asking.
 - **Keep personal details out of commits and comments** — monitor layouts and
