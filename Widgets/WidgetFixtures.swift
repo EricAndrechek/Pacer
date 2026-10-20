@@ -144,7 +144,8 @@ enum WidgetFixtures {
             chart: PaceChartView.Data(
                 cycleStart: cycleStart, resetsAt: resets, durationSeconds: duration,
                 points: points, usedPct: usedPct,
-                projection: projection, projectionCrossesFullAt: crossing),
+                // The fixture's crossing stands for the engine's claim (red).
+                projection: projection, projectionCrossesFullAt: crossing, projectionClaimed: crossing != nil),
             resetsAt: resets)
     }
 

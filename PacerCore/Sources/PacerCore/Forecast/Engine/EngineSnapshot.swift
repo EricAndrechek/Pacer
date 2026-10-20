@@ -39,10 +39,16 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
         /// is a decision it can make without re-deriving the engine's fit.
         /// Optional so snapshots written before this field existed still decode.
         public let burnPctPerHour: Double?
+        /// Whether the crossing is the engine's claim (`BurnOutlook
+        /// .willHitLimitBeforeReset`, the red "limit in …") rather than a
+        /// crossing the line shows but the claim withholds (the orange "may hit
+        /// limit in …"). Charts colour the dashed line by it. Optional so older
+        /// snapshots still decode; nil reads as not claimed.
+        public let hitClaimed: Bool?
 
         public init(usedPct: Double, endPct: Double?, endLoPct: Double?, endHiPct: Double?,
                     crossingUnix: Double?, resetsUnix: Double, trajectory: [TrajectoryPoint],
-                    burnPctPerHour: Double? = nil) {
+                    burnPctPerHour: Double? = nil, hitClaimed: Bool? = nil) {
             self.usedPct = usedPct
             self.endPct = endPct
             self.endLoPct = endLoPct
@@ -51,6 +57,7 @@ public struct EngineSnapshot: Codable, Sendable, Equatable {
             self.resetsUnix = resetsUnix
             self.trajectory = trajectory
             self.burnPctPerHour = burnPctPerHour
+            self.hitClaimed = hitClaimed
         }
 
         public var crossingDate: Date? { crossingUnix.map { Date(timeIntervalSince1970: $0) } }
