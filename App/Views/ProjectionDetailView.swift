@@ -574,7 +574,7 @@ struct ProjectionDetailView: View {
                 Text("MODEL")
                 Spacer()
                 Text("TYPICAL ACCURACY, PAST CYCLES")
-                    .help("Typical |shown final − actual final| across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
+                    .help("Typical |shown final − actual final| at this half of the window (first or second) across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .foregroundStyle(.tertiary)

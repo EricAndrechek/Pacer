@@ -175,9 +175,11 @@ public enum EngineSelfEval {
 
     /// `weekly` picks the statistic `typicalAbsError` reports — the same one
     /// `bestMethod` ranks by, so the accuracy shown and the model chosen can't
-    /// disagree (see `typicalError`).
+    /// disagree (see `typicalError`). `phase` narrows `typicalAbsError` to that
+    /// half of the window's cuts, as `bestMethod(phase:)` does (#305); the
+    /// period count and `byStage` always cover every cut.
     public static func accuracy(surface: String = surfaceEOD, from records: [Record],
-                                weekly: Bool = false) -> Accuracy {
+                                weekly: Bool = false, phase: SelectionPhase? = nil) -> Accuracy {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let methods = byMethod.map { method, rows -> Accuracy.MethodStat in
             let periods = Set(rows.map { $0.periodKey }).count
@@ -192,7 +194,7 @@ public enum EngineSelfEval {
             }
             return .init(method: method,
                          medianAbsPctError: median(rows.map { $0.absPctError }),
-                         typicalAbsError: typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly),
+                         typicalAbsError: typicalError(phaseErrors(rows, phase), weekly: weekly),
                          periods: periods, byStage: byStage)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
@@ -301,12 +303,38 @@ public enum EngineSelfEval {
         return out
     }
 
+    /// The first or second half of a rate-limit window, for selection (#305):
+    /// cuts 0.2–0.4 and 0.5–0.9 of the grid, and the live cycle's elapsed
+    /// fraction on either side of 0.5. A model that reads the early, sparse
+    /// part of a window well is often not the one that reads its late part
+    /// well, and one all-cuts number picked the same model for both.
+    public enum SelectionPhase: Sendable, Equatable {
+        case early, late
+        public init(cut: Double) { self = cut < 0.5 ? .early : .late }
+    }
+
+    /// A method's absolute errors on `phase`'s cuts, or on every cut when nil.
+    static func phaseErrors(_ rows: [Record], _ phase: SelectionPhase?) -> [Double] {
+        rows.compactMap { r in
+            if let phase {
+                guard let cut = rlCutFraction(r.bucket), SelectionPhase(cut: cut) == phase else { return nil }
+            }
+            return abs(r.predicted - r.truth)
+        }
+    }
+
     /// Pick the best method from an accumulated record: lowest typical
     /// absolute error (`typicalError`: the median, the mean when `weekly`) in
     /// the surface's native units (percentage points for rate-limit windows),
-    /// breaking near-ties within 1.5 percentage points toward the simpler
-    /// model. This keeps selection consistent with the accuracy the UI
-    /// displays (`typicalAbsError`) — the two can never contradict each other.
+    /// breaking near-ties toward the simpler model. This keeps selection
+    /// consistent with the accuracy the UI displays (`typicalAbsError`, for
+    /// the same `phase`) — the two can never contradict each other.
+    ///
+    /// The near-tie band is 1.5 points, or `tieRelative` of the best error
+    /// when given. Rate-limit windows pass `EngineParams.rlTieRelative` (5%):
+    /// at a ~3 pp typical miss, 1.5 points tied most of the roster, so the
+    /// simplest model won whatever the record said. With `phase`, errors come
+    /// from that half of the window's cuts only (#305).
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
     ///
@@ -320,15 +348,20 @@ public enum EngineSelfEval {
         from records: [Record],
         minPeriods: Int = 2,
         complexity: [String: Int] = [:],
-        weekly: Bool = false
+        weekly: Bool = false,
+        phase: SelectionPhase? = nil,
+        tieRelative: Double? = nil
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
             guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
-            return (id, typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly), complexity[id] ?? 3)
+            let errs = phaseErrors(rows, phase)
+            guard !errs.isEmpty else { return nil }
+            return (id, typicalError(errs, weekly: weekly), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
-        return scored.filter { $0.err <= best.err + 1.5 }
+        let band = tieRelative.map { best.err * $0 } ?? 1.5
+        return scored.filter { $0.err <= best.err + band }
             .min { ($0.cx, $0.err) < ($1.cx, $1.err) }?.id
     }
 

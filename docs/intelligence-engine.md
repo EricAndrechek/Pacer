@@ -147,14 +147,26 @@ Three layers close the loop end-to-end (2026-07):
   automatically.
 - **New models compete at once, on a backtested record.** A model added to
   the roster is scored over every completed cycle the store holds, the
-  archive included, on the second refit after install (the record backfill),
-  so it arrives with as deep a record as the models it competes with, and
+  archive included, by the full-history pass on the first launch after the
+  update (`backfillRateLimitRecordIfNeeded`: background priority, a few
+  cycles at a time, and skipped while a per-account marker says the record
+  already covers the current scoring version and roster), so it arrives
+  with as deep a record as the models it competes with, and
   every model clears the same floor (2 scored periods). Until 2026-10 a new
   model was a "shadow" that needed 15 periods before it could be shown. That
   floor dates from when the record grew one live cycle at a time; with the
   backfill it only kept a model with hundreds of scored cycles off the
   screen. Removing it moved the walk-forward on full history from 3.94 to
   3.82 pp (5h median) and 8.77 to 8.57 pp (7d mean), coverage in range.
+- **Each half of a window picks its own model** (#305,
+  `EngineParams.rlSelectByPhase`). Selection reads the record's cuts in the
+  half of the window the live cycle is in (20–40% or 50–90%), and near-ties
+  go to the simpler model only within 5% of the best error
+  (`rlTieRelative`) rather than an absolute 1.5 points, which at a ~3 pp
+  miss tied most of the roster. The compare sheet's accuracy column reads
+  the same half, so the number shown and the model chosen agree. Adopted on
+  full history: 5h median 3.82 → 3.57 pp (fold-robust), 7d mean
+  8.57 → 8.18.
 
 The tuning loop itself lives out-of-app in `research/harness` (Python/uv):
 a walk-forward replay of this whole pipeline over the real store (~1s for

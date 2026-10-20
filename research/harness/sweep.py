@@ -41,9 +41,9 @@ DEFAULT_GRID = {
 }
 # Rate-limit selection knobs (#305), swept on their own: `sweep.py --selection`.
 # Harness-only until one passes the adoption rule; then it lands in Swift
-# (EngineSelfEval.bestMethod + EngineParams) in the same commit. On 2026-10-20
-# none did: phase selection was best on 5h (2.93 vs 3.04 pp, 4/4 folds) but
-# short of the 5% bar, with coverage 0.793 -> 0.767.
+# (EngineSelfEval.bestMethod + EngineParams) in the same commit. On 2026-10-20,
+# on full history, phase selection with a 5% relative tie passed on 5h (3.82 ->
+# 3.57 pp, fold-robust) and was adopted; recency did not pass.
 SELECTION_GRID = {
     "rl_select_by_phase": [False, True],
     "rl_selection_recency": [0, 30, 15],
