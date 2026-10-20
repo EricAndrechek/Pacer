@@ -13,6 +13,7 @@ uv run pacer_replay.py --source usagelimit      # scoped per-model windows (ZUSA
 uv run pacer_replay.py --source usagelimit --identity "weekly_scoped|Fable|"
 uv run sweep.py                   # grid-sweep the EngineParams knobs
 uv run sweep.py --full --json     # bigger grid, machine-readable
+uv run sweep.py --selection        # rate-limit selection knobs (#305), harness-only until adopted
 uv run weekly_check.py            # the standing check (drift/promotions/sweep)
 uv run weekly_check.py --install-agent   # LaunchAgent: Mondays 09:23
 ```
