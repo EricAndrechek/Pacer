@@ -232,6 +232,13 @@ public enum BurnTrajectory {
         public let typicalAbsError: Double
         public let coverage: Double
         public let isSelected: Bool
+        /// Why this model has no line this cycle ("nothing used yet this
+        /// cycle"), or nil when it projects. The compare sheet lists every
+        /// model the window knows, with its record, rather than only those
+        /// that fit (#307): at 0% a weekly window showed 3–4 rows of six.
+        public var unavailableReason: String? = nil
+        /// Whether this model has a line this cycle.
+        public var canProject: Bool { unavailableReason == nil }
         public var id: String { modelId }
 
         /// The same trajectory, marked as the one on display. Used when the
@@ -239,7 +246,8 @@ public enum BurnTrajectory {
         /// to stand in — see `rateLimitTrajectories`.
         public func selecting() -> ScoredTrajectory {
             ScoredTrajectory(modelId: modelId, complexity: complexity, trajectory: trajectory,
-                             typicalAbsError: typicalAbsError, coverage: coverage, isSelected: true)
+                             typicalAbsError: typicalAbsError, coverage: coverage, isSelected: true,
+                             unavailableReason: unavailableReason)
         }
     }
 
@@ -330,6 +338,7 @@ public extension BurnTrajectory.ScoredTrajectory {
         BurnTrajectory.ScoredTrajectory(
             modelId: modelId, complexity: complexity,
             trajectory: trajectory.reanchored(toTime: tailTime, value: tailValue, cap: cap),
-            typicalAbsError: typicalAbsError, coverage: coverage, isSelected: isSelected)
+            typicalAbsError: typicalAbsError, coverage: coverage, isSelected: isSelected,
+            unavailableReason: unavailableReason)
     }
 }

@@ -220,11 +220,15 @@ struct ProjectionDetailView: View {
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
 
+    /// The models with a line this cycle. The chart, its domain and spread are
+    /// built from these; the table lists every model (#307).
+    private var projecting: [BurnTrajectory.ScoredTrajectory] { trajectories.filter(\.canProject) }
+
     // MARK: - Zoom domain
 
     /// The instant all trajectories branch from (their shared first point).
     private var trajectoryNow: Date? {
-        trajectories.first?.trajectory.points.first?.at
+        projecting.first?.trajectory.points.first?.at
     }
 
     /// Chart x-axis right edge: the latest `at` across all trajectories' last
@@ -232,7 +236,7 @@ struct ProjectionDetailView: View {
     /// resetsAt. Falls back to resetsAt when trajectories are empty.
     private var xEnd: Date {
         guard let now = trajectoryNow,
-              let rawEnd = trajectories.compactMap({ $0.trajectory.points.last?.at }).max()
+              let rawEnd = projecting.compactMap({ $0.trajectory.points.last?.at }).max()
         else { return resetsAt }
         let span = rawEnd.timeIntervalSince(now)
         // Degenerate at the cap: every trajectory has collapsed to its origin
@@ -271,7 +275,7 @@ struct ProjectionDetailView: View {
     /// Highest value across filtered actuals + all trajectories.
     private var dataMax: Double {
         let actMax = filteredActuals.map(\.value).max() ?? 0
-        let trajMax = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
+        let trajMax = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.max() ?? 0
         return max(actMax, trajMax)
     }
 
@@ -289,7 +293,7 @@ struct ProjectionDetailView: View {
     /// the plot empty under the lines.
     private var yMin: Double {
         let actMin = filteredActuals.map(\.value).min() ?? 0
-        let trajMin = trajectories.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
+        let trajMin = projecting.flatMap { $0.trajectory.points.map(\.usedPercentage) }.min() ?? 0
         let minVisible = min(actMin, trajMin)
         guard minVisible > 30 else { return 0 }
         let pad = max(2, (dataMax - minVisible) * 0.1)
@@ -310,7 +314,7 @@ struct ProjectionDetailView: View {
     /// Values past a trajectory's last point extend at that last value, so
     /// stepping to xEnd (which may be before resetsAt) is correct.
     private var envelopeSteps: [EnvelopeStep] {
-        guard let now = trajectoryNow, !trajectories.isEmpty else { return [] }
+        guard let now = trajectoryNow, !projecting.isEmpty else { return [] }
         let span = xEnd.timeIntervalSince(now)
         guard span > 0 else { return [] }
         let steps = 24
@@ -318,7 +322,7 @@ struct ProjectionDetailView: View {
             let frac = Double(i) / Double(steps)
             let t = now.addingTimeInterval(span * frac)
             var vals: [Double] = []
-            for st in trajectories {
+            for st in projecting {
                 vals.append(interpolatedValue(st.trajectory.points, at: t))
             }
             guard !vals.isEmpty else { return nil }
@@ -351,7 +355,8 @@ struct ProjectionDetailView: View {
     /// point is 100 are sorted earliest-cap-first among ties. The selected
     /// model keeps its highlight but does not jump the order.
     private var ranked: [BurnTrajectory.ScoredTrajectory] {
-        trajectories.sorted { a, b in
+        // Models without a line go last, keeping the engine's order.
+        projecting.sorted { a, b in
             let aVal = a.trajectory.points.last?.usedPercentage ?? 0
             let bVal = b.trajectory.points.last?.usedPercentage ?? 0
             if aVal != bVal { return aVal > bVal }
@@ -362,7 +367,7 @@ struct ProjectionDetailView: View {
             case (.none, .some):     return false
             default:                 return false
             }
-        }
+        } + trajectories.filter { !$0.canProject }
     }
 
     // MARK: - Body
@@ -383,7 +388,7 @@ struct ProjectionDetailView: View {
     /// "why isn't the best one picked?".
     private var legendText: String {
         var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard."
-        let best = trajectories.filter { $0.typicalAbsError.isFinite }.min { $0.typicalAbsError < $1.typicalAbsError }
+        let best = projecting.filter { $0.typicalAbsError.isFinite }.min { $0.typicalAbsError < $1.typicalAbsError }
         if let best, let selected = trajectories.first(where: { $0.isSelected }),
            selected.modelId != best.modelId {
             s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
@@ -527,7 +532,7 @@ struct ProjectionDetailView: View {
         let dash: [CGFloat]
     }
     private var styledLines: [StyledLine] {
-        trajectories.map { st in
+        projecting.map { st in
             StyledLine(
                 id: st.modelId,
                 points: st.trajectory.points,
@@ -591,7 +596,7 @@ struct ProjectionDetailView: View {
                 Text("MODEL")
                 Spacer()
                 Text("TYPICAL ACCURACY, PAST CYCLES")
-                    .help("Median |projected final − actual final| across your completed cycles, in percentage points — lower is better")
+                    .help("Typical |shown final − actual final| across your completed cycles (median; mean on weekly windows), in percentage points — lower is better")
             }
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .foregroundStyle(.tertiary)
@@ -602,13 +607,18 @@ struct ProjectionDetailView: View {
             ForEach(Array(ranked.enumerated()), id: \.element.id) { idx, st in
                 HStack(spacing: 10) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(color(st.modelId))
+                        .fill(color(st.modelId).opacity(st.canProject ? 1 : 0.35))
                         .frame(width: 14, height: 4)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(BurnTrajectory.displayName(st.modelId))
                             .font(.system(size: 13, weight: st.isSelected ? .semibold : .regular))
                         if let caption = shadowCaption(st) {
                             Text("\(Image(systemName: "flask")) \(caption)")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                        if let reason = st.unavailableReason {
+                            Text("can't project yet · \(reason)")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
                         }

@@ -869,7 +869,7 @@ struct PaceChartCard: View {
                     let id = Self.columnID(account, key)
                     if let outlook { out[id] = outlook }
                     ends[id] = end
-                    if let chosen = list.first(where: { $0.isSelected }) ?? list.first {
+                    if let chosen = list.first(where: { $0.isSelected }) ?? list.first(where: \.canProject) {
                         sel[id] = WindowProjection(trajectory: chosen.trajectory)
                     }
                 }
