@@ -126,7 +126,7 @@ struct RLDisplayedParityTests {
         #expect(acc.methods.first { $0.method == "saturating" }?.typicalAbsError == 2)
     }
 
-    @Test func theSecondRefitScoresCyclesOlderThanTheRefitWindow() async throws {
+    @Test func theFullPassScoresCyclesOlderThanTheRefitWindow() async throws {
         let container = try PacerStore.makeInMemoryContainer()
         let cal = Self.utc
         let duration: TimeInterval = 5 * 3600
@@ -161,8 +161,8 @@ struct RLDisplayedParityTests {
         let engine = UsageIntelligenceEngine(modelContainer: container)
         await engine.recompute(now: now, calendar: cal)
         #expect(try oldRows() == 0)          // the first refit reads 32 days only, and stays fast
-        await engine.recompute(now: now, calendar: cal)
-        #expect(try oldRows() > 0)           // the second one scores the full history
+        await engine.backfillRateLimitRecordIfNeeded(now: now, calendar: cal, pause: .zero)
+        #expect(try oldRows() > 0)           // the full-history pass, run on its own, scores the rest
         let rows = try ModelContext(container).fetch(FetchDescriptor<EngineEvalOutcome>())
         #expect(rows.filter { $0.surface.hasPrefix("rl-") }.allSatisfy { EngineSelfEval.isCurrentRLBucket($0.bucket) })
     }

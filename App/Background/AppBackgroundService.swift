@@ -79,6 +79,8 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
+    /// The once-per-launch full-history record pass; see `startRecordBackfill`.
+    private var recordBackfillTask: Task<Void, Never>?
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -607,6 +609,23 @@ final class AppBackgroundService {
     /// - Returns: whether a refit actually ran, so callers whose work is only
     ///   meaningful against a fresh fit can skip themselves when it didn't.
     @discardableResult
+    /// After the first fit is on screen, give each engine its full-history
+    /// record pass (`UsageIntelligenceEngine.backfillRateLimitRecordIfNeeded`):
+    /// at background priority, never awaited by a refit, one engine after
+    /// another, a few cycles at a time. An engine whose record already covers
+    /// its history skips it on a single meta read, which after the first launch
+    /// of a build is every engine. When a pass did add outcomes, one more refit
+    /// puts them to use (bands, cycle facts, selection) without waiting for
+    /// the next poll.
+    private func startRecordBackfill(_ engines: [UsageIntelligenceEngine]) {
+        guard recordBackfillTask == nil else { return }
+        recordBackfillTask = Task.detached(priority: .background) { [weak self] in
+            var added = 0
+            for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
+            if added > 0 { _ = await self?.recomputeEngineIfDue(force: true) }
+        }
+    }
+
     private func recomputeEngineIfDue(force: Bool = false,
                                       rateLimitsChanged: Bool = true) async -> Bool {
         let now = Date()
@@ -657,6 +676,7 @@ final class AppBackgroundService {
         let refitMs = Int(Date().timeIntervalSince(started) * 1000)
         await exportEngineSnapshots(live)
         NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
+        startRecordBackfill(live.map { $0.engine })
 
         // The refit is the most expensive recurring thing Pacer does and it
         // had never been timed — which is how it went unnoticed that it runs

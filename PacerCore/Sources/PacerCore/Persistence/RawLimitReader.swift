@@ -81,6 +81,54 @@ enum RawLimitReader {
         }
     }
 
+    /// One account's archived `rate_limit` rows (`AccountUsageArchive`), every
+    /// one, ascending: the readings that have left the 35-day live table. The
+    /// record backfill reads them, ~124,000 rows on a real store, which through
+    /// SwiftData was most of a 5.6 s read. Rows without a window or a
+    /// percentage carry nothing to forecast and are left out in SQL, since a
+    /// row that fails to map would abandon the whole read.
+    static func archivedRateRows(storeURL: URL, account: String) -> [EngineFeatures.RateRow]? {
+        query(storeURL: storeURL, account: account, since: .distantPast,
+              sql: """
+              SELECT ZWINDOW, ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT
+              FROM ZACCOUNTUSAGEARCHIVE
+              WHERE ZSAMPLEDAT >= ? AND ZKIND = '\(AccountUsageArchive.kindRateLimit)'
+                AND ZWINDOW IS NOT NULL AND ZUSEDPERCENTAGE IS NOT NULL
+              """) { stmt in
+            guard let window = text(stmt, 0) else { return nil }
+            return EngineFeatures.RateRow(
+                window: window,
+                at: date(stmt, 1),
+                usedPercentage: sqlite3_column_double(stmt, 2),
+                resetsAt: optionalDate(stmt, 3))
+        }
+    }
+
+    /// One account's archived `usage_limit` rows, mapped the way
+    /// `UsageIntelligenceEngine.fetchArchivedLimits` maps them: a missing group
+    /// reads as "", a missing label as the identity, a missing flag as false.
+    static func archivedScopedRows(storeURL: URL, account: String) -> [EngineFeatures.ScopedRow]? {
+        query(storeURL: storeURL, account: account, since: .distantPast,
+              sql: """
+              SELECT ZIDENTITY, ZGROUP, ZLABEL, ZMODELID, ZMODELDISPLAYNAME,
+                     ZSURFACE, ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT, ZISACTIVE
+              FROM ZACCOUNTUSAGEARCHIVE
+              WHERE ZSAMPLEDAT >= ? AND ZKIND = '\(AccountUsageArchive.kindUsageLimit)'
+                AND ZIDENTITY IS NOT NULL AND ZUSEDPERCENTAGE IS NOT NULL
+              """) { stmt in
+            guard let identity = text(stmt, 0) else { return nil }
+            return EngineFeatures.ScopedRow(
+                identity: identity, group: text(stmt, 1) ?? "", label: text(stmt, 2) ?? identity,
+                modelId: text(stmt, 3), modelDisplayName: text(stmt, 4),
+                surface: text(stmt, 5),
+                at: date(stmt, 6),
+                usedPercentage: sqlite3_column_double(stmt, 7),
+                resetsAt: optionalDate(stmt, 8),
+                inLatestBatch: false,
+                isActive: sqlite3_column_int(stmt, 9) != 0)
+        }
+    }
+
     // MARK: - Machinery
 
     /// The account predicate is appended rather than parameterised over a
