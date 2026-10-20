@@ -852,6 +852,7 @@ struct PaceChartCard: View {
         var nextSelected: [String: WindowProjection] = [:]
         var nextOutlooks: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
         var nextEnds: [String: Estimate] = [:]
+        var noLine: [String: String] = [:]
 
         for entry in plan {
             let engine = engines.engine(forAccount: entry.accountId)
@@ -860,10 +861,13 @@ struct PaceChartCard: View {
             let computed = await askEngine {
                 () -> ([String: WindowProjection],
                        [String: UsageIntelligenceEngine.BurnOutlook],
-                       [String: Estimate]) in
+                       [String: Estimate],
+                       [String: String]) in
                 var sel: [String: WindowProjection] = [:]
                 var out: [String: UsageIntelligenceEngine.BurnOutlook] = [:]
                 var ends: [String: Estimate] = [:]
+                var why: [String: String] = [:]
+                let fittedAt = await engine.fittedAt()
                 func absorb(key: String, outlook: UsageIntelligenceEngine.BurnOutlook?,
                             end: Estimate, list: [BurnTrajectory.ScoredTrajectory]) {
                     let id = Self.columnID(account, key)
@@ -871,6 +875,13 @@ struct PaceChartCard: View {
                     ends[id] = end
                     if let chosen = list.first(where: { $0.isSelected }) ?? list.first(where: \.canProject) {
                         sel[id] = WindowProjection(trajectory: chosen.trajectory)
+                    } else {
+                        // Why this column has no line (#308): the engine hasn't
+                        // fitted yet, there is no live cycle to fit, or every
+                        // model declined it.
+                        why[id] = fittedAt == nil ? "engine not fitted yet"
+                            : list.isEmpty ? "no live cycle to fit"
+                            : "no model can project (\(list.first?.unavailableReason ?? "?"))"
                     }
                 }
                 for window in RateLimitWindowKind.allCases {
@@ -885,11 +896,13 @@ struct PaceChartCard: View {
                            end: await engine.ask(.scopedOutlook(id)),
                            list: await engine.rateLimitTrajectories(windowKey: id))
                 }
-                return (sel, out, ends)
+                if let fittedAt { why["fit|\(account ?? "")"] = "\(Int(Date().timeIntervalSince(fittedAt)))s" }
+                return (sel, out, ends, why)
             }
             nextSelected.merge(computed.0) { _, new in new }
             nextOutlooks.merge(computed.1) { _, new in new }
             nextEnds.merge(computed.2) { _, new in new }
+            noLine.merge(computed.3) { _, new in new }
         }
 
         projections = nextSelected
@@ -898,6 +911,26 @@ struct PaceChartCard: View {
         Log.write("PaceChartCard",
                   "projections for \(nextEnds.count) window(s) across \(plan.count) account(s) in "
                     + "\(Int(Date().timeIntervalSince(started) * 1000))ms")
+        // Attribute every column drawn without a forecast line (#308): the
+        // engine's reason, or a projection the column withholds because its
+        // reading is stale (`ReadingFreshness`, the rule PaceColumn applies).
+        // The fit ages say how old the answers are.
+        let now = Date()
+        var missing: [String] = []
+        for col in columns(now: now) {
+            let tag = "\(col.windowKey.prefix(12))·\(col.accountId.map { String($0.suffix(4)) } ?? "-")"
+            if nextSelected[col.id] == nil {
+                missing.append("\(tag): \(noLine[col.id] ?? "no projection")")
+            } else if ReadingFreshness.isStale(readingAt: col.readingAt, newestAnyAccountAt: col.newestAnyAccountAt,
+                                               typicalGap: col.typicalPollGap) {
+                missing.append("\(tag): reading stale, line withheld")
+            }
+        }
+        if !missing.isEmpty {
+            let ages = noLine.filter { $0.key.hasPrefix("fit|") }
+                .map { "\($0.key.dropFirst(4).suffix(4)):\($0.value)" }.sorted().joined(separator: ",")
+            Log.write("PaceChartCard", "no line: " + missing.joined(separator: " | ") + " [fit age \(ages)]")
+        }
     }
 
     // MARK: - Body

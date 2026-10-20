@@ -111,6 +111,11 @@ public actor UsageIntelligenceEngine {
     /// `newOutcomesRL` skips fully-scored cycles, so later launches are cheap.
     private var rateLimitRecordBackfilled = false
     private var refitsCompleted = 0
+    /// When this engine's current fit was made, nil before the first refit.
+    private var lastRefitAt: Date?
+    /// When this engine's current fit was made, nil before the first refit:
+    /// the age a surface states when it attributes a missing line (#308).
+    public func fittedAt() -> Date? { lastRefitAt }
 
     /// One scoreboard row, as the refit slices them.
     typealias EvalRow = (key: String, surface: String, record: EngineSelfEval.Record)
@@ -211,6 +216,12 @@ public actor UsageIntelligenceEngine {
             return out
         }
         let recomputeStarted = Date()
+        // Wall time alone can't tell a slow refit from one the process slept or
+        // starved through: the 321–396 s refits in the scan log overlapped a
+        // 172 s main-thread stall that used 343 ms of CPU (#308). Awake time
+        // (stops while the machine sleeps) and process CPU go beside it.
+        let awakeStarted = SuspendingClock.now
+        let cpuStarted = clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID)
 
         let daily = timed("daily") { fetchDaily() }
         let hourly = timed("hourly") { fetchHourly() }
@@ -336,6 +347,7 @@ public actor UsageIntelligenceEngine {
         // tags — behind the change/heartbeat policy.
         timed("snapshots") { recordPredictionSnapshots(f, now: now) }
         refitsCompleted += 1
+        lastRefitAt = Date()
 
         let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
         // Only when it is worth reading about. A warm refit on a small store
@@ -349,7 +361,13 @@ public actor UsageIntelligenceEngine {
             // the active login's, so this is how you see two engines doing the
             // same expensive work in one cycle.
             let acct = "limitAcct:" + (limitAccountId.map { String($0.suffix(4)) } ?? "nil")
-            Log.write("Engine", "recompute \(scopeLabel) \(total)ms {\(detail)} \(acct)")
+            let awake = awakeStarted.duration(to: .now)
+            let awakeMs = Int(awake.components.seconds * 1000 + awake.components.attoseconds / 1_000_000_000_000_000)
+            // Process-wide: concurrent scope refits share it, so it bounds this
+            // refit's CPU from above.
+            let cpuMs = Int((clock_gettime_nsec_np(CLOCK_PROCESS_CPUTIME_ID) - cpuStarted) / 1_000_000)
+            Log.write("Engine", "recompute \(scopeLabel) \(total)ms awake:\(awakeMs)ms cpuProc:\(cpuMs)ms "
+                      + "{\(detail)} \(acct)")
         }
     }
 
