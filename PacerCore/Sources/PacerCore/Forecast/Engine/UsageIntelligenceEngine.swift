@@ -978,7 +978,13 @@ public actor UsageIntelligenceEngine {
                     points.append(.init(at: crossing, usedPercentage: 100))
                     break
                 }
-                points.append(.init(at: date, usedPercentage: min(100, max(0, projection(date) + anchor))))
+                // Floored at the live reading, as the shown value is
+                // (`BurnTrajectory.displayedAtReset`): a meter does not fall
+                // inside a window, and a fit whose slope turned negative (the
+                // Kalman filter after a jump then a flat stretch, #312) drew a
+                // line falling to 22% under a 60% reading. Now every line ends
+                // at the value that model would show.
+                points.append(.init(at: date, usedPercentage: min(100, max(current.usedNow, projection(date) + anchor))))
             }
             let stat = statFor(model.id)
             return BurnTrajectory.ScoredTrajectory(
