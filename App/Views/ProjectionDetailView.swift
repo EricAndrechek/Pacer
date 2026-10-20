@@ -216,6 +216,7 @@ struct ProjectionDetailView: View {
         "saturating": .orange,
         "kalman-trend": .pink,
         "diurnal-rate": .teal,
+        "recent-rate": .indigo,
     ]
     private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
 

@@ -434,7 +434,7 @@ public actor UsageIntelligenceEngine {
     /// diurnal as established, a scoped session cap as a shadow.
     public static func rlShadowFloors(duration: TimeInterval) -> [String: Int] {
         let floor = EngineParams.current.shadowPromotionMinPeriods
-        var floors = ["kalman-trend": floor]
+        var floors = ["kalman-trend": floor, "recent-rate": floor]
         if !WindowSpec.isWeeklyScale(duration: duration) { floors["diurnal-rate"] = floor }
         return floors
     }

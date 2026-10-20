@@ -398,6 +398,25 @@ def linear_recent(c: Partial, params: Params):
     return lambda t: slope * ((t - c.cycle_start) / 3600.0) + intercept
 
 
+def recent_rate(c: Partial, params: Params):
+    """Port of BurnTrajectory.RecentRate (#272): the meter's rise over the last
+    hour (a day on weekly-scale windows), extrapolated from the latest reading."""
+    if len(c.samples) < 2:
+        return None
+    frm = c.now - (24 * 3600.0 if is_weekly_scale(c.resets_at - c.cycle_start) else 3600.0)
+    start = None
+    if frm > c.cycle_start:
+        prior = [s for s in c.samples if s[0] <= frm]
+        start = prior[-1] if prior else None
+    t0, u0 = start if start else (c.cycle_start, 0.0)
+    last_t, last_u = c.samples[-1]
+    span = last_t - t0
+    if span < 300:
+        return None
+    rate = max(0.0, (last_u - u0) / span)
+    return lambda t: last_u + rate * (t - last_t)
+
+
 def _trend_fit(c: Partial, params: Params, *, min_samples: int, damping_tau_s: float,
                max_accel_frac: float):
     """TrendEstimator.fit port (weighted LS in half-life units)."""
@@ -588,9 +607,9 @@ def diurnal_fit(table: list[list[float]]):
 
 MODEL_COMPLEXITY = {
     "linear-recent": 1, "recency-weighted": 2, "saturating": 3,
-    "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3,
+    "damped-acceleration": 4, "kalman-trend": 5, "diurnal-rate": 3, "recent-rate": 1,
 }
-SHADOW_IDS = {"five_hour": {"kalman-trend", "diurnal-rate"}, "seven_day": {"kalman-trend"}}
+SHADOW_IDS = {"five_hour": {"kalman-trend", "diurnal-rate", "recent-rate"}, "seven_day": {"kalman-trend", "recent-rate"}}
 
 # Mirror of Swift's WindowSpec.isWeeklyScale (24h threshold). Windows at least a
 # day long are weekly-cadence: diurnal is an established candidate (not a shadow)
@@ -616,7 +635,8 @@ def headline_key(duration: float) -> str:
 def shadow_ids(duration: float) -> set[str]:
     """Kalman is a shadow everywhere; diurnal is a shadow on session-cadence
     windows only (mirror of UsageIntelligenceEngine.rlShadowFloors(duration:))."""
-    return {"kalman-trend"} if is_weekly_scale(duration) else {"kalman-trend", "diurnal-rate"}
+    base = {"kalman-trend", "recent-rate"}
+    return base if is_weekly_scale(duration) else base | {"diurnal-rate"}
 
 
 def scoped_duration(group: str, reset_spacings: list[float] | None = None) -> float:
@@ -637,6 +657,7 @@ def model_roster(diurnal_table):
         "damped-acceleration": damped_acceleration,
         "saturating": saturating,
         "kalman-trend": kalman_trend,
+        "recent-rate": recent_rate,
         "diurnal-rate": diurnal_fit(diurnal_table),
     }
 
@@ -1022,7 +1043,8 @@ def summarize(scores: list[CaseScore]) -> dict:
     return out
 
 
-PARITY_MODELS = ["linear-recent", "recency-weighted", "damped-acceleration", "saturating", "kalman-trend"]
+PARITY_MODELS = ["linear-recent", "recency-weighted", "damped-acceleration", "saturating", "kalman-trend",
+                 "recent-rate"]
 
 
 def parity_fixture() -> dict:
