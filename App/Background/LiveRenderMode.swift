@@ -43,6 +43,8 @@ enum LiveRenderMode {
     /// comma-separated subset when iterating on one of them.
     enum Page: String, CaseIterable {
         case dashboard, history, projects, models, now, pace, badges, settings
+        /// The compare-models sheet for the scope's 5-hour and 7-day windows.
+        case projection, projectionWeekly
 
         /// Wide enough that the balanced grids take their many-column layout —
         /// a narrow render exercises a fallback the user is not looking at.
@@ -53,6 +55,7 @@ enum LiveRenderMode {
             case .settings: return 820
             case .pace: return 1100
             case .now, .badges: return 900
+            case .projection, .projectionWeekly: return 760
             }
         }
 
@@ -69,6 +72,12 @@ enum LiveRenderMode {
             // SwiftData, and this process opens the store read-only, so a
             // stray click is not possible and a write would fail loudly.
             case .settings:  SettingsView()
+            case .projection:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.fiveHour,
+                                       limitAccountId: UsageScope.shared.limitAccountId)
+            case .projectionWeekly:
+                ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
+                                       limitAccountId: UsageScope.shared.limitAccountId)
             }
         }
     }

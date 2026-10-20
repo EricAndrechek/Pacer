@@ -891,7 +891,37 @@ public actor UsageIntelligenceEngine {
         // (`resolveModel`, #301). The chart used to run its own fallback here
         // when the selected model declined, so it drew a line no chip
         // described.
-        return scored
+        //
+        // Every model the window knows follows, the roster and any method its
+        // record holds, each that has no line this cycle flagged with why
+        // (#307). The sheet listed only the models that fit, so its rows came
+        // and went with the cycle.
+        let fitted = Set(scored.map(\.modelId))
+        let recorded = Set(accuracy?.methods.map(\.method) ?? [])
+        let known = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"])
+            .filter { id in rf.roster.contains { $0.id == id } || recorded.contains(id) }
+        let complexities = Self.rlComplexities()
+        let unavailable = known.filter { !fitted.contains($0) }.map { id -> BurnTrajectory.ScoredTrajectory in
+            let stat = statFor(id)
+            return BurnTrajectory.ScoredTrajectory(
+                modelId: id, complexity: complexities[id] ?? 3,
+                trajectory: .init(modelId: id, points: [], crossesFullAt: nil),
+                typicalAbsError: stat?.typicalAbsError ?? .infinity,
+                coverage: stat == nil ? 0 : 1, isSelected: false,
+                unavailableReason: Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id },
+                                                          current: current))
+        }
+        return scored + unavailable
+    }
+
+    /// Why a known model has no line this cycle: the conditions its `fit`
+    /// declines on, in the cycle's terms. The models don't say which guard
+    /// they tripped, so this reads the cycle; the wording is the fact, terse.
+    static func unavailableReason(inRoster: Bool, current: BurnTrajectory.PartialCycle) -> String {
+        if !inRoster { return "needs a completed cycle" }        // diurnal, with none in the window
+        if current.samples.count < 3 { return "fewer than 3 readings yet" }
+        if current.usedNow <= 0 { return "nothing used yet this cycle" }
+        return "too early in the cycle"
     }
 
     // MARK: - Pace vs norm
