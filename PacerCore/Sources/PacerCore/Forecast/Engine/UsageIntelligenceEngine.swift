@@ -651,6 +651,30 @@ public actor UsageIntelligenceEngine {
         /// The red "limit in …" claim: claimable and confirmed. Every surface
         /// that says it (chip, menu bar, alert) reads this one.
         public var willHitLimitBeforeReset: Bool { hitClaimable && claimConfirmed }
+
+        /// Why a crossing the line shows is said as "may hit limit" rather
+        /// than claimed. Without it the chip fell through to the at-reset
+        /// value, which the line's own crossing clamps to 100: a window at
+        /// 46% read "≈100% at reset", the limit stated as the reset's problem.
+        public enum HitWithheld: Sendable, Equatable {
+            /// Under `BurnRate.warningUsedFloor` used. An early burst
+            /// extrapolated over hours is what most unconfirmed claims were.
+            case earlyInWindow
+            /// The slow end of the calibrated range (the line shifted by its
+            /// own q10) still resets first.
+            case slowEndResetsFirst
+            /// Claimable on this refit, not yet on the one before.
+            case unconfirmed
+        }
+
+        /// Nil when nothing crosses before the reset, or when the crossing is
+        /// claimed outright.
+        public var hitWithheld: HitWithheld? {
+            guard projectedFullAt != nil, !willHitLimitBeforeReset else { return nil }
+            if usedPct < BurnRate.warningUsedFloor { return .earlyInWindow }
+            if !hitClaimable { return .slowEndResetsFirst }
+            return .unconfirmed
+        }
     }
 
     public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
