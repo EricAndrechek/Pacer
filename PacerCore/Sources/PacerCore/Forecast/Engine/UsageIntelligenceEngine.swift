@@ -149,7 +149,15 @@ public actor UsageIntelligenceEngine {
 
     struct RateLimitFit {
         var roster: [any BurnTrajectory.Model]
+        /// The record's pick (or the cold backtest's).
         var selectedId: String?
+        /// The model this refit SHOWS: `selectedId` when it fits the live
+        /// cycle, else the stand-in `resolveModel` picks. Every surface reads
+        /// this one: the outlook, the estimate, the trajectories, the band, the
+        /// trail. `nil` only when no model fits.
+        var resolvedId: String?
+        /// The selected model a stand-in replaced, for the trail.
+        var replacedId: String? { resolvedId != selectedId ? selectedId : nil }
         /// Stratified additive conformal calibrators keyed
         /// `"early|weekday"`-style, plus the `"pooled"` fallback. Strata
         /// thinner than 10 scores aren't built — lookups fall back to pooled,
@@ -280,7 +288,12 @@ public actor UsageIntelligenceEngine {
             }
         }
 
-        self.fit = timed("makeFit") { Self.makeFit(f, eodPools: pools, rlSelection: rlSelection) }
+        let rlAccuracy = Dictionary(f.windows.compactMap { w in
+            accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        self.fit = timed("makeFit") {
+            Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy)
+        }
 
         // Prediction trail: record what this refit would tell the user —
         // the live answers with their bands, residual evidence, and version
@@ -494,7 +507,7 @@ public actor UsageIntelligenceEngine {
         guard let current = currentOpt else {
             return .insufficient(method: "rate-limit", note: "no live cycle")
         }
-        let model = rf.roster.first { $0.id == rf.selectedId } ?? rf.roster.first
+        let model = rf.roster.first { $0.id == rf.resolvedId }
         guard let model, let projection = model.fit(current) else {
             return .insufficient(method: "rate-limit", note: "too early in the cycle to project", support: rf.historyCount)
         }
@@ -600,7 +613,7 @@ public actor UsageIntelligenceEngine {
                 / (last.at.timeIntervalSince(first.at) / 3600)
         }
 
-        let model = rf.roster.first { $0.id == rf.selectedId } ?? rf.roster.first
+        let model = rf.roster.first { $0.id == rf.resolvedId }
         guard let model, let projection = model.fit(current) else {
             return BurnOutlook(slopePercentPerHour: slope, projectedFullAt: nil, etaSeconds: nil,
                                projectedFullAtEarliest: nil, projectedFullAtLatest: nil,
@@ -788,27 +801,15 @@ public actor UsageIntelligenceEngine {
                 trajectory: .init(modelId: model.id, points: points, crossesFullAt: crossing),
                 typicalAbsError: stat?.typicalAbsError ?? .infinity,
                 coverage: stat == nil ? 0 : 1,
-                isSelected: model.id == rf.selectedId)
+                isSelected: model.id == rf.resolvedId)
         }
 
-        // The scoreboard can name a model that is not in the roster: selection
-        // reads the accumulated record, while the roster is what will actually
-        // *fit this cycle*, and a model may decline (the diurnal model early in
-        // a cycle, every model at 0%). When that happened nothing was marked
-        // selected, and the chart drew `first` — roster order, which is
-        // arbitrary. On a 7-day window three hours past its reset that meant an
-        // unvetted curve presented as the forecast.
-        //
-        // Fall back explicitly: best realized accuracy among the models that
-        // did fit, ties to the simpler one — the same rule the scoreboard uses.
-        guard !scored.contains(where: \.isSelected), let best = scored.min(by: {
-            $0.typicalAbsError != $1.typicalAbsError
-                ? $0.typicalAbsError < $1.typicalAbsError
-                : $0.complexity < $1.complexity
-        }) else { return scored }
-        return scored.map {
-            $0.modelId == best.modelId ? $0.selecting() : $0
-        }
+        // `isSelected` is the model `makeFit` resolved for this cycle, the
+        // same one the outlook, the estimate, the band and the trail use
+        // (`resolveModel`, #301). The chart used to run its own fallback here
+        // when the selected model declined, so it drew a line no chip
+        // described.
+        return scored
     }
 
     // MARK: - Pace vs norm
@@ -908,7 +909,8 @@ public actor UsageIntelligenceEngine {
     /// Build the per-user fit. `eodPools` are the per-cut trimmed pools
     /// resolved by `recompute` from the persisted self-eval scoreboard
     /// (empty = median-of-all-candidates, the safe cold-start prior).
-    static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:]) -> Fit {
+    static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
+                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:]) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -926,7 +928,7 @@ public actor UsageIntelligenceEngine {
             let key = window.key
             let duration = window.duration
             guard let samples = f.rateLimit[key], !samples.isEmpty else { continue }
-            let (_, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
+            let (current, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
 
             // The diurnal model competes on every window: established on
             // weekly-cadence windows (where the idle structure lives), a
@@ -975,7 +977,12 @@ public actor UsageIntelligenceEngine {
                     scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
                     ?? (WindowSpec.isWeeklyScale(duration: duration) ? "diurnal-rate" : "recency-weighted")
             }
-            let model = roster.first { $0.id == selectedId } ?? roster.first
+            // Resolve what this refit SHOWS, once: every surface reads it, and
+            // the band is calibrated on the model actually drawn.
+            let resolvedId = Self.resolveModel(
+                roster: roster, selectedId: selectedId, current: current,
+                accuracy: rlAccuracy[key], shadowFloors: Self.rlShadowFloors(duration: duration))
+            let model = roster.first { $0.id == resolvedId }
 
             // Cap-hit frequency facts over completed cycles (for honest
             // natural-frequency risk phrasing in the UI).
@@ -987,12 +994,38 @@ public actor UsageIntelligenceEngine {
             }
 
             fit.rl[key] = RateLimitFit(
-                roster: roster, selectedId: selectedId,
+                roster: roster, selectedId: selectedId, resolvedId: resolvedId,
                 calibrators: model.map { stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar) } ?? [:],
                 duration: duration, historyCount: history.count,
                 cyclesObserved: history.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
         }
         return fit
+    }
+
+    /// The model a window shows this refit (#301): the selected one when it
+    /// can fit the live cycle, else the best-recorded model that can. Promoted
+    /// models come before unpromoted shadows (display is earned), then the
+    /// lowest typical error, then the simpler model, the scoreboard's tie rule.
+    ///
+    /// The selected model declines routinely: diurnal-rate before 5% of the
+    /// expected activity has happened, saturating at 0%. Only the chart used to
+    /// fall back, so the at-reset value, ETA, band and chip were missing for
+    /// 24.7% of one account's live 5-hour minutes while a dashed line was drawn.
+    /// With no live cycle there is nothing to fit, so the selection stands.
+    static func resolveModel(roster: [any BurnTrajectory.Model], selectedId: String,
+                             current: BurnTrajectory.PartialCycle?,
+                             accuracy: EngineSelfEval.Accuracy?,
+                             shadowFloors: [String: Int]) -> String? {
+        guard let current else { return roster.contains { $0.id == selectedId } ? selectedId : roster.first?.id }
+        if let selected = roster.first(where: { $0.id == selectedId }), selected.fit(current) != nil {
+            return selectedId
+        }
+        func rank(_ m: any BurnTrajectory.Model) -> (Int, Double, Int) {
+            let stat = accuracy?.methods.first { $0.method == m.id }
+            let unpromoted = shadowFloors[m.id].map { (stat?.periods ?? 0) < $0 } ?? false
+            return (unpromoted ? 1 : 0, stat?.typicalAbsError ?? .infinity, m.complexity)
+        }
+        return roster.filter { $0.fit(current) != nil }.min { rank($0) < rank($1) }?.id
     }
 
     /// Remainder-ratio conformal calibration: walk-forward of the SAME pooled
@@ -1219,6 +1252,7 @@ public actor UsageIntelligenceEngine {
         var bandStratum: String?
         var residualCount: Int?
         var spendSoFar: Double?
+        var replacedMethod: String?
 
         /// The row's identity at DISPLAY precision: a new row is worth writing
         /// exactly when the user-visible facts would change (utilisation to
@@ -1235,7 +1269,7 @@ public actor UsageIntelligenceEngine {
             func t(_ d: Date?) -> String { d.map { String(Int($0.timeIntervalSince1970 / 900)) } ?? "-" }
             let isCost = surface == EngineSelfEval.surfaceEOD || surface == "month"
             let v = isCost ? sig2 : pp
-            return [surface, method, confidence, periodKey,
+            return [surface, method, replacedMethod ?? "-", confidence, periodKey,
                     v(value), v(lo80), v(hi80),
                     t(crossingAt), t(crossingEarliest), t(crossingLatest)].joined(separator: "|")
         }
@@ -1275,7 +1309,8 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: o.projectedFullAtLatest,
                 usedPct: o.usedPct, anchorShift: o.anchorShift,
                 slopePercentPerHour: o.slopePercentPerHour,
-                bandStratum: stratum, residualCount: residuals))
+                bandStratum: stratum, residualCount: residuals,
+                replacedMethod: fit.rl[key]?.replacedId))
         }
 
         let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
@@ -1323,7 +1358,7 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: d.crossingLatest, usedPct: d.usedPct,
                 anchorShift: d.anchorShift, slopePercentPerHour: d.slopePercentPerHour,
                 bandStratum: d.bandStratum, residualCount: d.residualCount,
-                spendSoFar: d.spendSoFar))
+                spendSoFar: d.spendSoFar, replacedMethod: d.replacedMethod))
             lastSnapshotSig[d.surface] = (now, sig)
             dirty = true
         }

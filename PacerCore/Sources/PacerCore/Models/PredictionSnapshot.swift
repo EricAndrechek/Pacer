@@ -72,6 +72,11 @@ public final class PredictionSnapshot {
     /// Spend already realized within the period at prediction time.
     public var spendSoFar: Double?
 
+    /// The selected model a stand-in replaced on this row, when the selected
+    /// one could not fit the live cycle (#301). `method` is always the model
+    /// actually drawn; this says what it stood in for. Nil when they're the same.
+    public var replacedMethod: String?
+
     /// Snapshots older than this are pruned (the eval table keeps the
     /// predicted-vs-truth accuracy record forever; this table is the
     /// high-resolution debugging trail).
@@ -101,7 +106,8 @@ public final class PredictionSnapshot {
         slopePercentPerHour: Double? = nil,
         bandStratum: String? = nil,
         residualCount: Int? = nil,
-        spendSoFar: Double? = nil
+        spendSoFar: Double? = nil,
+        replacedMethod: String? = nil
     ) {
         self.recordedAt = recordedAt
         self.surface = surface
@@ -127,5 +133,6 @@ public final class PredictionSnapshot {
         self.bandStratum = bandStratum
         self.residualCount = residualCount
         self.spendSoFar = spendSoFar
+        self.replacedMethod = replacedMethod
     }
 }

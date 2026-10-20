@@ -41,6 +41,9 @@ public struct PacerPredictionHistory: Codable, Sendable {
         public let bandStratum: String?
         public let residualCount: Int?
         public let spendSoFar: Double?
+        /// The selected model a stand-in replaced, when the selected one
+        /// could not fit the live cycle; nil when `method` is the selection.
+        public let replacedMethod: String?
     }
 
     public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
@@ -80,7 +83,7 @@ public enum PacerPredictionHistoryBuilder {
                 crossingLatest: s.crossingLatest, usedPct: s.usedPct,
                 anchorShift: s.anchorShift, slopePercentPerHour: s.slopePercentPerHour,
                 bandStratum: s.bandStratum, residualCount: s.residualCount,
-                spendSoFar: s.spendSoFar)
+                spendSoFar: s.spendSoFar, replacedMethod: s.replacedMethod)
         }
         return PacerPredictionHistory(
             schemaVersion: 1, generatedAt: now,

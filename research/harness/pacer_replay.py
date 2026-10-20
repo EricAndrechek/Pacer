@@ -707,6 +707,39 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
+def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[str, list[float]]],
+                  shadow_set: set[str], params: Params, weekly: bool = False):
+    """Port of UsageIntelligenceEngine.resolveModel (#301): the chosen model if
+    it fits this moment, else the best-recorded model that does — promoted
+    models before unpromoted shadows, then the lowest typical error, then the
+    simpler one. Returns (model id, projection), or (None, None) if nothing
+    fits. The app used to show nothing when its selection declined (and the
+    harness skipped those cases), while the chart drew a stand-in."""
+    proj = roster[chosen](partial, params) if chosen in roster else None
+    if proj is not None:
+        return chosen, proj
+
+    def rank(mid: str):
+        per = record.get(mid, {})
+        errs = sorted(e for es in per.values() for e in es)
+        n = len(errs)
+        if not n:
+            err = math.inf
+        elif weekly:
+            err = sum(errs) / n
+        else:
+            err = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
+        unpromoted = mid in shadow_set and len(per) < params.shadow_promotion_min_periods
+        return (1 if unpromoted else 0, err, MODEL_COMPLEXITY.get(mid, 3))
+
+    best = None
+    for mid, fit in roster.items():          # roster order breaks full ties, as in Swift
+        p = fit(partial, params)
+        if p is not None and (best is None or rank(mid) < best[0]):
+            best = (rank(mid), mid, p)
+    return (best[1], best[2]) if best else (None, None)
+
+
 def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params,
                 weekly: bool = False) -> str | None:
     """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
@@ -781,7 +814,8 @@ def replay_window(window: str, samples, activity_grid, params: Params,
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
         chosen = best_method(record, shadow_set, params, weekly) or (
             "diurnal-rate" if weekly else "recency-weighted")
-        residuals = collect_residuals(roster[chosen], params, history, mode=conformal_mode)
+        # Calibrators for whichever model resolves at a cut, built on demand.
+        residual_cache = {chosen: collect_residuals(roster[chosen], params, history, mode=conformal_mode)}
 
         for cf in RL_CUT_FRACTIONS:
             cut_now = cyc.cycle_start + cyc.duration * cf
@@ -789,9 +823,12 @@ def replay_window(window: str, samples, activity_grid, params: Params,
             if len(seen) < 3:
                 continue
             partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
-            proj = roster[chosen](partial, params)
+            shown, proj = resolve_model(roster, chosen, partial, record, shadow_set, params, weekly)
             if proj is None:
                 continue
+            if shown not in residual_cache:
+                residual_cache[shown] = collect_residuals(roster[shown], params, history, mode=conformal_mode)
+            residuals = residual_cache[shown]
             # The displayed value is both the point and the band's centre: the
             # residuals it's calibrated on are measured from it too.
             point = displayed_at_reset(proj, partial)
@@ -818,7 +855,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 p_hit = sum(w for w, r in strat if point + r >= 100.0) / total_w
             else:
                 p_hit = 1.0 if point >= 100.0 else 0.0
-            scores.append(CaseScore(i, cf, chosen, abs(point - truth), covered,
+            scores.append(CaseScore(i, cf, shown, abs(point - truth), covered,
                                     pb10, pb90, (p_hit - (1.0 if truth_hit else 0.0)) ** 2,
                                     truth_hit, band_stated))
 
