@@ -3,7 +3,7 @@ import Foundation
 
 /// A scratch directory holding a `metrics` fixture, which `PACER_API=file://…`
 /// serves, and the run's state file.
-final class PaceSandbox {
+final class PaceSandbox: Sendable {
     let dir: URL
     init(metrics: String?) throws {
         dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -44,9 +44,14 @@ final class PaceCapture: @unchecked Sendable {
 /// count so far, which is where a test changes the world between two polls.
 /// More than 50 sleeps ends the wait by giving it headroom and records the
 /// overrun, so a wait that misses its cue fails instead of spinning.
+///
+/// `onGet` sees every request (to count reads of Pacer), and `nap` replaces
+/// the short pause a `status` takes while another reader refreshes.
 func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
              unsetState: Bool = false, extra: [String: String] = [:],
-             onSleep: ((Int) -> Void)? = nil) -> PaceResult {
+             onSleep: ((Int) -> Void)? = nil,
+             onGet: ((URLRequest) -> Void)? = nil,
+             nap: ((TimeInterval) -> Void)? = nil) -> PaceResult {
     var env = ["HOME": box.dir.path, "PATH": "/usr/bin:/bin"]
     env["PACER_API"] = api ?? "file://\(box.dir.path)"
     if !unsetState { env["PACE_STATE"] = box.stateURL.path }
@@ -63,9 +68,33 @@ func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
                 try? box.setMetrics("pacer_rate_limit_used_ratio{account=\"x\",window=\"five_hour\"} 0\n")
             }
         },
-        get: PaceHTTP.get, gitBranch: { _ in nil })
+        get: { request in
+            onGet?(request)
+            return PaceHTTP.get(request)
+        },
+        gitBranch: { _ in nil },
+        nap: nap ?? { Thread.sleep(forTimeInterval: $0) })
     let status = Pace.run(args, environment: env, io: io)
     return PaceResult(status: status, out: capture.text)
+}
+
+/// Requests seen, from any thread.
+final class PaceRequestLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+    func record(_ request: URLRequest) {
+        lock.withLock { paths.append(request.url?.lastPathComponent ?? "") }
+    }
+    var all: [String] { lock.withLock { paths } }
+    func count(_ last: String) -> Int { all.filter { $0 == last }.count }
+}
+
+/// Rewrite a state file's `updatedAt` to `seconds` ago.
+func age(_ box: PaceSandbox, by seconds: TimeInterval) throws {
+    let then = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-seconds))
+    let rewritten = box.stateText.replacingOccurrences(
+        of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(then)""#, options: .regularExpression)
+    try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
 }
 
 /// The smallest HTTP server that answers one status to every path. `file`,

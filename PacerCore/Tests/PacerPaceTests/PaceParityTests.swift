@@ -23,6 +23,10 @@ import Testing
 ///   `auto` (#264), so that `wait` asks again, and the gate's `--margin`
 ///   (#263); `withoutAddedKeys` drops those lines from the port's file
 ///   before comparing.
+/// - `status` re-gates a stale, expired or missing verdict (#266); the
+///   script only reported it. The port's `status` steps run with
+///   `--no-refresh`, which is the script's pure file read, so what they
+///   print is still compared.
 /// - The port has subcommands the script did not (`safecap`, #263), so its
 ///   "unknown subcommand" message lists more; `renamed` maps the list.
 /// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
@@ -127,7 +131,8 @@ struct PaceParityTests {
             let capture = PaceCapture()
             let io = PaceIO(out: capture.append, err: capture.append, now: Date.init,
                             sleep: { _ in }, get: PaceHTTP.get, gitBranch: { _ in nil })
-            return PaceResult(status: Pace.run(args, environment: env, io: io), out: capture.text)
+            let ported = args.first == "status" ? args + ["--no-refresh"] : args
+            return PaceResult(status: Pace.run(ported, environment: env, io: io), out: capture.text)
         }.map { Outcome(status: $0.status, output: $0.output, state: Self.withoutAddedKeys($0.state)) }
         #expect(port.count == script.count)
         for (i, (s, p)) in zip(script, port).enumerated() {

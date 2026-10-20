@@ -78,6 +78,9 @@ struct PaceStateFile {
         return safe.isEmpty ? nil : String(safe.prefix(8))
     }
 
+    /// The lock a refreshing `status` holds beside this file (#266).
+    var lockPath: String { path + ".lock" }
+
     /// How long another session's default verdict is kept. Any verdict is
     /// stale after `--max-age` (15 minutes by default), so a week is only
     /// about not deleting the file of a session that is still around.
@@ -133,5 +136,47 @@ struct PaceStateFile {
         guard let stamp = quoted("updatedAt"), !stamp.isEmpty,
               let written = PaceFormat.isoFormatter.date(from: stamp) else { return nil }
         return Int(floor(now.timeIntervalSince1970)) - Int(written.timeIntervalSince1970)
+    }
+}
+
+/// An exclusive, non-blocking lock beside a state file, so that of many
+/// readers finding one stale verdict, one re-gates (#266).
+///
+/// `flock(2)` on a file that stays in place rather than a lock directory:
+/// the kernel drops the lock when its holder exits, however it exits, so a
+/// reader killed mid-refresh leaves nothing behind for the next one to wait
+/// out or break. The empty `.lock` file stays; `pruneSessionFiles` removes it
+/// with its state file.
+final class PaceRefreshLock {
+    enum Outcome { case acquired, held, unavailable }
+
+    private let path: String
+    private var fd: Int32 = -1
+    private var locked = false
+
+    init(path: String) { self.path = path }
+    deinit { release() }
+
+    func acquire() -> Outcome {
+        if locked { return .acquired }
+        if fd < 0 {
+            try? FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
+            if fd < 0 { return .unavailable }
+        }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            locked = true
+            return .acquired
+        }
+        return errno == EWOULDBLOCK ? .held : .unavailable
+    }
+
+    func release() {
+        guard fd >= 0 else { return }
+        if locked { flock(fd, LOCK_UN) }
+        close(fd)
+        fd = -1
+        locked = false
     }
 }

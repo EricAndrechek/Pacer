@@ -67,9 +67,14 @@ struct PaceCommandTests {
 
     @Test func statusWithNoStateFileIsUnknownRatherThanGo() throws {
         let box = try PaceSandbox(metrics: Self.metrics)
-        let result = runPace(box, ["status"])
+        let result = runPace(box, ["status", "--no-refresh"])
         #expect(result.status == 3)
         #expect(result.out.contains("no state file"))
+        // With no Pacer to re-gate from, still unknown rather than go.
+        let off = try PaceSandbox(metrics: nil)
+        let unread = runPace(off, ["status", "--retries", "1"])
+        #expect(unread.status == 3, "\(unread.out)")
+        #expect(unread.out.contains("unknown"))
     }
 
     @Test func aWindowSelectorNarrowsWhatCounts() throws {
@@ -205,7 +210,7 @@ struct PaceCommandTests {
             of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(old)""#,
             options: .regularExpression)
         try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
-        let stale = runPace(box, ["status"])
+        let stale = runPace(box, ["status", "--no-refresh"])
         #expect(stale.status == 3)
         #expect(stale.out.hasPrefix("stale:"))
     }
@@ -238,10 +243,14 @@ struct PaceCommandTests {
             of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(later)""#,
             options: .regularExpression)
         try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
-        let expired = runPace(box, ["status"])
+        let expired = runPace(box, ["status", "--no-refresh"])
         #expect(expired.status == 3)
         #expect(expired.out.hasPrefix("stale:"), "\(expired.out)")
         #expect(expired.out.contains("5h"))
+        // Re-gated, by the pause's own --cap 85, against a window still at 90%.
+        let regated = runPace(box, ["status"])
+        #expect(regated.status == 10, "\(regated.out)")
+        #expect(regated.out.contains("the 5h pause had expired — re-gated"), "\(regated.out)")
     }
 
     @Test func namedRunsKeepSeparateState() throws {
@@ -259,6 +268,141 @@ struct PaceCommandTests {
         #expect(alpha.status == 10)
         #expect(FileManager.default.fileExists(
             atPath: home.appendingPathComponent(".claude/pace/state-alpha.json").path))
+    }
+
+    // MARK: - status re-gates a stale verdict, once for every reader (#266)
+
+    @Test func aStaleVerdictIsReGatedByItsOwnSettings() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--window", "5h", "--model", "opus"]).status == 0)
+        try age(box, by: 7200)
+        // The 5h window has climbed past the gate's own cap since.
+        try box.setMetrics(Self.metrics.replacingOccurrences(
+            of: "window=\"five_hour\"} 0.12", with: "window=\"five_hour\"} 0.90"))
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status"], onGet: log.record)
+        #expect(result.status == 10, "\(result.out)")
+        #expect(result.out.contains("paused: 5h at 90% >= cap 85%"), "\(result.out)")
+        #expect(result.out.contains("the verdict was 120m old — re-gated"))
+        #expect(log.count("metrics") == 1)
+        #expect(box.stateText.contains("\"cap\": 85"))
+        #expect(box.stateText.contains("\"window\": \"5h\""))
+        #expect(box.stateText.contains("\"model\": \"opus\""))
+        // Fresh now: the next reader reads the file and nothing else.
+        let next = PaceRequestLog()
+        #expect(runPace(box, ["status"], onGet: next.record).status == 10)
+        #expect(next.all.isEmpty)
+    }
+
+    @Test func noRefreshIsThePureFileRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let before = box.stateText
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status", "--no-refresh"], onGet: log.record)
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(log.all.isEmpty)
+        #expect(box.stateText == before)
+    }
+
+    @Test func aMissingVerdictIsGatedOnFirstRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["status"])
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.hasSuffix("go\n"), "\(result.out)")
+        #expect(result.out.contains("no verdict yet — re-gated"))
+        #expect(box.stateText.contains("\"status\": \"go\""))
+    }
+
+    @Test func aStaleVerdictForAnotherModelIsNotReGated() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--model", "opus"])
+        try age(box, by: 7200)
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status", "--model", "fable"], onGet: log.record)
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(log.all.isEmpty, "re-gating opus's verdict cannot answer fable")
+    }
+
+    @Test func statusAsksPacerNothingWhileTheVerdictIsFresh() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        let log = PaceRequestLog()
+        // A session id used to cost a /v1/session lookup on every status.
+        let result = runPace(box, ["status"], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"], onGet: log.record)
+        #expect(result.status == 0)
+        #expect(log.all.isEmpty, "\(log.all)")
+    }
+
+    @Test func aReGateThatCannotReadPacerIsReadOnce() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        try FileManager.default.removeItem(at: box.metricsURL)
+        let log = PaceRequestLog()
+        let first = runPace(box, ["status", "--retries", "1"], onGet: log.record)
+        #expect(first.status == 3)
+        #expect(first.out.contains("unknown"), "\(first.out)")
+        #expect(log.count("metrics") == 1)
+        let second = runPace(box, ["status", "--retries", "1"], onGet: log.record)
+        #expect(second.status == 3)
+        #expect(log.count("metrics") == 1, "a fresh 'unknown' is not re-read until it is stale")
+    }
+
+    @Test func manyReadersOfOneStaleVerdictCostOneRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let log = PaceRequestLog()
+        let lanes = 8
+        let codes = PaceRequestLog()
+        DispatchQueue.concurrentPerform(iterations: lanes) { _ in
+            let result = runPace(box, ["status"], onGet: { request in
+                log.record(request)
+                // A slow read, so the other lanes find the lock held.
+                Thread.sleep(forTimeInterval: 0.3)
+            })
+            codes.record(URLRequest(url: URL(string: "x:/\(result.status)")!))
+        }
+        #expect(log.count("metrics") == 1, "\(log.all)")
+        #expect(codes.all == Array(repeating: "0", count: lanes), "\(codes.all)")
+    }
+
+    @Test func aReaderThatLosesTheRaceTakesTheWinnersVerdict() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let held = PaceRefreshLock(path: box.stateURL.path + ".lock")
+        #expect(held.acquire() == .acquired)
+        defer { held.release() }
+        let log = PaceRequestLog()
+        var naps = 0
+        let result = runPace(box, ["status"], onGet: log.record, nap: { _ in
+            naps += 1
+            // The winner writes its verdict.
+            if naps == 2 { try? age(box, by: 0) }
+        })
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.contains("another reader re-gated it"))
+        #expect(naps == 2)
+        #expect(log.all.isEmpty)
+    }
+
+    @Test func aReaderThatLosesTheRaceGivesUpAfterAboutThreeSeconds() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let held = PaceRefreshLock(path: box.stateURL.path + ".lock")
+        #expect(held.acquire() == .acquired)
+        defer { held.release() }
+        var napped = 0.0
+        let result = runPace(box, ["status"], nap: { napped += $0 })
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(abs(napped - 3) < 0.01, "\(napped)")
     }
 
     // MARK: - One verdict per session by default (#265)
@@ -279,10 +423,12 @@ struct PaceCommandTests {
         #expect(FileManager.default.fileExists(atPath: file.path))
         #expect(runPace(box, ["status"], unsetState: true, extra: mine).status == 10)
         // ...pauses nobody else.
-        let other = runPace(box, ["status"], unsetState: true,
-                            extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "77aa0000-1111"])
+        let theirs = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "77aa0000-1111"]
+        let other = runPace(box, ["status", "--no-refresh"], unsetState: true, extra: theirs)
         #expect(other.status == 3)
         #expect(other.out.contains("state-session-77aa0000.json"), "\(other.out)")
+        #expect(runPace(box, ["status"], unsetState: true, extra: theirs).status == 0,
+                "their own verdict, gated on first read (#266)")
         #expect(!FileManager.default.fileExists(
             atPath: home.appendingPathComponent(".claude/pace/state.json").path))
     }
@@ -882,6 +1028,19 @@ struct PaceCommandTests {
         let wait = runPace(box, ["wait", "--interval", "5", "--max-wait", "60"], extra: env)
         #expect(wait.out.contains("--model auto"), "\(wait.out)")
         #expect(wait.status == 20)
+    }
+
+    @Test func statusModelAutoTakesAnAutoVerdictWithoutAskingPacer() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let env = ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base]
+        #expect(runPace(box, ["gate", "--cap", "85", "--margin", "2"], extra: env).status == 0)
+        let log = PaceRequestLog()
+        #expect(runPace(box, ["status", "--model", "auto"], extra: env, onGet: log.record).status == 0)
+        #expect(log.all.isEmpty, "\(log.all)")
+        // ...but still by its margin.
+        #expect(runPace(box, ["status", "--model", "auto", "--margin", "0"], extra: env).status == 3)
     }
 
     @Test func aBareStatusInAKnownSessionJudgesTheVerdictItFinds() throws {
