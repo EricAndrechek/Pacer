@@ -95,10 +95,15 @@ struct PaceOfflineTests {
         let container = try Self.store()
         let served = try Self.runServed(args, container: container)
         let offline = try Self.run(args, api: Self.deadAPI, offline: Self.offline(container))
-        // `pace`'s own clock still reads the wall: the verdict's timestamp.
+        // `pace`'s own clock still reads the wall: the verdict's timestamp,
+        // a reset's local time and when a GO runs out, which two runs a
+        // moment apart can see in different minutes.
         func normal(_ s: String) -> String {
             s.replacingOccurrences(of: #""(at|updatedAt)": "[^"]+""#, with: "\"$1\": \"<now>\"",
                                    options: .regularExpression)
+                .replacingOccurrences(of: #"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} (AM|PM)\b"#,
+                                      with: "<clock>", options: .regularExpression)
+                .replacingOccurrences(of: #"\b\d{2}:\d{2}Z\b"#, with: "<utc>", options: .regularExpression)
         }
         #expect(offline.status == served.status)
         #expect(normal(offline.out) == normal(served.out))

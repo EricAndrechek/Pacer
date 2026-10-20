@@ -35,6 +35,16 @@ import Testing
 /// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
 ///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:
 ///   the harness runs without a session id, where both bind every window.
+/// - A GO records when it runs out, `goUntil`: the soonest binding window's
+///   headroom at its burn, within `--max-age` (#313). `status` prints such a
+///   GO as `go (until 22:41Z)` and treats it as stale after;
+///   `withoutGoUntil` maps that line back to the script's `go`, and
+///   `withoutAddedKeys` drops the key. The gate's GO line says when it runs
+///   out only where a window projects inside `--max-age`, which no fixture
+///   here does, so that line is still compared as it was.
+/// - On a login switch, `wait` resumes only onto a login with
+///   `--resume-headroom` below the paused window's limit (#313). `wait` is
+///   not compared (above).
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -135,7 +145,8 @@ struct PaceParityTests {
             let io = PaceIO(out: capture.append, err: capture.append, now: Date.init,
                             sleep: { _ in }, get: PaceHTTP.get, gitBranch: { _ in nil })
             let ported = args.first == "status" ? args + ["--no-refresh"] : args
-            return PaceResult(status: Pace.run(ported, environment: env, io: io), out: capture.text)
+            return PaceResult(status: Pace.run(ported, environment: env, io: io),
+                              out: Self.withoutGoUntil(capture.text))
         }.map { Outcome(status: $0.status, output: $0.output, state: Self.withoutAddedKeys($0.state)) }
         #expect(port.count == script.count)
         for (i, (s, p)) in zip(script, port).enumerated() {
@@ -161,7 +172,13 @@ struct PaceParityTests {
     }
 
     /// The keys the script never wrote.
-    static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit"]
+    static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit",
+                            "goUntil"]
+
+    /// `status`'s `go (until 22:41Z)` as the script's `go`.
+    static func withoutGoUntil(_ text: String) -> String {
+        text.replacingOccurrences(of: #"(?m)^go \(until \d{2}:\d{2}Z\)$"#, with: "go", options: .regularExpression)
+    }
 
     /// The port's state file minus the keys the script never wrote.
     static func withoutAddedKeys(_ state: String) -> String {

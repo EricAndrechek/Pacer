@@ -150,9 +150,13 @@ public enum Pace {
       status                 read the state file; 0=go 10=paused 3=unknown or
                              stale. A stale, expired or missing verdict is
                              re-gated first, by one reader for all of them
-                             (--no-refresh: never ask Pacer)
+                             (--no-refresh: never ask Pacer). A GO runs out
+                             early when a window it binds is projected to
+                             reach its limit: `go (until 22:41Z)`
       wait  [--cap N]        block until the tripping window resets; 0=resume
-                             20=beyond --max-wait (checkpoint & stop) 2=no Pacer
+                             20=beyond --max-wait (checkpoint & stop) 2=no Pacer.
+                             A login switch resumes only onto a login with
+                             --resume-headroom left below that window's limit
       feedback "TEXT"        report a wrong verdict or a missing flag: saved to
                              ~/.claude/pace/feedback.jsonl, with a link to file
                              it on GitHub. Nothing is sent anywhere
@@ -173,7 +177,13 @@ public enum Pace {
       --interval S           how often `wait` looks; default 15, floor 5
       --max-wait S           longest reset `wait` sleeps for; default 21600
       --max-age S            how old a verdict may be before `status` calls
-                             it stale; default 900
+                             it stale; default 900. A GO's projected expiry
+                             (`goUntil`) can only shorten it
+      --resume-headroom N|auto
+                             after a login switch, points `wait` needs below
+                             the paused window's limit on the new login to
+                             resume; default auto: 20 minutes at its recent
+                             burn, at least 5. 0 resumes on any headroom
       --retries N            reads of Pacer before giving up; default 3
       --state FILE           the state file; default state-session-<id>.json
                              in ~/.claude/pace for a Claude Code session,
@@ -182,8 +192,9 @@ public enum Pace {
 
     Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
       PACE_SESSION_API (override just the session lookup's base URL),
-      PACE_MODEL, PACE_MARGIN, PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
-      orchestrations on one machine do not overwrite each other's verdict)
+      PACE_MODEL, PACE_MARGIN, PACE_RESUME_HEADROOM, PACE_ACCOUNT, PACE_STATE,
+      PACE_RUN (names a per-run state file, so two orchestrations on one
+      machine do not overwrite each other's verdict)
 
     """
 }
@@ -219,6 +230,15 @@ final class PaceRun {
     private var maxAge = 900
     /// `status --no-refresh`: the pure file read, never asking Pacer (#266).
     private var noRefresh = false
+    /// `--resume-headroom`: points below the paused window's limit a `wait`
+    /// needs on a new login before it resumes onto it (#313). Nil is `auto`.
+    private var resumeHeadroom: Int?
+    /// The burn of each window this `wait` has read, by account, so a switch
+    /// onto a login that reports none can be judged by the rate of the login
+    /// being left: those are the sessions about to move.
+    private var seenBurn: [String: Double] = [:]
+    /// When the last GO this run wrote runs out, for the gate's line.
+    private var lastGoUntil: Date?
     private var model: String
     /// The model was `auto` before it was resolved, so a verdict records
     /// that and a later `wait` or refresh asks again rather than reusing
@@ -300,6 +320,7 @@ final class PaceRun {
             case "--retries":  retries = try integer(try value(), flag)
             case "--state":    statePath = try value(); stateIsSessionDefault = false
             case "--no-refresh": noRefresh = true
+            case "--resume-headroom": resumeHeadroom = try room(try value(), flag); given.insert("resume-headroom")
             case "-h", "--help":
                 io.out(Pace.help)
                 throw PaceExit(code: 0)
@@ -310,6 +331,9 @@ final class PaceRun {
         if !given.contains("margin"), let raw = env["PACE_MARGIN"], !raw.isEmpty {
             margin = try points(raw, "PACE_MARGIN")
             given.insert("margin")
+        }
+        if !given.contains("resume-headroom"), let raw = env["PACE_RESUME_HEADROOM"], !raw.isEmpty {
+            resumeHeadroom = try room(raw, "PACE_RESUME_HEADROOM")
         }
 
         // `status` is a file read: it judges the verdict it finds, with no
@@ -371,6 +395,15 @@ final class PaceRun {
     /// above the safe one would be a cap, and `--cap` already says that.
     private func points(_ text: String, _ name: String) throws -> Int {
         guard let v = Int(text), v >= 0 else { try die("\(name) takes a whole number of points, 0 or more, not '\(text)'") }
+        return v
+    }
+
+    /// `--resume-headroom`: whole points, or `auto` (nil) for the default.
+    private func room(_ text: String, _ name: String) throws -> Int? {
+        if text == "auto" { return nil }
+        guard let v = Int(text), v >= 0 else {
+            try die("\(name) takes a whole number of points, 0 or more, or auto, not '\(text)'")
+        }
         return v
     }
 
@@ -622,6 +655,11 @@ final class PaceRun {
     }
 
     private func tripReason(_ trip: PaceRules.Trip) -> String {
+        if trip.why == "room" {
+            let limit = trip.limit + Double(trip.room)
+            let left = PaceFormat.percent(PaceFormat.awkNumber(max(0, limit - PaceFormat.number(trip.percentText))))
+            return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% on \(trip.account.prefix(8)) is \(left) points below its \(PaceFormat.awkNumber(limit))% limit, short of the \(trip.room) a resume needs"
+        }
         if trip.why == "eta" {
             return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% is projected to fill in \(PaceFormat.human(trip.hitEta)) (horizon \(PaceFormat.human(eta)))"
         }
@@ -650,14 +688,33 @@ final class PaceRun {
         bindingRows.map { "\($0.label) \(String(format: "%.0f", $0.percent))%" }.joined(separator: ", ")
     }
 
+    /// A GO is written with when it runs out (#313), from the rows it was
+    /// judged on, so a `wait`'s resume carries one as a gate's GO does.
     private func writeState(_ status: String, trip: String = "", percent: String? = nil,
                             resets: String? = nil, note: String, tripped: PaceRules.Trip? = nil) {
+        let now = io.now()
+        lastGoUntil = status == "go" ? now.addingTimeInterval(PaceRules.goLife(goExpiry(), maxAge: maxAge)) : nil
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
             modelAuto: modelAuto, margin: margin, usedPercent: percent, resetsIn: resets,
             note: note + autoNoteText(),
             tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
-            tripLimit: tripped?.limit), now: io.now())
+            tripLimit: tripped?.limit, goUntil: lastGoUntil), now: now)
+    }
+
+    private func goExpiry() -> PaceRules.Expiry? {
+        PaceRules.goExpiry(bindingRows, cap: cap, margin: margin, horizon: eta)
+    }
+
+    /// The gate's GO line says when it runs out only where a window, not the
+    /// shelf life, decides that.
+    private func untilText() -> String {
+        guard let until = lastGoUntil, let expiry = goExpiry(), expiry.seconds < Double(maxAge) else { return "" }
+        let at = PaceFormat.utcClock(until)
+        if expiry.why == "eta" {
+            return " Good until \(at): \(expiry.label) is then projected to fill within \(PaceFormat.human(eta))."
+        }
+        return " Good until \(at): \(expiry.label) reaches its \(PaceFormat.awkNumber(expiry.limit))% limit in ~\(PaceFormat.human(Int(expiry.seconds.rounded()))) at \(String(format: "%.0f", expiry.burn))%/h."
     }
 
     /// What went wrong, and how loudly: `off` is ordinary; `auth` and `http`
@@ -756,7 +813,7 @@ final class PaceRun {
         try requireSelection()
         guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
             writeState("go", note: "\(summary()) (\(capNote()))")
-            io.out("pace: GO — \(summary()) (\(capNote())).\(autoNoteText())\(scopeCaveat())\n")
+            io.out("pace: GO — \(summary()) (\(capNote())).\(untilText())\(autoNoteText())\(scopeCaveat())\n")
             throw PaceExit(code: 0)
         }
         writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
@@ -770,6 +827,9 @@ final class PaceRun {
         case missing
         case old(age: Int)
         case expired(trip: String)
+        /// A GO past its `goUntil`: a window it binds was projected to reach
+        /// its limit by then (#313).
+        case spent(until: Date)
 
         /// For the line saying it was re-gated.
         var reason: String {
@@ -777,6 +837,7 @@ final class PaceRun {
             case .missing: return "no verdict yet"
             case .old(let age): return "the verdict was \(age < 60 ? "\(age)s" : "\(age / 60)m") old"
             case .expired(let trip): return "the \(trip.isEmpty ? "window" : trip) pause had expired"
+            case .spent(let until): return "the go verdict ran out at \(PaceFormat.utcClock(until))"
             }
         }
     }
@@ -789,6 +850,9 @@ final class PaceRun {
            let resetIn = state.bare("resetsInSeconds"), let secs = Int(resetIn), resetIn.allSatisfy(\.isNumber),
            age >= secs {
             return .expired(trip: state.quoted("tripWindow") ?? "")
+        }
+        if state.quoted("status") == "go", let until = state.goUntil, io.now() >= until {
+            return .spent(until: until)
         }
         return nil
     }
@@ -843,13 +907,21 @@ final class PaceRun {
         let status = state.quoted("status") ?? ""
         // A pause ends when the window that caused it resets, whatever its
         // shelf life says.
-        if case .expired(let trip)? = staleness(state) {
+        switch staleness(state) {
+        case .expired(let trip)?:
             io.out("stale: the \(trip.isEmpty ? "window" : trip) pause has expired — that window reset since; re-gate.\n")
             throw PaceExit(code: 3)
+        case .spent(let until)?:
+            // Near a limit a GO lasts minutes, not the whole shelf life: past
+            // this, the window it was judged on is projected at its limit.
+            io.out("stale: the go verdict ran out at \(PaceFormat.utcClock(until)) — at the burn it was gated on, a window it binds is at its limit by now; re-gate.\n")
+            throw PaceExit(code: 3)
+        default:
+            break
         }
         switch status {
         case "go":
-            io.out("go\n")
+            io.out(state.goUntil.map { "go (until \(PaceFormat.utcClock($0)))\n" } ?? "go\n")
             throw PaceExit(code: 0)
         case "paused":
             io.out("paused: \(state.quoted("note") ?? "")\n")
@@ -1046,6 +1118,9 @@ final class PaceRun {
             everRead = true
             fails = 0
             try requireSelection()
+            for row in rows {
+                if let burn = PaceRules.burnRate(row) { seenBurn[Self.burnKey(row.account, row.identity)] = burn }
+            }
             let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta)
             let accounts = Set(rows.map(\.account))
             let nowOn = accounts.count == 1 ? accounts.first ?? "" : ""
@@ -1068,17 +1143,30 @@ final class PaceRun {
             let switched = !nowOn.isEmpty && !current.trip.account.isEmpty && nowOn != current.trip.account
             let release = switched ? nil : PaceRules.release(current, rows: rows, now: io.now(), horizon: eta)
             if switched || release != nil {
-                guard let trip else {
-                    try resume(from: current, switched: switched ? nowOn : nil, release: release)
+                if trip == nil, switched, let short = shortOfRoom(on: nowOn, leaving: current) {
+                    // Under the limit, but every session waiting here would
+                    // resume onto it at once and fill it within minutes.
+                    let from = current.trip.account.prefix(8)
+                    current = short.hold
+                    held = current
+                    let left = remaining(current) ?? current.trip.resetsIn
+                    io.out("pace: account switched (\(from) → \(nowOn.prefix(8))), but \(tripReason(current.trip))\(short.why) — holding for more room or its reset in ~\(PaceFormat.human(left)) (\(PaceFormat.clock(left, now: io.now()))).\n")
+                    announced = true
+                    // Said: the "would pass the limit now" line is this one.
+                    overruled = true
+                } else {
+                    guard let trip else {
+                        try resume(from: current, switched: switched ? nowOn : nil, release: release)
+                    }
+                    // Cleared, and the gate's rules still trip: wait that out.
+                    if switched {
+                        io.out("pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
+                    }
+                    current = anchor(trip)
+                    held = current
+                    announced = switched
+                    overruled = false
                 }
-                // Cleared, and the gate's rules still trip: wait that out.
-                if switched {
-                    io.out("pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
-                }
-                current = anchor(trip)
-                held = current
-                announced = switched
-                overruled = false
             }
             // How it reads now, where this poll has the window: the anchor
             // keeps the limit and the reset, the reading the rest.
@@ -1092,8 +1180,11 @@ final class PaceRun {
                 io.out("pace: \(tripReason(shown)) and resets in \(PaceFormat.human(left)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(left, now: io.now())).\n")
                 throw PaceExit(code: 20)
             }
+            let note = current.trip.why == "room"
+                ? "waiting for room: \(tripReason(current.trip)); resets in ~\(PaceFormat.human(left))"
+                : "waiting for \(current.trip.label) reset (~\(PaceFormat.human(left)))"
             writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
-                       note: "waiting for \(current.trip.label) reset (~\(PaceFormat.human(left)))", tripped: current.trip)
+                       note: note, tripped: current.trip)
             if !announced {
                 io.out("pace: \(tripReason(shown)) — waiting ~\(PaceFormat.human(left)) for reset (\(PaceFormat.clock(left, now: io.now())))…\n")
                 announced = true
@@ -1105,6 +1196,39 @@ final class PaceRun {
             }
             io.sleep(TimeInterval(interval))
         }
+    }
+
+    static func burnKey(_ account: String, _ identity: String) -> String { account + "\t" + identity }
+
+    /// After a switch to `account`, what a `wait` holds when the new login
+    /// passes the gate's rules but has too little room to resume onto (#313):
+    /// fewer than `--resume-headroom` points below its limit, by default 20
+    /// minutes at its burn (the old login's where it reports none), at least
+    /// 5. Nil to resume. Resuming on the gate's rules alone once sent every
+    /// waiting session onto a login at 97%, which they filled in four minutes.
+    ///
+    /// Only the window that paused the wait is asked: a 5-hour pause needs
+    /// 5-hour room. Five points of a weekly window is hours of work, and the
+    /// gate's own rules already judge every window.
+    private func shortOfRoom(on account: String, leaving held: PaceRules.Anchor) -> (hold: PaceRules.Anchor, why: String)? {
+        guard let row = bindingRows.first(where: { $0.account == account && $0.identity == held.trip.identity })
+        else { return nil }
+        let limit = PaceRules.limit(row, cap: cap, margin: margin)
+        let needed = PaceRules.resumeHeadroom(
+            row, fixed: resumeHeadroom,
+            fallbackBurn: seenBurn[Self.burnKey(held.trip.account, row.identity)])
+        guard limit - row.percent < Double(needed.points) else { return nil }
+        let trip = PaceRules.Trip(
+            label: row.label, percentText: row.percentText, resetsIn: row.resetsIn, why: "room",
+            hitEta: row.hitEta, limit: limit - Double(needed.points), identity: row.identity,
+            account: row.account, safe: PaceRules.safeLimit(row),
+            fromSafe: cap.number.map { limit < $0 } ?? true, room: needed.points)
+        var why = ""
+        if let burn = needed.burn {
+            let whose = PaceRules.burnRate(row) == nil ? "the old login's " : ""
+            why = " (\(PaceFormat.human(Int(PaceRules.resumeRunway))) at \(whose)\(String(format: "%.0f", burn))%/h)"
+        }
+        return (anchor(trip), why)
     }
 
     /// The pause is over: say why, record it, exit 0.
@@ -1121,6 +1245,11 @@ final class PaceRun {
             case .reset:
                 writeState("go", note: "reset — \(label) rolled over (\(summary()))")
                 io.out("pace: reset — the \(label) window rolled over; headroom restored (\(summary())). Resume.\n")
+            case .drop where anchor.trip.why == "room":
+                let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
+                let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"
+                writeState("go", note: "room on \(anchor.trip.account.prefix(8)) — \(label) at \(at)% (\(summary()))")
+                io.out("pace: room on the new login — \(label) at \(at)%, at least \(anchor.trip.room) points below its limit (\(summary())). Resume.\n")
             case .drop:
                 let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
                 let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"

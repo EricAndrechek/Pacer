@@ -37,6 +37,10 @@ struct PaceStateFile {
         var tripIdentity = ""
         var tripAccount = ""
         var tripLimit: Double?
+        /// For a GO: when it stops describing the windows it was judged on,
+        /// the soonest binding window's projected arrival at its limit,
+        /// within the shelf life (#313). `status` re-gates it after.
+        var goUntil: Date?
     }
 
     /// Written to a temporary file and renamed into place, so a reader never
@@ -65,6 +69,7 @@ struct PaceStateFile {
           "tripIdentity": "\(v.tripIdentity)",
           "tripAccount": "\(v.tripAccount)",
           "tripLimit": \(v.tripLimit.map(PaceFormat.awkNumber) ?? "null"),
+          "goUntil": \(v.goUntil.map { "\"\(PaceFormat.utcStamp($0))\"" } ?? "null"),
           "note": "\(v.note)",
           "updatedAt": "\(PaceFormat.utcStamp(now))"
         }
@@ -144,6 +149,14 @@ struct PaceStateFile {
         guard let stamp = quoted("updatedAt"), !stamp.isEmpty,
               let written = PaceFormat.isoFormatter.date(from: stamp) else { return nil }
         return Int(floor(now.timeIntervalSince1970)) - Int(written.timeIntervalSince1970)
+    }
+
+    /// When a GO runs out (#313). Nil for a pause, for a verdict written
+    /// before there was one, and for one that cannot be read: the shelf
+    /// life alone then decides, as it did.
+    var goUntil: Date? {
+        guard let stamp = quoted("goUntil"), !stamp.isEmpty else { return nil }
+        return PaceFormat.isoFormatter.date(from: stamp)
     }
 }
 

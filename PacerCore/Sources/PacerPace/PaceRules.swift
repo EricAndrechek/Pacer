@@ -86,14 +86,21 @@ enum PaceRules {
     /// every 5 minutes.
     static let pollWorst = 300.0
 
+    /// The climb a window is making, in points per hour: the measured
+    /// half-hour rate, else the engine's smoothed slope. Nil when Pacer
+    /// reported neither. The safe limit, a GO's expiry and a resume's headroom
+    /// all read it, so they cannot disagree about how fast a window fills.
+    static func burnRate(_ row: PaceRow) -> Double? {
+        if let recent = row.recentBurn, !recent.isEmpty { return PaceFormat.number(recent) }
+        if let burn = row.burn, !burn.isEmpty { return PaceFormat.number(burn) }
+        return nil
+    }
+
     /// The safe limit for one window: 100% minus how far usage can climb before
     /// a fresher reading arrives — the recent burn times (the reading's age
     /// plus one worst-case poll), at least 1 point. 98 with no burn measured.
     static func safeLimit(_ row: PaceRow) -> Int {
-        let b: Double
-        if let recent = row.recentBurn, !recent.isEmpty { b = PaceFormat.number(recent) }
-        else if let burn = row.burn, !burn.isEmpty { b = PaceFormat.number(burn) }
-        else { return 98 }
+        guard let b = burnRate(row) else { return 98 }
         let age = row.sampleAge.flatMap { $0.isEmpty ? nil : PaceFormat.number($0) } ?? pollWorst
         var m = max(0, b) * (age + pollWorst) / 3600
         if m < 1 { m = 1 }
@@ -127,8 +134,13 @@ enum PaceRules {
         let label: String
         let percentText: String
         let resetsIn: String?
-        let why: String          // "cap" or "eta"
+        /// "cap", "eta", or "room": a `wait` holding after a login switch
+        /// because the new login is under its limit but too close to it to
+        /// resume onto (#313).
+        let why: String
         let hitEta: String?
+        /// The level it holds at. For "room", the window's limit less the
+        /// headroom a resume needs, so usage falling below it is room.
         let limit: Double
         /// Which window, on which account, so a `wait` can follow this one
         /// window rather than whatever trips next.
@@ -138,6 +150,91 @@ enum PaceRules {
         /// it (less any margin) rather than from `--cap`.
         var safe = 0
         var fromSafe = true
+        /// For "room": the points below its limit a resume needs.
+        var room = 0
+    }
+
+    // MARK: - How long a GO holds (#313)
+
+    /// What ends a GO verdict first: one binding window reaching its limit
+    /// at its burn, or, with a horizon, its projected fill coming inside it.
+    struct Expiry: Equatable, Sendable {
+        /// From the reading.
+        let seconds: Double
+        let label: String
+        /// "limit" or "eta".
+        let why: String
+        let limit: Double
+        let burn: Double
+    }
+
+    /// The shortest life a GO is given, however near the limit. Pacer's
+    /// readings change about once a minute, so re-gating sooner mostly reads
+    /// the same one again; the safe limit already allows for a reading that
+    /// old plus a whole poll.
+    static let minimumGoLife = 60.0
+
+    /// When the soonest binding window stops matching a GO verdict: its
+    /// headroom to its limit at its burn, `(limit − used) / burn`, or with a
+    /// horizon, its forecast fill minus the horizon. Nil when no window is
+    /// climbing, so the verdict's shelf life alone decides.
+    ///
+    /// A `status` used to take a GO for its whole `--max-age`. At 45%/h, a GO
+    /// gated at 88% against a 95% limit is wrong after about 9 minutes, and
+    /// lanes kept obeying it for 15: that is how sessions ran into the wall.
+    static func goExpiry(_ rows: [PaceRow], cap: Cap, margin: Int = 0, horizon: Int) -> Expiry? {
+        var best: Expiry?
+        for row in rows {
+            let reset = row.resetsIn.map(PaceFormat.number)
+            // A reset already due: the next reading is a fresh cycle.
+            if let reset, reset <= 0 { continue }
+            let limit = limit(row, cap: cap, margin: margin)
+            let burn = burnRate(row) ?? 0
+            var candidates: [Expiry] = []
+            if burn > 0 {
+                candidates.append(Expiry(seconds: max(0, limit - row.percent) / burn * 3_600,
+                                         label: row.label, why: "limit", limit: limit, burn: burn))
+            }
+            if horizon > 0, PaceFormat.number(row.willHit) == 1, let eta = row.hitEta.map(PaceFormat.number) {
+                candidates.append(Expiry(seconds: max(0, eta - Double(horizon)),
+                                         label: row.label, why: "eta", limit: limit, burn: burn))
+            }
+            // A window that resets first never gets there this cycle, and a
+            // GO stays right through a reset.
+            for c in candidates where reset.map({ c.seconds <= $0 }) ?? true {
+                if best.map({ c.seconds < $0.seconds }) ?? true { best = c }
+            }
+        }
+        return best
+    }
+
+    /// How long a GO verdict holds: its expiry, no less than
+    /// `minimumGoLife` and no more than `maxAge`. Without an expiry, `maxAge`,
+    /// as before.
+    static func goLife(_ expiry: Expiry?, maxAge: Int) -> TimeInterval {
+        let cap = Double(max(0, maxAge))
+        guard let expiry else { return cap }
+        return min(cap, max(minimumGoLife, expiry.seconds))
+    }
+
+    // MARK: - Room to resume onto after a switch (#313)
+
+    /// The fewest points a resume onto another login needs.
+    static let resumeFloor = 5
+    /// How much of the burn a resume needs room for.
+    static let resumeRunway = 20.0 * 60
+
+    /// The headroom a `wait` needs below `row`'s limit to resume onto its
+    /// login after a switch: `fixed` points when given (`--resume-headroom`),
+    /// else 20 minutes at the window's burn, at least 5 points, in whole
+    /// points. `fallbackBurn` stands in where the new login reports none: the
+    /// rate of the login being left. Returns the points and how much of them
+    /// the burn asked for (nil when the floor or `fixed` decided).
+    static func resumeHeadroom(_ row: PaceRow, fixed: Int?, fallbackBurn: Double?) -> (points: Int, burn: Double?) {
+        if let fixed { return (fixed, nil) }
+        guard let burn = burnRate(row) ?? fallbackBurn, burn > 0 else { return (resumeFloor, nil) }
+        let needed = Int((burn * resumeRunway / 3_600).rounded(.up))
+        return needed > resumeFloor ? (needed, burn) : (resumeFloor, nil)
     }
 
     /// What a paused `wait` is waiting out (#267): the window that tripped,
@@ -194,6 +291,7 @@ enum PaceRules {
             }
         }
         guard row.percent < anchor.trip.limit else { return nil }
+        // A "room" hold's limit is already the level with room enough.
         guard anchor.trip.why == "eta" else { return .drop }
         let projected = horizon > 0 && PaceFormat.number(row.willHit) == 1
             && row.hitEta.map { PaceFormat.number($0) <= Double(horizon) } == true
@@ -283,6 +381,19 @@ enum PaceFormat {
         let whole = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + Double(s))
         return clockFormatter.string(from: whole)
     }
+
+    nonisolated(unsafe) private static let utcClockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "HH:mm'Z'"
+        return f
+    }()
+
+    /// An instant as UTC `22:41Z`: when a GO verdict runs out (#313). UTC,
+    /// like the state file's stamps, so a lane and its orchestrator on
+    /// different clocks read the same time.
+    static func utcClock(_ date: Date) -> String { utcClockFormatter.string(from: date) }
 
     /// `61.99999` → `62`; `4.5` → `4.5`.
     static func percent(_ text: String?) -> String {

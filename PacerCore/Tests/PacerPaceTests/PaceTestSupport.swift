@@ -46,9 +46,11 @@ final class PaceCapture: @unchecked Sendable {
 /// overrun, so a wait that misses its cue fails instead of spinning.
 ///
 /// `onGet` sees every request (to count reads of Pacer), and `nap` replaces
-/// the short pause a `status` takes while another reader refreshes.
+/// the short pause a `status` takes while another reader refreshes. `later`
+/// runs the command that many seconds from now, for a verdict's expiry.
 func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
              unsetState: Bool = false, extra: [String: String] = [:],
+             later: TimeInterval = 0,
              onSleep: ((Int) -> Void)? = nil,
              onGet: ((URLRequest) -> Void)? = nil,
              nap: ((TimeInterval) -> Void)? = nil) -> PaceResult {
@@ -59,7 +61,7 @@ func runPace(_ box: PaceSandbox, _ args: [String], api: String? = nil,
     let capture = PaceCapture()
     var sleeps = 0
     let io = PaceIO(
-        out: capture.append, err: capture.append, now: Date.init,
+        out: capture.append, err: capture.append, now: { Date().addingTimeInterval(later) },
         sleep: { _ in
             sleeps += 1
             onSleep?(sleeps)
