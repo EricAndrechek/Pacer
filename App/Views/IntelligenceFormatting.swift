@@ -283,6 +283,13 @@ enum IntelligenceFormatting {
             }
             return ("limit \(eta)", .red, help)
         }
+        // The line crosses before the reset but the claim is withheld: say the
+        // crossing, hedged. Falling through printed the at-reset value, which
+        // that same crossing clamps to "≈100% at reset".
+        if let withheld = outlook.hitWithheld, let eta = relativeCrossingPhrase(outlook) {
+            help += " The forecast line reaches 100% \(eta). " + withheldReason(withheld)
+            return ("may hit limit \(eta)", .orange, help)
+        }
         let tint: Color = ratio < 0.9 ? .green : ratio < 1.15 ? .secondary : .orange
         if let e = endEstimate, !e.isInsufficient {
             if let band = e.interval80 {
@@ -292,5 +299,17 @@ enum IntelligenceFormatting {
             return ("≈\(Int(e.value.rounded()))% at reset", tint, help)
         }
         return (String(format: "%+.1f%%/hr", outlook.slopePercentPerHour), tint, help)
+    }
+
+    static func withheldReason(_ w: UsageIntelligenceEngine.BurnOutlook.HitWithheld) -> String {
+        switch w {
+        case .earlyInWindow:
+            return String(format: "Not called below %.0f%% used: early bursts usually slow down.",
+                          BurnRate.warningUsedFloor)
+        case .slowEndResetsFirst:
+            return "Not called yet: at the slow end of its usual error, the window resets first."
+        case .unconfirmed:
+            return "Called once it holds on the next update."
+        }
     }
 }

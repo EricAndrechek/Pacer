@@ -69,6 +69,28 @@ struct RLHitClaimTests {
         #expect(!o.hitClaimable)
     }
 
+    /// A crossing the line shows but the claim withholds is said hedged, and
+    /// the reason is the gate that withheld it. Without one the chip printed
+    /// the at-reset value the crossing clamps to: "≈100% at reset" at 46%.
+    @Test func aWithheldCrossingCarriesTheGateThatWithheldIt() throws {
+        let early = Self.features(liveUsed: 45)
+        let e = try #require(UsageIntelligenceEngine.burnOutlook(early, Self.confirmedFit(early), windowKey: "five_hour"))
+        #expect(e.projectedFullAt != nil)
+        #expect(e.hitWithheld == .earlyInWindow)
+
+        let overshoot = Self.features(liveUsed: 52)
+        let o = try #require(UsageIntelligenceEngine.burnOutlook(overshoot, Self.confirmedFit(overshoot), windowKey: "five_hour"))
+        #expect(o.hitWithheld == .slowEndResetsFirst)
+
+        let steep = Self.features(liveUsed: 55)
+        let once = UsageIntelligenceEngine.carryClaimStreaks(steep, into: UsageIntelligenceEngine.makeFit(steep), from: .init())
+        let first = try #require(UsageIntelligenceEngine.burnOutlook(steep, once, windowKey: "five_hour"))
+        #expect(first.hitWithheld == .unconfirmed)
+        let confirmed = try #require(UsageIntelligenceEngine.burnOutlook(steep, Self.confirmedFit(steep), windowKey: "five_hour"))
+        #expect(confirmed.willHitLimitBeforeReset)
+        #expect(confirmed.hitWithheld == nil)        // claimed outright: the red chip says it
+    }
+
     @Test func aClaimRestartsOnANewCycleAndLapsesWhenTheEvidenceGoes() {
         var fit = UsageIntelligenceEngine.Fit()
         fit.rl["five_hour"] = .init(roster: [], selectedId: nil, duration: Self.window, historyCount: 0)
