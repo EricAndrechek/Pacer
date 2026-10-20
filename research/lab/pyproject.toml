@@ -1,0 +1,16 @@
+[project]
+name = "pacer-lab"
+version = "0.1.0"
+description = "Walk-forward prediction lab for Pacer's rate-limit forecasts: one case table, one prediction format, one scorer, many candidates."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.5",
+]
+
+[tool.uv]
+package = false
