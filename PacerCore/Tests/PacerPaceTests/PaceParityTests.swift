@@ -29,7 +29,8 @@ import Testing
 ///   script only reported it. The port's `status` steps run with
 ///   `--no-refresh`, which is the script's pure file read, so what they
 ///   print is still compared.
-/// - The port has subcommands the script did not (`safecap`, #263), so its
+/// - The port has subcommands the script did not (`safecap`, #263;
+///   `feedback`, #268), so its
 ///   "unknown subcommand" message lists more; `renamed` maps the list.
 /// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
 ///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:

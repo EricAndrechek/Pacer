@@ -912,6 +912,82 @@ struct PaceCommandTests {
         #expect(PaceRules.cycleLength(identity: "something||cli") == 18_000)
     }
 
+    // MARK: - pacer feedback (#268)
+
+    private func inbox(_ box: PaceSandbox) -> [[String: Any]] {
+        let url = box.dir.appendingPathComponent(".claude/pace/feedback.jsonl")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any]
+        }
+    }
+
+    @Test func feedbackSavesOneLineLocallyAndSendsNothing() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85"])
+        let log = PaceRequestLog()
+        let text = #"ran `pacer gate --cap 85`, got "PAUSE — Fable" & expected GO; 50% + more"#
+        let result = runPace(box, ["feedback", text], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"],
+                             onGet: log.record)
+        #expect(result.status == 0, "\(result.out)")
+        #expect(log.all.isEmpty, "feedback must not touch the network: \(log.all)")
+        #expect(result.out.contains("feedback saved to \(box.dir.path)/.claude/pace/feedback.jsonl"))
+        #expect(result.out.contains("nothing was sent anywhere"))
+        let lines = inbox(box)
+        #expect(lines.count == 1)
+        let entry = try #require(lines.first)
+        #expect(entry["text"] as? String == text)
+        #expect(entry["sessionId"] as? String == "abc-123")
+        #expect((entry["ts"] as? String)?.hasSuffix("Z") == true)
+        #expect(entry["version"] is String)
+        #expect(entry["cwd"] is String)
+        let verdict = try #require(entry["lastVerdict"] as? [String: Any])
+        #expect(verdict["status"] as? String == "paused")
+        #expect(verdict["tripWindow"] as? String == "Fable")
+    }
+
+    @Test func feedbackOffersAPrefilledIssueThatCarriesNothingPrivate() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85"])
+        let result = runPace(box, ["feedback", "wait", "said", "reset", "at", "97%", "&", "#1"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"])
+        let line = try #require(result.out.split(separator: "\n").first { $0.hasPrefix("https://") })
+        #expect(line.hasPrefix(Pace.issuesURL + "?title="))
+        let items = try #require(URLComponents(string: String(line))?.queryItems)
+        let title = try #require(items.first { $0.name == "title" }?.value)
+        let body = try #require(items.first { $0.name == "body" }?.value)
+        #expect(items.count == 2, "a & or # in the text must not split the query")
+        #expect(title == "pacer feedback: wait said reset at 97% & #1")
+        #expect(body.hasPrefix("wait said reset at 97% & #1\n"))
+        #expect(body.contains("Last verdict: paused — Fable at 95% >= cap 85%"), "\(body)")
+        #expect(body.contains("cap 85, margin 0"), "\(body)")
+        #expect(!body.contains("abc-123"), "no session id in a public issue")
+        #expect(!body.contains(box.dir.path), "no paths in a public issue")
+        #expect(!body.contains(FileManager.default.currentDirectoryPath))
+    }
+
+    @Test func feedbackAppendsAndReadsThisSessionsVerdict() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let session = ["CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"]
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"], unsetState: true, extra: session)
+        #expect(runPace(box, ["feedback", "first"], unsetState: true, extra: session).status == 0)
+        #expect(runPace(box, ["feedback", "second"], unsetState: true).status == 0)
+        let lines = inbox(box)
+        #expect(lines.map { $0["text"] as? String } == ["first", "second"])
+        #expect((lines[0]["lastVerdict"] as? [String: Any])?["status"] as? String == "go")
+        #expect((lines[0]["stateFile"] as? String)?.hasSuffix("state-session-0f3c9a12.json") == true)
+        #expect(lines[1]["lastVerdict"] == nil, "no session, no state.json: no verdict")
+        #expect(lines[1]["sessionId"] == nil)
+    }
+
+    @Test func feedbackNeedsText() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["feedback", "  "])
+        #expect(result.status == 1)
+        #expect(result.out.contains("feedback needs the text"))
+        #expect(inbox(box).isEmpty)
+    }
+
     // MARK: - Knowing what you are
 
     private func sessionStub(_ models: [String]) throws -> PaceStubServer {

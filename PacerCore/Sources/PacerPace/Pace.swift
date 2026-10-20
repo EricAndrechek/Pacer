@@ -97,7 +97,31 @@ public enum Pace {
     }
 
     /// For the "unknown subcommand" message.
-    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap"]
+    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback"]
+
+    /// Where `pacer feedback` would have this reported.
+    static let issuesURL = "https://github.com/EricAndrechek/Pacer/issues/new"
+
+    /// This command line's version and build, from the bundle it ships in
+    /// (Pacer stamps its own on it). Run through the skill's symlink,
+    /// `Bundle.main` is the link's folder rather than `PacerCLI.app`, so the
+    /// bundle is found again from the executable's real path.
+    static var version: String {
+        func read(_ bundle: Bundle?) -> String? {
+            guard let short = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            else { return nil }
+            let build = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            return build.map { "\(short) (\($0))" } ?? short
+        }
+        if let main = read(.main) { return main }
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { return "unknown" }
+        let executable = URL(fileURLWithPath: String(
+            decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        // …/PacerCLI.app/Contents/MacOS/pacer
+        let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return read(Bundle(url: app)) ?? "unknown"
+    }
 
     /// `pacer --help`.
     public static let help = """
@@ -129,6 +153,9 @@ public enum Pace {
                              (--no-refresh: never ask Pacer)
       wait  [--cap N]        block until the tripping window resets; 0=resume
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer
+      feedback "TEXT"        report a wrong verdict or a missing flag: saved to
+                             ~/.claude/pace/feedback.jsonl, with a link to file
+                             it on GitHub. Nothing is sent anywhere
 
     Flags:
       --model NAME|auto|all  which per-model caps bind (account-wide windows
@@ -252,6 +279,9 @@ final class PaceRun {
     func main(_ arguments: [String]) throws {
         var args = arguments[...]
         let sub = args.popFirst() ?? "report"
+        // Everything after `feedback` is the text, flags and all: it is a
+        // report of what was run, and that is what gets quoted.
+        if sub == "feedback" { return try cmdFeedback(Array(args)) }
         while let flag = args.popFirst() {
             func value() throws -> String {
                 guard let v = args.popFirst() else { try die("\(flag) needs a value") }
@@ -1116,6 +1146,70 @@ final class PaceRun {
             io.out(Self.pad(row.label, 10) + " "
                    + PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)) + "\n")
         }
+    }
+
+    /// `pacer feedback "<text>"`: a problem with Pacer, reported through
+    /// Pacer (#268) rather than worked around in an agent's memory, where the
+    /// workaround outlives the fix. One JSON line in a local inbox, and a
+    /// pre-filled GitHub issue link for the user to open if they choose.
+    /// Nothing leaves the machine: no request, no browser.
+    private func cmdFeedback(_ words: [String]) throws {
+        let text = words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            try die("feedback needs the text: pacer feedback \"what you ran, what it printed\"")
+        }
+        let now = io.now()
+        let state = PaceStateFile(path: statePath)
+        var entry: [String: Any] = [
+            "ts": PaceFormat.utcStamp(now), "text": text, "version": Pace.version,
+            "cwd": FileManager.default.currentDirectoryPath, "stateFile": statePath,
+        ]
+        if let id = env["CLAUDE_CODE_SESSION_ID"], !id.isEmpty { entry["sessionId"] = id }
+        var verdict: [String: Any]?
+        if let data = FileManager.default.contents(atPath: statePath) {
+            verdict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            entry["lastVerdict"] = verdict ?? String(decoding: data, as: UTF8.self)
+        }
+        let inbox = "\(env["HOME"] ?? NSHomeDirectory())/.claude/pace/feedback.jsonl"
+        guard let json = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes]),
+              Self.append(Data(json + [UInt8(ascii: "\n")]), to: inbox) else {
+            try die("could not write \(inbox)")
+        }
+        // The issue body is public once filed, so it carries what the report
+        // needs and nothing about the machine: no paths, no session id.
+        var body = text + "\n\n---\npacer \(Pace.version)"
+        if verdict != nil || state.exists {
+            let status = state.quoted("status") ?? "?"
+            let note = state.quoted("note") ?? ""
+            body += "\nLast verdict: \(status)\(note.isEmpty ? "" : " — \(note)")"
+            let cap = (state.bare("cap") ?? "?").replacingOccurrences(of: "\"", with: "")
+            body += " (model \(state.quoted("model").map { $0.isEmpty ? "every" : $0 } ?? "?"), cap \(cap), margin \(state.bare("margin") ?? "0"))"
+        }
+        body += "\nReported with `pacer feedback`."
+        let title = "pacer feedback: " + (text.count > 60 ? String(text.prefix(59)) + "…" : text)
+        let url = Pace.issuesURL + "?title=" + Self.queryEncoded(title)
+            + "&body=" + Self.queryEncoded(String(body.prefix(4_000)))
+        io.out("pace: feedback saved to \(inbox) — nothing was sent anywhere.\n")
+        io.out("To file it as an issue, open:\n\(url)\n")
+    }
+
+    /// One `write(2)` on an `O_APPEND` descriptor, so two sessions reporting
+    /// at once add two whole lines rather than interleaving.
+    static func append(_ data: Data, to path: String) -> Bool {
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) } == data.count
+    }
+
+    /// Percent-encoded for a query value: only RFC 3986's unreserved
+    /// characters left as they are, so `+`, `&` and `#` in the text survive.
+    static func queryEncoded(_ text: String) -> String {
+        var unreserved = CharacterSet.alphanumerics.intersection(CharacterSet(charactersIn: Unicode.Scalar(0)...Unicode.Scalar(127)))
+        unreserved.insert(charactersIn: "-._~")
+        return text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
     /// How many accounts, on what plan, with how many sessions drawing on
