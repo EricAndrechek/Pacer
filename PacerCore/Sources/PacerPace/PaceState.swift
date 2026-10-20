@@ -29,6 +29,9 @@ struct PaceStateFile {
         var modelAuto = false
         /// Points below the safe limit the gate stopped at (#263).
         var margin = 0
+        /// The gate's `--resume-headroom` (nil: `auto`), so a bare `wait`
+        /// resumes onto a switched-to login by the same rule (#313).
+        var resumeHeadroom: Int?
         let usedPercent: String?
         let resetsIn: String?
         let note: String
@@ -64,6 +67,7 @@ struct PaceStateFile {
           "window": "\(v.window)",
           "autoModel": \(v.modelAuto),
           "margin": \(v.margin),
+          "resumeHeadroom": \(v.resumeHeadroom.map(String.init) ?? "\"auto\""),
           "usedPercent": \(v.usedPercent ?? "null"),
           "resetsInSeconds": \(v.resetsIn ?? "null"),
           "tripIdentity": "\(v.tripIdentity)",

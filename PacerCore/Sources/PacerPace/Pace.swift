@@ -182,8 +182,9 @@ public enum Pace {
       --resume-headroom N|auto
                              after a login switch, points `wait` needs below
                              the paused window's limit on the new login to
-                             resume; default auto: 20 minutes at its recent
-                             burn, at least 5. 0 resumes on any headroom
+                             resume; default auto: 20 minutes at the higher
+                             of its recent burn there and on the old login,
+                             at least 5. 0 resumes on any headroom
       --retries N            reads of Pacer before giving up; default 3
       --state FILE           the state file; default state-session-<id>.json
                              in ~/.claude/pace for a Claude Code session,
@@ -234,8 +235,8 @@ final class PaceRun {
     /// needs on a new login before it resumes onto it (#313). Nil is `auto`.
     private var resumeHeadroom: Int?
     /// The burn of each window this `wait` has read, by account, so a switch
-    /// onto a login that reports none can be judged by the rate of the login
-    /// being left: those are the sessions about to move.
+    /// is judged by the rate of the login being left too: those are the
+    /// sessions about to move.
     private var seenBurn: [String: Double] = [:]
     /// When the last GO this run wrote runs out, for the gate's line.
     private var lastGoUntil: Date?
@@ -334,6 +335,7 @@ final class PaceRun {
         }
         if !given.contains("resume-headroom"), let raw = env["PACE_RESUME_HEADROOM"], !raw.isEmpty {
             resumeHeadroom = try room(raw, "PACE_RESUME_HEADROOM")
+            given.insert("resume-headroom")
         }
 
         // `status` is a file read: it judges the verdict it finds, with no
@@ -696,7 +698,8 @@ final class PaceRun {
         lastGoUntil = status == "go" ? now.addingTimeInterval(PaceRules.goLife(goExpiry(), maxAge: maxAge)) : nil
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
-            modelAuto: modelAuto, margin: margin, usedPercent: percent, resetsIn: resets,
+            modelAuto: modelAuto, margin: margin, resumeHeadroom: resumeHeadroom,
+            usedPercent: percent, resetsIn: resets,
             note: note + autoNoteText(),
             tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
             tripLimit: tripped?.limit, goUntil: lastGoUntil), now: now)
@@ -1015,6 +1018,14 @@ final class PaceRun {
             margin = points
             if points > 0 { taken.append("--margin \(points)") }
         }
+        if force || !given.contains("resume-headroom"), let raw = state.bare("resumeHeadroom"), !raw.isEmpty {
+            if raw.contains("auto") {
+                resumeHeadroom = nil
+            } else if let points = Int(raw), points >= 0 {
+                resumeHeadroom = points
+                taken.append("--resume-headroom \(points)")
+            }
+        }
         if force || !given.contains("eta"), let raw = state.bare("eta"), let seconds = Int(raw) {
             eta = seconds
             if seconds > 0 { taken.append("--eta \(PaceFormat.human(seconds))") }
@@ -1203,8 +1214,8 @@ final class PaceRun {
     /// After a switch to `account`, what a `wait` holds when the new login
     /// passes the gate's rules but has too little room to resume onto (#313):
     /// fewer than `--resume-headroom` points below its limit, by default 20
-    /// minutes at its burn (the old login's where it reports none), at least
-    /// 5. Nil to resume. Resuming on the gate's rules alone once sent every
+    /// minutes at the higher of its burn and the old login's, at least 5.
+    /// Nil to resume. Resuming on the gate's rules alone once sent every
     /// waiting session onto a login at 97%, which they filled in four minutes.
     ///
     /// Only the window that paused the wait is asked: a 5-hour pause needs
@@ -1216,7 +1227,7 @@ final class PaceRun {
         let limit = PaceRules.limit(row, cap: cap, margin: margin)
         let needed = PaceRules.resumeHeadroom(
             row, fixed: resumeHeadroom,
-            fallbackBurn: seenBurn[Self.burnKey(held.trip.account, row.identity)])
+            oldBurn: seenBurn[Self.burnKey(held.trip.account, row.identity)])
         guard limit - row.percent < Double(needed.points) else { return nil }
         let trip = PaceRules.Trip(
             label: row.label, percentText: row.percentText, resetsIn: row.resetsIn, why: "room",
@@ -1225,7 +1236,7 @@ final class PaceRun {
             fromSafe: cap.number.map { limit < $0 } ?? true, room: needed.points)
         var why = ""
         if let burn = needed.burn {
-            let whose = PaceRules.burnRate(row) == nil ? "the old login's " : ""
+            let whose = needed.fromOldLogin ? "the old login's " : ""
             why = " (\(PaceFormat.human(Int(PaceRules.resumeRunway))) at \(whose)\(String(format: "%.0f", burn))%/h)"
         }
         return (anchor(trip), why)

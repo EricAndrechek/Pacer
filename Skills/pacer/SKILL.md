@@ -266,8 +266,8 @@ For a big fan-out:
    ~/.claude/skills/pacer/pacer wait
    ```
 
-   It judges by the same `--cap`, `--margin`, `--eta`, `--model` and
-   `--window` as the gate that paused (they are in the state file), unless
+   It judges by the same `--cap`, `--margin`, `--eta`, `--model`,
+   `--window` and `--resume-headroom` as the gate that paused (they are in the state file), unless
    you pass your own, and it holds **the window that tripped**, at the limit
    it tripped at. It blocks *across turns* until there is headroom again,
    then **exits — which re-invokes you**. Three things end the wait, and it
@@ -285,8 +285,8 @@ For a big fan-out:
    pushes it to a waiting process within seconds. A switch onto a login with
    little room left does not count: the window that paused needs
    `--resume-headroom` points below its limit there (default: 20 minutes at
-   the recent burn, at least 5), or `wait` holds on the new login and says
-   why. On wake: read the manifest,
+   the higher of the old and new login's recent burn, at least 5), or `wait`
+   holds on the new login and says why. On wake: read the manifest,
    re-dispatch the in-flight and
    pending items (in-flight ones resume from their checkpoint commits), and
    merge the finished worktrees as usual.
@@ -392,8 +392,9 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   also how long `wait` holds a pause through an unreadable API before giving up.
 - `--resume-headroom N|auto` (default auto; `PACE_RESUME_HEADROOM`): the points
   `wait` needs below the paused window's limit on a newly switched-to login
-  before it resumes onto it. `auto` is 20 minutes at that login's recent burn
-  (the old login's, if it reports none), at least 5; `0` resumes on any room.
+  before it resumes onto it. `auto` is 20 minutes at the higher of the old
+  and new login's recent burn (the sessions move with the work), at least 5;
+  `0` resumes on any room.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer

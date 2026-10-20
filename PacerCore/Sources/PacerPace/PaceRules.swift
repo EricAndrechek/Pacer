@@ -224,17 +224,32 @@ enum PaceRules {
     /// How much of the burn a resume needs room for.
     static let resumeRunway = 20.0 * 60
 
+    /// What a resume onto a switched-to login needs, and why.
+    struct Room: Equatable, Sendable {
+        let points: Int
+        /// The burn that set `points`; nil when the floor or a fixed
+        /// `--resume-headroom` did.
+        var burn: Double?
+        /// That burn was the old login's.
+        var fromOldLogin = false
+    }
+
     /// The headroom a `wait` needs below `row`'s limit to resume onto its
     /// login after a switch: `fixed` points when given (`--resume-headroom`),
-    /// else 20 minutes at the window's burn, at least 5 points, in whole
-    /// points. `fallbackBurn` stands in where the new login reports none: the
-    /// rate of the login being left. Returns the points and how much of them
-    /// the burn asked for (nil when the floor or `fixed` decided).
-    static func resumeHeadroom(_ row: PaceRow, fixed: Int?, fallbackBurn: Double?) -> (points: Int, burn: Double?) {
-        if let fixed { return (fixed, nil) }
-        guard let burn = burnRate(row) ?? fallbackBurn, burn > 0 else { return (resumeFloor, nil) }
+    /// else 20 minutes at the higher of the window's burn on the new login
+    /// and on the old one (`oldBurn`), at least 5 points, in whole points.
+    ///
+    /// The old login's burn counts because the workload moves with the
+    /// sessions: the ones waiting were burning the old login, and they all
+    /// resume onto the new one. An idle new login reports about 0%/h, which
+    /// judged alone let every waiting session resume onto a login at 97%.
+    static func resumeHeadroom(_ row: PaceRow, fixed: Int?, oldBurn: Double?) -> Room {
+        if let fixed { return Room(points: fixed) }
+        let new = max(0, burnRate(row) ?? 0), old = max(0, oldBurn ?? 0)
+        let burn = max(new, old)
         let needed = Int((burn * resumeRunway / 3_600).rounded(.up))
-        return needed > resumeFloor ? (needed, burn) : (resumeFloor, nil)
+        guard needed > resumeFloor else { return Room(points: resumeFloor) }
+        return Room(points: needed, burn: burn, fromOldLogin: old > new)
     }
 
     /// What a paused `wait` is waiting out (#267): the window that tripped,

@@ -1104,7 +1104,9 @@ struct PaceCommandTests {
         })
         #expect(result.status == 0, "\(result.out)")
         #expect(polls == 3, "it resumed onto 97%:\n\(result.out)")
-        #expect(result.out.contains("account switched (org-work → org-home), but 5h at 97% on org-home is 2 points below its 99% limit, short of the 5 a resume needs — holding for more room or its reset in ~15m"),
+        // The new login is idle (0%/h); the sessions about to move were
+        // burning 36%/h, and 20 minutes of that is 12 points.
+        #expect(result.out.contains("account switched (org-work → org-home), but 5h at 97% on org-home is 2 points below its 99% limit, short of the 12 a resume needs (20m at the old login's 36%/h) — holding for more room or its reset in ~15m"),
                 "\(result.out)")
         #expect(result.out.components(separatedBy: "account switched").count == 2, "said once:\n\(result.out)")
         #expect(!result.out.contains("would pass the limit now"), "\(result.out)")
@@ -1201,14 +1203,71 @@ struct PaceCommandTests {
     }
 
     @Test func resumeHeadroomRule() {
+        typealias Room = PaceRules.Room
         let row = Self.window("5h", identity: "five_hour", percent: 90, recent: "45")
-        #expect(PaceRules.resumeHeadroom(row, fixed: nil, fallbackBurn: nil) == (15, 45))
-        #expect(PaceRules.resumeHeadroom(row, fixed: 3, fallbackBurn: nil) == (3, nil))
-        let slow = Self.window("5h", identity: "five_hour", percent: 90, recent: "6")
-        #expect(PaceRules.resumeHeadroom(slow, fixed: nil, fallbackBurn: 60) == (5, nil), "its own rate, though slow")
+        #expect(PaceRules.resumeHeadroom(row, fixed: nil, oldBurn: nil) == Room(points: 15, burn: 45))
+        #expect(PaceRules.resumeHeadroom(row, fixed: nil, oldBurn: 30) == Room(points: 15, burn: 45))
+        #expect(PaceRules.resumeHeadroom(row, fixed: 3, oldBurn: 90) == Room(points: 3))
+        // The higher of the two: the workload moves with the sessions.
+        let idle = Self.window("5h", identity: "five_hour", percent: 90, recent: "0")
+        #expect(PaceRules.resumeHeadroom(idle, fixed: nil, oldBurn: 60) == Room(points: 20, burn: 60, fromOldLogin: true))
         let unknown = Self.window("5h", identity: "five_hour", percent: 90)
-        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, fallbackBurn: 60) == (20, 60))
-        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, fallbackBurn: nil) == (5, nil))
+        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, oldBurn: 60) == Room(points: 20, burn: 60, fromOldLogin: true))
+        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, oldBurn: nil) == Room(points: 5))
+        #expect(PaceRules.resumeHeadroom(idle, fixed: nil, oldBurn: 12) == Room(points: 5), "4 points: the floor")
+    }
+
+    /// The old login's burn counts even where the new login reports its own:
+    /// an idle login's 0%/h says nothing about the sessions about to arrive.
+    @Test func theOldLoginsBurnDecidesWhenItIsTheHigher() throws {
+        let fast = Self.burning(burn: "45")   // 97% against 96%: paused
+        // 90% against 99%, idle: 9 points, where 20 minutes at 45%/h is 15.
+        let box = try PaceSandbox(metrics: fast)
+        var polls = 0
+        let held = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.90")) }
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(held.status == 0)
+        #expect(polls == 3, "it resumed onto 90%:\n\(held.out)")
+        #expect(held.out.contains("5h at 90% on org-home is 9 points below its 99% limit, short of the 15 a resume needs (20m at the old login's 45%/h)"),
+                "\(held.out)")
+        // 60% has 39 points: room.
+        try box.setMetrics(fast)
+        let roomy = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.60")) }
+        })
+        #expect(roomy.status == 0)
+        #expect(roomy.out.contains("account switched (org-work → org-home) — headroom on the new login"), "\(roomy.out)")
+    }
+
+    @Test func aBareWaitTakesTheGatesResumeHeadroom() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        #expect(runPace(box, ["gate"]).status == 10)
+        #expect(box.stateText.contains("\"resumeHeadroom\": \"auto\""), "\(box.stateText)")
+        #expect(runPace(box, ["gate", "--resume-headroom", "0"]).status == 10)
+        #expect(box.stateText.contains("\"resumeHeadroom\": 0,"), "\(box.stateText)")
+        // The gate said 0, so 97% on the new login is room enough.
+        let bare = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+        })
+        #expect(bare.status == 0)
+        #expect(bare.out.contains("waiting by the gate's settings (--resume-headroom 0)"), "\(bare.out)")
+        #expect(bare.out.contains("headroom on the new login"), "\(bare.out)")
+        // The wait's own setting, flag or environment, beats the gate's.
+        for own in [(["--resume-headroom", "auto"], [String: String]()), ([], ["PACE_RESUME_HEADROOM": "auto"])] {
+            try box.setMetrics(Self.burning())
+            #expect(runPace(box, ["gate", "--resume-headroom", "0"]).status == 10)
+            var polls = 0
+            let result = runPace(box, ["wait", "--interval", "5"] + own.0, extra: own.1, onSleep: { n in
+                polls = n
+                if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+                if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+            })
+            #expect(polls == 3, "\(own): \(result.out)")
+            #expect(!result.out.contains("--resume-headroom 0"), "\(result.out)")
+        }
     }
 
     // MARK: - pacer feedback (#268)

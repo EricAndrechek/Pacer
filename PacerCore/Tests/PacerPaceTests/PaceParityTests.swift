@@ -43,8 +43,9 @@ import Testing
 ///   out only where a window projects inside `--max-age`, which no fixture
 ///   here does, so that line is still compared as it was.
 /// - On a login switch, `wait` resumes only onto a login with
-///   `--resume-headroom` below the paused window's limit (#313). `wait` is
-///   not compared (above).
+///   `--resume-headroom` below the paused window's limit (#313), which the
+///   state file records for a later `wait`; `withoutAddedKeys` drops it.
+///   `wait` is not compared (above).
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -173,7 +174,7 @@ struct PaceParityTests {
 
     /// The keys the script never wrote.
     static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit",
-                            "goUntil"]
+                            "goUntil", "resumeHeadroom"]
 
     /// `status`'s `go (until 22:41Z)` as the script's `go`.
     static func withoutGoUntil(_ text: String) -> String {
