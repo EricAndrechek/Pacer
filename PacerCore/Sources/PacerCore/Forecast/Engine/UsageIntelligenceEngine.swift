@@ -104,7 +104,7 @@ public actor UsageIntelligenceEngine {
 
     /// Whether this engine has scored the rate-limit record over the FULL raw
     /// history this launch. A refit reads 32 days, but the record has to cover
-    /// every completed cycle: selection and the shadow floors count it, and a
+    /// every completed cycle: selection and the cycle facts count it, and a
     /// new bucket version (`EngineSelfEval.rlBucketVersion`) would otherwise
     /// leave only the last 32 days scored. It runs on the second refit, never
     /// the first, so it can't delay the first answers after launch, and
@@ -323,7 +323,6 @@ public actor UsageIntelligenceEngine {
             let weekly = WindowSpec.isWeeklyScale(duration: window.duration)
             accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly)
             if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
-                                                    provisionalMinPeriods: Self.rlShadowFloors(duration: window.duration),
                                                     weekly: weekly) {
                 rlSelection[window.key] = pick
             }
@@ -446,29 +445,6 @@ public actor UsageIntelligenceEngine {
         var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
         c["diurnal-rate"] = 3
         return c
-    }
-
-    /// The SHADOW candidates for a window and the promotion floor each must
-    /// clear (completed periods in its scored record) before `bestMethod` may
-    /// select it for display. Kalman is new everywhere; the diurnal model is
-    /// established on weekly-cadence windows but a shadow on session-cadence
-    /// ones — the 2026-06 backtest measured a null on the 5h block (session
-    /// cycles rarely straddle a day/night boundary), and the shadow record
-    /// re-tests that assumption instead of trusting it forever. Keyed off the
-    /// window's *duration* (via `WindowSpec.isWeeklyScale`), so scoped per-model
-    /// windows get the same rule with no new code — a scoped weekly cap treats
-    /// diurnal as established, a scoped session cap as a shadow.
-    public static func rlShadowFloors(duration: TimeInterval) -> [String: Int] {
-        let floor = EngineParams.current.shadowPromotionMinPeriods
-        var floors = ["kalman-trend": floor, "recent-rate": floor]
-        if !WindowSpec.isWeeklyScale(duration: duration) { floors["diurnal-rate"] = floor }
-        return floors
-    }
-
-    /// Enum-typed adapter for the fixed windows — preserved for the widget/UI/
-    /// tests that ask by `RateLimitWindowKind`.
-    public static func rlShadowFloors(_ window: RateLimitWindowKind) -> [String: Int] {
-        rlShadowFloors(duration: WindowSpec.fixed(window).duration)
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -1088,11 +1064,9 @@ public actor UsageIntelligenceEngine {
             guard let samples = f.rateLimit[key], !samples.isEmpty else { continue }
             let (current, history) = BurnTrajectory.segment(samples: samples, duration: duration, now: f.now)
 
-            // The diurnal model competes on every window: established on
-            // weekly-cadence windows (where the idle structure lives), a
-            // promotion-gated SHADOW on session-cadence ones — the 2026-06
-            // "measured null" on the 5h block gets re-tested by the accumulating
-            // record instead of trusted forever.
+            // The diurnal model competes on every window, the 5h block too:
+            // the 2026-06 "measured null" there gets re-tested by the record
+            // instead of trusted forever.
             var roster = BurnTrajectory.defaultModels
             // ...but only once there is a completed cycle to learn a shape
             // from. With none, `rateTable` is the activity prior alone, and on
@@ -1125,12 +1099,7 @@ public actor UsageIntelligenceEngine {
             if let learned = rlSelection[key] {
                 selectedId = learned
             } else {
-                // Cold start never displays a shadow candidate — the whole
-                // point of the promotion floor is that new models earn
-                // display from the persisted record, not a cold backtest.
-                let shadowIds = Set(Self.rlShadowFloors(duration: duration).keys)
-                let scores = BurnTrajectory.score(models: roster.filter { !shadowIds.contains($0.id) },
-                                                  cycles: history)
+                let scores = BurnTrajectory.score(models: roster, cycles: history)
                 selectedId = ForecastSelector.select(
                     scores: scores, policy: .init(minScoredCases: 6, minCoverage: 0.5)).id
                     ?? (WindowSpec.isWeeklyScale(duration: duration) ? "diurnal-rate" : "recency-weighted")
@@ -1139,7 +1108,7 @@ public actor UsageIntelligenceEngine {
             // the band is calibrated on the model actually drawn.
             let resolvedId = Self.resolveModel(
                 roster: roster, selectedId: selectedId, current: current,
-                accuracy: rlAccuracy[key], shadowFloors: Self.rlShadowFloors(duration: duration))
+                accuracy: rlAccuracy[key])
             let model = roster.first { $0.id == resolvedId }
 
             // Cap-hit frequency facts over completed cycles (for honest
@@ -1166,8 +1135,7 @@ public actor UsageIntelligenceEngine {
     }
 
     /// The model a window shows this refit (#301): the selected one when it
-    /// can fit the live cycle, else the best-recorded model that can. Promoted
-    /// models come before unpromoted shadows (display is earned), then the
+    /// can fit the live cycle, else the best-recorded model that can: the
     /// lowest typical error, then the simpler model, the scoreboard's tie rule.
     ///
     /// The selected model declines routinely: diurnal-rate before 5% of the
@@ -1177,16 +1145,14 @@ public actor UsageIntelligenceEngine {
     /// With no live cycle there is nothing to fit, so the selection stands.
     static func resolveModel(roster: [any BurnTrajectory.Model], selectedId: String,
                              current: BurnTrajectory.PartialCycle?,
-                             accuracy: EngineSelfEval.Accuracy?,
-                             shadowFloors: [String: Int]) -> String? {
+                             accuracy: EngineSelfEval.Accuracy?) -> String? {
         guard let current else { return roster.contains { $0.id == selectedId } ? selectedId : roster.first?.id }
         if let selected = roster.first(where: { $0.id == selectedId }), selected.fit(current) != nil {
             return selectedId
         }
-        func rank(_ m: any BurnTrajectory.Model) -> (Int, Double, Int) {
+        func rank(_ m: any BurnTrajectory.Model) -> (Double, Int) {
             let stat = accuracy?.methods.first { $0.method == m.id }
-            let unpromoted = shadowFloors[m.id].map { (stat?.periods ?? 0) < $0 } ?? false
-            return (unpromoted ? 1 : 0, stat?.typicalAbsError ?? .infinity, m.complexity)
+            return (stat?.typicalAbsError ?? .infinity, m.complexity)
         }
         return roster.filter { $0.fit(current) != nil }.min { rank($0) < rank($1) }?.id
     }

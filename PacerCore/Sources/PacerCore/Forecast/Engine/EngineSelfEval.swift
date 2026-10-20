@@ -281,23 +281,21 @@ public enum EngineSelfEval {
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
     ///
-    /// `provisionalMinPeriods` is the SHADOW promotion gate: methods listed
-    /// there need their own (much higher) floor of scored periods before they
-    /// can be selected at all. They accumulate record from day one like
-    /// everyone else — the gate only bounds what a thin early record can put
-    /// on screen, so a new candidate earns display instead of getting it on a
-    /// lucky week.
+    /// Every model clears the same floor. A new model used to need 15 scored
+    /// periods first (a "shadow"), back when its record could only grow one
+    /// live cycle at a time. The record backfill now scores every model over
+    /// every cycle the store holds, archive included, on the first refit after
+    /// install, so a new model arrives with the same depth of record as the
+    /// ones it competes with, and a separate floor only kept it off the screen.
     public static func bestMethod(
         from records: [Record],
         minPeriods: Int = 2,
         complexity: [String: Int] = [:],
-        provisionalMinPeriods: [String: Int] = [:],
         weekly: Bool = false
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
-            let floor = provisionalMinPeriods[id] ?? minPeriods
-            guard Set(rows.map { $0.periodKey }).count >= floor else { return nil }
+            guard Set(rows.map { $0.periodKey }).count >= minPeriods else { return nil }
             return (id, typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }

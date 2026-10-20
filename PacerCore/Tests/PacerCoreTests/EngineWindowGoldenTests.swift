@@ -17,8 +17,10 @@ import Testing
 /// Deliberately moved once since: #300 measures the conformal residuals from
 /// the displayed (anchored, clamped) value and centres the band on it, which
 /// changed the 5-hour `cal[pooled]` line and the band built from it — and
-/// nothing else. #272 added the `recent-rate` shadow to the roster, so each
-/// window lists one more trajectory (`traj n=7`); selection is unchanged.
+/// nothing else. #272 added `recent-rate` to the roster, so each window lists
+/// one more trajectory (`traj n=7`). Dropping the shadow floor let the cold
+/// start score every model, so the 7-day window's tied cold backtest now goes
+/// to the simpler `recent-rate` (same 61.6 at reset); the 5-hour is unchanged.
 struct EngineWindowGoldenTests {
 
     static let utc = Calendar(identifier: .gregorian).with(timeZone: TimeZone(identifier: "UTC")!)
@@ -102,12 +104,12 @@ struct EngineWindowGoldenTests {
     burn used=55.0000 slope=22.0000 cross=nil early=nil late=nil anchor=2.4050 method=saturating
     traj n=7 selected=saturating pts=25 cross=nil last=87.4769
     == seven_day ==
-    selectedId=linear-recent duration=604800.0000 history=6
+    selectedId=recent-rate duration=604800.0000 history=6
     cycles obs=6 over90=0 hit100=0
     cal[pooled] n=6 q10=-0.6000 q50=-0.6000 q90=-0.6000
-    outlook value=61.6000 i80=nil i50=nil conf=medium support=6 method=rl-linear-recent note=-
-    burn used=30.8000 slope=0.3667 cross=nil early=nil late=nil anchor=0.0000 method=linear-recent
-    traj n=7 selected=linear-recent pts=25 cross=nil last=61.6000
+    outlook value=61.6000 i80=nil i50=nil conf=medium support=6 method=rl-recent-rate note=-
+    burn used=30.8000 slope=0.3667 cross=nil early=nil late=nil anchor=0.0000 method=recent-rate
+    traj n=7 selected=recent-rate pts=25 cross=nil last=61.6000
     """
 
     @Test func fixedWindowsAreByteIdenticalToPreRefactor() {

@@ -101,9 +101,6 @@ public enum BurnTrajectory {
 
     /// Default roster. Quadratic is deliberately excluded — it reliably
     /// explodes on real cycles and was the worst fit in every backtest.
-    /// `KalmanTrend` rides along as a shadow candidate: it accumulates a
-    /// scored record like the others but can't be displayed until it clears
-    /// the promotion floor (`EngineParams.shadowPromotionMinPeriods`).
     public static var defaultModels: [any Model] {
         [
             LinearRecent(),

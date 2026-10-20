@@ -67,9 +67,10 @@ struct RLResolvedModelTests {
         #expect(rf.replacedId == nil)
     }
 
-    @Test func aStandInPrefersPromotedModelsOverAnUnpromotedShadow() throws {
+    @Test func aStandInIsTheBestRecordedModelThatFits() throws {
         let f = Self.features()
-        // kalman-trend has the best record but hasn't reached its promotion floor.
+        // kalman-trend has the best record on only 3 cycles; with no separate
+        // floor for newer models, the record decides.
         func stat(_ id: String, _ err: Double, _ periods: Int) -> EngineSelfEval.Accuracy.MethodStat {
             .init(method: id, medianAbsPctError: err, typicalAbsError: err, periods: periods)
         }
@@ -78,7 +79,7 @@ struct RLResolvedModelTests {
         ])
         let fit = UsageIntelligenceEngine.makeFit(f, rlSelection: ["seven_day": "diurnal-rate"],
                                                   rlAccuracy: ["seven_day": acc])
-        #expect(fit.rl["seven_day"]?.resolvedId == "saturating")
+        #expect(fit.rl["seven_day"]?.resolvedId == "kalman-trend")
     }
 }
 

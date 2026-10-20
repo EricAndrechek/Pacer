@@ -1,13 +1,11 @@
 """Weekly self-improvement check — deterministic, no LLM required.
 
 Runs the walk-forward replay against the live store, compares against the
-committed baselines, checks shadow-candidate promotion progress from the
-app's own eval record, and runs the default parameter sweep. Emits a macOS
+committed baselines, and runs the default parameter sweep. Emits a macOS
 notification ONLY when something is actionable:
 
 - 80%-band coverage drifted outside [0.70, 0.92] (on ≥ 20 banded cases)
 - median |end-at-reset error| worsened ≥ 25% vs baseline
-- a shadow candidate reached its promotion floor (once per candidate)
 - the sweep found a fold-robust parameter improvement
 
 Every run appends one JSON line to reports/log.jsonl regardless, so the
@@ -25,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pacer_replay import (
-    RL_BUCKET_VERSION, WINDOW_SECONDS, Params, grid_loader, headline_key, is_weekly_scale,
+    WINDOW_SECONDS, Params, grid_loader, headline_key, is_weekly_scale,
     locate_store, open_copy, rate_samples_by_account, replay_accounts, summarize,
 )
 from sweep import DEFAULT_GRID, fold_errors, robust_improvement
@@ -34,8 +32,6 @@ HERE = Path(__file__).resolve().parent
 REPORTS = HERE / "reports"
 BASELINES = HERE / "baselines.json"
 
-SHADOWS = {"rl-five_hour": ["kalman-trend", "diurnal-rate", "recent-rate"],
-           "rl-seven_day": ["kalman-trend", "recent-rate"]}
 COVERAGE_OK = (0.70, 0.92)
 MIN_BANDED_FOR_ALARM = 20
 MEDIAN_WORSEN_FACTOR = 1.25
@@ -50,21 +46,6 @@ def banded_cases(scores) -> int:
     return sum(1 for s in scores if s.covered80 is not None)
 
 
-def shadow_progress(conn) -> dict[str, dict[str, int]]:
-    """Distinct scored periods per shadow method per surface, from the app's
-    own persisted record (the same numbers the promotion gate reads) — current
-    bucket version only, as the app reads it."""
-    out: dict[str, dict[str, int]] = {}
-    for surface, methods in SHADOWS.items():
-        for m in methods:
-            n = conn.execute(
-                "SELECT COUNT(DISTINCT ZPERIODKEY) FROM ZENGINEEVALOUTCOME "
-                "WHERE ZSURFACE = ? AND ZMETHOD = ? AND ZBUCKET LIKE ?",
-                (surface, m, f"%|{RL_BUCKET_VERSION}")).fetchone()[0]
-            out.setdefault(surface, {})[m] = int(n)
-    return out
-
-
 def run_check() -> int:
     conn = open_copy(locate_store(None))
     grid = grid_loader(conn)
@@ -72,7 +53,7 @@ def run_check() -> int:
     baselines = json.loads(BASELINES.read_text()) if BASELINES.exists() else {}
     actionable: list[str] = []
     result = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-              "paramsVersion": params.version_tag(), "windows": {}, "shadows": {}}
+              "paramsVersion": params.version_tag(), "windows": {}}
 
     all_scores = {}
     for window in ("five_hour", "seven_day"):
@@ -95,19 +76,7 @@ def run_check() -> int:
         if err and base_err and err > base_err * MEDIAN_WORSEN_FACTOR:
             actionable.append(f"{window}: {metric} {err}pp vs baseline {base_err}pp")
 
-    # Shadow promotion progress (notify once per candidate crossing the floor).
     REPORTS.mkdir(exist_ok=True)
-    seen_file = REPORTS / "promotions-seen.json"
-    seen = set(json.loads(seen_file.read_text())) if seen_file.exists() else set()
-    progress = shadow_progress(conn)
-    result["shadows"] = progress
-    for surface, methods in progress.items():
-        for m, n in methods.items():
-            key = f"{surface}|{m}"
-            if n >= params.shadow_promotion_min_periods and key not in seen:
-                actionable.append(f"{m} reached its promotion floor on {surface} ({n} cycles)")
-                seen.add(key)
-    seen_file.write_text(json.dumps(sorted(seen)))
 
     # Parameter sweep (default grid) with the fold-robust adoption rule.
     keys = sorted(DEFAULT_GRID)
@@ -140,7 +109,6 @@ def run_check() -> int:
         print("quiet week — nothing actionable")
     for w, s in result["windows"].items():
         print(f"  {w}: {s}")
-    print(f"  shadows: {progress}")
     return 0
 
 

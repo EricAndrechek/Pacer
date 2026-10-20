@@ -145,11 +145,16 @@ Three layers close the loop end-to-end (2026-07):
   string, bit-identical to the Python harness). The app never mutates its own
   parameters; changes arrive as reviewed code and re-tag the trail
   automatically.
-- **Shadow candidates**: new models (`kalman-trend` everywhere, the diurnal
-  model on 5h) score into the record from day one but can't be displayed
-  until they clear `shadowPromotionMinPeriods` completed periods AND win on
-  realized error — display is earned, never granted to a lucky thin record.
-  Cold-start selection skips shadows entirely.
+- **New models compete at once, on a backtested record.** A model added to
+  the roster is scored over every completed cycle the store holds, the
+  archive included, on the second refit after install (the record backfill),
+  so it arrives with as deep a record as the models it competes with, and
+  every model clears the same floor (2 scored periods). Until 2026-10 a new
+  model was a "shadow" that needed 15 periods before it could be shown. That
+  floor dates from when the record grew one live cycle at a time; with the
+  backfill it only kept a model with hundreds of scored cycles off the
+  screen. Removing it moved the walk-forward on full history from 3.94 to
+  3.82 pp (5h median) and 8.77 to 8.57 pp (7d mean), coverage in range.
 
 The tuning loop itself lives out-of-app in `research/harness` (Python/uv):
 a walk-forward replay of this whole pipeline over the real store (~1s for
@@ -184,7 +189,7 @@ evening accuracy from its own record.
 - CreateML tabular candidate joins the EOD roster via the scoreboard at ~6
   months of data.
 - 5-hour window: diurnal structure was a measured null in 2026-06 (too short
-  to straddle day/night) — now re-tested continuously as a promotion-gated
-  shadow candidate instead of trusted forever. Cap-hit early-warning there
+  to straddle day/night) — now re-tested continuously by the record instead
+  of trusted forever. Cap-hit early-warning there
   has an information wall (44→100% in 12 minutes once observed); that one IS
   impossible, don't rebuild it.

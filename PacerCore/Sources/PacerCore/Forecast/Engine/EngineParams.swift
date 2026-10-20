@@ -46,14 +46,6 @@ public struct EngineParams: Sendable, Equatable, Codable {
     /// fraction of the cycle duration.
     public var recencyHalfLifeFraction: Double = 0.15
 
-    // MARK: Shadow-candidate promotion
-
-    /// Completed periods a SHADOW candidate's record needs before
-    /// `EngineSelfEval.bestMethod` may select it for display (it still must
-    /// win on realized error once there). Shadows score from day one; this
-    /// only stops a lucky thin record from reaching the screen.
-    public var shadowPromotionMinPeriods: Int = 15
-
     // MARK: Conformal residual grouping
 
     /// Below this many completed cycles, the rate-limit calibrator collapses
@@ -90,7 +82,6 @@ public struct EngineParams: Sendable, Equatable, Codable {
             "poolRecencyWindow=\(poolRecencyWindow)",
             "linearRecentLookbackFraction=\(g(linearRecentLookbackFraction))",
             "recencyHalfLifeFraction=\(g(recencyHalfLifeFraction))",
-            "shadowPromotionMinPeriods=\(shadowPromotionMinPeriods)",
             "conformalBlockMinCycles=\(conformalBlockMinCycles)",
         ].joined(separator: ";")
     }
