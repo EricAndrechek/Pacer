@@ -87,6 +87,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Fails fast, before the long build. Compiler intermediates carry absolute
+      # build paths, and 400 of them were once committed by accident (#309).
+      - name: No tracked compiler intermediates
+        run: |
+          if git ls-files | grep -E '\.(o|d|dia|swiftdeps|swiftconstvalues)$'; then
+            echo "::error::Compiler intermediates are tracked (listed above). git rm --cached them; see #309."
+            exit 1
+          fi
+
       - name: Show toolchain
         run: xcodebuild -version
 
