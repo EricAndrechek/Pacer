@@ -45,6 +45,8 @@ enum LiveRenderMode {
         case dashboard, history, projects, models, now, pace, badges, settings
         /// The compare-models sheet for the scope's 5-hour and 7-day windows.
         case projection, projectionWeekly
+        /// Every model's info popover, for both windows.
+        case modelInfo
 
         /// Wide enough that the balanced grids take their many-column layout —
         /// a narrow render exercises a fallback the user is not looking at.
@@ -56,6 +58,7 @@ enum LiveRenderMode {
             case .pace: return 1100
             case .now, .badges: return 900
             case .projection, .projectionWeekly: return 760
+            case .modelInfo: return 1040
             }
         }
 
@@ -78,6 +81,15 @@ enum LiveRenderMode {
             case .projectionWeekly:
                 ProjectionCompareModal(windowKey: RateLimitWindowName.sevenDay,
                                        limitAccountId: UsageScope.shared.limitAccountId)
+            case .modelInfo:
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("5-hour").font(.headline).padding(.horizontal, 16).padding(.top, 16)
+                    ModelInfoGallery(windowKey: RateLimitWindowName.fiveHour, duration: 5 * 3600,
+                                     limitAccountId: UsageScope.shared.limitAccountId)
+                    Text("7-day").font(.headline).padding(.horizontal, 16)
+                    ModelInfoGallery(windowKey: RateLimitWindowName.sevenDay, duration: 7 * 86400,
+                                     limitAccountId: UsageScope.shared.limitAccountId)
+                }
             }
         }
     }

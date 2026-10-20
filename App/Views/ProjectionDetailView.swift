@@ -596,6 +596,13 @@ struct ProjectionDetailView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
+                    if let summary = BurnTrajectory.summary(st.modelId) {
+                        PacerInfoButton(help: summary) {
+                            ModelInfoContent(
+                                modelId: st.modelId, windowDuration: durationSeconds,
+                                stat: accuracy?.methods.first { $0.method == st.modelId })
+                        }
+                    }
                     if st.isSelected {
                         Text("on the dashboard").font(.system(size: 10, weight: .semibold))
                             .padding(.horizontal, 6).padding(.vertical, 2)
@@ -634,6 +641,89 @@ struct ProjectionDetailView: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
             }
+        }
+    }
+}
+
+/// Every model's info popover for one window, side by side — `make
+/// render-live`'s `modelInfo` page, because a popover cannot be rendered
+/// off-screen. Reads the scope's engine the way the sheet does.
+struct ModelInfoGallery: View {
+    let windowKey: String
+    let duration: TimeInterval
+    let limitAccountId: String?
+    @Environment(\.usageEngines) private var engines
+    @State private var accuracy: EngineSelfEval.Accuracy?
+
+    var body: some View {
+        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
+                  alignment: .leading, spacing: 12) {
+            ForEach(ids, id: \.self) { id in
+                ModelInfoContent(modelId: id, windowDuration: duration,
+                                 stat: accuracy?.methods.first { $0.method == id })
+                    .padding(14)
+                    .frame(width: 300, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.background.secondary))
+            }
+        }
+        .padding(16)
+        .task {
+            guard let engine = engines?.engine(forAccount: limitAccountId) else { return }
+            let surface = EngineSelfEval.rlSurface(windowKey)
+            accuracy = await askEngine { await engine.selfEvalAccuracy(surface: surface) }
+        }
+    }
+}
+
+/// The compare sheet's info popover for one model: how it works, then its
+/// record on this window split by how far through the window the call was
+/// made. Late calls are always closer, so the split shows where a model earns
+/// or loses its overall number.
+private struct ModelInfoContent: View {
+    let modelId: String
+    let windowDuration: TimeInterval
+    let stat: EngineSelfEval.Accuracy.MethodStat?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(BurnTrajectory.displayName(modelId))
+                .font(.system(size: 13, weight: .semibold))
+            if let how = BurnTrajectory.howItWorks(modelId, windowDuration: windowDuration) {
+                Text(how)
+                    .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let stat, !stat.byStage.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("TYPICAL ACCURACY, \(stat.periods) PAST CYCLES")
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                        .tracking(0.5)
+                    ForEach(stat.byStage, id: \.stage) { s in
+                        HStack {
+                            Text(Self.label(s.stage))
+                            Spacer()
+                            Text(String(format: "within ±%.0f%%", s.typicalAbsError))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 12))
+                    }
+                }
+            } else {
+                Text("No completed cycles scored yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    static func label(_ stage: EngineSelfEval.Accuracy.Stage) -> String {
+        switch stage {
+        case .early: return "Early, 20–40% through"
+        case .middle: return "Middle, 50–70% through"
+        case .late: return "Late, 80–90% through"
         }
     }
 }
