@@ -296,14 +296,21 @@ public actor UsageIntelligenceEngine {
         // per-model windows — each keyed by its own surface, so scoped windows
         // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
+        let params = EngineParams.current
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             // Current-version rows only: v1 graded the raw line, not the value shown.
             let recs = records(surface).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
             let weekly = WindowSpec.isWeeklyScale(duration: window.duration)
-            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly)
+            // Which half of its window the live cycle is in (#305): the pick,
+            // the stand-in ranking and the accuracy shown all read that half's
+            // record. No live cycle, no phase: every cut, as before.
+            let phase = params.rlSelectByPhase ? Self.livePhase(f, window: window) : nil
+            accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly,
+                                                                 phase: phase)
             if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
-                                                    weekly: weekly) {
+                                                    weekly: weekly, phase: phase,
+                                                    tieRelative: params.rlTieRelative > 0 ? params.rlTieRelative : nil) {
                 rlSelection[window.key] = pick
             }
         }
@@ -1220,6 +1227,14 @@ public actor UsageIntelligenceEngine {
                 cyclesObserved: finals.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
         }
         return fit
+    }
+
+    /// The half of its window the live cycle is in, nil when there is none.
+    static func livePhase(_ f: EngineFeatures, window: WindowSpec) -> EngineSelfEval.SelectionPhase? {
+        guard let samples = f.rateLimit[window.key] else { return nil }
+        let (current, _) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: f.now)
+        guard let current, current.durationHours > 0 else { return nil }
+        return .init(cut: current.nowHours / current.durationHours)
     }
 
     /// The model a window shows this refit (#301): the selected one when it

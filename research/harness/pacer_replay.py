@@ -61,11 +61,13 @@ class Params:
     linear_recent_lookback_fraction: float = 0.3
     recency_half_life_fraction: float = 0.15
     conformal_block_min_cycles: int = 40
-    # Rate-limit selection knobs (#305). Not in `canonical()` until a value is
-    # adopted, so the defaults (today's rule) keep the version tag unchanged.
-    rl_select_by_phase: bool = False         # select early (<50%) and late cuts separately
+    # Rate-limit selection knobs (#305). Phase selection and the relative tie
+    # were adopted 2026-10-20 (EngineParams.rlSelectByPhase / rlTieRelative)
+    # and are in `canonical()`. Recency is still harness-only, kept out of
+    # `canonical()` until a value is adopted.
+    rl_select_by_phase: bool = True          # select early (<50%) and late cuts separately
     rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
-    rl_tie_relative: float = 0.0             # tie band relative to the best; 0 = absolute 1.5 pp
+    rl_tie_relative: float = 0.05            # tie band relative to the best; 0 = absolute 1.5 pp
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -80,6 +82,8 @@ class Params:
             f"linearRecentLookbackFraction={g(self.linear_recent_lookback_fraction)}",
             f"recencyHalfLifeFraction={g(self.recency_half_life_fraction)}",
             f"conformalBlockMinCycles={self.conformal_block_min_cycles}",
+            f"rlSelectByPhase={int(self.rl_select_by_phase)}",
+            f"rlTieRelative={g(self.rl_tie_relative)}",
         ])
 
     def version_tag(self) -> str:
