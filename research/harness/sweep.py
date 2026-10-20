@@ -89,13 +89,23 @@ def robust_improvement(base_folds, cand_folds, base_med, cand_med, cand_cov) -> 
     return cand_cov is not None and 0.70 <= cand_cov <= 0.92
 
 
+def label(p: Params) -> str:
+    """The version tag, plus any knob outside canonical() that differs from
+    the default — those share the baseline's tag, so the tag alone can't name
+    a --selection row."""
+    base = Params()
+    extra = [f"{f}={getattr(p, f)}" for f in ("rl_select_by_phase", "rl_selection_recency", "rl_tie_relative")
+             if getattr(p, f) != getattr(base, f)]
+    return p.version_tag() + (f" [{', '.join(extra)}]" if extra else "")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--store")
     ap.add_argument("--window", choices=["five_hour", "seven_day"])
     ap.add_argument("--full", action="store_true", help="the larger grid (~360 configs)")
     ap.add_argument("--selection", action="store_true",
-                    help="the rate-limit selection knobs instead (#305; 48 configs)")
+                    help="the rate-limit selection knobs instead (#305; 24 configs)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -110,11 +120,13 @@ def main() -> None:
         replace(Params(), **dict(zip(keys, values)))
         for values in itertools.product(*(grid[k] for k in keys))
     )]
-    # De-dup (the baseline usually appears in the grid too).
+    # De-dup (the baseline usually appears in the grid too) on every field, not
+    # canonical(): the selection knobs stay out of canonical() until adopted,
+    # so keying on it collapsed the whole --selection grid into the baseline.
     seen, unique = set(), []
     for p in configs:
-        if p.canonical() not in seen:
-            seen.add(p.canonical())
+        if repr(p) not in seen:
+            seen.add(repr(p))
             unique.append(p)
 
     report: dict = {"baseline": Params().version_tag(), "windows": {}}
@@ -127,7 +139,7 @@ def main() -> None:
             s = summarize(scores)
             # "median" is the window's headline error: the mean on weekly windows.
             rows.append({
-                "tag": p.version_tag(), "canonical": p.canonical(), "metric": metric,
+                "tag": label(p), "canonical": p.canonical(), "metric": metric,
                 "median": s.get(metric), "coverage80": s.get("coverage80"),
                 "brier": s.get("brier"), "folds": fold_errors(scores, weekly),
                 "isBaseline": i == 0,
