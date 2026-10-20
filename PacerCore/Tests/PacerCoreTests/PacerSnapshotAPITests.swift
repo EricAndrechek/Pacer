@@ -224,12 +224,13 @@ struct PacerSnapshotAPITests {
 
     // MARK: - Which engine's projection
 
-    /// The all-accounts engine fits the **active login's** rate-limit windows,
-    /// so an unscoped payload — and a request for the active account — reads
-    /// its outlook. Its *cost* projection blends both logins, which is why only
-    /// the unscoped payload takes that half.
+    /// The active login's rate-limit windows come from **its own** engine's
+    /// export (#303), for an unscoped payload and for a request naming it: the
+    /// all-accounts engine fits no rate limits while an account is active, so
+    /// its export carries none. A stale all-accounts export with a different
+    /// number is seeded too, to show it isn't read.
     @MainActor
-    @Test func theActiveLoginsWindowsReadTheAllAccountsOutlook() throws {
+    @Test func theActiveLoginsWindowsReadItsOwnOutlook() throws {
         let container = try Self.makeContainer()
         let now = Date()
         let context = ModelContext(container)
@@ -248,8 +249,16 @@ struct PacerSnapshotAPITests {
         let snapshot = EngineSnapshot(generatedUnix: now.timeIntervalSince1970,
                                       fiveHour: outlook, sevenDay: nil,
                                       cost: nil, scoped: [scopedOutlook])
-        context.insert(ClaudeCodeMeta(key: EngineSnapshot.metaKey(for: .allAccounts),
+        context.insert(ClaudeCodeMeta(key: EngineSnapshot.metaKey(for: .account(Self.work)),
                                       value: snapshot.encodedJSON() ?? ""))
+        let other = EngineSnapshot(
+            generatedUnix: now.timeIntervalSince1970,
+            fiveHour: EngineSnapshot.WindowOutlook(
+                usedPct: 37, endPct: 12, endLoPct: 10, endHiPct: 15, crossingUnix: nil,
+                resetsUnix: reset.timeIntervalSince1970, trajectory: []),
+            sevenDay: nil, cost: nil, scoped: [])
+        context.insert(ClaudeCodeMeta(key: EngineSnapshot.metaKey(for: .allAccounts),
+                                      value: other.encodedJSON() ?? ""))
         try context.save()
 
         for account in [nil, Self.work] {
@@ -299,13 +308,17 @@ struct PacerSnapshotAPITests {
         #expect(global.dataSource.forecastFresh == true)
     }
 
-    @Test func engineScopeFollowsTheActiveLogin() {
+    @Test func engineScopeIsTheAccountsOwn() {
+        // The active login's limits come from its own engine (#303), not the
+        // all-accounts one, which fits no rate limits while an account is active.
         #expect(PacerSnapshotBuilder.engineScope(limitAccount: nil, activeAccountId: Self.work)
-            == .allAccounts)
+            == .account(Self.work))
         #expect(PacerSnapshotBuilder.engineScope(limitAccount: Self.work, activeAccountId: Self.work)
-            == .allAccounts)
+            == .account(Self.work))
         #expect(PacerSnapshotBuilder.engineScope(limitAccount: Self.home, activeAccountId: Self.work)
             == .account(Self.home))
+        // With no account at all, the all-accounts export is the only one.
+        #expect(PacerSnapshotBuilder.engineScope(limitAccount: nil, activeAccountId: nil) == .allAccounts)
     }
 
     /// A projection from a previous cycle would be nonsense, so it is attached

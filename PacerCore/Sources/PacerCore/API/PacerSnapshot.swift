@@ -541,17 +541,17 @@ public enum PacerSnapshotBuilder {
                       now: now)
     }
 
-    /// Which engine scope's outlook describes `limitAccount`'s windows.
-    ///
-    /// The all-accounts engine fits the **active login's** rate-limit windows
-    /// (see `EngineScope`), so for that account it is both the right answer and
-    /// the only one that is reliably warm. Any other account gets its own
-    /// scope, which may be cold — then there is no projection, which is the
-    /// honest result.
+    /// Which engine scope's outlook describes `limitAccount`'s windows: that
+    /// account's own. Rate limits belong to one account, and the all-accounts
+    /// engine fits none while an account is active (#303): its record folded
+    /// every rotated-through account into one, and its answers disagreed with
+    /// the dashboard's. Every known account is kept fitted and its snapshot
+    /// exported each refit, so the account's scope is warm. Only with no
+    /// account at all does the all-accounts export carry the limits.
     nonisolated static func engineScope(limitAccount: String?,
                                         activeAccountId: String?) -> EngineScope {
-        guard let limitAccount, limitAccount != activeAccountId else { return .allAccounts }
-        return .account(limitAccount)
+        guard let account = limitAccount ?? activeAccountId else { return .allAccounts }
+        return .account(account)
     }
 
     nonisolated static func limits(context: ModelContext, limitAccount: String?,

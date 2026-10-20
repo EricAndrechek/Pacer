@@ -58,7 +58,9 @@ parity — if either side drifts, CI fails.
 
 ## What it does / doesn't replay
 
-Replayed: cycle segmentation, all six burn-trajectory models (including the
+Replayed **per account**, each on its own record and activity prior, the way the
+app fits them since #303 (a rate-limit window belongs to one account; pooling
+them was the all-accounts engine's bug): cycle segmentation, all six burn-trajectory models (including the
 shadow Kalman + diurnal), record-driven selection with shadow promotion
 floors, live-value anchoring, stratified additive conformal bands with the
 gated quantiles. Not replayed (yet): the EOD/month cost surfaces and their

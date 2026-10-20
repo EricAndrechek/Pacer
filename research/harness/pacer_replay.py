@@ -149,6 +149,39 @@ def load_rate_samples(conn: sqlite3.Connection, window: str) -> list[tuple[float
     return [(r[0] + CORE_DATA_EPOCH, float(r[1]), r[2] + CORE_DATA_EPOCH) for r in rows]
 
 
+def rate_samples_by_account(conn: sqlite3.Connection, window: str) -> dict[str, list[tuple[float, float, float]]]:
+    """`load_rate_samples`, one series per account ("" for rows with none).
+    A rate-limit window belongs to one account, and since #303 the app fits
+    and records each account's on its own: the harness used to pool every
+    account's cycles into one record, which is what the app's all-accounts
+    engine did and no longer does."""
+    rows = conn.execute(
+        "SELECT ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT, ZACCOUNTID FROM ZRATELIMITSAMPLE "
+        "WHERE ZWINDOW = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
+        (window,),
+    ).fetchall()
+    out: dict[str, list[tuple[float, float, float]]] = {}
+    for at, used, reset, acct in rows:
+        out.setdefault(acct or "", []).append((at + CORE_DATA_EPOCH, float(used), reset + CORE_DATA_EPOCH))
+    return out
+
+
+def usagelimit_samples_by_account(conn: sqlite3.Connection, identity: str) -> dict[str, list[tuple[float, float, float]]]:
+    """`load_usagelimit_samples`, one series per account: two accounts can
+    hold a weekly window under the same identity string."""
+    if "ZUSAGELIMITSAMPLE" not in _tables(conn) or "ZACCOUNTID" not in _cols(conn, "ZUSAGELIMITSAMPLE"):
+        return {"": load_usagelimit_samples(conn, identity)}
+    rows = conn.execute(
+        "SELECT ZSAMPLEDAT, ZPERCENT, ZRESETSAT, ZACCOUNTID FROM ZUSAGELIMITSAMPLE "
+        "WHERE ZIDENTITY = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
+        (identity,),
+    ).fetchall()
+    out: dict[str, list[tuple[float, float, float]]] = {}
+    for at, used, reset, acct in rows:
+        out.setdefault(acct or "", []).append((at + CORE_DATA_EPOCH, float(used), reset + CORE_DATA_EPOCH))
+    return out
+
+
 def load_usagelimit_samples(conn: sqlite3.Connection, identity: str) -> list[tuple[float, float, float]]:
     """(at_unix, percent, resets_unix) for one scoped `limits[]` identity — the
     same tuple shape as `load_rate_samples`, read from ZUSAGELIMITSAMPLE. Empty
@@ -205,14 +238,21 @@ def scoped_identities(conn: sqlite3.Connection) -> list[tuple[str, str, float]]:
     return sorted(out)
 
 
-def load_activity_grid(conn: sqlite3.Connection) -> list[list[float]]:
+def load_activity_grid(conn: sqlite3.Connection, account: str | None = None) -> list[list[float]]:
     """P(active)[weekday 0=Sun..6=Sat][hour] from hourly aggregates — the
     diurnal prior. Idle days count in the denominator (gaps are real zeros).
+    With `account`, that account's own hourly rollup, as its engine reads.
     A missing/renamed table degrades to a uniform (absent) prior."""
     try:
-        rows = conn.execute(
-            "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZHOURLYAGGREGATE GROUP BY ZDATE, ZHOUR"
-        ).fetchall()
+        if account:
+            rows = conn.execute(
+                "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZACCOUNTHOURLYAGGREGATE "
+                "WHERE ZACCOUNTID = ? GROUP BY ZDATE, ZHOUR", (account,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT ZDATE, ZHOUR, SUM(ZTOTALCOSTUSD) FROM ZHOURLYAGGREGATE GROUP BY ZDATE, ZHOUR"
+            ).fetchall()
     except sqlite3.OperationalError:
         return [[0.0] * 24 for _ in range(7)]
     active: dict[str, set[int]] = {}
@@ -786,6 +826,7 @@ class CaseScore:
     brier: float
     truth_hit: bool
     band_stated: bool
+    cycle_start: float = 0.0      # for ordering cases across accounts (replay_accounts)
 
 
 def replay_window(window: str, samples, activity_grid, params: Params,
@@ -857,7 +898,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 p_hit = 1.0 if point >= 100.0 else 0.0
             scores.append(CaseScore(i, cf, shown, abs(point - truth), covered,
                                     pb10, pb90, (p_hit - (1.0 if truth_hit else 0.0)) ** 2,
-                                    truth_hit, band_stated))
+                                    truth_hit, band_stated, cyc.cycle_start))
 
         # After the cycle completes, extend every model's record (walk-forward).
         period_key = str(round(cyc.resets_at / 60) * 60)
@@ -874,6 +915,34 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 record.setdefault(mid, {}).setdefault(period_key, []).append(
                     abs(displayed_at_reset(proj, partial) - truth))
     return scores
+
+
+def grid_loader(conn: sqlite3.Connection):
+    """`grid_for(account)` for replay_accounts: each account's own activity
+    prior, read once ("" falls back to the all-accounts rollup)."""
+    cache: dict[str, list[list[float]]] = {}
+
+    def grid_for(acct: str) -> list[list[float]]:
+        if acct not in cache:
+            cache[acct] = load_activity_grid(conn, acct or None)
+        return cache[acct]
+    return grid_for
+
+
+def replay_accounts(window: str, by_account: dict[str, list], grid_for, params: Params,
+                    conformal_mode: str = "auto", duration: float | None = None) -> list[CaseScore]:
+    """Replay each account on its own record and activity prior, as the app
+    fits them (#303), and merge. `cycle_index` is renumbered in time order
+    across accounts so the contiguous-fold split (sweep.fold_errors) stays
+    chronological rather than interleaving accounts."""
+    tagged = []
+    for acct, samples in sorted(by_account.items()):
+        for sc in replay_window(window, samples, grid_for(acct), params, conformal_mode, duration):
+            tagged.append((acct, sc))
+    order = {key: n for n, key in enumerate(sorted({(sc.cycle_start, acct, sc.cycle_index) for acct, sc in tagged}))}
+    for acct, sc in tagged:
+        sc.cycle_index = order[(sc.cycle_start, acct, sc.cycle_index)]
+    return [sc for _, sc in tagged]
 
 
 def summarize(scores: list[CaseScore]) -> dict:
@@ -964,7 +1033,7 @@ def main() -> None:
         return
 
     conn = open_copy(locate_store(args.store))
-    grid = load_activity_grid(conn)
+    grid_for = grid_loader(conn)
     params = Params()
     report = {"paramsVersion": params.version_tag(), "params": params.canonical(),
               "conformalMode": args.conformal_mode, "source": args.source, "windows": {}}
@@ -981,8 +1050,7 @@ def main() -> None:
             print(json.dumps({**report, "note": msg}, indent=2) if args.json else msg)
             return
         for identity, label, dur in idents:
-            samples = load_usagelimit_samples(conn, identity)
-            scores = replay_window(identity, samples, grid, params,
+            scores = replay_accounts(identity, usagelimit_samples_by_account(conn, identity), grid_for, params,
                                    conformal_mode=args.conformal_mode, duration=dur)
             report["windows"][f"{label} [{identity}]"] = summarize(scores)
         if args.json:
@@ -997,8 +1065,8 @@ def main() -> None:
         return
 
     for window in ([args.window] if args.window else ["five_hour", "seven_day"]):
-        samples = load_rate_samples(conn, window)
-        scores = replay_window(window, samples, grid, params, conformal_mode=args.conformal_mode)
+        scores = replay_accounts(window, rate_samples_by_account(conn, window), grid_for, params,
+                                 conformal_mode=args.conformal_mode)
         report["windows"][window] = summarize(scores)
     if args.json:
         print(json.dumps(report, indent=2))
