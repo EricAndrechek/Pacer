@@ -22,6 +22,16 @@ xcuserdata/
 !default.perspectivev3
 *.xccheckout
 
+# Compiler intermediates. A manual `swiftc` run from the repo root leaves these
+# beside the sources; 400 of them were committed once, carrying absolute build
+# paths into a public repo (#309). `*.d` is root-only: too generic to ignore
+# everywhere.
+*.o
+*.dia
+*.swiftdeps
+*.swiftconstvalues
+/*.d
+
 # Swift Package Manager
 .build/
 .swiftpm/
