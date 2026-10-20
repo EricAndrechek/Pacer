@@ -508,8 +508,10 @@ public actor UsageIntelligenceEngine {
         let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
         let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
         let minResiduals = EngineParams.current.conformalMinResiduals
-        let band80 = calibrator?.interval(around: point, level: 0.8, minResiduals: minResiduals).map { clampPct($0) }
-        let band50 = calibrator?.interval(around: point, level: 0.5, minResiduals: minResiduals).map { clampPct($0) }
+        let band80 = calibrator?.interval(around: point, level: 0.8, minResiduals: minResiduals)
+            .map { clampPct($0, floor: current.usedNow) }
+        let band50 = calibrator?.interval(around: point, level: 0.5, minResiduals: minResiduals)
+            .map { clampPct($0, floor: current.usedNow) }
 
         let confidence: Estimate.Confidence
         if rf.historyCount < 3 { confidence = .low }
@@ -1179,9 +1181,17 @@ public actor UsageIntelligenceEngine {
         return out
     }
 
-    static func clampPct(_ r: ClosedRange<Double>) -> ClosedRange<Double> {
-        let lo = min(100, max(0, r.lowerBound))
-        let hi = min(100, max(0, r.upperBound))
+    /// A rate-limit band, clamped to what the value at reset can actually be:
+    /// never above 100, and never below `floor`, the usage the meter already
+    /// shows. The additive calibrator's low quantile is usually negative, so
+    /// clamping at 0 alone left 76% of 5-hour 80% bands starting below the
+    /// meter ("range 25–55%" at 30% used, #273). Coverage is unchanged by
+    /// construction, since the outcome is always ≥ the meter: the same
+    /// guarantee `RemainderConformal` gives the end-of-day band.
+    static func clampPct(_ r: ClosedRange<Double>, floor: Double = 0) -> ClosedRange<Double> {
+        let floor = min(100, max(0, floor))
+        let lo = min(100, max(floor, r.lowerBound))
+        let hi = min(100, max(floor, r.upperBound))
         return lo...max(lo, hi)
     }
 
