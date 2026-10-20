@@ -126,6 +126,62 @@ struct RawLimitReaderParityTests {
         }
     }
 
+    /// The archive read the record backfill makes, held to the engine's own
+    /// SwiftData mapping (`archivedLimits`): rows with no window, identity or
+    /// percentage dropped, a missing group/label/flag defaulted, another
+    /// account and another kind left out, in time order.
+    @Test("archived rows match the engine's SwiftData mapping")
+    func archiveParity() throws {
+        let (container, url) = try makeStore()
+        let context = ModelContext(container)
+        let base = Date(timeIntervalSince1970: 1_780_000_000)
+        for i in (0..<30).reversed() {       // inserted newest first: the read must sort
+            let at = base.addingTimeInterval(Double(i) * 60)
+            context.insert(AccountUsageArchive(
+                accountId: i < 25 ? "orgA" : "orgB", kind: AccountUsageArchive.kindRateLimit, sampledAt: at,
+                window: i == 3 ? nil : (i.isMultiple(of: 2) ? "five_hour" : "seven_day"),
+                usedPercentage: i == 4 ? nil : Double(i), resetsAt: i.isMultiple(of: 6) ? nil : at,
+                source: "oauth"))
+            context.insert(AccountUsageArchive(
+                accountId: "orgA", kind: AccountUsageArchive.kindUsageLimit, sampledAt: at,
+                usedPercentage: i == 5 ? nil : Double(i) / 2, resetsAt: at, source: "oauth",
+                identity: i == 7 ? nil : "weekly_scoped|Fable|",
+                group: i.isMultiple(of: 3) ? nil : "weekly", label: i.isMultiple(of: 4) ? nil : "Fable",
+                isActive: i.isMultiple(of: 5) ? nil : i.isMultiple(of: 2),
+                modelId: i.isMultiple(of: 2) ? "claude-fable-5" : nil, modelDisplayName: "Fable"))
+            context.insert(AccountUsageArchive(
+                accountId: "orgA", kind: "extra_usage", sampledAt: at, amountCents: 100, source: "oauth"))
+        }
+        try context.save()
+
+        let rows = try context.fetch(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.accountId == "orgA" }, sortBy: [SortDescriptor(\.sampledAt)]))
+        let expected = UsageIntelligenceEngine.archivedLimits(rows)
+        let rate = try #require(RawLimitReader.archivedRateRows(storeURL: url, account: "orgA"))
+        let scoped = try #require(RawLimitReader.archivedScopedRows(storeURL: url, account: "orgA"))
+
+        #expect(rate.count == 23)                 // 25 orgA rows less a nil window and a nil percentage
+        #expect(rate.count == expected.rate.count)
+        for (a, e) in zip(rate, expected.rate) {
+            #expect(a.window == e.window)
+            #expect(abs(a.at.timeIntervalSince(e.at)) < 0.001)
+            #expect(a.usedPercentage == e.usedPercentage)
+            #expect(sameInstant(a.resetsAt, e.resetsAt))
+        }
+        #expect(scoped.count == 28)               // 30 less a nil percentage and a nil identity
+        #expect(scoped.count == expected.scoped.count)
+        for (a, e) in zip(scoped, expected.scoped) {
+            #expect(a.identity == e.identity)
+            #expect(a.group == e.group)
+            #expect(a.label == e.label)
+            #expect(a.modelId == e.modelId)
+            #expect(a.modelDisplayName == e.modelDisplayName)
+            #expect(abs(a.at.timeIntervalSince(e.at)) < 0.001)
+            #expect(a.usedPercentage == e.usedPercentage)
+            #expect(a.isActive == e.isActive)
+        }
+    }
+
     /// A path with no database is the ordinary in-memory case, and must degrade
     /// to "the caller falls back", not to a crash or an empty answer that looks
     /// like real data.

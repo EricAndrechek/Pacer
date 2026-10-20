@@ -66,7 +66,7 @@ struct RLActiveAccountRoutingTests {
         let container = try Self.seededContainer()
         let global = UsageIntelligenceEngine(modelContainer: container)
         await global.recompute(now: Self.now)
-        await global.recompute(now: Self.now)      // and not on the backfill refit either
+        #expect(await global.backfillRateLimitRecordIfNeeded(now: Self.now, pause: .zero) == 0)   // nor its full pass
         let rows = try ModelContext(container).fetch(FetchDescriptor<EngineEvalOutcome>())
         #expect(!rows.contains { $0.surface.hasPrefix("rl-") && !$0.surface.contains("#") })
 

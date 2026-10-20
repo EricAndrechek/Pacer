@@ -83,7 +83,7 @@ public actor UsageIntelligenceEngine {
     public func adopt(scope: EngineScope) {
         self.scope = scope
         evalRowsCache = nil
-        rateLimitRecordBackfilled = false
+        recordBackfill = .idle
     }
 
     /// Whether an engine of this scope fits rate-limit windows itself (#303).
@@ -102,15 +102,11 @@ public actor UsageIntelligenceEngine {
         scope != .allAccounts || activeAccountId == nil
     }
 
-    /// Whether this engine has scored the rate-limit record over the FULL raw
-    /// history this launch. A refit reads 32 days, but the record has to cover
-    /// every completed cycle: selection and the cycle facts count it, and a
-    /// new bucket version (`EngineSelfEval.rlBucketVersion`) would otherwise
-    /// leave only the last 32 days scored. It runs on the second refit, never
-    /// the first, so it can't delay the first answers after launch, and
-    /// `newOutcomesRL` skips fully-scored cycles, so later launches are cheap.
-    private var rateLimitRecordBackfilled = false
-    private var refitsCompleted = 0
+    /// Where this engine is with the full-history record pass
+    /// (`backfillRateLimitRecordIfNeeded`) this launch: in memory, so asking
+    /// again after every refit costs nothing once it has run or been skipped.
+    private enum RecordBackfill { case idle, running, done }
+    private var recordBackfill = RecordBackfill.idle
     /// When this engine's current fit was made, nil before the first refit.
     private var lastRefitAt: Date?
     /// When this engine's current fit was made, nil before the first refit:
@@ -256,29 +252,13 @@ public actor UsageIntelligenceEngine {
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
-        var rlFeatures = f
-        if fitsRateLimits && refitsCompleted > 0 && !rateLimitRecordBackfilled {
-            rateLimitRecordBackfilled = true
-            rlFeatures = timed("rlBackfill") {
-                let archived = fetchArchivedLimits()
-                return EngineFeatures.build(
-                    now: now, calendar: calendar,
-                    daily: daily, hourly: hourly,
-                    rate: Self.merged(fetchRate(now: now, since: .distantPast), archived.rate,
-                                      key: { "\($0.window)|\($0.at.timeIntervalSince1970)" }, at: \.at),
-                    lastArrivalAt: arrival,
-                    scoped: Self.merged(fetchScopedLimits(now: now, since: .distantPast), archived.scoped,
-                                        key: { "\($0.identity)|\($0.at.timeIntervalSince1970)" }, at: \.at))
-            }
-        }
+        // Cycles that completed inside the 32 days just read. Everything older
+        // is `backfillRateLimitRecordIfNeeded`'s, which runs on its own.
         let newRL = fitsRateLimits
-            ? newRLOutcomes(features: rlFeatures, calendar: calendar, now: now, existingKeys: existing)
+            ? newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: existing)
             : []
         persist(newRL, now: now)
-        allRows.append(contentsOf: (newEOD + newRL).map {
-            (key: EngineEvalOutcome.makeKey(surface: $0.surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey),
-             surface: $0.surface, record: EngineSelfEval.Record(method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey, predicted: $0.predicted, truth: $0.truth))
-        })
+        allRows.append(contentsOf: (newEOD + newRL).map(Self.evalRow))
         evalRowsCache = allRows
         let bySurface = Dictionary(grouping: allRows, by: { $0.surface })
         func records(_ surface: String) -> [EngineSelfEval.Record] {
@@ -348,7 +328,6 @@ public actor UsageIntelligenceEngine {
         // the live answers with their bands, residual evidence, and version
         // tags — behind the change/heartbeat policy.
         timed("snapshots") { recordPredictionSnapshots(f, now: now) }
-        refitsCompleted += 1
         lastRefitAt = Date()
 
         let total = Int(Date().timeIntervalSince(recomputeStarted) * 1000)
@@ -445,6 +424,109 @@ public actor UsageIntelligenceEngine {
         var c = Dictionary(uniqueKeysWithValues: BurnTrajectory.defaultModels.map { ($0.id, $0.complexity) })
         c["diurnal-rate"] = 3
         return c
+    }
+
+    // MARK: - Full-history record pass
+
+    /// What the full-history pass covers. Live refits score each cycle as it
+    /// completes, so a full pass can only add something when the record could
+    /// not have scored history yet: the first launch of a build with this pass
+    /// (`backfillVersion`, bumped when what it reads changes; 1 = archive
+    /// included), a scoring change (`EngineSelfEval.rlBucketVersion`), or a
+    /// model the record has never seen. A tuning change (`EngineParams`) is
+    /// deliberately not here: the pass only fills keys that are missing, and
+    /// never re-scores ones that exist.
+    static var recordBackfillFingerprint: String {
+        let models = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]).sorted()
+        return "v1|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+    }
+
+    /// Score every completed rate-limit cycle the store holds (the live
+    /// 35-day cache and `AccountUsageArchive`) for every model, unless
+    /// `recordBackfillFingerprint` says this account's record already covers
+    /// it. Returns the outcomes added.
+    ///
+    /// Not part of `recompute`. On a real store the first run scored ~300
+    /// cycles inside one 14.5 s refit, and every engine ask (the pace card's
+    /// projections, the compare sheet) queued behind it, while later launches
+    /// re-read ~260,000 rows to add nothing. Now it is skipped unless
+    /// something changed, and when it runs it scores `batch` cycles at a time
+    /// with a `pause` between batches. The pause is a suspension point, so
+    /// refits and asks run in between instead of behind it. Each batch reads
+    /// `evalRowsCache` afresh, so a cycle a refit scored in the gap is not
+    /// scored twice. The caller runs it at background priority
+    /// (`AppBackgroundService`).
+    @discardableResult
+    public func backfillRateLimitRecordIfNeeded(
+        now: Date = Date(), calendar: Calendar = .current,
+        batch: Int = 8, pause: Duration = .milliseconds(150)
+    ) async -> Int {
+        guard recordBackfill == .idle else { return 0 }
+        guard Self.fitsRateLimits(scope: scope, activeAccountId: Account.activeId(in: modelContext)) else {
+            recordBackfill = .done
+            return 0
+        }
+        let markerKey = "rl_record_backfill|\(limitAccountId ?? "all")"
+        let fingerprint = Self.recordBackfillFingerprint
+        let marker = try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
+            predicate: #Predicate { $0.key == markerKey })).first
+        if marker?.value == fingerprint {
+            recordBackfill = .done
+            return 0
+        }
+        recordBackfill = .running
+        let started = SuspendingClock.now
+
+        let archived = fetchArchivedLimits()
+        let f = EngineFeatures.build(
+            now: now, calendar: calendar,
+            daily: fetchDaily(), hourly: fetchHourly(),
+            rate: Self.merged(fetchRate(now: now, since: .distantPast), archived.rate,
+                              key: { "\($0.window)|\($0.at.timeIntervalSince1970)" }, at: \.at),
+            lastArrivalAt: nil,
+            scoped: Self.merged(fetchScopedLimits(now: now, since: .distantPast), archived.scoped,
+                                key: { "\($0.identity)|\($0.at.timeIntervalSince1970)" }, at: \.at))
+        try? await Task.sleep(for: pause)
+
+        var added = 0, cycles = 0, batches = 0
+        for window in f.windows {
+            guard let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
+            let (_, history) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
+            let completed = history.filter { $0.resetsAt <= now }.sorted { $0.cycleStart < $1.cycleStart }
+            cycles += completed.count
+            var start = 0
+            while start < completed.count {
+                let range = start..<min(start + batch, completed.count)
+                var rows = evalRowsCache ?? fetchEvalRows()
+                let news = EngineSelfEval.newOutcomesRL(
+                    window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
+                    existingKeys: Set(rows.map(\.key)), includeDiurnal: true, indices: range)
+                persist(news, now: now)
+                rows.append(contentsOf: news.map(Self.evalRow))
+                evalRowsCache = rows
+                added += news.count
+                batches += 1
+                start = range.upperBound
+                try? await Task.sleep(for: pause)
+            }
+        }
+
+        if let marker { marker.value = fingerprint } else {
+            modelContext.insert(ClaudeCodeMeta(key: markerKey, value: fingerprint))
+        }
+        try? modelContext.save()
+        recordBackfill = .done
+        let took = SuspendingClock.now - started
+        Log.write("Engine", "record backfill \(String((limitAccountId ?? "all").suffix(4))): "
+                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake")
+        return added
+    }
+
+    private static func evalRow(_ n: EngineSelfEval.NewOutcome) -> EvalRow {
+        (key: EngineEvalOutcome.makeKey(surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey),
+         surface: n.surface,
+         record: EngineSelfEval.Record(method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                                       predicted: n.predicted, truth: n.truth))
     }
 
     // MARK: - Ask (the typed question → Estimate contract)
@@ -1631,15 +1713,32 @@ public actor UsageIntelligenceEngine {
     /// (four months), and with them every weekly band.
     private func fetchArchivedLimits() -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
         guard let account = limitAccountId else { return ([], []) }
+        // Raw SQLite first, as `fetchRate` does: the archive is the biggest
+        // read the engine makes, and SwiftData materialising it was most of a
+        // 5.6 s pass. Either half failing falls back to the query below.
+        if let url = rawStoreURL,
+           let rate = RawLimitReader.archivedRateRows(storeURL: url, account: account),
+           let scoped = RawLimitReader.archivedScopedRows(storeURL: url, account: account) {
+            return (rate, scoped)
+        }
         let rateKind = AccountUsageArchive.kindRateLimit, scopedKind = AccountUsageArchive.kindUsageLimit
         let rows = (try? modelContext.fetch(FetchDescriptor<AccountUsageArchive>(
-            predicate: #Predicate { $0.accountId == account && ($0.kind == rateKind || $0.kind == scopedKind) }))) ?? []
+            predicate: #Predicate { $0.accountId == account && ($0.kind == rateKind || $0.kind == scopedKind) },
+            sortBy: [SortDescriptor(\.sampledAt)]))) ?? []
+        return Self.archivedLimits(rows)
+    }
+
+    /// The archive rows as the engine's rows. One mapping for the SwiftData
+    /// fallback and for `RawLimitReaderParityTests`, which holds the raw
+    /// reader to it.
+    static func archivedLimits(_ rows: [AccountUsageArchive])
+        -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
         var rate: [EngineFeatures.RateRow] = [], scoped: [EngineFeatures.ScopedRow] = []
         for r in rows {
             guard let pct = r.usedPercentage else { continue }
-            if r.kind == rateKind, let window = r.window {
+            if r.kind == AccountUsageArchive.kindRateLimit, let window = r.window {
                 rate.append(.init(window: window, at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt))
-            } else if r.kind == scopedKind, let identity = r.identity {
+            } else if r.kind == AccountUsageArchive.kindUsageLimit, let identity = r.identity {
                 scoped.append(.init(identity: identity, group: r.group ?? "", label: r.label ?? identity,
                                     modelId: r.modelId, modelDisplayName: r.modelDisplayName, surface: r.surface,
                                     at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt,

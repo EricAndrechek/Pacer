@@ -249,13 +249,17 @@ public enum EngineSelfEval {
         activityGrid: [[Double]],
         calendar: Calendar,
         existingKeys: Set<String>,
-        includeDiurnal: Bool
+        includeDiurnal: Bool,
+        indices: Range<Int>? = nil
     ) -> [NewOutcome] {
         let surface = rlSurface(window)
         let sorted = cycles.sorted { $0.cycleStart < $1.cycleStart }
         var out: [NewOutcome] = []
         let rosterIds = BurnTrajectory.defaultModels.map(\.id) + (includeDiurnal ? ["diurnal-rate"] : [])
-        for (i, cycle) in sorted.enumerated() {
+        // `indices` scores a slice of the (sorted) cycles, for the batched
+        // full-history pass; the diurnal table still learns from every cycle
+        // before each one, so a slice scores exactly what the whole would.
+        for (i, cycle) in sorted.enumerated() where indices?.contains(i) ?? true {
             let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
             guard trueFinal > 0 else { continue }
             let periodKey = periodKeyRL(cycle.resetsAt)
