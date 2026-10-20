@@ -382,18 +382,15 @@ enum PaceFormat {
         return clockFormatter.string(from: whole)
     }
 
-    nonisolated(unsafe) private static let utcClockFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "HH:mm'Z'"
-        return f
-    }()
-
     /// An instant as UTC `22:41Z`: when a GO verdict runs out (#313). UTC,
     /// like the state file's stamps, so a lane and its orchestrator on
-    /// different clocks read the same time.
-    static func utcClock(_ date: Date) -> String { utcClockFormatter.string(from: date) }
+    /// different clocks read the same time. Unix time has no leap seconds or
+    /// offsets, so the time of day is arithmetic.
+    static func utcClock(_ date: Date) -> String {
+        let day = 86_400
+        let second = (Int(floor(date.timeIntervalSince1970)) % day + day) % day
+        return String(format: "%02d:%02dZ", second / 3_600, second % 3_600 / 60)
+    }
 
     /// `61.99999` → `62`; `4.5` → `4.5`.
     static func percent(_ text: String?) -> String {

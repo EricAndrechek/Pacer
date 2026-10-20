@@ -1067,6 +1067,12 @@ struct PaceCommandTests {
         #expect(PaceRules.goLife(expiry(8), maxAge: 30) == 30)
     }
 
+    @Test func utcClockIsTheTimeOfDayInUTC() {
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: 1_800_000_000)) == "08:00Z")
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: 1_800_000_000 + 14 * 3_600 + 41 * 60 + 59)) == "22:41Z")
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: -60)) == "23:59Z")
+    }
+
     // MARK: - A switch resumes only onto a login with room (#313)
 
     /// The login switched to: 5h at `ratio`, resetting in 15 minutes.
