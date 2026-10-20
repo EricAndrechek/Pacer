@@ -86,6 +86,22 @@ public actor UsageIntelligenceEngine {
         rateLimitRecordBackfilled = false
     }
 
+    /// Whether an engine of this scope fits rate-limit windows itself (#303).
+    ///
+    /// A rate-limit window belongs to one account: two 5-hour windows do not
+    /// sum. So the all-accounts engine, which reads the active login's limits,
+    /// fitted the very series the active account's own engine fits, and saved
+    /// its record under scope-less surfaces, folding every account cswap
+    /// rotated through into one scoreboard (the global 5-hour record's last 53
+    /// cycles came from four accounts). Its answers then disagreed with the
+    /// dashboard's per-account columns. With an active account it now fits
+    /// none: rate-limit asks for "all accounts" go to that account's engine
+    /// (`EngineHost.rateLimitEngine`). With none (a fresh install, a fixture)
+    /// there is no account engine to ask, and it fits them as before.
+    static func fitsRateLimits(scope: EngineScope, activeAccountId: String?) -> Bool {
+        scope != .allAccounts || activeAccountId == nil
+    }
+
     /// Whether this engine has scored the rate-limit record over the FULL raw
     /// history this launch. A refit reads 32 days, but the record has to cover
     /// every completed cycle: selection and the shadow floors count it, and a
@@ -195,9 +211,15 @@ public actor UsageIntelligenceEngine {
 
         let daily = timed("daily") { fetchDaily() }
         let hourly = timed("hourly") { fetchHourly() }
-        let rate = timed("rate") { fetchRate(now: now) }
+        // The all-accounts engine leaves rate limits to the active account's
+        // engine whenever there is one (`fitsRateLimits`, #303): it would fit
+        // exactly the same series while scoring every account it had rotated
+        // through into one unscoped record. Decided before the reads, so it
+        // doesn't fetch ~30k rows it would not use.
+        let fitsRateLimits = Self.fitsRateLimits(scope: scope, activeAccountId: Account.activeId(in: modelContext))
+        let rate = fitsRateLimits ? timed("rate") { fetchRate(now: now) } : []
         let arrival = timed("arrival") { fetchLastArrival() }
-        let scopedLimits = timed("scopedLimits") { fetchScopedLimits(now: now) }
+        let scopedLimits = fitsRateLimits ? timed("scopedLimits") { fetchScopedLimits(now: now) } : []
         let f = timed("features") {
             EngineFeatures.build(
                 now: now, calendar: calendar,
@@ -221,7 +243,7 @@ public actor UsageIntelligenceEngine {
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
         var rlFeatures = f
-        if refitsCompleted > 0 && !rateLimitRecordBackfilled {
+        if fitsRateLimits && refitsCompleted > 0 && !rateLimitRecordBackfilled {
             rateLimitRecordBackfilled = true
             rlFeatures = timed("rlBackfill") {
                 EngineFeatures.build(
@@ -232,7 +254,9 @@ public actor UsageIntelligenceEngine {
                     scoped: fetchScopedLimits(now: now, since: .distantPast))
             }
         }
-        let newRL = newRLOutcomes(features: rlFeatures, calendar: calendar, now: now, existingKeys: existing)
+        let newRL = fitsRateLimits
+            ? newRLOutcomes(features: rlFeatures, calendar: calendar, now: now, existingKeys: existing)
+            : []
         persist(newRL, now: now)
         allRows.append(contentsOf: (newEOD + newRL).map {
             (key: EngineEvalOutcome.makeKey(surface: $0.surface, method: $0.method, bucket: $0.bucket, periodKey: $0.periodKey),
@@ -275,7 +299,7 @@ public actor UsageIntelligenceEngine {
         // per-model windows — each keyed by its own surface, so scoped windows
         // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
-        for window in f.windows {
+        for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             // Current-version rows only: v1 graded the raw line, not the value shown.
             let recs = records(surface).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
@@ -292,7 +316,8 @@ public actor UsageIntelligenceEngine {
             accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
         }, uniquingKeysWith: { first, _ in first })
         self.fit = timed("makeFit") {
-            Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy)
+            Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
+                         rateLimits: fitsRateLimits)
         }
 
         // Prediction trail: record what this refit would tell the user —
@@ -910,7 +935,7 @@ public actor UsageIntelligenceEngine {
     /// resolved by `recompute` from the persisted self-eval scoreboard
     /// (empty = median-of-all-candidates, the safe cold-start prior).
     static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
-                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:]) -> Fit {
+                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -924,7 +949,7 @@ public actor UsageIntelligenceEngine {
         // Rate-limit fits per window — the generic window SET (fixed 5h/7d plus
         // any scoped per-model windows). Each spec carries its own `(key,
         // duration)`; the pure math below is identical across windows.
-        for window in f.windows {
+        for window in f.windows where rateLimits {
             let key = window.key
             let duration = window.duration
             guard let samples = f.rateLimit[key], !samples.isEmpty else { continue }

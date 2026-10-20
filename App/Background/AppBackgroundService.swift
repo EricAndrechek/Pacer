@@ -629,9 +629,10 @@ final class AppBackgroundService {
         // for in the last fifteen minutes used to be refitted, so an account
         // nobody was looking at kept a stale forecast. See `EngineHost`.
         var accountIds = FetchDescriptor<Account>()
-        accountIds.propertiesToFetch = [\.id]
-        await engines.keepFitted(
-            accounts: ((try? container.mainContext.fetch(accountIds)) ?? []).map(\.id))
+        accountIds.propertiesToFetch = [\.id, \.isActive]
+        let accounts = (try? container.mainContext.fetch(accountIds)) ?? []
+        await engines.keepFitted(accounts: accounts.map(\.id),
+                                 active: accounts.first(where: \.isActive)?.id)
         let started = Date()
         //
         // Still concurrent, and deliberately so after trying the alternative.
@@ -789,6 +790,10 @@ final class AppBackgroundService {
     /// the per-cycle dedup, and the opt-in gate.
     private func checkBurnRateWarning() async {
         let context = ModelContext(container)
+        // The active login's engine: a burn alert is about the account Claude
+        // Code is spending, and the all-accounts engine fits no rate limits of
+        // its own (#303). Captured once, so a switch mid-check can't mix two.
+        let engine = engines.rateLimitEngine
         for window in RateLimitWindowKind.allCases {
             guard let outlook = await engine.burnOutlook(window: window) else {
                 burnHitStreak[window.rawValue] = 0
@@ -848,6 +853,7 @@ final class AppBackgroundService {
     /// present in the latest poll, so a vanished window is never evaluated (its
     /// alert rules are kept, untouched) and resumes when it reappears.
     private func checkScopedBurnRateWarnings(context: ModelContext) async {
+        let engine = engines.rateLimitEngine   // see checkBurnRateWarning
         let scopedSpecs = await engine.scopedWindows()
         guard !scopedSpecs.isEmpty else { return }
         let rules = (try? context.fetch(FetchDescriptor<AlertRule>())) ?? []

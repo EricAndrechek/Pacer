@@ -1184,9 +1184,25 @@ enum ScreenshotMode {
         // single-engine key, so their forecasts quietly disappeared. Preseeded
         // so the host uses this scene's already-fitted engine rather than
         // warming a fresh one against a capture deadline.
-        let host = screenshotEngine.map {
-            EngineHost(container: container, preseeded: [.allAccounts: $0])
+        //
+        // With an active account in the fixture, its own engine too, fitted
+        // here: the all-accounts engine fits no rate limits while an account
+        // is active (#303), so the menu bar's "all accounts" captions come
+        // from `EngineHost.rateLimitEngine`, and a lazily warmed one would race
+        // the capture.
+        var preseeded: [EngineScope: UsageIntelligenceEngine] = [:]
+        let active = Account.activeId(in: ModelContext(container))
+        if let screenshotEngine {
+            preseeded[.allAccounts] = screenshotEngine
+            if let active {
+                let accountEngine = UsageIntelligenceEngine(modelContainer: container)
+                await accountEngine.adopt(scope: .account(active))
+                await accountEngine.recompute(now: Date())
+                preseeded[.account(active)] = accountEngine
+            }
         }
+        let host = preseeded.isEmpty ? nil
+            : EngineHost(container: container, preseeded: preseeded, activeAccountId: active)
         let inner = content()
             .modelContainer(container)
             .environment(\.usageEngine, screenshotEngine)

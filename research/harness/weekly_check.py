@@ -25,9 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pacer_replay import (
-    RL_BUCKET_VERSION, WINDOW_SECONDS, Params, headline_key, is_weekly_scale,
-    load_activity_grid, load_rate_samples, locate_store, open_copy,
-    replay_window, summarize,
+    RL_BUCKET_VERSION, WINDOW_SECONDS, Params, grid_loader, headline_key, is_weekly_scale,
+    locate_store, open_copy, rate_samples_by_account, replay_accounts, summarize,
 )
 from sweep import DEFAULT_GRID, fold_errors, robust_improvement
 
@@ -67,7 +66,7 @@ def shadow_progress(conn) -> dict[str, dict[str, int]]:
 
 def run_check() -> int:
     conn = open_copy(locate_store(None))
-    grid = load_activity_grid(conn)
+    grid = grid_loader(conn)
     params = Params()
     baselines = json.loads(BASELINES.read_text()) if BASELINES.exists() else {}
     actionable: list[str] = []
@@ -76,8 +75,7 @@ def run_check() -> int:
 
     all_scores = {}
     for window in ("five_hour", "seven_day"):
-        samples = load_rate_samples(conn, window)
-        scores = replay_window(window, samples, grid, params)
+        scores = replay_accounts(window, rate_samples_by_account(conn, window), grid, params)
         all_scores[window] = scores
         s = summarize(scores)
         metric = headline_key(WINDOW_SECONDS[window])
@@ -122,8 +120,7 @@ def run_check() -> int:
         if cand.canonical() == Params().canonical():
             continue
         for window in all_scores:
-            samples = load_rate_samples(conn, window)
-            scores = replay_window(window, samples, grid, cand)
+            scores = replay_accounts(window, rate_samples_by_account(conn, window), grid, cand)
             s = summarize(scores)
             metric = result["windows"][window]["headline"]
             if robust_improvement(base_folds[window], fold_errors(scores, weekly[window]),

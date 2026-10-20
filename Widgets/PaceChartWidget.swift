@@ -179,7 +179,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
             // The engine's exported outlook (the app writes it after every
             // refit): the same dashed trajectory + crossing the dashboard
             // draws, so the widget matches instead of showing a bare line.
-            let snapshot = Self.engineSnapshot(context: context)
+            let snapshot = Self.engineSnapshot(context: context, account: account)
             let five = Self.window(rows: rows, key: "five_hour", duration: K.fiveHourSeconds,
                                    outlook: snapshot?.fiveHour)
             let seven = Self.window(rows: rows, key: "seven_day", duration: K.sevenDaySeconds,
@@ -256,10 +256,14 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         return latest.resetsAt == nil ? latest.usedPercentage : nil
     }
 
-    /// Read + decode the engine's outlook export. `nil` when absent or stale
-    /// (the app may not be running; an old projection is worse than none).
-    private static func engineSnapshot(context: ModelContext) -> EngineSnapshot? {
-        let key = EngineSnapshot.metaKey
+    /// Read + decode the engine's outlook export for the account being
+    /// charted. `nil` when absent or stale (the app may not be running; an old
+    /// projection is worse than none). The unqualified all-accounts export used
+    /// to be read whatever the widget charted, so picking an account that isn't
+    /// the active login drew no forecast at all: the export's reset never
+    /// matched (#303).
+    private static func engineSnapshot(context: ModelContext, account: String?) -> EngineSnapshot? {
+        let key = EngineSnapshot.metaKey(for: account.map(EngineScope.account) ?? .allAccounts)
         let descriptor = FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })
         guard let json = try? context.fetch(descriptor).first?.value,

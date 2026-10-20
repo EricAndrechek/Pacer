@@ -28,9 +28,8 @@ import json
 from dataclasses import replace
 
 from pacer_replay import (
-    WINDOW_SECONDS, CaseScore, Params, headline_key, is_weekly_scale,
-    load_activity_grid, load_rate_samples, locate_store, open_copy,
-    replay_window, summarize,
+    WINDOW_SECONDS, CaseScore, Params, grid_loader, headline_key, is_weekly_scale,
+    locate_store, open_copy, rate_samples_by_account, replay_accounts, summarize,
 )
 
 FOLDS = 4
@@ -89,9 +88,9 @@ def main() -> None:
     args = ap.parse_args()
 
     conn = open_copy(locate_store(args.store))
-    grid_prior = load_activity_grid(conn)
+    grid_prior = grid_loader(conn)
     windows = [args.window] if args.window else ["five_hour", "seven_day"]
-    samples = {w: load_rate_samples(conn, w) for w in windows}
+    samples = {w: rate_samples_by_account(conn, w) for w in windows}
 
     grid = FULL_GRID if args.full else DEFAULT_GRID
     keys = sorted(grid)
@@ -112,7 +111,7 @@ def main() -> None:
         metric = headline_key(WINDOW_SECONDS[window])
         weekly = is_weekly_scale(WINDOW_SECONDS[window])
         for i, p in enumerate(unique):
-            scores = replay_window(window, samples[window], grid_prior, p)
+            scores = replay_accounts(window, samples[window], grid_prior, p)
             s = summarize(scores)
             # "median" is the window's headline error: the mean on weekly windows.
             rows.append({

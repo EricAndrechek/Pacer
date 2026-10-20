@@ -50,9 +50,61 @@ public final class EngineHost {
     /// it refitting for the life of the process.
     public static let idleScopeGrace: TimeInterval = 15 * 60
 
+    /// The login Claude Code is using, as last heard: from each refit's account
+    /// list (`keepFitted(accounts:active:)`) and, between refits, from
+    /// `PacerAccountChange.didActivate`, which the poller posts the moment it
+    /// activates a different account. Refits have a 300 s floor and take
+    /// seconds to minutes, so a switch must not wait for one to be heard.
+    public private(set) var activeAccountId: String?
+
+    /// The engine that answers RATE-LIMIT questions when no account is picked:
+    /// the active login's own (#303).
+    ///
+    /// A rate-limit window belongs to one account, so "all accounts" has no
+    /// rate-limit fit of its own: the all-accounts engine only ever read the
+    /// active login's limits, and it now leaves them to that login's engine
+    /// (`UsageIntelligenceEngine.fitsRateLimits`). Routing by identity is what
+    /// makes the menu bar, the alerts, the API and the widget agree with the
+    /// dashboard's column for the same account: they ask the same engine.
+    /// With no account known yet, the all-accounts engine fits them itself.
+    ///
+    /// Until a refit or an activation has said which login is active, the
+    /// store's own flag answers, the same one the all-accounts engine reads
+    /// to decide it should not fit rate limits, so the two can't disagree.
+    public var rateLimitEngine: UsageIntelligenceEngine {
+        if activeAccountId == nil { activeAccountId = Account.activeId(in: container.mainContext) }
+        return activeAccountId.map { engine(for: .account($0)) } ?? global
+    }
+
+    nonisolated(unsafe) private var activationObserver: NSObjectProtocol?
+
     public init(container: ModelContainer) {
         self.container = container
         _ = engine(for: .allAccounts)
+        observeActivations()
+    }
+
+    deinit {
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+    }
+
+    private func observeActivations() {
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: PacerAccountChange.didActivate, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let change = PacerAccountChange(note) else { return }
+            MainActor.assumeIsolated { self?.activeAccountDidChange(to: change.activeAccountId) }
+        }
+    }
+
+    /// Re-route rate-limit asks to the new login and have every card ask again.
+    /// Its engine is normally already fitted: every known account is refitted
+    /// each cycle.
+    func activeAccountDidChange(to id: String) {
+        guard id != activeAccountId else { return }
+        activeAccountId = id
+        _ = engine(for: .account(id))
+        NotificationCenter.default.post(name: .pacerEngineDidRecompute, object: nil)
     }
 
     /// Build a host around engines that already exist and are already fitted.
@@ -66,9 +118,11 @@ public final class EngineHost {
     /// engine silently rendered no forecast at all, and the README's headline
     /// screenshot lost its projections, its at-reset chips and its
     /// pace-vs-normal chip.
-    public init(container: ModelContainer, preseeded: [EngineScope: UsageIntelligenceEngine]) {
+    public init(container: ModelContainer, preseeded: [EngineScope: UsageIntelligenceEngine],
+                activeAccountId: String? = nil) {
         self.container = container
         self.engines = preseeded
+        self.activeAccountId = activeAccountId
         if engines[.allAccounts] == nil { _ = engine(for: .allAccounts) }
     }
 
@@ -115,8 +169,9 @@ public final class EngineHost {
     /// reaching an engine before its scope is set would fit every account's
     /// data under one account's name. Adopting only sets the scope, so the hop
     /// costs nothing.
-    public func keepFitted(accounts ids: [String]) async {
+    public func keepFitted(accounts ids: [String], active: String? = nil) async {
         keptAccounts = Set(ids)
+        if let active { activeAccountId = active }
         for id in ids where engines[.account(id)] == nil {
             let scope = EngineScope.account(id)
             let engine = UsageIntelligenceEngine(modelContainer: container)
