@@ -1320,5 +1320,31 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="42mv7siEeZTghbnusO22skXwaC5lM8hHQJLuP0nEKkdhmOVXmkLUzkeeCqMmxTPrA7IqZJHpDVbr7jP+i5NwAA==" />
     </item>
+            <item>
+        <title>Version 0.7.6</title>
+        <description><![CDATA[<p>Fixes to <code class="notranslate">pacer</code>, the command the pacing skill uses to pause work before a limit and resume after it.</p>
+<h2>Your session's model decides which limits apply</h2>
+<p>Inside a Claude Code session, <code class="notranslate">pacer gate</code> with no <code class="notranslate">--model</code> used to hold your work to every limit on the account, including a per-model cap your work never touched, so Opus work paused on a full Fable window. It now does what <code class="notranslate">--model auto</code> does: it looks up the model your session runs and applies the caps that bind it, and the verdict says what it found. Outside a session nothing changes, and <code class="notranslate">--model all</code> still applies every limit.</p>
+<h2><code class="notranslate">wait</code> resumes only when the limit has really cleared</h2>
+<p>A paused session could be released while still at the limit. As other sessions paused, usage slowed, the safe limit rose a point, and <code class="notranslate">wait</code> took that for a reset. <code class="notranslate">wait</code> now holds the limit that paused you. It resumes when that window resets, when you switch to an account with room, or when usage really drops, and it says which.</p>
+<h2>Lanes stay paced through long tasks</h2>
+<p><code class="notranslate">pacer status</code>, the cheap check subagents run between steps, called a verdict stale after 15 minutes, so long tasks went unpaced. When a verdict is stale, <code class="notranslate">status</code> now refreshes it itself: one reader checks Pacer and the rest wait a moment for its answer, so a hundred lanes still cost one check.</p>
+<h2>Each session keeps its own verdict</h2>
+<p>Sessions used to share one pause verdict unless they set <code class="notranslate">PACE_RUN</code>, so a test in one session could pause all of them. Each session now has its own, shared with its subagents. <code class="notranslate">PACE_RUN</code> and <code class="notranslate">PACE_STATE</code> work as before.</p>
+<h2>Stop short of the limit by a margin</h2>
+<p><code class="notranslate">--margin N</code> pauses N points before the safe limit, which still adapts to how fast usage is climbing. A fixed <code class="notranslate">--cap</code> replaced that limit. <code class="notranslate">pacer safecap</code> prints the limit each window is held to.</p>
+<h2>Report a Pacer problem from the command line</h2>
+<p><code class="notranslate">pacer feedback "what you ran, what it printed"</code> saves the report on your Mac and prints a link to file it as a GitHub issue, pre-filled with the report, the Pacer version and the last verdict. Nothing is sent anywhere. The pacing skill now tells agents to report Pacer problems this way instead of working around them in their notes.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Tue, 20 Oct 2026 16:48:18 +0000</pubDate>
+        <sparkle:version>1792514491</sparkle:version>
+        <sparkle:shortVersionString>0.7.6</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.6/Pacer-0.7.6.dmg"
+            length="25008387"
+            type="application/octet-stream"
+            sparkle:edSignature="cHS7mCs1SroknZxblpWPwk3H4HM+99uVitJfcNfxg6+NfstMu4S1t6EmM4HOlqntqYTT6vAdWAC7y2wrmcpqDw==" />
+    </item>
         </channel>
 </rss>
