@@ -780,6 +780,20 @@ def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[
     return (best[1], best[2]) if best else (None, None)
 
 
+CLAIM_USED_FLOOR = 50.0   # BurnRate.warningUsedFloor
+
+
+def hit_claimable(raw_at_reset: float, used_now: float, q10: float | None) -> bool:
+    """Port of BurnOutlook.hitClaimable (#304): the latest-plausible crossing
+    (the anchored, unclamped curve shifted by its calibrated q10 still reaches
+    100 by the reset; the point crossing when no band is stated) at or above
+    the level floor. The app also requires the claim on two consecutive refits,
+    which a replay at 10% cuts cannot reproduce."""
+    if used_now >= 100.0 or used_now < CLAIM_USED_FLOOR:
+        return False
+    return raw_at_reset + min(q10, 0.0) >= 100.0 if q10 is not None else raw_at_reset >= 100.0
+
+
 def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params,
                 weekly: bool = False) -> str | None:
     """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
@@ -827,6 +841,7 @@ class CaseScore:
     truth_hit: bool
     band_stated: bool
     cycle_start: float = 0.0      # for ordering cases across accounts (replay_accounts)
+    claimed: bool = False         # the red "limit in …" evidence at this cut (hit_claimable)
 
 
 def replay_window(window: str, samples, activity_grid, params: Params,
@@ -896,9 +911,11 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 p_hit = sum(w for w, r in strat if point + r >= 100.0) / total_w
             else:
                 p_hit = 1.0 if point >= 100.0 else 0.0
+            raw_at_reset = proj(cyc.resets_at) + max(0.0, partial.used_now - proj(cut_now))
+            claimed = hit_claimable(raw_at_reset, partial.used_now, lo)
             scores.append(CaseScore(i, cf, shown, abs(point - truth), covered,
                                     pb10, pb90, (p_hit - (1.0 if truth_hit else 0.0)) ** 2,
-                                    truth_hit, band_stated, cyc.cycle_start))
+                                    truth_hit, band_stated, cyc.cycle_start, claimed))
 
         # After the cycle completes, extend every model's record (walk-forward).
         period_key = str(round(cyc.resets_at / 60) * 60)
@@ -960,6 +977,12 @@ def summarize(scores: list[CaseScore]) -> dict:
         "meanPinball": round(sum((s.pinball_q10 + s.pinball_q90) / 2 for s in banded) / len(banded), 3) if banded else None,
         "brier": round(sum(s.brier for s in scores) / n, 4),
         "capHitBaseRate": round(sum(1 for s in scores if s.truth_hit) / n, 3),
+        # The red claim's evidence per cut (#304): how often a claim was right,
+        # and how many cap hits were claimed.
+        "claimPrecision": round(sum(1 for s in scores if s.claimed and s.truth_hit)
+                                / max(1, sum(1 for s in scores if s.claimed)), 3),
+        "claimRecall": round(sum(1 for s in scores if s.claimed and s.truth_hit)
+                             / max(1, sum(1 for s in scores if s.truth_hit)), 3),
         "methodShare": {},
     }
     for s in scores:

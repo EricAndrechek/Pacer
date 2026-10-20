@@ -1048,7 +1048,11 @@ struct MenuStatusContent: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
                             .lineLimit(1)
-                    } else if let o = outlook, let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                    } else if let o = outlook, o.willHitLimitBeforeReset,
+                              let eta = IntelligenceFormatting.relativeCrossingPhrase(o) {
+                        // Only the engine's confirmed claim goes red (#304): a
+                        // single refit's point crossing was claimed here, and
+                        // 87% of claimed 5-hour cycles never reached the cap.
                         Text("limit \(eta)")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red)
