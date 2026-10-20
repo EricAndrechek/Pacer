@@ -23,10 +23,12 @@ is never touched.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,13 +101,29 @@ def locate_store(explicit: str | None) -> Path:
 
 
 def open_copy(store: Path) -> sqlite3.Connection:
+    """Read-only connection to a private copy of the store, removed at exit.
+
+    The copy is a full store (~1 GB on a real one) and every replay, sweep and
+    weekly check makes one, so it must not outlive the process: before this
+    cleanup each run left one in $TMPDIR until macOS's temp cleaner got to it
+    days later (#274). On APFS `cp -c` clones instead of copying — no extra
+    disk, and each file is captured at one instant while the app keeps
+    writing; anything else falls back to a byte copy."""
     tmp = Path(tempfile.mkdtemp(prefix="pacer-harness-"))
     for suffix in ("", "-wal", "-shm"):
         src = Path(str(store) + suffix)
         if src.exists():
-            shutil.copy2(src, tmp / src.name)
+            if subprocess.run(["cp", "-c", str(src), str(tmp / src.name)],
+                              capture_output=True).returncode != 0:
+                shutil.copy2(src, tmp / src.name)
     conn = sqlite3.connect(f"file:{tmp / store.name}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+
+    def cleanup() -> None:
+        conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    atexit.register(cleanup)
     return conn
 
 
