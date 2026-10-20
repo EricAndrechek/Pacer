@@ -133,19 +133,23 @@ of the model-lifecycle cost.
   and has tests — the new estimator should likely subsume or sit beside
   it, not parallel it.
 
-## Open decision (asked, deferred)
+## Decision (resolved, June 2026)
 
-How far to go in the first pass:
+The choice offered here was how far the first pass should go: the damped
+2nd-derivative estimator swapped into all three projections, the same plus
+time-of-day/day-of-week shaping, or the estimator and warning only. What
+shipped was decided by the before/after on real data rather than by the
+option list:
 
-1. **Damped 2nd-deriv estimator + warning + swap all three projections**
-   (recommended — the direct "2nd derivative now" path).
-2. Same, **plus** personal time-of-day/day-of-week shaping.
-3. Estimator + warning **only**; leave displayed projections untouched
-   until the estimator is proven in the wild.
-
-Owner deferred the choice to the session that picks this up. Default
-recommendation if still unspecified: option 1, with the before/after
-shown before the displayed swap.
+- The estimator and the acceleration warning were built: `TrendEstimator`
+  (2599444, #46), the 7-day burn warning on it (3af9bac, #47), the 7-day pace
+  tile (7d920fe, #50).
+- The estimator **did not** beat naive projections on the real store, so the
+  displayed end-of-day and monthly projections took the profile shaping
+  instead (0b6763d, #48).
+- All of it was later folded into the usage-intelligence engine
+  (887ec2f, #65; 53d9511, #66), which selects from its own record. See
+  `docs/intelligence-engine.md`, the current reference.
 
 ## Files to touch
 
