@@ -889,7 +889,8 @@ public actor UsageIntelligenceEngine {
                 trajectory: (selected?.trajectory.points ?? []).map {
                     .init(t: $0.at.timeIntervalSince1970, v: $0.usedPercentage)
                 },
-                burnPctPerHour: o.slopePercentPerHour)
+                burnPctPerHour: o.slopePercentPerHour,
+                hitClaimed: o.willHitLimitBeforeReset)
         }
         // Scoped per-model windows: one outlook per discovered scoped spec that
         // still has a live cycle, keyed by identity so a widget can match it to

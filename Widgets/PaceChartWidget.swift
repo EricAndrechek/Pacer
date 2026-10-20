@@ -296,6 +296,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         // a nonsense overlay — and clip it to the chart's domain.
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
+        var claimed = false
         if let outlook, abs(outlook.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
             let pts = outlook.trajectory
                 .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
@@ -313,10 +314,11 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                 if rebased.count >= 2 {
                     projection = rebased
                     crossing = r.crossesFullAt
+                    claimed = outlook.hitClaimed ?? false
                 }
             }
         }
-        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing, claimed: claimed) } ?? base
         return PaceChartEntry.WindowState(chart: chart, resetsAt: resetsAt)
     }
 
@@ -339,6 +341,7 @@ struct PaceChartProvider: AppIntentTimelineProvider {
         let tailTime = min(now, resetsAt)
         var projection: [PaceChartView.Data.Point]?
         var crossing: Date?
+        var claimed = false
         if let o = outlook?.outlook, abs(o.resetsUnix - resetsAt.timeIntervalSince1970) < 120 {
             let pts = o.trajectory
                 .map { PaceChartView.Data.Point(time: Date(timeIntervalSince1970: $0.t), value: $0.v) }
@@ -348,10 +351,10 @@ struct PaceChartProvider: AppIntentTimelineProvider {
                     points: pts.map { ($0.time, $0.value) },
                     toTime: tailTime, value: row.percent)
                 let rebased = r.points.map { PaceChartView.Data.Point(time: $0.at, value: $0.value) }
-                if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt }
+                if rebased.count >= 2 { projection = rebased; crossing = r.crossesFullAt; claimed = o.hitClaimed ?? false }
             }
         }
-        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing) } ?? base
+        let chart = projection.map { base.withProjection($0, crossesFullAt: crossing, claimed: claimed) } ?? base
         return PaceChartEntry.ScopedState(
             key: row.identity,
             label: row.label,

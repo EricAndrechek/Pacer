@@ -177,7 +177,7 @@ import Testing
 
         let overlay = [PaceChartView.Data.Point(time: now, value: 15),
                        PaceChartView.Data.Point(time: resets, value: 40)]
-        let live = base.withProjection(overlay, crossesFullAt: nil)
+        let live = base.withProjection(overlay, crossesFullAt: nil, claimed: false)
 
         #expect(live.points == base.points)
         #expect(base.projection == nil)

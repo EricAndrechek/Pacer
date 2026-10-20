@@ -83,11 +83,15 @@ public extension PaceChartView.Data {
     /// The same line with a forecast overlay attached. Consumers build the
     /// projection themselves (from the live engine on the dashboard, from the
     /// exported snapshot in the widget) and layer it on the shared base.
-    func withProjection(_ points: [Point], crossesFullAt: Date?) -> PaceChartView.Data {
+    /// `claimed` is the engine's claim on the crossing (`willHitLimitBeforeReset`,
+    /// or `hitClaimed` in an exported snapshot); every caller says, so no
+    /// chart guesses the colour.
+    func withProjection(_ points: [Point], crossesFullAt: Date?, claimed: Bool) -> PaceChartView.Data {
         PaceChartView.Data(
             cycleStart: cycleStart, resetsAt: resetsAt, durationSeconds: durationSeconds,
             points: self.points, usedPct: usedPct,
-            projection: points, projectionCrossesFullAt: crossesFullAt)
+            projection: points, projectionCrossesFullAt: crossesFullAt,
+            projectionClaimed: claimed)
     }
 
     /// Clip to the cycle, sort ascending, and pin a tail at "now" so the line

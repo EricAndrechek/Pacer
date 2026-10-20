@@ -1380,7 +1380,8 @@ private struct PaceColumn: View {
         // At/over the cap the trajectory collapses to its origin — fall back to
         // the projection-free chart.
         guard pts.count >= 2 else { return base }
-        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt)
+        return base.withProjection(pts, crossesFullAt: rebased.crossesFullAt,
+                                   claimed: outlook?.willHitLimitBeforeReset ?? false)
     }
 
     var body: some View {
