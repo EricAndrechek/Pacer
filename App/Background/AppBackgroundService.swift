@@ -79,9 +79,6 @@ final class AppBackgroundService {
     private var engineRefitCount = 0
     private var engineRefitTotalMs = 0
     private var lastEngineRecomputeAt: Date?
-    /// Consecutive engine refits that projected a pre-reset cap hit, per
-    /// window — the burn warning's debounce counter.
-    private var burnHitStreak: [String: Int] = [:]
     /// Bridges `pacerScanCycleDidComplete` notifications to per-kind
     /// `WidgetCenter.reloadTimelines` calls so the WidgetKit extension
     /// — which can't observe SwiftData — refreshes when new data
@@ -806,23 +803,14 @@ final class AppBackgroundService {
         // its own (#303). Captured once, so a switch mid-check can't mix two.
         let engine = engines.rateLimitEngine
         for window in RateLimitWindowKind.allCases {
-            guard let outlook = await engine.burnOutlook(window: window) else {
-                burnHitStreak[window.rawValue] = 0
-                continue
-            }
-            // Debounce (industry-converged forecast-alert pattern: lead-time
-            // AND level gate AND k-consecutive confirmation): require the
-            // pre-reset crossing to hold across two consecutive engine refits
-            // before the coordinator may fire, so one transient burst between
-            // OAuth polls can't page the user. The level gate (≥50% used)
-            // stays in BurnRate.warrantsWarning; the per-cycle dedup stays in
-            // the coordinator.
-            if outlook.willHitLimitBeforeReset {
-                burnHitStreak[window.rawValue, default: 0] += 1
-            } else {
-                burnHitStreak[window.rawValue] = 0
-            }
-            guard (burnHitStreak[window.rawValue] ?? 0) >= 2 else { continue }
+            // The engine's claim: the latest-plausible crossing, at or above
+            // the level floor, confirmed across two consecutive refits (#304),
+            // the same claim the chip and the menu bar make. The two-refit
+            // debounce used to live here alone, so the chip went red on a
+            // single refit's point crossing. The per-cycle dedup stays in the
+            // coordinator.
+            guard let outlook = await engine.burnOutlook(window: window),
+                  outlook.willHitLimitBeforeReset else { continue }
             let projection = BurnRate.Projection(
                 slopePercentPerHour: outlook.slopePercentPerHour,
                 projectedFullAt: outlook.projectedFullAt,
@@ -846,7 +834,7 @@ final class AppBackgroundService {
     /// cap, etc.), driven by the SAME engine projection surface as the fixed
     /// 5h/7d path — `engine.scopedWindows()` for the live account-scoped windows
     /// and `engine.burnOutlook(windowKey:)` for each one's crossing. It reuses
-    /// the fixed path's k-consecutive-refit debounce (`burnHitStreak`, namespaced
+    /// the engine's confirmed claim (`BurnOutlook.willHitLimitBeforeReset`, namespaced
     /// by identity) and fires the identical banner via `handleBurnRateWarning`,
     /// labelled with the window's `displayName`.
     ///
@@ -871,19 +859,9 @@ final class AppBackgroundService {
 
         for spec in scopedSpecs {
             let identity = spec.key
-            guard let outlook = await engine.burnOutlook(windowKey: identity) else {
-                burnHitStreak[identity] = 0
-                continue
-            }
-            // Debounce on the raw pre-reset crossing, identical to the fixed
-            // path: require two consecutive refits before the coordinator may
-            // fire, so one transient burst between polls can't page the user.
-            if outlook.willHitLimitBeforeReset {
-                burnHitStreak[identity, default: 0] += 1
-            } else {
-                burnHitStreak[identity] = 0
-            }
-            guard (burnHitStreak[identity] ?? 0) >= 2 else { continue }
+            // The engine's confirmed claim, as on the fixed path (#304).
+            guard let outlook = await engine.burnOutlook(windowKey: identity),
+                  outlook.willHitLimitBeforeReset else { continue }
             // Opt-in + cold-start + used-floor gate (pure, unit-tested). A window
             // with no configured scoped alert, too few completed cycles, or below
             // the floor is not warned.

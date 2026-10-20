@@ -174,6 +174,9 @@ public actor UsageIntelligenceEngine {
         var resolvedId: String?
         /// The selected model a stand-in replaced, for the trail.
         var replacedId: String? { resolvedId != selectedId ? selectedId : nil }
+        /// Consecutive refits of this cycle whose hit claim held
+        /// (`carryClaimStreaks`).
+        var claimStreak: (period: String, count: Int)?
         /// Stratified additive conformal calibrators keyed
         /// `"early|weekday"`-style, plus the `"pooled"` fallback. Strata
         /// thinner than 10 scores aren't built — lookups fall back to pooled,
@@ -315,9 +318,12 @@ public actor UsageIntelligenceEngine {
         let rlAccuracy = Dictionary(f.windows.compactMap { w in
             accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
         }, uniquingKeysWith: { first, _ in first })
+        let previousFit = self.fit
         self.fit = timed("makeFit") {
-            Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
-                         rateLimits: fitsRateLimits)
+            Self.carryClaimStreaks(
+                f, into: Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
+                                      rateLimits: fitsRateLimits),
+                from: previousFit)
         }
 
         // Prediction trail: record what this refit would tell the user —
@@ -604,7 +610,21 @@ public actor UsageIntelligenceEngine {
         public let cyclesObserved: Int
         public let cyclesPeakOver90: Int
         public let cyclesHit100: Int
-        public var willHitLimitBeforeReset: Bool { projectedFullAt != nil }
+        /// Whether this refit's evidence supports CLAIMING a hit before the
+        /// reset (#304): the latest-plausible crossing exists (the curve
+        /// shifted by its own calibrated q10 still reaches 100 before the
+        /// reset; the point crossing when no band is stated), and the window
+        /// is at least `BurnRate.warningUsedFloor` used. A point crossing alone
+        /// was claimed in red, and 130 of 149 such 5-hour cycles never reached
+        /// 99%: most were an early burst extrapolated over hours.
+        public let hitClaimable: Bool
+        /// The claim also held on the previous refit of the same cycle, the
+        /// confirmation the burn alerts always required, now shared by the
+        /// chip and the menu-bar caption.
+        public let claimConfirmed: Bool
+        /// The red "limit in …" claim: claimable and confirmed. Every surface
+        /// that says it (chip, menu bar, alert) reads this one.
+        public var willHitLimitBeforeReset: Bool { hitClaimable && claimConfirmed }
     }
 
     public func burnOutlook(window: RateLimitWindowKind) -> BurnOutlook? {
@@ -645,7 +665,8 @@ public actor UsageIntelligenceEngine {
                                usedPct: current.usedNow, resetsAt: current.resetsAt,
                                anchorShift: 0, method: "none",
                                cyclesObserved: rf.cyclesObserved,
-                               cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100)
+                               cyclesPeakOver90: rf.cyclesPeakOver90, cyclesHit100: rf.cyclesHit100,
+                               hitClaimable: false, claimConfirmed: false)
         }
         // Anchor the curve to the live value: the smoothed fits (recency-
         // weighted, saturating) deliberately sit under a spiking last sample,
@@ -661,6 +682,7 @@ public actor UsageIntelligenceEngine {
         // P(U(t) ≥ 100), so the band's crossings ARE the hit-time range).
         // Already-at-100% suppresses the ETA: the tile shows the state directly.
         var crossing: Date?, earliest: Date?, latest: Date?
+        var loShift: Double?
         if current.usedNow < 100 {
             let cutFraction = current.durationHours > 0 ? current.nowHours / current.durationHours : 1
             let calibrator = Self.rlCalibrator(rf, cutFraction: cutFraction, cycleStart: current.cycleStart, calendar: f.calendar)
@@ -671,7 +693,7 @@ public actor UsageIntelligenceEngine {
             // the surfaces show the point crossing alone.
             let minResiduals = EngineParams.current.conformalMinResiduals
             let hiShift = calibrator?.gatedQuantile(0.9, minResiduals: minResiduals)   // upper band → earliest plausible
-            let loShift = calibrator?.gatedQuantile(0.1, minResiduals: minResiduals)   // lower band → latest plausible
+            loShift = calibrator?.gatedQuantile(0.1, minResiduals: minResiduals)   // lower band → latest plausible
             var t = f.now.addingTimeInterval(5 * 60)
             while t <= current.resetsAt {
                 let p = projection(t) + anchor
@@ -682,6 +704,14 @@ public actor UsageIntelligenceEngine {
                 t = t.addingTimeInterval(5 * 60)
             }
         }
+        // The claim gate (#304). Measured on the owner's store at refit-like
+        // spacing: per 5-hour cycle, claim precision 17% → 32% with every cycle
+        // that reached the cap still claimed.
+        let hitClaimable = current.usedNow >= BurnRate.warningUsedFloor
+            && (loShift != nil ? latest != nil : crossing != nil)
+        let streak = rf.claimStreak
+        let claimConfirmed = streak?.period == EngineSelfEval.periodKeyRL(current.resetsAt)
+            && (streak?.count ?? 0) >= Self.claimConfirmRefits
         return BurnOutlook(
             slopePercentPerHour: slope,
             projectedFullAt: crossing,
@@ -694,7 +724,29 @@ public actor UsageIntelligenceEngine {
             method: model.id,
             cyclesObserved: rf.cyclesObserved,
             cyclesPeakOver90: rf.cyclesPeakOver90,
-            cyclesHit100: rf.cyclesHit100)
+            cyclesHit100: rf.cyclesHit100,
+            hitClaimable: hitClaimable, claimConfirmed: claimConfirmed)
+    }
+
+    /// Consecutive refits a hit claim must hold before it is said (#304), the
+    /// same k the burn alerts used on their own.
+    static let claimConfirmRefits = 2
+
+    /// Carry each window's claim streak from the previous refit into the new
+    /// fit: +1 while the claim holds in the same cycle, restarting on a new
+    /// cycle, cleared when it lapses.
+    static func carryClaimStreaks(_ f: EngineFeatures, into newFit: Fit, from previous: Fit) -> Fit {
+        var out = newFit
+        for key in newFit.rl.keys {
+            guard let o = burnOutlook(f, newFit, windowKey: key), o.hitClaimable else {
+                out.rl[key]?.claimStreak = nil
+                continue
+            }
+            let period = EngineSelfEval.periodKeyRL(o.resetsAt)
+            let prior = previous.rl[key]?.claimStreak
+            out.rl[key]?.claimStreak = (period, prior?.period == period ? prior!.count + 1 : 1)
+        }
+        return out
     }
 
     /// The calibrator for a cycle position: its stratum's, else pooled.
@@ -1278,6 +1330,7 @@ public actor UsageIntelligenceEngine {
         var residualCount: Int?
         var spendSoFar: Double?
         var replacedMethod: String?
+        var hitClaimed: Bool?
 
         /// The row's identity at DISPLAY precision: a new row is worth writing
         /// exactly when the user-visible facts would change (utilisation to
@@ -1294,7 +1347,8 @@ public actor UsageIntelligenceEngine {
             func t(_ d: Date?) -> String { d.map { String(Int($0.timeIntervalSince1970 / 900)) } ?? "-" }
             let isCost = surface == EngineSelfEval.surfaceEOD || surface == "month"
             let v = isCost ? sig2 : pp
-            return [surface, method, replacedMethod ?? "-", confidence, periodKey,
+            return [surface, method, replacedMethod ?? "-", hitClaimed.map { $0 ? "claim" : "-" } ?? "-",
+                    confidence, periodKey,
                     v(value), v(lo80), v(hi80),
                     t(crossingAt), t(crossingEarliest), t(crossingLatest)].joined(separator: "|")
         }
@@ -1335,7 +1389,8 @@ public actor UsageIntelligenceEngine {
                 usedPct: o.usedPct, anchorShift: o.anchorShift,
                 slopePercentPerHour: o.slopePercentPerHour,
                 bandStratum: stratum, residualCount: residuals,
-                replacedMethod: fit.rl[key]?.replacedId))
+                replacedMethod: fit.rl[key]?.replacedId,
+                hitClaimed: o.willHitLimitBeforeReset))
         }
 
         let todayKey = TokenSample.formatDate(f.now, timeZone: f.calendar.timeZone)
@@ -1383,7 +1438,7 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: d.crossingLatest, usedPct: d.usedPct,
                 anchorShift: d.anchorShift, slopePercentPerHour: d.slopePercentPerHour,
                 bandStratum: d.bandStratum, residualCount: d.residualCount,
-                spendSoFar: d.spendSoFar, replacedMethod: d.replacedMethod))
+                spendSoFar: d.spendSoFar, replacedMethod: d.replacedMethod, hitClaimed: d.hitClaimed))
             lastSnapshotSig[d.surface] = (now, sig)
             dirty = true
         }

@@ -77,6 +77,13 @@ public final class PredictionSnapshot {
     /// actually drawn; this says what it stood in for. Nil when they're the same.
     public var replacedMethod: String?
 
+    /// Whether this row claimed a hit before the reset, in red
+    /// (`BurnOutlook.willHitLimitBeforeReset`, #304). `crossingAt` is the
+    /// model curve's crossing, which the chart marks whether or not it is
+    /// claimed; this is what the chip, the menu bar and the alerts said.
+    /// Nil on cost surfaces.
+    public var hitClaimed: Bool?
+
     /// Snapshots older than this are pruned (the eval table keeps the
     /// predicted-vs-truth accuracy record forever; this table is the
     /// high-resolution debugging trail).
@@ -107,7 +114,8 @@ public final class PredictionSnapshot {
         bandStratum: String? = nil,
         residualCount: Int? = nil,
         spendSoFar: Double? = nil,
-        replacedMethod: String? = nil
+        replacedMethod: String? = nil,
+        hitClaimed: Bool? = nil
     ) {
         self.recordedAt = recordedAt
         self.surface = surface
@@ -134,5 +142,6 @@ public final class PredictionSnapshot {
         self.residualCount = residualCount
         self.spendSoFar = spendSoFar
         self.replacedMethod = replacedMethod
+        self.hitClaimed = hitClaimed
     }
 }
