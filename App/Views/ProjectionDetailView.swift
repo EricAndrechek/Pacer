@@ -382,7 +382,7 @@ struct ProjectionDetailView: View {
     /// "why isn't the best one picked?".
     private var legendText: String {
         var s = "Solid — actual · dashed — projections from now · shaded — the models' spread · the highlighted model drives the dashboard."
-        let best = trajectories.filter { $0.medianAbsError.isFinite }.min { $0.medianAbsError < $1.medianAbsError }
+        let best = trajectories.filter { $0.typicalAbsError.isFinite }.min { $0.typicalAbsError < $1.typicalAbsError }
         if let best, let selected = trajectories.first(where: { $0.isSelected }),
            selected.modelId != best.modelId {
             s += " Models within ±1.5 points are treated as tied — the simplest of the tied models is used."
@@ -624,8 +624,8 @@ struct ProjectionDetailView: View {
                             .help(pacerRelativeExact(crossAt))
                             .font(.system(size: 11)).foregroundStyle(.red.opacity(0.85))
                     }
-                    Text(st.medianAbsError.isFinite
-                         ? String(format: "within ±%.0f%%", st.medianAbsError)
+                    Text(st.typicalAbsError.isFinite
+                         ? String(format: "within ±%.0f%%", st.typicalAbsError)
                          : "—")
                         .font(.system(size: 12).monospacedDigit())
                         .foregroundStyle(.secondary)

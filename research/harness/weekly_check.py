@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pacer_replay import (
-    Params, load_activity_grid, load_rate_samples, locate_store, open_copy,
+    RL_BUCKET_VERSION, WINDOW_SECONDS, Params, headline_key, is_weekly_scale,
+    load_activity_grid, load_rate_samples, locate_store, open_copy,
     replay_window, summarize,
 )
-from sweep import DEFAULT_GRID, fold_medians, robust_improvement
+from sweep import DEFAULT_GRID, fold_errors, robust_improvement
 
 HERE = Path(__file__).resolve().parent
 REPORTS = HERE / "reports"
@@ -51,13 +52,15 @@ def banded_cases(scores) -> int:
 
 def shadow_progress(conn) -> dict[str, dict[str, int]]:
     """Distinct scored periods per shadow method per surface, from the app's
-    own persisted record (the same numbers the promotion gate reads)."""
+    own persisted record (the same numbers the promotion gate reads) — current
+    bucket version only, as the app reads it."""
     out: dict[str, dict[str, int]] = {}
     for surface, methods in SHADOWS.items():
         for m in methods:
             n = conn.execute(
                 "SELECT COUNT(DISTINCT ZPERIODKEY) FROM ZENGINEEVALOUTCOME "
-                "WHERE ZSURFACE = ? AND ZMETHOD = ?", (surface, m)).fetchone()[0]
+                "WHERE ZSURFACE = ? AND ZMETHOD = ? AND ZBUCKET LIKE ?",
+                (surface, m, f"%|{RL_BUCKET_VERSION}")).fetchone()[0]
             out.setdefault(surface, {})[m] = int(n)
     return out
 
@@ -77,16 +80,21 @@ def run_check() -> int:
         scores = replay_window(window, samples, grid, params)
         all_scores[window] = scores
         s = summarize(scores)
+        metric = headline_key(WINDOW_SECONDS[window])
         result["windows"][window] = {k: s.get(k) for k in
-                                     ("cases", "medianAbsErrorPP", "coverage80", "bandStatedShare", "brier")}
+                                     ("cases", "medianAbsErrorPP", "meanAbsErrorPP", "coverage80",
+                                      "bandStatedShare", "brier")}
+        result["windows"][window]["headline"] = metric
         base = baselines.get(window, {})
         cov = s.get("coverage80")
         if cov is not None and banded_cases(scores) >= MIN_BANDED_FOR_ALARM \
                 and not (COVERAGE_OK[0] <= cov <= COVERAGE_OK[1]):
             actionable.append(f"{window}: coverage drifted to {cov}")
-        med, base_med = s.get("medianAbsErrorPP"), base.get("medianAbsErrorPP")
-        if med and base_med and med > base_med * MEDIAN_WORSEN_FACTOR:
-            actionable.append(f"{window}: median error {med}pp vs baseline {base_med}pp")
+        # The window's headline error (the mean on weekly windows, whose median
+        # is 0.0 for every model — see headline_key).
+        err, base_err = s.get(metric), base.get(metric)
+        if err and base_err and err > base_err * MEDIAN_WORSEN_FACTOR:
+            actionable.append(f"{window}: {metric} {err}pp vs baseline {base_err}pp")
 
     # Shadow promotion progress (notify once per candidate crossing the floor).
     REPORTS.mkdir(exist_ok=True)
@@ -106,8 +114,9 @@ def run_check() -> int:
     keys = sorted(DEFAULT_GRID)
     import itertools
     from dataclasses import replace
-    base_folds = {w: fold_medians(all_scores[w]) for w in all_scores}
-    base_meds = {w: result["windows"][w]["medianAbsErrorPP"] for w in all_scores}
+    weekly = {w: is_weekly_scale(WINDOW_SECONDS[w]) for w in all_scores}
+    base_folds = {w: fold_errors(all_scores[w], weekly[w]) for w in all_scores}
+    base_meds = {w: result["windows"][w][result["windows"][w]["headline"]] for w in all_scores}
     for values in itertools.product(*(DEFAULT_GRID[k] for k in keys)):
         cand = replace(Params(), **dict(zip(keys, values)))
         if cand.canonical() == Params().canonical():
@@ -116,11 +125,12 @@ def run_check() -> int:
             samples = load_rate_samples(conn, window)
             scores = replay_window(window, samples, grid, cand)
             s = summarize(scores)
-            if robust_improvement(base_folds[window], fold_medians(scores),
-                                  base_meds[window], s.get("medianAbsErrorPP"), s.get("coverage80")):
+            metric = result["windows"][window]["headline"]
+            if robust_improvement(base_folds[window], fold_errors(scores, weekly[window]),
+                                  base_meds[window], s.get(metric), s.get("coverage80")):
                 actionable.append(
                     f"{window}: sweep found fold-robust improvement {cand.version_tag()} "
-                    f"(median {s.get('medianAbsErrorPP')}pp) — {cand.canonical()}")
+                    f"({metric} {s.get(metric)}pp) — {cand.canonical()}")
 
     result["actionable"] = actionable
     with (REPORTS / "log.jsonl").open("a") as f:

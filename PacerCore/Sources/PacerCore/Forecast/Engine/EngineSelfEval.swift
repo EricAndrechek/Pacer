@@ -150,23 +150,52 @@ public enum EngineSelfEval {
             /// Median |predicted − truth| in the surface's native units
             /// (percentage points for rate-limit surfaces) — what the
             /// compare-models sheet displays as "fit ±N pp".
-            public let medianAbsError: Double
+            public let typicalAbsError: Double
             public let periods: Int
         }
         public let surface: String
         public let methods: [MethodStat]
     }
 
-    public static func accuracy(surface: String = surfaceEOD, from records: [Record]) -> Accuracy {
+    /// `weekly` picks the statistic `typicalAbsError` reports — the same one
+    /// `bestMethod` ranks by, so the accuracy shown and the model chosen can't
+    /// disagree (see `typicalError`).
+    public static func accuracy(surface: String = surfaceEOD, from records: [Record],
+                                weekly: Bool = false) -> Accuracy {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let methods = byMethod.map { method, rows -> Accuracy.MethodStat in
             let periods = Set(rows.map { $0.periodKey }).count
             return .init(method: method,
                          medianAbsPctError: median(rows.map { $0.absPctError }),
-                         medianAbsError: median(rows.map { abs($0.predicted - $0.truth) }),
+                         typicalAbsError: typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly),
                          periods: periods)
         }.sorted { $0.medianAbsPctError < $1.medianAbsPctError }
         return Accuracy(surface: surface, methods: methods)
+    }
+
+    /// The error a rate-limit model is judged by: the median, or on a
+    /// weekly-scale window the mean. Most weekly cycles end at the cap, where
+    /// the displayed (clamped) value is exactly right, so their median error
+    /// is 0 for every model and every pick falls to the simplest one through
+    /// the tie band: scoring the displayed value with the median moved 7-day
+    /// selection from saturating to linear-recent and raised its mean error
+    /// from 6.7 to 8.8 pp in the harness. The mean keeps the misses that
+    /// matter, an early cut undershooting a capped cycle. Mirrors the harness's
+    /// `headline_key`.
+    static func typicalError(_ errors: [Double], weekly: Bool) -> Double {
+        weekly ? mean(errors) : median(errors)
+    }
+
+    /// Version suffix of the rate-limit record's bucket keys. v1 rows scored the
+    /// raw extrapolation and stay in the table unread: every reader takes only
+    /// the current version, and the engine re-scores full history into it once
+    /// per launch (`backfillRateLimitRecord`).
+    static let rlBucketVersion = "v2"
+    static func rlBucket(_ cutFraction: Double) -> String {
+        "cut=\(String(format: "%.2f", cutFraction))|\(rlBucketVersion)"
+    }
+    static func isCurrentRLBucket(_ bucket: String) -> Bool {
+        bucket.hasSuffix("|\(rlBucketVersion)")
     }
 
     // MARK: - Rate-limit outlook self-eval
@@ -195,10 +224,22 @@ public enum EngineSelfEval {
         let surface = rlSurface(window)
         let sorted = cycles.sorted { $0.cycleStart < $1.cycleStart }
         var out: [NewOutcome] = []
+        let rosterIds = BurnTrajectory.defaultModels.map(\.id) + (includeDiurnal ? ["diurnal-rate"] : [])
         for (i, cycle) in sorted.enumerated() {
             let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
             guard trueFinal > 0 else { continue }
             let periodKey = periodKeyRL(cycle.resetsAt)
+            // A cycle already scored in full costs nothing: skip it before the
+            // diurnal table, which is built from every earlier cycle. This is
+            // what keeps the once-per-launch full-history pass cheap after the
+            // first one.
+            let scored = rlCutFractions.allSatisfy { cf in
+                rosterIds.allSatisfy { id in
+                    existingKeys.contains(EngineEvalOutcome.makeKey(
+                        surface: surface, method: id, bucket: rlBucket(cf), periodKey: periodKey))
+                }
+            }
+            if scored { continue }
             var roster = BurnTrajectory.defaultModels
             if includeDiurnal {
                 let table = DiurnalBurnModel.rateTable(cycles: Array(sorted[0..<i]), calendar: calendar, prior: activityGrid)
@@ -212,24 +253,26 @@ public enum EngineSelfEval {
                 guard seen.count >= 3 else { continue }
                 let partial = BurnTrajectory.PartialCycle(
                     samples: seen, now: now, cycleStart: cycle.cycleStart, resetsAt: cycle.resetsAt)
-                let bucket = "cut=\(String(format: "%.2f", cf))"
+                let bucket = rlBucket(cf)
                 for m in roster {
                     let key = EngineEvalOutcome.makeKey(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey)
                     guard !existingKeys.contains(key) else { continue }
                     guard let proj = m.fit(partial) else { continue }
-                    out.append(NewOutcome(surface: surface, method: m.id, bucket: bucket,
-                                          periodKey: periodKey, predicted: proj(cycle.resetsAt), truth: trueFinal))
+                    out.append(NewOutcome(surface: surface, method: m.id, bucket: bucket, periodKey: periodKey,
+                                          predicted: BurnTrajectory.displayedAtReset(proj, partial: partial),
+                                          truth: trueFinal))
                 }
             }
         }
         return out
     }
 
-    /// Pick the best method from an accumulated record: lowest median absolute
-    /// error in the surface's native units (percentage points for rate-limit
-    /// windows), breaking near-ties within 1.5 percentage points toward the
-    /// simpler model. This keeps selection consistent with the accuracy the UI
-    /// displays (`medianAbsError`) — the two can never contradict each other.
+    /// Pick the best method from an accumulated record: lowest typical
+    /// absolute error (`typicalError`: the median, the mean when `weekly`) in
+    /// the surface's native units (percentage points for rate-limit windows),
+    /// breaking near-ties within 1.5 percentage points toward the simpler
+    /// model. This keeps selection consistent with the accuracy the UI
+    /// displays (`typicalAbsError`) — the two can never contradict each other.
     /// Returns `nil` until at least `minPeriods` completed periods back a
     /// method — the engine then falls back to its cold on-the-fly backtest.
     ///
@@ -243,13 +286,14 @@ public enum EngineSelfEval {
         from records: [Record],
         minPeriods: Int = 2,
         complexity: [String: Int] = [:],
-        provisionalMinPeriods: [String: Int] = [:]
+        provisionalMinPeriods: [String: Int] = [:],
+        weekly: Bool = false
     ) -> String? {
         let byMethod = Dictionary(grouping: records, by: { $0.method })
         let scored = byMethod.compactMap { id, rows -> (id: String, err: Double, cx: Int)? in
             let floor = provisionalMinPeriods[id] ?? minPeriods
             guard Set(rows.map { $0.periodKey }).count >= floor else { return nil }
-            return (id, median(rows.map { abs($0.predicted - $0.truth) }), complexity[id] ?? 3)
+            return (id, typicalError(rows.map { abs($0.predicted - $0.truth) }, weekly: weekly), complexity[id] ?? 3)
         }
         guard let best = scored.min(by: { $0.err < $1.err }) else { return nil }
         return scored.filter { $0.err <= best.err + 1.5 }
@@ -269,5 +313,10 @@ public enum EngineSelfEval {
         guard !xs.isEmpty else { return .infinity }
         let s = xs.sorted(); let n = s.count
         return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
+    }
+
+    static func mean(_ xs: [Double]) -> Double {
+        guard !xs.isEmpty else { return .infinity }
+        return xs.reduce(0, +) / Double(xs.count)
     }
 }

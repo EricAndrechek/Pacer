@@ -306,6 +306,27 @@ class Partial:
         return self.samples[-1][1] if self.samples else 0.0
 
 
+def displayed_at_reset(proj, c: Partial) -> float:
+    """The end-at-reset value the app shows for a projection — port of
+    BurnTrajectory.displayedAtReset. Anchored to the live value (shift up only:
+    smoothed fits can sit under a spiking last sample) and clamped to
+    [usedNow, 100]. Everything that grades a projection — the record selection
+    reads, the conformal residuals, the scored point — goes through this, so a
+    model is judged on what the user is shown, not on how far past 100% its raw
+    line runs (#300)."""
+    anchor = max(0.0, c.used_now - proj(c.now))
+    return min(100.0, max(c.used_now, proj(c.resets_at) + anchor))
+
+
+# Version suffix of the rate-limit record's bucket keys (`cut=0.20|v2`). v1 rows
+# scored the raw extrapolation; readers take only the current version.
+RL_BUCKET_VERSION = "v2"
+
+
+def rl_bucket(cut_fraction: float) -> str:
+    return f"cut={cut_fraction:.2f}|{RL_BUCKET_VERSION}"
+
+
 def _ls_line(pts: list[tuple[float, float]]):
     n = float(len(pts))
     sx = sum(p[0] for p in pts)
@@ -536,6 +557,16 @@ def is_weekly_scale(duration: float) -> bool:
     return duration >= WEEKLY_SCALE_THRESHOLD
 
 
+def headline_key(duration: float) -> str:
+    """The `summarize` error a window is judged by (drift alarm, adoption rule).
+    Most weekly-cadence cycles end at the cap (57% of 7-day cycles on the
+    owner's store), where the clamped point is exactly right, so their MEDIAN
+    error is 0.0 for every model and says nothing. The mean keeps the misses
+    that matter, such as an early cut undershooting a capped cycle.
+    Session-cadence windows keep the median."""
+    return "meanAbsErrorPP" if is_weekly_scale(duration) else "medianAbsErrorPP"
+
+
 def shadow_ids(duration: float) -> set[str]:
     """Kalman is a shadow everywhere; diurnal is a shadow on session-cadence
     windows only (mirror of UsageIntelligenceEngine.rlShadowFloors(duration:))."""
@@ -650,7 +681,7 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             proj = model_fit(partial, params)
             if proj is None:
                 continue
-            residual = true_final - proj(cyc.resets_at)
+            residual = true_final - displayed_at_reset(proj, partial)
             raw["pooled"].append((ci, residual))
             raw.setdefault(mode_stratum(mode, cf, cyc.cycle_start), []).append((ci, residual))
 
@@ -676,9 +707,11 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
-def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params) -> str | None:
-    """Port of EngineSelfEval.bestMethod: lowest median |err|, ties within
-    1.5pp to the simpler model, shadow floors applied."""
+def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params,
+                weekly: bool = False) -> str | None:
+    """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
+    mean on weekly-scale windows — EngineSelfEval.typicalError / headline_key),
+    ties within 1.5pp to the simpler model, shadow floors applied."""
     scored = []
     for mid, per_period in record.items():
         floor = params.shadow_promotion_min_periods if mid in shadow_set else 2
@@ -687,8 +720,11 @@ def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str],
         errs = [e for es in per_period.values() for e in es]
         errs.sort()
         n = len(errs)
-        med = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
-        scored.append((mid, med, MODEL_COMPLEXITY.get(mid, 3)))
+        if weekly:
+            err = sum(errs) / n
+        else:
+            err = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
+        scored.append((mid, err, MODEL_COMPLEXITY.get(mid, 3)))
     if not scored:
         return None
     best = min(scored, key=lambda x: x[1])
@@ -743,7 +779,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
 
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
-        chosen = best_method(record, shadow_set, params) or (
+        chosen = best_method(record, shadow_set, params, weekly) or (
             "diurnal-rate" if weekly else "recency-weighted")
         residuals = collect_residuals(roster[chosen], params, history, mode=conformal_mode)
 
@@ -756,23 +792,23 @@ def replay_window(window: str, samples, activity_grid, params: Params,
             proj = roster[chosen](partial, params)
             if proj is None:
                 continue
-            anchor = max(0.0, partial.used_now - proj(cut_now))
-            raw = proj(cyc.resets_at) + anchor
-            point = min(100.0, max(partial.used_now, raw))
+            # The displayed value is both the point and the band's centre: the
+            # residuals it's calibrated on are measured from it too.
+            point = displayed_at_reset(proj, partial)
 
             strat = residuals.get(mode_stratum(conformal_mode, cf, cyc.cycle_start),
                                   residuals.get("pooled", []))
             lo = gated_quantile(strat, 0.1, params.conformal_min_residuals)
             hi = gated_quantile(strat, 0.9, params.conformal_min_residuals)
             band_stated = lo is not None and hi is not None
-            covered = (min(raw + lo, raw + hi) <= truth <= max(raw + lo, raw + hi)) if band_stated else None
-            pb10 = pinball(truth, raw + lo, 0.1) if band_stated else None
-            pb90 = pinball(truth, raw + hi, 0.9) if band_stated else None
+            covered = (min(point + lo, point + hi) <= truth <= max(point + lo, point + hi)) if band_stated else None
+            pb10 = pinball(truth, point + lo, 0.1) if band_stated else None
+            pb90 = pinball(truth, point + hi, 0.9) if band_stated else None
             # Hit probability: weighted share of residual-shifted outcomes ≥100
             # (conformal predictive), falling back to the deterministic call.
             if kish_n(strat) >= params.conformal_min_residuals:
                 total_w = sum(w for w, _ in strat)
-                p_hit = sum(w for w, r in strat if raw + r >= 100.0) / total_w
+                p_hit = sum(w for w, r in strat if point + r >= 100.0) / total_w
             else:
                 p_hit = 1.0 if point >= 100.0 else 0.0
             scores.append(CaseScore(i, cf, chosen, abs(point - truth), covered,
@@ -787,11 +823,12 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 seen = [s for s in cyc.samples if s[0] <= cut_now]
                 if len(seen) < 3:
                     continue
-                proj = fit(Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at), params)
+                partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
+                proj = fit(partial, params)
                 if proj is None:
                     continue
                 record.setdefault(mid, {}).setdefault(period_key, []).append(
-                    abs(proj(cyc.resets_at) - truth))
+                    abs(displayed_at_reset(proj, partial) - truth))
     return scores
 
 
@@ -819,8 +856,53 @@ def summarize(scores: list[CaseScore]) -> dict:
     return out
 
 
+PARITY_MODELS = ["linear-recent", "recency-weighted", "damped-acceleration", "saturating", "kalman-trend"]
+
+
+def parity_fixture() -> dict:
+    """Deterministic synthetic 5-hour cycles and the record rows this harness
+    scores for them — what `EngineSelfEval.newOutcomesRL` must reproduce
+    (RLDisplayedParityTests). The cycles exercise the three cases the display
+    function exists for: a plain ramp, a late spike the smoothed fits sit
+    under (anchor > 0), and a ramp whose raw line runs past 100 (clamp)."""
+    duration = WINDOW_SECONDS["five_hour"]
+    step = 300.0
+    base = 1_752_000_000.0
+    shapes = [
+        lambda f: 60.0 * f,                                   # plain ramp
+        lambda f: 10.0 * f if f < 0.45 else 4.5 + 70.0 * (f - 0.45),  # late spike
+        lambda f: min(100.0, 180.0 * f),                      # runs past the cap
+    ]
+    cycles, rows = [], []
+    for ci, shape in enumerate(shapes):
+        start = base + ci * duration
+        reset = start + duration
+        samples = [(start + k * step, round(shape(k * step / duration), 4))
+                   for k in range(int(duration / step) + 1)]
+        cyc = Cycle(samples, start, reset)
+        cycles.append({"cycleStart": start, "resetsAt": reset, "samples": samples})
+        roster = model_roster(None)
+        for cf in RL_CUT_FRACTIONS:
+            now = start + duration * cf
+            seen = [s for s in samples if s[0] <= now]
+            if len(seen) < 3:
+                continue
+            partial = Partial(seen, now, start, reset)
+            for mid in PARITY_MODELS:
+                proj = roster[mid](partial, Params())
+                if proj is None:
+                    continue
+                rows.append({"cycle": ci, "bucket": rl_bucket(cf), "method": mid,
+                             "predicted": displayed_at_reset(proj, partial), "truth": cyc.final})
+    return {"_comment": "Generated by `uv run pacer_replay.py --emit-parity-fixture`. "
+                        "Regenerate when the record's scoring changes; the Swift test pins it.",
+            "bucketVersion": RL_BUCKET_VERSION, "cycles": cycles, "rows": rows}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--emit-parity-fixture", metavar="PATH",
+                    help="write the Swift parity fixture (synthetic cycles; no store needed) and exit")
     ap.add_argument("--store", help="path to pacer.sqlite (default: app group)")
     ap.add_argument("--window", choices=["five_hour", "seven_day"], help="one window only")
     ap.add_argument("--source", default="rate", choices=["rate", "usagelimit"],
@@ -832,6 +914,10 @@ def main() -> None:
                     help="calibration experiment (see collect_residuals; 'auto' = shipping behavior)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
+
+    if args.emit_parity_fixture:
+        Path(args.emit_parity_fixture).write_text(json.dumps(parity_fixture(), indent=1) + "\n")
+        return
 
     conn = open_copy(locate_store(args.store))
     grid = load_activity_grid(conn)

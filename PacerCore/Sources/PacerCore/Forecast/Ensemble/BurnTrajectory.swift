@@ -65,6 +65,19 @@ public enum BurnTrajectory {
         func fit(_ cycle: PartialCycle) -> (@Sendable (Date) -> Double)?
     }
 
+    /// The end-at-reset value the app shows for a projection: anchored to the
+    /// live value (shift up only: smoothed fits sit under a spiking last
+    /// sample) and clamped to [usedNow, 100]. The outlook's point, the
+    /// self-eval record and the conformal residuals all go through this, so a
+    /// model is graded on what the user is shown. Scoring the raw line instead
+    /// rewarded how far past 100% it ran: 45–288 pp of "error" on 7-day early
+    /// cuts whose displayed value was off by 0–8 pp (#300). The harness's
+    /// `displayed_at_reset` is its port, pinned by `RLDisplayedParityTests`.
+    public static func displayedAtReset(_ projection: (Date) -> Double, partial: PartialCycle) -> Double {
+        let anchor = max(0, partial.usedNow - projection(partial.now))
+        return min(100, max(partial.usedNow, projection(partial.resetsAt) + anchor))
+    }
+
     /// The selected fit's forward trajectory, sampled for plotting.
     public struct Trajectory: Sendable, Equatable {
         public let modelId: String
@@ -211,9 +224,11 @@ public enum BurnTrajectory {
         public let modelId: String
         public let complexity: Int
         public let trajectory: Trajectory
-        /// Median absolute error (percentage points) against the realized
-        /// final of completed cycles. `.infinity` when there's no record yet.
-        public let medianAbsError: Double
+        /// Typical absolute error (percentage points) of the displayed value
+        /// against the realized final of completed cycles — the statistic
+        /// selection ranks by (`EngineSelfEval.typicalError`). `.infinity`
+        /// when there's no record yet.
+        public let typicalAbsError: Double
         public let coverage: Double
         public let isSelected: Bool
         public var id: String { modelId }
@@ -223,7 +238,7 @@ public enum BurnTrajectory {
         /// to stand in — see `rateLimitTrajectories`.
         public func selecting() -> ScoredTrajectory {
             ScoredTrajectory(modelId: modelId, complexity: complexity, trajectory: trajectory,
-                             medianAbsError: medianAbsError, coverage: coverage, isSelected: true)
+                             typicalAbsError: typicalAbsError, coverage: coverage, isSelected: true)
         }
     }
 
@@ -313,6 +328,6 @@ public extension BurnTrajectory.ScoredTrajectory {
         BurnTrajectory.ScoredTrajectory(
             modelId: modelId, complexity: complexity,
             trajectory: trajectory.reanchored(toTime: tailTime, value: tailValue, cap: cap),
-            medianAbsError: medianAbsError, coverage: coverage, isSelected: isSelected)
+            typicalAbsError: typicalAbsError, coverage: coverage, isSelected: isSelected)
     }
 }
