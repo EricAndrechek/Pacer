@@ -22,8 +22,9 @@ shadow-promotion progress from the app's own record, and the default sweep —
 one line appended to `reports/log.jsonl` every run, a macOS notification only
 when something is actionable. Deterministic, no LLM in the loop.
 
-The store (`pacer.sqlite` in the app group) is copied to a temp dir and opened
-read-only — the live app is never touched. A full-history replay takes ~1s,
+The store (`pacer.sqlite` in the app group) is cloned (APFS `cp -c`, else
+copied) to a temp dir, opened read-only, and the copy is removed when the run
+exits — the live app is never touched. A full-history replay takes ~1s,
 which is why the sweep is a plain deterministic grid: no need for random
 search, and every run is reproducible.
 
