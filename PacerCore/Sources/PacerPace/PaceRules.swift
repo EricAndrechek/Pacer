@@ -1,4 +1,5 @@
 import Foundation
+import PacerCore
 
 /// One rate-limit window of one account, as `pace.sh` held it in its row
 /// format: the parsed percentage, and the other fields as Pacer wrote them
@@ -47,9 +48,13 @@ enum PaceRules {
 
     /// `--window`: a case-insensitive substring of the label or the identity.
     static func selected(_ rows: [PaceRow], window: String) -> [PaceRow] {
+        rows.filter { watches(label: $0.label, identity: $0.identity, window: window) }
+    }
+
+    static func watches(label: String, identity: String, window: String) -> Bool {
         let sel = window.lowercased()
-        if sel.isEmpty || sel == "all" { return rows }
-        return rows.filter { $0.label.lowercased().contains(sel) || $0.identity.lowercased().contains(sel) }
+        if sel.isEmpty || sel == "all" { return true }
+        return label.lowercased().contains(sel) || identity.lowercased().contains(sel)
     }
 
     /// Stands for "which model I am is not knowable here". Only windows that
@@ -107,6 +112,17 @@ enum PaceRules {
         }
     }
 
+    /// The limit one window trips at (#263): its safe limit less `margin`;
+    /// a `--cap` alone replaces the safe limit, as it always has; with both,
+    /// whichever is lower. A fixed cap cannot say "the safe limit plus a
+    /// buffer": at a heavy burn the safe limit falls below it, and the cap
+    /// lets a session run past where the default would have stopped it.
+    static func limit(_ row: PaceRow, cap: Cap, margin: Int) -> Double {
+        let safe = Double(safeLimit(row) - margin)
+        guard let capped = cap.number else { return safe }
+        return margin > 0 ? min(capped, safe) : capped
+    }
+
     struct Trip: Equatable, Sendable {
         let label: String
         let percentText: String
@@ -114,15 +130,84 @@ enum PaceRules {
         let why: String          // "cap" or "eta"
         let hitEta: String?
         let limit: Double
+        /// Which window, on which account, so a `wait` can follow this one
+        /// window rather than whatever trips next.
+        var identity = ""
+        var account = ""
+        /// The window's safe limit when judged, and whether `limit` came from
+        /// it (less any margin) rather than from `--cap`.
+        var safe = 0
+        var fromSafe = true
+    }
+
+    /// What a paused `wait` is waiting out (#267): the window that tripped,
+    /// on which account, when its cycle resets, and the limit it tripped at.
+    /// Held for the whole wait because the safe limit is not: it rises as
+    /// paused sessions cut the burn, so re-judging every poll let the 97%
+    /// that paused at a safe limit of 97 "reset" a few polls later at 98,
+    /// with nothing reset.
+    struct Anchor: Equatable, Sendable {
+        var trip: Trip
+        let resetsAt: Date?
+    }
+
+    /// Why an anchored window no longer holds a wait.
+    enum Release: Equatable, Sendable {
+        /// Its cycle rolled over.
+        case reset
+        /// Its usage fell below the limit it paused at.
+        case drop
+        /// A forecast pause (`--eta`): it is no longer projected to fill.
+        case forecast
+    }
+
+    /// How long a window's cycle is, to tell "the next cycle" from jitter in
+    /// one cycle's reset instant. Unknown kinds take the shortest window
+    /// there is: a later cycle is at least that far off, and one cycle's
+    /// reset never drifts by half of it.
+    static func cycleLength(identity: String) -> TimeInterval {
+        if let fixed = PaceMath.windowDuration(for: identity) { return fixed }
+        let kind = identity.split(separator: "|", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        if kind.contains("week") || kind.contains("seven") { return 7 * 86_400 }
+        if kind.contains("day") || kind.contains("daily") { return 86_400 }
+        return 5 * 3_600
+    }
+
+    /// Whether the anchored window has cleared in `rows`: its reset is due
+    /// or past, a reading belongs to a later cycle (never `resetsAt ==`: the
+    /// instant jitters, AGENTS.md rule 9), or its usage fell below the
+    /// anchored limit (for a forecast pause, under it and no longer projected
+    /// within `horizon`). Nil while it holds. A window missing from the
+    /// reading holds until its reset: absent is not empty.
+    static func release(_ anchor: Anchor, rows: [PaceRow], now: Date, horizon: Int) -> Release? {
+        if let resetsAt = anchor.resetsAt, now >= resetsAt { return .reset }
+        guard let row = rows.first(where: {
+            $0.identity == anchor.trip.identity && $0.account == anchor.trip.account
+        }) else { return nil }
+        if let secs = row.resetsIn.map(PaceFormat.number) {
+            // A reset already due: the reading describes the window that ended.
+            if secs <= 0 { return .reset }
+            if let resetsAt = anchor.resetsAt,
+               !RateLimitCycle.contains(sampleReset: now.addingTimeInterval(secs), resets: resetsAt,
+                                        duration: cycleLength(identity: row.identity)) {
+                return .reset
+            }
+        }
+        guard row.percent < anchor.trip.limit else { return nil }
+        guard anchor.trip.why == "eta" else { return .drop }
+        let projected = horizon > 0 && PaceFormat.number(row.willHit) == 1
+            && row.hitEta.map { PaceFormat.number($0) <= Double(horizon) } == true
+        return projected ? nil : .forecast
     }
 
     /// The binding window that is at or over its limit — or, with a horizon,
     /// projected to fill inside it — and resets soonest. Nil means headroom.
-    static func evaluate(_ rows: [PaceRow], cap: Cap, horizon: Int) -> Trip? {
+    static func evaluate(_ rows: [PaceRow], cap: Cap, margin: Int = 0, horizon: Int) -> Trip? {
         var best: Trip?
         var bestSeconds = 0.0
         for row in rows {
-            let limit = cap.number ?? Double(safeLimit(row))
+            let safe = safeLimit(row)
+            let limit = limit(row, cap: cap, margin: margin)
             // A reset already due describes the window that just ended: Pacer
             // polls every few minutes, so for a while its last reading still
             // says "85%, resets in 0m".
@@ -139,7 +224,9 @@ enum PaceRules {
             let s = row.resetsIn.map(PaceFormat.number) ?? 9_999_999
             if best == nil || s < bestSeconds {
                 best = Trip(label: row.label, percentText: row.percentText, resetsIn: row.resetsIn,
-                            why: why, hitEta: row.hitEta, limit: limit)
+                            why: why, hitEta: row.hitEta, limit: limit,
+                            identity: row.identity, account: row.account, safe: safe,
+                            fromSafe: cap.number.map { limit < $0 } ?? true)
                 bestSeconds = s
             }
         }

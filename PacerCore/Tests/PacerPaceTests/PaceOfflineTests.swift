@@ -113,7 +113,7 @@ struct PaceOfflineTests {
                                   offline: Self.offline(container),
                                   extra: ["CLAUDE_CODE_SESSION_ID": "session-194"])
         #expect(result.status == 0)
-        #expect(result.out.contains("model claude-opus-5 (detected)"), "\(result.out)")
+        #expect(result.out.contains("model auto: detected claude-opus-5"), "\(result.out)")
     }
 
     @MainActor

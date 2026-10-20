@@ -13,17 +13,23 @@ public struct PaceIO: @unchecked Sendable {
     public var get: (URLRequest) -> PaceResponse?
     /// The branch checked out at a path, for `sessions`.
     public var gitBranch: (String) -> String?
+    /// A short pause that is not a wait for Pacer: a `status` that lost the
+    /// race to refresh a verdict naps while the winner writes it (#266).
+    /// Separate from `sleep`, which opens Pacer's stream on first use.
+    public var nap: (TimeInterval) -> Void
 
     public init(out: @escaping (String) -> Void, err: @escaping (String) -> Void,
                 now: @escaping () -> Date, sleep: @escaping (TimeInterval) -> Void,
                 get: @escaping (URLRequest) -> PaceResponse?,
-                gitBranch: @escaping (String) -> String?) {
+                gitBranch: @escaping (String) -> String?,
+                nap: @escaping (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) {
         self.out = out
         self.err = err
         self.now = now
         self.sleep = sleep
         self.get = get
         self.gitBranch = gitBranch
+        self.nap = nap
     }
 
     /// The real thing: stdout, stderr, the wall clock, URLSession and git.
@@ -90,6 +96,33 @@ public enum Pace {
         }
     }
 
+    /// For the "unknown subcommand" message.
+    static let subcommands = ["report", "json", "accounts", "sessions", "gate", "status", "wait", "safecap", "feedback"]
+
+    /// Where `pacer feedback` would have this reported.
+    static let issuesURL = "https://github.com/EricAndrechek/Pacer/issues/new"
+
+    /// This command line's version and build, from the bundle it ships in
+    /// (Pacer stamps its own on it). Run through the skill's symlink,
+    /// `Bundle.main` is the link's folder rather than `PacerCLI.app`, so the
+    /// bundle is found again from the executable's real path.
+    static var version: String {
+        func read(_ bundle: Bundle?) -> String? {
+            guard let short = bundle?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            else { return nil }
+            let build = bundle?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            return build.map { "\(short) (\($0))" } ?? short
+        }
+        if let main = read(.main) { return main }
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { return "unknown" }
+        let executable = URL(fileURLWithPath: String(
+            decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        // …/PacerCLI.app/Contents/MacOS/pacer
+        let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return read(Bundle(url: app)) ?? "unknown"
+    }
+
     /// `pacer --help`.
     public static let help = """
     pacer — report Claude usage from Pacer and gate heavy work against
@@ -99,8 +132,9 @@ public enum Pace {
     Design: ONE poller, MANY cheap readers.
       - An orchestrator runs `gate` once per fan-out wave (a fresh read of
         Pacer), which writes a shared state file.
-      - The subagents only ever run `status` — a plain file read, Pacer is not
-        asked — so a hundred of them cost Pacer nothing.
+      - The subagents only ever run `status` — a file read. When the verdict
+        has gone stale, one of them re-gates it for all of them, so a hundred
+        cost Pacer one read per staleness period.
       - On a trip, `wait` blocks (background-friendly) until the window resets,
         then exits so the launcher is re-invoked to resume.
 
@@ -111,20 +145,44 @@ public enum Pace {
       json                   machine JSON of the same
       gate  [--cap N]        read Pacer + write state file; 0=go 10=paused
                              2=no Pacer 4=misconfigured
-      status                 read state file only (Pacer not asked); 0=go
-                             10=paused 3=unknown or stale
+      safecap                the limit gate applies to each binding window,
+                             one per line (label, percent), for scripts
+      status                 read the state file; 0=go 10=paused 3=unknown or
+                             stale. A stale, expired or missing verdict is
+                             re-gated first, by one reader for all of them
+                             (--no-refresh: never ask Pacer)
       wait  [--cap N]        block until the tripping window resets; 0=resume
                              20=beyond --max-wait (checkpoint & stop) 2=no Pacer
+      feedback "TEXT"        report a wrong verdict or a missing flag: saved to
+                             ~/.claude/pace/feedback.jsonl, with a link to file
+                             it on GitHub. Nothing is sent anywhere
 
-    Flags: --cap N (default: the safe limit, see `safecap`), --interval S (how often `wait` looks; default
-      15, floor 5 — a login switch shows up within seconds), --window SEL (default all; a label or identity
-      substring, e.g. 5h, 7d, fable), --account ID|all, --max-wait S (default
-      21600 = 6h), --max-age S (default 900; how old a state file may be before
-      `status` calls it stale), --retries N (default 3), --state FILE
+    Flags:
+      --model NAME|auto|all  which per-model caps bind (account-wide windows
+                             always do); default auto where
+                             CLAUDE_CODE_SESSION_ID is set, else all
+      --cap N                pause at N% (default: each window's safe limit,
+                             see `safecap`)
+      --margin N             stop N points below each window's safe limit;
+                             with --cap, the lower of the two wins
+      --eta DURATION         also pause when a window is projected to fill
+                             within DURATION (90m, 2h); default off
+      --window SEL           a label or identity substring (5h, 7d, fable);
+                             default all
+      --account ID|all       whose windows; default this session's login
+      --interval S           how often `wait` looks; default 15, floor 5
+      --max-wait S           longest reset `wait` sleeps for; default 21600
+      --max-age S            how old a verdict may be before `status` calls
+                             it stale; default 900
+      --retries N            reads of Pacer before giving up; default 3
+      --state FILE           the state file; default state-session-<id>.json
+                             in ~/.claude/pace for a Claude Code session,
+                             state-<PACE_RUN>.json for a named run, else
+                             state.json
 
     Env: PACER_API (default http://127.0.0.1:7223), PACE_TOKEN (bearer, optional),
       PACE_SESSION_API (override just the session lookup's base URL),
-      PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
+      PACE_MODEL, PACE_MARGIN, PACE_ACCOUNT, PACE_STATE, PACE_RUN (names a per-run state file, so two
       orchestrations on one machine do not overwrite each other's verdict)
 
     """
@@ -138,13 +196,19 @@ struct PaceExit: Error {
 /// read against it line by line.
 final class PaceRun {
     private let env: [String: String]
-    private let io: PaceIO
+    /// `var` so a refreshing `status` can run the gate with its stdout muted.
+    private var io: PaceIO
 
     private var apiBase: String
     private var api: String { apiBase + "/metrics" }
     private var statePath: String
+    /// The state file is this session's default one (#265), which `gate`
+    /// may prune old siblings of; not one a caller named.
+    private var stateIsSessionDefault = false
     private var account: String
     private var cap: PaceRules.Cap = .safe
+    /// Points below each window's safe limit to stop at (#263).
+    private var margin = 0
     /// Which of the gating settings were given (flag, or PACE_MODEL). A
     /// `wait` takes the rest from the gate that paused (#258).
     private var given: Set<String> = []
@@ -153,7 +217,13 @@ final class PaceRun {
     private var window = "all"
     private var maxWait = 21_600
     private var maxAge = 900
+    /// `status --no-refresh`: the pure file read, never asking Pacer (#266).
+    private var noRefresh = false
     private var model: String
+    /// The model was `auto` before it was resolved, so a verdict records
+    /// that and a later `wait` or refresh asks again rather than reusing
+    /// what this session ran at gate time.
+    private var modelAuto = false
     private var eta = 0
     private var retries: Int
     private var token: String?
@@ -181,8 +251,21 @@ final class PaceRun {
         if base.hasSuffix("/") { base.removeLast() }
         apiBase = base
         let run = environment["PACE_RUN"].flatMap { $0.isEmpty ? nil : $0 }
-        statePath = environment["PACE_STATE"].flatMap { $0.isEmpty ? nil : $0 }
-            ?? "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace/state\(run.map { "-\($0)" } ?? "").json"
+        let dir = "\(environment["HOME"] ?? NSHomeDirectory())/.claude/pace"
+        if let path = environment["PACE_STATE"].flatMap({ $0.isEmpty ? nil : $0 }) {
+            statePath = path
+        } else if let run {
+            statePath = "\(dir)/state-\(run).json"
+        } else if let session = PaceStateFile.sessionTag(environment["CLAUDE_CODE_SESSION_ID"]) {
+            // One verdict per session by default (#265). A shared file let a
+            // test `gate --cap 50` in one session pause every session on the
+            // machine. Subagents run under their parent's session id, so a
+            // session's own lanes still share one verdict.
+            statePath = "\(dir)/state-session-\(session).json"
+            stateIsSessionDefault = true
+        } else {
+            statePath = "\(dir)/state.json"
+        }
         account = environment["PACE_ACCOUNT"] ?? ""
         model = environment["PACE_MODEL"] ?? ""
         if !model.isEmpty { given.insert("model") }
@@ -196,6 +279,9 @@ final class PaceRun {
     func main(_ arguments: [String]) throws {
         var args = arguments[...]
         let sub = args.popFirst() ?? "report"
+        // Everything after `feedback` is the text, flags and all: it is a
+        // report of what was run, and that is what gets quoted.
+        if sub == "feedback" { return try cmdFeedback(Array(args)) }
         while let flag = args.popFirst() {
             func value() throws -> String {
                 guard let v = args.popFirst() else { try die("\(flag) needs a value") }
@@ -203,6 +289,7 @@ final class PaceRun {
             }
             switch flag {
             case "--cap":      let v = try value(); cap = v == "safe" ? .safe : .value(v); given.insert("cap")
+            case "--margin":   margin = try points(try value(), flag); given.insert("margin")
             case "--interval": interval = try integer(try value(), flag); intervalSet = true
             case "--window":   window = try value(); given.insert("window")
             case "--model":    model = try value(); given.insert("model")
@@ -211,7 +298,8 @@ final class PaceRun {
             case "--max-wait": maxWait = try integer(try value(), flag)
             case "--max-age":  maxAge = try integer(try value(), flag)
             case "--retries":  retries = try integer(try value(), flag)
-            case "--state":    statePath = try value()
+            case "--state":    statePath = try value(); stateIsSessionDefault = false
+            case "--no-refresh": noRefresh = true
             case "-h", "--help":
                 io.out(Pace.help)
                 throw PaceExit(code: 0)
@@ -219,14 +307,19 @@ final class PaceRun {
             }
         }
         if interval < 5 { interval = 5 }
+        if !given.contains("margin"), let raw = env["PACE_MARGIN"], !raw.isEmpty {
+            margin = try points(raw, "PACE_MARGIN")
+            given.insert("margin")
+        }
 
-        // Which account you are is not a function of which model you run: an
-        // orchestrator passing `--model opus` once got no session lookup, fell
-        // back to the idle active login, and reported GO at 0% while its own
-        // account sat at 65%.
-        if account.isEmpty || account == "all" { _ = resolveSession() }
-        resolveAutoModel()
-        setScope()
+        // `status` is a file read: it judges the verdict it finds, with no
+        // model default (#264), and asks Pacer nothing unless it has to
+        // re-gate (#266). It used to look the session up on every call, which
+        // with the API off opened the store, once per reader.
+        if sub != "status" {
+            defaultModel()
+            prepare()
+        }
 
         switch sub {
         case "accounts": try cmdAccounts()
@@ -235,9 +328,33 @@ final class PaceRun {
         case "json":     try cmdJSON()
         case "gate":     try cmdGate()
         case "status":   try cmdStatus()
+        case "safecap":  try cmdSafecap()
         case "wait":     try cmdWait()
-        default: try die("unknown subcommand '\(sub)' (report|json|accounts|sessions|gate|status|wait)")
+        default: try die("unknown subcommand '\(sub)' (\(Pace.subcommands.joined(separator: "|")))")
         }
+    }
+
+    /// A caller that names no model, in a session Pacer can identify, is
+    /// asking about that session (#264). "Every window binds" paused Opus and
+    /// Sonnet work on a Fable cap that never constrained it: 73 false PAUSEs
+    /// in a fortnight on one machine. `auto` binds what certainly applies,
+    /// and still falls back to every window when Pacer has not seen the
+    /// session. `--model all` asks for every window explicitly.
+    private func defaultModel() {
+        if model.isEmpty, !given.contains("model"),
+           let id = env["CLAUDE_CODE_SESSION_ID"], !id.isEmpty {
+            model = "auto"
+        }
+    }
+
+    /// Who is asking, before reading Pacer for them. Which account you are is
+    /// not a function of which model you run: an orchestrator passing
+    /// `--model opus` once got no session lookup, fell back to the idle
+    /// active login, and reported GO at 0% while its own account sat at 65%.
+    private func prepare() {
+        if account.isEmpty || account == "all" { _ = resolveSession() }
+        resolveAutoModel()
+        setScope()
     }
 
     private func die(_ message: String) throws -> Never {
@@ -247,6 +364,13 @@ final class PaceRun {
 
     private func integer(_ text: String, _ flag: String) throws -> Int {
         guard let v = Int(text) else { try die("\(flag) takes a whole number, not '\(text)'") }
+        return v
+    }
+
+    /// A margin: whole points, none negative. A margin that raised the limit
+    /// above the safe one would be a cap, and `--cap` already says that.
+    private func points(_ text: String, _ name: String) throws -> Int {
+        guard let v = Int(text), v >= 0 else { try die("\(name) takes a whole number of points, 0 or more, not '\(text)'") }
         return v
     }
 
@@ -331,20 +455,22 @@ final class PaceRun {
         return out
     }
 
-    /// `--model auto` means "whatever this session is running".
+    /// `--model auto` means "whatever this session is running". The note
+    /// always reads `model auto: …`, so a verdict reached by default says so.
     private func resolveAutoModel() {
         guard model == "auto" else { return }
+        modelAuto = true
         if sessionModels.count > 1 {
             // A parent and its subagents at once, and nothing here says which
             // one is asking: bind what certainly applies and nothing else.
             model = PaceRules.ambiguousModel
-            autoNote = "model ambiguous (\(sessionModels.joined(separator: ","))) — account-wide windows only; pass --model to gate on yours"
+            autoNote = "model auto: ambiguous (\(sessionModels.joined(separator: ","))) — account-wide windows only; pass --model to gate on yours"
         } else if !sessionModel.isEmpty {
             model = sessionModel
-            autoNote = "model \(model) (detected)"
+            autoNote = "model auto: detected \(model)"
         } else {
             model = ""
-            autoNote = "model unknown — every window binds"
+            autoNote = "model auto: unknown — every window binds"
         }
     }
 
@@ -486,7 +612,7 @@ final class PaceRun {
         throw PaceExit(code: 1)
     }
 
-    private func autoNoteText() -> String { autoNote.isEmpty ? "" : " [\(autoNote)]" }
+    private func autoNoteText() -> String { autoNote.isEmpty ? "" : " (\(autoNote))" }
 
     /// Whose numbers these are, when that had to be inferred.
     private func scopeCaveat() -> String {
@@ -499,20 +625,24 @@ final class PaceRun {
         if trip.why == "eta" {
             return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% is projected to fill in \(PaceFormat.human(trip.hitEta)) (horizon \(PaceFormat.human(eta)))"
         }
-        switch cap {
-        case .safe:
-            return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= safe limit \(PaceFormat.awkNumber(trip.limit))%"
-        case .value(let text):
-            return "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= cap \(text)%"
-        }
+        let at = "\(trip.label) at \(PaceFormat.percent(trip.percentText))% >= "
+        if case .value(let text) = cap, !trip.fromSafe { return at + "cap \(text)%" }
+        if margin > 0 { return at + "safe limit \(trip.safe)% − \(margin)" }
+        return at + "safe limit \(PaceFormat.awkNumber(trip.limit))%"
     }
 
+    /// What the verdict was judged against: the safe limit per window (less
+    /// any margin, `5h 97% − 3`), a cap, or with both, the cap and the
+    /// margined safe limits, of which each window takes the lower.
     private func capNote() -> String {
+        let safe = "safe limit " + bindingRows.map {
+            "\($0.label) \(PaceRules.safeLimit($0))%" + (margin > 0 ? " − \(margin)" : "")
+        }.joined(separator: ", ")
         switch cap {
         case .safe:
-            return "safe limit " + bindingRows.map { "\($0.label) \(PaceRules.safeLimit($0))%" }.joined(separator: ", ")
+            return safe
         case .value(let text):
-            return "cap \(text)%"
+            return margin > 0 ? "cap \(text)%, \(safe)" : "cap \(text)%"
         }
     }
 
@@ -521,10 +651,13 @@ final class PaceRun {
     }
 
     private func writeState(_ status: String, trip: String = "", percent: String? = nil,
-                            resets: String? = nil, note: String) {
+                            resets: String? = nil, note: String, tripped: PaceRules.Trip? = nil) {
         PaceStateFile(path: statePath).write(.init(
             status: status, tripWindow: trip, model: model, cap: cap, eta: eta, window: window,
-            usedPercent: percent, resetsIn: resets, note: note), now: io.now())
+            modelAuto: modelAuto, margin: margin, usedPercent: percent, resetsIn: resets,
+            note: note + autoNoteText(),
+            tripIdentity: tripped?.identity ?? "", tripAccount: tripped?.account ?? "",
+            tripLimit: tripped?.limit), now: io.now())
     }
 
     /// What went wrong, and how loudly: `off` is ordinary; `auth` and `http`
@@ -554,7 +687,7 @@ final class PaceRun {
     private func cmdReport() throws {
         guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
         try requireSelection()
-        if !autoNote.isEmpty { io.out("pace:\(autoNoteText())\n") }
+        if !autoNote.isEmpty { io.out("pace: \(autoNote)\n") }
         let multi = Set(rows.map(\.account)).count > 1
         let now = io.now()
         for row in selectedRows {
@@ -613,6 +746,7 @@ final class PaceRun {
     }
 
     private func cmdGate() throws {
+        if stateIsSessionDefault { PaceStateFile.pruneSessionFiles(beside: statePath, now: io.now()) }
         guard fetchRows() else {
             writeState("unknown", note: "not gating (\(fetchReason ?? "off"))")
             apiOffNote()
@@ -620,19 +754,77 @@ final class PaceRun {
             throw PaceExit(code: offExitCode)
         }
         try requireSelection()
-        guard let trip = PaceRules.evaluate(bindingRows, cap: cap, horizon: eta) else {
+        guard let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta) else {
             writeState("go", note: "\(summary()) (\(capNote()))")
             io.out("pace: GO — \(summary()) (\(capNote())).\(autoNoteText())\(scopeCaveat())\n")
             throw PaceExit(code: 0)
         }
         writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                   note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))")
+                   note: "\(tripReason(trip)); resets in \(PaceFormat.human(trip.resetsIn))", tripped: trip)
         io.out("pace: PAUSE — \(tripReason(trip)), resets in \(PaceFormat.human(trip.resetsIn)) (\(PaceFormat.clock(trip.resetsIn, now: io.now()))).\(autoNoteText())\n")
         throw PaceExit(code: 10)
     }
 
+    /// Why a verdict cannot be obeyed as it stands.
+    private enum Staleness {
+        case missing
+        case old(age: Int)
+        case expired(trip: String)
+
+        /// For the line saying it was re-gated.
+        var reason: String {
+            switch self {
+            case .missing: return "no verdict yet"
+            case .old(let age): return "the verdict was \(age < 60 ? "\(age)s" : "\(age / 60)m") old"
+            case .expired(let trip): return "the \(trip.isEmpty ? "window" : trip) pause had expired"
+            }
+        }
+    }
+
+    private func staleness(_ state: PaceStateFile) -> Staleness? {
+        guard state.exists else { return .missing }
+        guard let age = state.age(now: io.now()) else { return nil }
+        if age > maxAge { return .old(age: age) }
+        if state.quoted("status") == "paused",
+           let resetIn = state.bare("resetsInSeconds"), let secs = Int(resetIn), resetIn.allSatisfy(\.isNumber),
+           age >= secs {
+            return .expired(trip: state.quoted("tripWindow") ?? "")
+        }
+        return nil
+    }
+
+    /// Why this caller cannot take that verdict, or nil if it can: it is about
+    /// another model, or another margin.
+    private func mismatch(_ state: PaceStateFile) -> String? {
+        // `--model auto` takes a verdict gated by `auto` without asking Pacer
+        // anything; otherwise the session's model is looked up to compare.
+        let bothAuto = model == "auto" && state.bare("autoModel") == "true"
+        if model == "auto", !bothAuto { prepare() }
+        // A verdict is only about the model it was gated for.
+        let gatedModel = state.quoted("model") ?? ""
+        if !bothAuto, !model.isEmpty, model != "all", gatedModel != model {
+            return "unknown: last gate was for '\(gatedModel.isEmpty ? "every model" : gatedModel)', not '\(model)' — re-gate."
+        }
+        // So is a margin: a verdict gated at the safe limit says nothing about
+        // a caller who wanted to stop three points short of it (#263).
+        let gatedMargin = state.bare("margin").flatMap { Int($0) } ?? 0
+        if given.contains("margin"), gatedMargin != margin {
+            return "unknown: last gate was with margin \(gatedMargin), not \(margin) — re-gate."
+        }
+        return nil
+    }
+
     private func cmdStatus() throws {
         let state = PaceStateFile(path: statePath)
+        // Lanes run for 15-60 minutes and a verdict goes stale in 15, so a
+        // lane that only reads went blind partway through (#266). A stale,
+        // expired or missing verdict is re-gated here, by one reader for all
+        // of them. Not one for another model or margin: re-gating that with
+        // its own settings would give this caller the same refusal, and with
+        // this caller's, would take the verdict away from its owner.
+        if !noRefresh, let stale = staleness(state) {
+            if case .missing = stale { refresh(stale) } else if mismatch(state) == nil { refresh(stale) }
+        }
         guard state.exists else {
             io.out("pace: no state file (\(statePath)) — run 'gate' first.\n")
             throw PaceExit(code: 3)
@@ -644,19 +836,14 @@ final class PaceRun {
             io.out("stale: last gated \(age / 60)m ago (max \(maxAge)s) — treat as unknown and re-gate.\n")
             throw PaceExit(code: 3)
         }
-        // A verdict is only about the model it was gated for.
-        let gatedModel = state.quoted("model") ?? ""
-        if !model.isEmpty, model != "all", gatedModel != model {
-            io.out("unknown: last gate was for '\(gatedModel.isEmpty ? "every model" : gatedModel)', not '\(model)' — re-gate.\n")
+        if let refusal = mismatch(state) {
+            io.out(refusal + "\n")
             throw PaceExit(code: 3)
         }
         let status = state.quoted("status") ?? ""
         // A pause ends when the window that caused it resets, whatever its
         // shelf life says.
-        if status == "paused", let age,
-           let resetIn = state.bare("resetsInSeconds"), let secs = Int(resetIn), resetIn.allSatisfy(\.isNumber),
-           age >= secs {
-            let trip = state.quoted("tripWindow") ?? ""
+        if case .expired(let trip)? = staleness(state) {
             io.out("stale: the \(trip.isEmpty ? "window" : trip) pause has expired — that window reset since; re-gate.\n")
             throw PaceExit(code: 3)
         }
@@ -673,6 +860,53 @@ final class PaceRun {
         }
     }
 
+    /// How many times, 0.1 s apart, a reader that lost the race waits for the
+    /// winner's verdict: about 3 s.
+    static let refreshNaps = 30
+
+    /// Re-gate a stale or missing verdict, single-flight (#266): of the
+    /// readers that find it stale, the one that takes the lock beside the
+    /// state file reads Pacer and writes the verdict; the rest wait briefly
+    /// for it, and give up (exit 3, as before) if it does not come. So the
+    /// cost is one read of Pacer per staleness period, however many lanes.
+    private func refresh(_ stale: Staleness) {
+        let lock = PaceRefreshLock(path: PaceStateFile(path: statePath).lockPath)
+        defer { lock.release() }
+        for attempt in 0...Self.refreshNaps {
+            switch lock.acquire() {
+            case .unavailable:
+                // Nowhere to put a lock is nowhere to put a verdict either.
+                return
+            case .acquired:
+                // Another reader may have re-gated while this one waited.
+                if staleness(PaceStateFile(path: statePath)) == nil { return }
+                regate(stale)
+                if staleness(PaceStateFile(path: statePath)) == nil {
+                    io.err("pace: \(stale.reason) — re-gated.\n")
+                }
+                return
+            case .held:
+                if attempt == Self.refreshNaps { return }
+                io.nap(0.1)
+                if staleness(PaceStateFile(path: statePath)) == nil {
+                    io.err("pace: \(stale.reason) — another reader re-gated it.\n")
+                    return
+                }
+            }
+        }
+    }
+
+    /// A gate by the stale verdict's own settings (a missing one's are this
+    /// call's), its line unprinted: `status` answers from the file it writes.
+    private func regate(_ stale: Staleness) {
+        if case .missing = stale { defaultModel() } else { inherit(from: PaceStateFile(path: statePath), force: true) }
+        prepare()
+        let shown = io
+        io.out = { _ in }
+        defer { io = shown }
+        do { try cmdGate() } catch {}
+    }
+
     /// What a `wait` was not told, it takes from the verdict it is waiting
     /// out (#258). A gate that paused on `--eta 1h` or `--cap 85`, followed by
     /// a bare `wait` as the skill's protocol says, used to judge by the safe
@@ -681,32 +915,111 @@ final class PaceRun {
     private func inheritFromGate() {
         let state = PaceStateFile(path: statePath)
         guard state.exists else { return }
-        var taken: [String] = []
-        if !given.contains("cap"), let raw = state.bare("cap"), !raw.isEmpty, !raw.contains("safe") {
-            cap = .value(raw)
-            taken.append("--cap \(raw)")
-        }
-        if !given.contains("eta"), let raw = state.bare("eta"), let seconds = Int(raw), seconds > 0 {
-            eta = seconds
-            taken.append("--eta \(PaceFormat.human(seconds))")
-        }
-        if !given.contains("model"), let m = state.quoted("model"), !m.isEmpty {
-            model = m
-            taken.append("--model \(m)")
-        }
-        if !given.contains("window"), let w = state.quoted("window"), !w.isEmpty, w != "all" {
-            window = w
-            taken.append("--window \(w)")
-        }
+        let taken = inherit(from: state, force: false)
+        // Resolved after, not inside: a refresh adopts `auto` before the
+        // session has been looked up.
+        resolveAutoModel()
         if !taken.isEmpty {
             io.out("pace: waiting by the gate's settings (\(taken.joined(separator: ", "))).\n")
         }
     }
 
+    /// Take a verdict's gating settings: those this call was not given, or
+    /// with `force` (a refresh, #266), all of them. Returns the ones that
+    /// changed anything, as flags. An `auto` model is left for the caller to
+    /// resolve.
+    @discardableResult
+    private func inherit(from state: PaceStateFile, force: Bool) -> [String] {
+        var taken: [String] = []
+        if force || !given.contains("cap"), let raw = state.bare("cap"), !raw.isEmpty {
+            if !raw.contains("safe") {
+                cap = .value(raw)
+                taken.append("--cap \(raw)")
+            } else {
+                cap = .safe
+            }
+        }
+        if force || !given.contains("margin"), let raw = state.bare("margin"), let points = Int(raw) {
+            margin = points
+            if points > 0 { taken.append("--margin \(points)") }
+        }
+        if force || !given.contains("eta"), let raw = state.bare("eta"), let seconds = Int(raw) {
+            eta = seconds
+            if seconds > 0 { taken.append("--eta \(PaceFormat.human(seconds))") }
+        }
+        if force || !given.contains("model") {
+            if state.bare("autoModel") == "true" {
+                // Asked again, not reused: which models the session runs
+                // changes while it waits.
+                model = "auto"
+                autoNote = ""
+                taken.append("--model auto")
+            } else if let m = state.quoted("model"), force || !m.isEmpty {
+                model = m
+                modelAuto = false
+                autoNote = ""
+                if !m.isEmpty { taken.append("--model \(m)") }
+            }
+        }
+        if force || !given.contains("window"), let w = state.quoted("window"), !w.isEmpty {
+            window = w
+            if w != "all" { taken.append("--window \(w)") }
+        }
+        return taken
+    }
+
+    /// The gate's own trip, when this wait judges by the gate's rules and the
+    /// window binds it (#267). A wait started just after a gate must not
+    /// release because the safe limit moved in between; one told another
+    /// cap, margin, horizon or window is asking its own question.
+    private func seededAnchor() -> PaceRules.Anchor? {
+        let state = PaceStateFile(path: statePath)
+        guard state.exists, state.quoted("status") == "paused",
+              let identity = state.quoted("tripIdentity"), !identity.isEmpty,
+              let limit = state.bare("tripLimit").flatMap(Double.init),
+              let percent = state.bare("usedPercent").flatMap(Double.init) else { return nil }
+        let recordedCap = state.bare("cap") ?? ""
+        let sameCap: Bool
+        switch cap {
+        case .safe: sameCap = recordedCap.contains("safe")
+        case .value(let text): sameCap = recordedCap == text
+        }
+        guard sameCap,
+              (state.bare("margin").flatMap { Int($0) } ?? 0) == margin,
+              (state.bare("eta").flatMap { Int($0) } ?? 0) == eta,
+              (state.quoted("window") ?? "all") == window else { return nil }
+        let label = state.quoted("tripWindow") ?? PaceRules.label(forIdentity: identity)
+        guard PaceRules.watches(label: label, identity: identity, window: window),
+              PaceRules.binds(windowModel: PaceRules.model(forIdentity: identity), wanted: model) else { return nil }
+        var resetsAt: Date?
+        if let stamp = state.quoted("updatedAt"), let written = PaceFormat.isoFormatter.date(from: stamp),
+           let resets = state.bare("resetsInSeconds").flatMap(Double.init) {
+            resetsAt = written.addingTimeInterval(resets)
+        }
+        let fromSafe = cap.number.map { limit < $0 } ?? true
+        let trip = PaceRules.Trip(
+            label: label, percentText: PaceFormat.awkNumber(percent), resetsIn: nil,
+            why: percent >= limit ? "cap" : "eta", hitEta: nil, limit: limit,
+            identity: identity, account: state.quoted("tripAccount") ?? "",
+            safe: Int(limit) + (fromSafe ? margin : 0), fromSafe: fromSafe)
+        return PaceRules.Anchor(trip: trip, resetsAt: resetsAt)
+    }
+
+    private func anchor(_ trip: PaceRules.Trip) -> PaceRules.Anchor {
+        PaceRules.Anchor(trip: trip, resetsAt: trip.resetsIn.map { io.now().addingTimeInterval(PaceFormat.number($0)) })
+    }
+
+    /// Seconds until the anchored window resets, as the state file and the
+    /// messages print them.
+    private func remaining(_ anchor: PaceRules.Anchor) -> String? {
+        anchor.resetsAt.map { String(max(0, Int(ceil($0.timeIntervalSince(io.now()))))) }
+    }
+
     private func cmdWait() throws {
         inheritFromGate()
-        var waiting = false, everRead = false, fails = 0
-        var startedOn = ""
+        var held = PaceRules.Anchor?.none
+        if let seeded = seededAnchor() { held = seeded }
+        var announced = false, overruled = false, everRead = false, fails = 0
         // A switch restores headroom at once and Pacer sees it within
         // seconds, so a waiter looks more often than a reading changes (#184).
         if !intervalSet { interval = 15 }
@@ -732,35 +1045,171 @@ final class PaceRun {
             }
             everRead = true
             fails = 0
-            let nowOn = rows.first?.account ?? ""
-            if startedOn.isEmpty { startedOn = nowOn }
             try requireSelection()
-            guard let trip = PaceRules.evaluate(bindingRows, cap: cap, horizon: eta) else {
-                // Why the headroom came back matters: a reset is the window
-                // rolling over, a switch is another login's window entirely.
-                if !startedOn.isEmpty, nowOn != startedOn {
-                    writeState("go", note: "account switched — headroom on \(nowOn.prefix(8)) (\(summary()))")
-                    io.out("pace: account switched (\(startedOn.prefix(8)) → \(nowOn.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
-                } else {
+            let trip = PaceRules.evaluate(bindingRows, cap: cap, margin: margin, horizon: eta)
+            let accounts = Set(rows.map(\.account))
+            let nowOn = accounts.count == 1 ? accounts.first ?? "" : ""
+
+            var current: PaceRules.Anchor
+            if let anchored = held {
+                current = anchored
+            } else {
+                // Headroom at the first look: no pause to wait out.
+                guard let trip else {
                     writeState("go", note: "headroom restored (\(summary()))")
-                    if waiting { io.out("pace: reset — headroom restored (\(summary())). Resume.\n") }
+                    throw PaceExit(code: 0)
                 }
-                throw PaceExit(code: 0)
+                current = anchor(trip)
+                held = current
             }
-            if let secs = trip.resetsIn.flatMap(PaceFormat.integer), secs > maxWait {
-                writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                           note: "manual: \(trip.label) resets in \(PaceFormat.human(trip.resetsIn)) (> max-wait \(PaceFormat.human(maxWait))) — checkpoint & stop")
-                io.out("pace: \(tripReason(trip)) and resets in \(PaceFormat.human(trip.resetsIn)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(trip.resetsIn, now: io.now())).\n")
+            // Only three things end a pause, and the message names which:
+            // the window's cycle reset, the session moved to another login,
+            // or its usage really fell. A safe limit that rose is none of them.
+            let switched = !nowOn.isEmpty && !current.trip.account.isEmpty && nowOn != current.trip.account
+            let release = switched ? nil : PaceRules.release(current, rows: rows, now: io.now(), horizon: eta)
+            if switched || release != nil {
+                guard let trip else {
+                    try resume(from: current, switched: switched ? nowOn : nil, release: release)
+                }
+                // Cleared, and the gate's rules still trip: wait that out.
+                if switched {
+                    io.out("pace: account switched (\(current.trip.account.prefix(8)) → \(nowOn.prefix(8))), but \(tripReason(trip)).\n")
+                }
+                current = anchor(trip)
+                held = current
+                announced = switched
+                overruled = false
+            }
+            // How it reads now, where this poll has the window: the anchor
+            // keeps the limit and the reset, the reading the rest.
+            let shown = (trip?.identity == current.trip.identity && trip?.account == current.trip.account)
+                ? trip! : current.trip
+            let left = remaining(current) ?? shown.resetsIn
+            if let secs = left.flatMap(PaceFormat.integer), secs > maxWait {
+                writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
+                           note: "manual: \(current.trip.label) resets in \(PaceFormat.human(left)) (> max-wait \(PaceFormat.human(maxWait))) — checkpoint & stop",
+                           tripped: current.trip)
+                io.out("pace: \(tripReason(shown)) and resets in \(PaceFormat.human(left)) — beyond max-wait. Checkpoint and stop; resume after \(PaceFormat.clock(left, now: io.now())).\n")
                 throw PaceExit(code: 20)
             }
-            writeState("paused", trip: trip.label, percent: trip.percentText, resets: trip.resetsIn,
-                       note: "waiting for \(trip.label) reset (~\(PaceFormat.human(trip.resetsIn)))")
-            if !waiting {
-                io.out("pace: \(tripReason(trip)) — waiting ~\(PaceFormat.human(trip.resetsIn)) for reset (\(PaceFormat.clock(trip.resetsIn, now: io.now())))…\n")
+            writeState("paused", trip: current.trip.label, percent: current.trip.percentText, resets: left,
+                       note: "waiting for \(current.trip.label) reset (~\(PaceFormat.human(left)))", tripped: current.trip)
+            if !announced {
+                io.out("pace: \(tripReason(shown)) — waiting ~\(PaceFormat.human(left)) for reset (\(PaceFormat.clock(left, now: io.now())))…\n")
+                announced = true
             }
-            waiting = true
+            if trip == nil, !overruled,
+               let row = rows.first(where: { $0.identity == current.trip.identity && $0.account == current.trip.account }) {
+                io.out("pace: \(row.label) at \(PaceFormat.percent(row.percentText))% would pass the limit now (\(PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)))%), but it paused at \(PaceFormat.awkNumber(current.trip.limit))% — holding until that window resets or falls below it.\n")
+                overruled = true
+            }
             io.sleep(TimeInterval(interval))
         }
+    }
+
+    /// The pause is over: say why, record it, exit 0.
+    private func resume(from anchor: PaceRules.Anchor, switched newAccount: String?,
+                        release: PaceRules.Release?) throws -> Never {
+        let label = anchor.trip.label
+        if let newAccount {
+            // Why the headroom came back matters: a reset is the window
+            // rolling over, a switch is another login's window entirely.
+            writeState("go", note: "account switched — headroom on \(newAccount.prefix(8)) (\(summary()))")
+            io.out("pace: account switched (\(anchor.trip.account.prefix(8)) → \(newAccount.prefix(8))) — headroom on the new login (\(summary())). Resume.\n")
+        } else {
+            switch release ?? .reset {
+            case .reset:
+                writeState("go", note: "reset — \(label) rolled over (\(summary()))")
+                io.out("pace: reset — the \(label) window rolled over; headroom restored (\(summary())). Resume.\n")
+            case .drop:
+                let now = rows.first { $0.identity == anchor.trip.identity && $0.account == anchor.trip.account }
+                let at = now.map { PaceFormat.percent($0.percentText) } ?? "?"
+                writeState("go", note: "\(label) fell to \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary()))")
+                io.out("pace: usage fell — \(label) at \(at)%, below the \(PaceFormat.awkNumber(anchor.trip.limit))% it paused at (\(summary())). Resume.\n")
+            case .forecast:
+                writeState("go", note: "\(label) no longer projected to fill within \(PaceFormat.human(eta)) (\(summary()))")
+                io.out("pace: forecast cleared — \(label) is no longer projected to fill within \(PaceFormat.human(eta)) (\(summary())). Resume.\n")
+            }
+        }
+        throw PaceExit(code: 0)
+    }
+
+    /// The limit `gate` would apply to each binding window, one per line
+    /// (`5h         97`), for scripts (#263): the safe limit, less `--margin`,
+    /// capped by `--cap`. The model note goes to stderr so stdout stays two
+    /// columns.
+    private func cmdSafecap() throws {
+        guard fetchRows() else { apiOffNote(); throw PaceExit(code: offExitCode) }
+        try requireSelection()
+        if !autoNote.isEmpty { io.err("pace: \(autoNote)\n") }
+        for row in bindingRows {
+            io.out(Self.pad(row.label, 10) + " "
+                   + PaceFormat.awkNumber(PaceRules.limit(row, cap: cap, margin: margin)) + "\n")
+        }
+    }
+
+    /// `pacer feedback "<text>"`: a problem with Pacer, reported through
+    /// Pacer (#268) rather than worked around in an agent's memory, where the
+    /// workaround outlives the fix. One JSON line in a local inbox, and a
+    /// pre-filled GitHub issue link for the user to open if they choose.
+    /// Nothing leaves the machine: no request, no browser.
+    private func cmdFeedback(_ words: [String]) throws {
+        let text = words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            try die("feedback needs the text: pacer feedback \"what you ran, what it printed\"")
+        }
+        let now = io.now()
+        let state = PaceStateFile(path: statePath)
+        var entry: [String: Any] = [
+            "ts": PaceFormat.utcStamp(now), "text": text, "version": Pace.version,
+            "cwd": FileManager.default.currentDirectoryPath, "stateFile": statePath,
+        ]
+        if let id = env["CLAUDE_CODE_SESSION_ID"], !id.isEmpty { entry["sessionId"] = id }
+        var verdict: [String: Any]?
+        if let data = FileManager.default.contents(atPath: statePath) {
+            verdict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            entry["lastVerdict"] = verdict ?? String(decoding: data, as: UTF8.self)
+        }
+        let inbox = "\(env["HOME"] ?? NSHomeDirectory())/.claude/pace/feedback.jsonl"
+        guard let json = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys, .withoutEscapingSlashes]),
+              Self.append(Data(json + [UInt8(ascii: "\n")]), to: inbox) else {
+            try die("could not write \(inbox)")
+        }
+        // The issue body is public once filed, so it carries what the report
+        // needs and nothing about the machine: no paths, no session id.
+        var body = text + "\n\n---\npacer \(Pace.version)"
+        if verdict != nil || state.exists {
+            let status = state.quoted("status") ?? "?"
+            let note = state.quoted("note") ?? ""
+            body += "\nLast verdict: \(status)\(note.isEmpty ? "" : " — \(note)")"
+            let cap = (state.bare("cap") ?? "?").replacingOccurrences(of: "\"", with: "")
+            body += " (model \(state.quoted("model").map { $0.isEmpty ? "every" : $0 } ?? "?"), cap \(cap), margin \(state.bare("margin") ?? "0"))"
+        }
+        body += "\nReported with `pacer feedback`."
+        let title = "pacer feedback: " + (text.count > 60 ? String(text.prefix(59)) + "…" : text)
+        let url = Pace.issuesURL + "?title=" + Self.queryEncoded(title)
+            + "&body=" + Self.queryEncoded(String(body.prefix(4_000)))
+        io.out("pace: feedback saved to \(inbox) — nothing was sent anywhere.\n")
+        io.out("To file it as an issue, open:\n\(url)\n")
+    }
+
+    /// One `write(2)` on an `O_APPEND` descriptor, so two sessions reporting
+    /// at once add two whole lines rather than interleaving.
+    static func append(_ data: Data, to path: String) -> Bool {
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) } == data.count
+    }
+
+    /// Percent-encoded for a query value: only RFC 3986's unreserved
+    /// characters left as they are, so `+`, `&` and `#` in the text survive.
+    static func queryEncoded(_ text: String) -> String {
+        var unreserved = CharacterSet.alphanumerics.intersection(CharacterSet(charactersIn: Unicode.Scalar(0)...Unicode.Scalar(127)))
+        unreserved.insert(charactersIn: "-._~")
+        return text.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
     /// How many accounts, on what plan, with how many sessions drawing on

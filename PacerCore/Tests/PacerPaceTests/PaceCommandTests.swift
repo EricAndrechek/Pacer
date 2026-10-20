@@ -67,9 +67,14 @@ struct PaceCommandTests {
 
     @Test func statusWithNoStateFileIsUnknownRatherThanGo() throws {
         let box = try PaceSandbox(metrics: Self.metrics)
-        let result = runPace(box, ["status"])
+        let result = runPace(box, ["status", "--no-refresh"])
         #expect(result.status == 3)
         #expect(result.out.contains("no state file"))
+        // With no Pacer to re-gate from, still unknown rather than go.
+        let off = try PaceSandbox(metrics: nil)
+        let unread = runPace(off, ["status", "--retries", "1"])
+        #expect(unread.status == 3, "\(unread.out)")
+        #expect(unread.out.contains("unknown"))
     }
 
     @Test func aWindowSelectorNarrowsWhatCounts() throws {
@@ -205,7 +210,7 @@ struct PaceCommandTests {
             of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(old)""#,
             options: .regularExpression)
         try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
-        let stale = runPace(box, ["status"])
+        let stale = runPace(box, ["status", "--no-refresh"])
         #expect(stale.status == 3)
         #expect(stale.out.hasPrefix("stale:"))
     }
@@ -238,10 +243,14 @@ struct PaceCommandTests {
             of: #""updatedAt": "[^"]+""#, with: #""updatedAt": "\#(later)""#,
             options: .regularExpression)
         try rewritten.write(to: box.stateURL, atomically: true, encoding: .utf8)
-        let expired = runPace(box, ["status"])
+        let expired = runPace(box, ["status", "--no-refresh"])
         #expect(expired.status == 3)
         #expect(expired.out.hasPrefix("stale:"), "\(expired.out)")
         #expect(expired.out.contains("5h"))
+        // Re-gated, by the pause's own --cap 85, against a window still at 90%.
+        let regated = runPace(box, ["status"])
+        #expect(regated.status == 10, "\(regated.out)")
+        #expect(regated.out.contains("the 5h pause had expired — re-gated"), "\(regated.out)")
     }
 
     @Test func namedRunsKeepSeparateState() throws {
@@ -259,6 +268,234 @@ struct PaceCommandTests {
         #expect(alpha.status == 10)
         #expect(FileManager.default.fileExists(
             atPath: home.appendingPathComponent(".claude/pace/state-alpha.json").path))
+    }
+
+    // MARK: - status re-gates a stale verdict, once for every reader (#266)
+
+    @Test func aStaleVerdictIsReGatedByItsOwnSettings() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--window", "5h", "--model", "opus"]).status == 0)
+        try age(box, by: 7200)
+        // The 5h window has climbed past the gate's own cap since.
+        try box.setMetrics(Self.metrics.replacingOccurrences(
+            of: "window=\"five_hour\"} 0.12", with: "window=\"five_hour\"} 0.90"))
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status"], onGet: log.record)
+        #expect(result.status == 10, "\(result.out)")
+        #expect(result.out.contains("paused: 5h at 90% >= cap 85%"), "\(result.out)")
+        #expect(result.out.contains("the verdict was 120m old — re-gated"))
+        #expect(log.count("metrics") == 1)
+        #expect(box.stateText.contains("\"cap\": 85"))
+        #expect(box.stateText.contains("\"window\": \"5h\""))
+        #expect(box.stateText.contains("\"model\": \"opus\""))
+        // Fresh now: the next reader reads the file and nothing else.
+        let next = PaceRequestLog()
+        #expect(runPace(box, ["status"], onGet: next.record).status == 10)
+        #expect(next.all.isEmpty)
+    }
+
+    @Test func noRefreshIsThePureFileRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let before = box.stateText
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status", "--no-refresh"], onGet: log.record)
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(log.all.isEmpty)
+        #expect(box.stateText == before)
+    }
+
+    @Test func aMissingVerdictIsGatedOnFirstRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["status"])
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.hasSuffix("go\n"), "\(result.out)")
+        #expect(result.out.contains("no verdict yet — re-gated"))
+        #expect(box.stateText.contains("\"status\": \"go\""))
+    }
+
+    @Test func aStaleVerdictForAnotherModelIsNotReGated() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--model", "opus"])
+        try age(box, by: 7200)
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status", "--model", "fable"], onGet: log.record)
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(log.all.isEmpty, "re-gating opus's verdict cannot answer fable")
+    }
+
+    @Test func statusAsksPacerNothingWhileTheVerdictIsFresh() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        let log = PaceRequestLog()
+        // A session id used to cost a /v1/session lookup on every status.
+        let result = runPace(box, ["status"], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"], onGet: log.record)
+        #expect(result.status == 0)
+        #expect(log.all.isEmpty, "\(log.all)")
+    }
+
+    @Test func aReGateThatCannotReadPacerIsReadOnce() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        try FileManager.default.removeItem(at: box.metricsURL)
+        let log = PaceRequestLog()
+        let first = runPace(box, ["status", "--retries", "1"], onGet: log.record)
+        #expect(first.status == 3)
+        #expect(first.out.contains("unknown"), "\(first.out)")
+        #expect(log.count("metrics") == 1)
+        let second = runPace(box, ["status", "--retries", "1"], onGet: log.record)
+        #expect(second.status == 3)
+        #expect(log.count("metrics") == 1, "a fresh 'unknown' is not re-read until it is stale")
+    }
+
+    @Test func manyReadersOfOneStaleVerdictCostOneRead() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let log = PaceRequestLog()
+        let lanes = 8
+        let codes = PaceRequestLog()
+        DispatchQueue.concurrentPerform(iterations: lanes) { _ in
+            let result = runPace(box, ["status"], onGet: { request in
+                log.record(request)
+                // A slow read, so the other lanes find the lock held.
+                Thread.sleep(forTimeInterval: 0.3)
+            })
+            codes.record(URLRequest(url: URL(string: "x:/\(result.status)")!))
+        }
+        #expect(log.count("metrics") == 1, "\(log.all)")
+        #expect(codes.all == Array(repeating: "0", count: lanes), "\(codes.all)")
+    }
+
+    @Test func aReaderThatLosesTheRaceTakesTheWinnersVerdict() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let held = PaceRefreshLock(path: box.stateURL.path + ".lock")
+        #expect(held.acquire() == .acquired)
+        defer { held.release() }
+        let log = PaceRequestLog()
+        var naps = 0
+        let result = runPace(box, ["status"], onGet: log.record, nap: { _ in
+            naps += 1
+            // The winner writes its verdict.
+            if naps == 2 { try? age(box, by: 0) }
+        })
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.contains("another reader re-gated it"))
+        #expect(naps == 2)
+        #expect(log.all.isEmpty)
+    }
+
+    @Test func aReaderThatLosesTheRaceGivesUpAfterAboutThreeSeconds() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"])
+        try age(box, by: 7200)
+        let held = PaceRefreshLock(path: box.stateURL.path + ".lock")
+        #expect(held.acquire() == .acquired)
+        defer { held.release() }
+        var napped = 0.0
+        let result = runPace(box, ["status"], nap: { napped += $0 })
+        #expect(result.status == 3)
+        #expect(result.out.hasPrefix("stale:"))
+        #expect(abs(napped - 3) < 0.01, "\(napped)")
+    }
+
+    // MARK: - One verdict per session by default (#265)
+
+    private func paceHome(_ box: PaceSandbox) throws -> URL {
+        let home = box.dir.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
+    }
+
+    @Test func aSessionGetsItsOwnDefaultStateFile() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let mine = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa-bbbb-cccc-1234567890ab"]
+        // A test gate in one session...
+        #expect(runPace(box, ["gate", "--cap", "50"], unsetState: true, extra: mine).status == 10)
+        let file = home.appendingPathComponent(".claude/pace/state-session-0f3c9a12.json")
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(runPace(box, ["status"], unsetState: true, extra: mine).status == 10)
+        // ...pauses nobody else.
+        let theirs = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "77aa0000-1111"]
+        let other = runPace(box, ["status", "--no-refresh"], unsetState: true, extra: theirs)
+        #expect(other.status == 3)
+        #expect(other.out.contains("state-session-77aa0000.json"), "\(other.out)")
+        #expect(runPace(box, ["status"], unsetState: true, extra: theirs).status == 0,
+                "their own verdict, gated on first read (#266)")
+        #expect(!FileManager.default.fileExists(
+            atPath: home.appendingPathComponent(".claude/pace/state.json").path))
+    }
+
+    @Test func aNamedRunOrPathStillBeatsTheSessionDefault() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let session = ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"]
+        var run = session
+        run["PACE_RUN"] = "alpha"
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true, extra: run)
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude/pace/state-alpha.json").path))
+        let named = box.dir.appendingPathComponent("named.json")
+        var state = session
+        state["PACE_STATE"] = named.path
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true, extra: state)
+        #expect(FileManager.default.fileExists(atPath: named.path))
+        let flag = box.dir.appendingPathComponent("flag.json")
+        _ = runPace(box, ["gate", "--cap", "85", "--state", flag.path], unsetState: true, extra: session)
+        #expect(FileManager.default.fileExists(atPath: flag.path))
+        #expect(!FileManager.default.fileExists(
+            atPath: home.appendingPathComponent(".claude/pace/state-session-0f3c9a12.json").path))
+    }
+
+    @Test func withoutASessionTheDefaultIsStillStateJSON() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true,
+                    extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": ""])
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude/pace/state.json").path))
+    }
+
+    @Test func aSessionIdIsCutToEightFileNameSafeCharacters() {
+        #expect(PaceStateFile.sessionTag("0f3c9a12-aaaa-bbbb") == "0f3c9a12")
+        #expect(PaceStateFile.sessionTag("../../etc/passwd") == "etcpassw")
+        #expect(PaceStateFile.sessionTag("ab") == "ab")
+        #expect(PaceStateFile.sessionTag("") == nil)
+        #expect(PaceStateFile.sessionTag("/./") == nil)
+        #expect(PaceStateFile.sessionTag(nil) == nil)
+    }
+
+    @Test func aGatePrunesOtherSessionsLongStaleDefaults() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let home = try paceHome(box)
+        let dir = home.appendingPathComponent(".claude/pace")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let longAgo = Date().addingTimeInterval(-8 * 86_400)
+        func file(_ name: String, old: Bool) throws -> URL {
+            let url = dir.appendingPathComponent(name)
+            try "{}\n".write(to: url, atomically: true, encoding: .utf8)
+            if old { try fm.setAttributes([.modificationDate: longAgo], ofItemAtPath: url.path) }
+            return url
+        }
+        let gone = try file("state-session-deadbeef.json", old: true)
+        let goneLock = try file("state-session-deadbeef.json.lock", old: true)
+        let recent = try file("state-session-cafe0001.json", old: false)
+        let named = try file("state-alpha.json", old: true)
+        let shared = try file("state.json", old: true)
+        let manifest = try file("resume-alpha.json", old: true)
+        _ = runPace(box, ["gate", "--cap", "85"], unsetState: true,
+                    extra: ["HOME": home.path, "CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"])
+        #expect(!fm.fileExists(atPath: gone.path))
+        #expect(!fm.fileExists(atPath: goneLock.path))
+        for kept in [recent, named, shared, manifest] {
+            #expect(fm.fileExists(atPath: kept.path), "\(kept.lastPathComponent) is not a stale session default")
+        }
     }
 
     // MARK: - Which windows bind whom
@@ -492,6 +729,263 @@ struct PaceCommandTests {
         #expect(result.status == 0)
         #expect(result.out.contains("holding the pause"))
         #expect(!result.out.contains("proceeding ungated"))
+        // 97% to 4% inside one cycle, with no reset time on the reading: a
+        // drop below the pause's 85%, and said as one.
+        #expect(result.out.contains("usage fell — 5h at 4%, below the 85% it paused at"), "\(result.out)")
+    }
+
+    // MARK: - wait resumes on a reset, a switch or a real drop, nothing else (#267)
+
+    /// 5h at 97% with a burn that puts the safe limit at 97; then the burn
+    /// falls as paused sessions stop, and the safe limit rises to 99.
+    private static func burning(_ ratio: String = "0.97", burn: String = "36",
+                                resets: String = "3600") -> String {
+        """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} \(ratio)
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} \(resets)
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org-work",window="five_hour"} \(burn)
+        pacer_rate_limit_sample_age_seconds{account="org-work",window="five_hour"} 0
+        pacer_rate_limit_used_ratio{account="org-work",window="seven_day"} 0.26
+        pacer_rate_limit_reset_seconds{account="org-work",window="seven_day"} 300000
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        """
+    }
+
+    /// The bug, as it happened: a pause at 5h 97% "reset" while still at 97%
+    /// because the safe limit rose.
+    @Test func aRisingSafeLimitIsNotAReset() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.burning(burn: "12")) }
+            // The next cycle: 3%, resetting five hours out.
+            if n == 4 { try? box.setMetrics(Self.burning("0.03", burn: "12", resets: "18000")) }
+        })
+        #expect(result.status == 0, "\(result.out)")
+        #expect(polls == 4, "it resumed before the window reset:\n\(result.out)")
+        #expect(result.out.contains("5h at 97% >= safe limit 97%"), "\(result.out)")
+        #expect(result.out.contains("would pass the limit now (99%), but it paused at 97%"), "\(result.out)")
+        #expect(result.out.contains("pace: reset — the 5h window rolled over; headroom restored (5h 3%, 7d 26%). Resume."),
+                "\(result.out)")
+        #expect(box.stateText.contains("reset — 5h rolled over"))
+    }
+
+    @Test func aWaitAfterAGateHoldsTheGatesTrip() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        let gate = runPace(box, ["gate"])
+        #expect(gate.status == 10)
+        #expect(box.stateText.contains("\"tripIdentity\": \"five_hour\""))
+        #expect(box.stateText.contains("\"tripAccount\": \"org-work\""))
+        #expect(box.stateText.contains("\"tripLimit\": 97"))
+        // Between the gate and the wait, the burn falls: on its own rules the
+        // wait would see headroom at its first look and leave at once.
+        try box.setMetrics(Self.burning(burn: "12"))
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 2 { try? box.setMetrics(Self.burning("0.95", burn: "12")) }
+        })
+        #expect(result.status == 0)
+        #expect(polls == 2, "\(result.out)")
+        #expect(result.out.contains("pace: usage fell — 5h at 95%, below the 97% it paused at (5h 95%, 7d 26%). Resume."),
+                "\(result.out)")
+        #expect(!result.out.contains("pace: reset"), "nothing reset:\n\(result.out)")
+    }
+
+    @Test func aDueResetEndsThePause() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            // Pacer's last reading of the window that just ended.
+            if n == 1 { try? box.setMetrics(Self.burning(resets: "-5")) }
+        })
+        #expect(result.status == 0)
+        #expect(result.out.contains("reset — the 5h window rolled over"), "\(result.out)")
+    }
+
+    @Test func aSwitchToASpentLoginDoesNotResume() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--cap", "85", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 {
+                try? box.setMetrics("""
+                pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.99
+                pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 900
+                pacer_account_info{account="org-home",name="h",active="true"} 1
+                """)
+            }
+            if n == 3 {
+                try? box.setMetrics("""
+                pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} 0.04
+                pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} 18000
+                pacer_account_info{account="org-home",name="h",active="true"} 1
+                """)
+            }
+        })
+        #expect(result.status == 0)
+        #expect(polls == 3, "\(result.out)")
+        #expect(result.out.contains("account switched (org-work → org-home), but 5h at 99% >= cap 85%"), "\(result.out)")
+        #expect(result.out.contains("reset — the 5h window rolled over"), "\(result.out)")
+    }
+
+    @Test func aWaitToldOtherRulesIgnoresTheGatesTrip() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        #expect(runPace(box, ["gate"]).status == 10)
+        // --cap 99 is this wait's own question, and 97% answers it.
+        let result = runPace(box, ["wait", "--cap", "99"])
+        #expect(result.status == 0)
+        #expect(!result.out.contains("waiting"), "\(result.out)")
+    }
+
+    // MARK: - The release rule itself (#267)
+
+    private static let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private static func row(_ percent: Double, resets: String?, willHit: String = "0",
+                            hitEta: String? = nil) -> PaceRow {
+        PaceRow(account: "org", identity: "five_hour", label: "5h", model: "", percent: percent,
+                resetsIn: resets, hitEta: hitEta, burn: nil, willHit: willHit, recentBurn: nil, sampleAge: nil)
+    }
+
+    private static func anchored(limit: Double, why: String = "cap", resetsIn: TimeInterval? = 3600) -> PaceRules.Anchor {
+        PaceRules.Anchor(
+            trip: PaceRules.Trip(label: "5h", percentText: "97", resetsIn: nil, why: why, hitEta: nil,
+                                 limit: limit, identity: "five_hour", account: "org"),
+            resetsAt: resetsIn.map { t0.addingTimeInterval($0) })
+    }
+
+    @Test func releaseHoldsAtTheSameUsageWhateverTheLimitNowIs() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "3500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+        #expect(PaceRules.release(a, rows: [Self.row(98, resets: "3500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+    }
+
+    @Test func releaseOnARealDrop() {
+        #expect(PaceRules.release(Self.anchored(limit: 97), rows: [Self.row(96.5, resets: "3500")],
+                                  now: Self.t0.addingTimeInterval(100), horizon: 0) == .drop)
+    }
+
+    @Test func releaseOnAResetByTheClockByADueReadingOrByALaterCycle() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "1")], now: Self.t0.addingTimeInterval(3600), horizon: 0) == .reset)
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "0")], now: Self.t0.addingTimeInterval(100), horizon: 0) == .reset)
+        // The next cycle's reset, five hours after this one's.
+        #expect(PaceRules.release(a, rows: [Self.row(97, resets: "21500")], now: Self.t0.addingTimeInterval(100), horizon: 0) == .reset)
+    }
+
+    @Test func aJitteringResetInstantIsTheSameCycle() {
+        // The server re-serializes resets_at on every response; seconds of
+        // drift are the same cycle (AGENTS.md rule 9).
+        let a = Self.anchored(limit: 97)
+        for resets in ["3497", "3503", "3500.4"] {
+            #expect(PaceRules.release(a, rows: [Self.row(97, resets: resets)], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil,
+                    "\(resets)")
+        }
+    }
+
+    @Test func aWindowMissingFromTheReadingHoldsUntilItsReset() {
+        let a = Self.anchored(limit: 97)
+        #expect(PaceRules.release(a, rows: [], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil)
+        #expect(PaceRules.release(a, rows: [], now: Self.t0.addingTimeInterval(3600), horizon: 0) == .reset)
+        let other = PaceRow(account: "org-other", identity: "five_hour", label: "5h", model: "", percent: 1,
+                            resetsIn: "3500", hitEta: nil, burn: nil, willHit: "0", recentBurn: nil, sampleAge: nil)
+        #expect(PaceRules.release(a, rows: [other], now: Self.t0.addingTimeInterval(100), horizon: 0) == nil,
+                "another account's window is not this one")
+    }
+
+    @Test func aForecastPauseEndsWhenTheForecastClears() {
+        let a = Self.anchored(limit: 85, why: "eta")
+        let projected = Self.row(40, resets: "3500", willHit: "1", hitEta: "1800")
+        #expect(PaceRules.release(a, rows: [projected], now: Self.t0.addingTimeInterval(100), horizon: 5400) == nil)
+        let cleared = Self.row(40, resets: "3500", willHit: "0")
+        #expect(PaceRules.release(a, rows: [cleared], now: Self.t0.addingTimeInterval(100), horizon: 5400) == .forecast)
+        let farOff = Self.row(40, resets: "3500", willHit: "1", hitEta: "9000")
+        #expect(PaceRules.release(a, rows: [farOff], now: Self.t0.addingTimeInterval(100), horizon: 5400) == .forecast)
+    }
+
+    @Test func cycleLengthsByIdentity() {
+        #expect(PaceRules.cycleLength(identity: "five_hour") == 18_000)
+        #expect(PaceRules.cycleLength(identity: "seven_day") == 604_800)
+        #expect(PaceRules.cycleLength(identity: "weekly_scoped|Fable|") == 604_800)
+        #expect(PaceRules.cycleLength(identity: "daily|claude-opus-5|web") == 86_400)
+        #expect(PaceRules.cycleLength(identity: "something||cli") == 18_000)
+    }
+
+    // MARK: - pacer feedback (#268)
+
+    private func inbox(_ box: PaceSandbox) -> [[String: Any]] {
+        let url = box.dir.appendingPathComponent(".claude/pace/feedback.jsonl")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any]
+        }
+    }
+
+    @Test func feedbackSavesOneLineLocallyAndSendsNothing() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85"])
+        let log = PaceRequestLog()
+        let text = #"ran `pacer gate --cap 85`, got "PAUSE — Fable" & expected GO; 50% + more"#
+        let result = runPace(box, ["feedback", text], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"],
+                             onGet: log.record)
+        #expect(result.status == 0, "\(result.out)")
+        #expect(log.all.isEmpty, "feedback must not touch the network: \(log.all)")
+        #expect(result.out.contains("feedback saved to \(box.dir.path)/.claude/pace/feedback.jsonl"))
+        #expect(result.out.contains("nothing was sent anywhere"))
+        let lines = inbox(box)
+        #expect(lines.count == 1)
+        let entry = try #require(lines.first)
+        #expect(entry["text"] as? String == text)
+        #expect(entry["sessionId"] as? String == "abc-123")
+        #expect((entry["ts"] as? String)?.hasSuffix("Z") == true)
+        #expect(entry["version"] is String)
+        #expect(entry["cwd"] is String)
+        let verdict = try #require(entry["lastVerdict"] as? [String: Any])
+        #expect(verdict["status"] as? String == "paused")
+        #expect(verdict["tripWindow"] as? String == "Fable")
+    }
+
+    @Test func feedbackOffersAPrefilledIssueThatCarriesNothingPrivate() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        _ = runPace(box, ["gate", "--cap", "85"])
+        let result = runPace(box, ["feedback", "wait", "said", "reset", "at", "97%", "&", "#1"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123"])
+        let line = try #require(result.out.split(separator: "\n").first { $0.hasPrefix("https://") })
+        #expect(line.hasPrefix(Pace.issuesURL + "?title="))
+        let items = try #require(URLComponents(string: String(line))?.queryItems)
+        let title = try #require(items.first { $0.name == "title" }?.value)
+        let body = try #require(items.first { $0.name == "body" }?.value)
+        #expect(items.count == 2, "a & or # in the text must not split the query")
+        #expect(title == "pacer feedback: wait said reset at 97% & #1")
+        #expect(body.hasPrefix("wait said reset at 97% & #1\n"))
+        #expect(body.contains("Last verdict: paused — Fable at 95% >= cap 85%"), "\(body)")
+        #expect(body.contains("cap 85, margin 0"), "\(body)")
+        #expect(!body.contains("abc-123"), "no session id in a public issue")
+        #expect(!body.contains(box.dir.path), "no paths in a public issue")
+        #expect(!body.contains(FileManager.default.currentDirectoryPath))
+    }
+
+    @Test func feedbackAppendsAndReadsThisSessionsVerdict() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let session = ["CLAUDE_CODE_SESSION_ID": "0f3c9a12-aaaa"]
+        _ = runPace(box, ["gate", "--cap", "85", "--window", "5h"], unsetState: true, extra: session)
+        #expect(runPace(box, ["feedback", "first"], unsetState: true, extra: session).status == 0)
+        #expect(runPace(box, ["feedback", "second"], unsetState: true).status == 0)
+        let lines = inbox(box)
+        #expect(lines.map { $0["text"] as? String } == ["first", "second"])
+        #expect((lines[0]["lastVerdict"] as? [String: Any])?["status"] as? String == "go")
+        #expect((lines[0]["stateFile"] as? String)?.hasSuffix("state-session-0f3c9a12.json") == true)
+        #expect(lines[1]["lastVerdict"] == nil, "no session, no state.json: no verdict")
+        #expect(lines[1]["sessionId"] == nil)
+    }
+
+    @Test func feedbackNeedsText() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["feedback", "  "])
+        #expect(result.status == 1)
+        #expect(result.out.contains("feedback needs the text"))
+        #expect(inbox(box).isEmpty)
     }
 
     // MARK: - Knowing what you are
@@ -616,6 +1110,203 @@ struct PaceCommandTests {
                              extra: ["CLAUDE_CODE_SESSION_ID": "unknown", "PACE_SESSION_API": server.base])
         #expect(result.status == 10)
         #expect(result.out.contains("Fable"))
+    }
+
+    // MARK: - --margin and safecap (#263)
+
+    /// 5h at 95%, burning 36%/h on a fresh reading: safe limit 97. 7d at 50%,
+    /// no burn measured: 98.
+    private static let margined = """
+    pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.95
+    pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+    pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 36
+    pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 0
+    pacer_rate_limit_used_ratio{account="org",window="seven_day"} 0.50
+    pacer_rate_limit_reset_seconds{account="org",window="seven_day"} 300000
+    pacer_account_info{account="org",name="o",active="true"} 1
+    """
+
+    @Test func aMarginStopsThatManyPointsShortOfEachSafeLimit() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let plain = runPace(box, ["gate"])
+        #expect(plain.status == 0)
+        #expect(plain.out.contains("(safe limit 5h 97%, 7d 98%)"), "\(plain.out)")
+        let one = runPace(box, ["gate", "--margin", "1"])
+        #expect(one.status == 0)
+        #expect(one.out.contains("(safe limit 5h 97% − 1, 7d 98% − 1)"), "\(one.out)")
+        let three = runPace(box, ["gate", "--margin", "3"])
+        #expect(three.status == 10)
+        #expect(three.out.contains("5h at 95% >= safe limit 97% − 3"), "\(three.out)")
+        #expect(box.stateText.contains("\"margin\": 3"))
+        #expect(box.stateText.contains("safe limit 97% − 3"))
+    }
+
+    @Test func aMarginWithACapTakesTheLowerOfTheTwo() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        // A cap alone replaces the safe limit, as it always did.
+        #expect(runPace(box, ["gate", "--cap", "96"]).status == 0)
+        // min(99, 97 − 3) = 94: the margined safe limit trips.
+        let safer = runPace(box, ["gate", "--cap", "99", "--margin", "3"])
+        #expect(safer.status == 10)
+        #expect(safer.out.contains("safe limit 97% − 3"), "\(safer.out)")
+        // min(90, 97 − 1) = 90: the cap trips, and says so.
+        let capped = runPace(box, ["gate", "--cap", "90", "--margin", "1"])
+        #expect(capped.status == 10)
+        #expect(capped.out.contains("5h at 95% >= cap 90%"), "\(capped.out)")
+        let go = runPace(box, ["gate", "--cap", "99", "--margin", "1", "--window", "7d"])
+        #expect(go.status == 0)
+        #expect(go.out.contains("(cap 99%, safe limit 7d 98% − 1)"), "\(go.out)")
+    }
+
+    /// #263's case: under a burst the safe limit falls below a fixed cap, and
+    /// only the margin keeps tracking it.
+    @Test func underABurstAMarginStillStopsWhereAFixedCapWouldNot() throws {
+        let box = try PaceSandbox(metrics: """
+        pacer_rate_limit_used_ratio{account="org",window="five_hour"} 0.92
+        pacer_rate_limit_reset_seconds{account="org",window="five_hour"} 3600
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org",window="five_hour"} 120
+        pacer_rate_limit_sample_age_seconds{account="org",window="five_hour"} 0
+        pacer_account_info{account="org",name="o",active="true"} 1
+        """)
+        #expect(runPace(box, ["gate", "--cap", "94"]).status == 0)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+    }
+
+    @Test func paceMarginSetsTheMarginOnce() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let result = runPace(box, ["gate"], extra: ["PACE_MARGIN": "3"])
+        #expect(result.status == 10)
+        #expect(result.out.contains("− 3"))
+        #expect(runPace(box, ["gate", "--margin", "0"], extra: ["PACE_MARGIN": "3"]).status == 0,
+                "the flag beats the environment")
+    }
+
+    @Test func aMarginMustBeWholePointsAndNotNegative() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        for bad in ["-1", "two", "1.5"] {
+            let result = runPace(box, ["gate", "--margin", bad])
+            #expect(result.status == 1, "\(bad)")
+            #expect(result.out.contains("whole number of points"))
+        }
+        #expect(runPace(box, ["gate"], extra: ["PACE_MARGIN": "x"]).status == 1)
+    }
+
+    @Test func statusRefusesAVerdictGatedWithAnotherMargin() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+        #expect(runPace(box, ["status"]).status == 10)
+        #expect(runPace(box, ["status", "--margin", "3"]).status == 10)
+        let other = runPace(box, ["status", "--margin", "0"])
+        #expect(other.status == 3)
+        #expect(other.out.contains("margin 3, not 0"), "\(other.out)")
+        #expect(runPace(box, ["status"], extra: ["PACE_MARGIN": "1"]).status == 3)
+    }
+
+    @Test func aBareWaitKeepsTheGatesMargin() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        #expect(runPace(box, ["gate", "--margin", "3"]).status == 10)
+        let wait = runPace(box, ["wait", "--max-wait", "60"])
+        #expect(wait.out.contains("--margin 3"), "\(wait.out)")
+        #expect(wait.status == 20)
+    }
+
+    @Test func safecapPrintsTheLimitTheGateWouldApply() throws {
+        let box = try PaceSandbox(metrics: Self.margined)
+        let plain = runPace(box, ["safecap"])
+        #expect(plain.status == 0)
+        #expect(plain.out == "5h         97\n7d         98\n", "\(plain.out)")
+        #expect(runPace(box, ["safecap", "--margin", "3"]).out == "5h         94\n7d         95\n")
+        #expect(runPace(box, ["safecap", "--cap", "90", "--margin", "1"]).out == "5h         90\n7d         90\n")
+        #expect(runPace(box, ["safecap", "--window", "7d"]).out == "7d         98\n")
+        #expect(runPace(box, ["safecap", "--window", "1h"]).status == 1, "a selector matching nothing is an error")
+    }
+
+    @Test func safecapListsOnlyTheWindowsThatBindTheModel() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["safecap"]).out.contains("Fable"))
+        let opus = runPace(box, ["safecap", "--model", "opus"])
+        #expect(opus.status == 0)
+        #expect(!opus.out.contains("Fable"))
+        #expect(opus.out.contains("5h"))
+    }
+
+    // MARK: - No --model in a known session is --model auto (#264)
+
+    @Test func noModelInAKnownSessionGatesAsAuto() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base])
+        // The Fable cap at 95% does not bind Opus work.
+        #expect(result.status == 0, "\(result.out)")
+        #expect(result.out.contains("(model auto: detected claude-opus-5)"), "\(result.out)")
+        #expect(box.stateText.contains("\"autoModel\": true"))
+        #expect(box.stateText.contains("model auto: detected claude-opus-5"))
+    }
+
+    @Test func noModelWithoutASessionStillBindsEveryWindow() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let result = runPace(box, ["gate", "--cap", "85"], extra: ["CLAUDE_CODE_SESSION_ID": ""])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(!result.out.contains("model auto"))
+        #expect(box.stateText.contains("\"autoModel\": false"))
+    }
+
+    @Test func noModelInASessionPacerHasNotSeenBindsEveryWindowAndSaysSo() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try PaceStubServer(status: 404, body: "No turns recorded\n")
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "unknown", "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(result.out.contains("(model auto: unknown — every window binds)"), "\(result.out)")
+    }
+
+    @Test func modelAllStillBindsEveryWindowInAKnownSession() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let result = runPace(box, ["gate", "--cap", "85", "--model", "all"],
+                             extra: ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base])
+        #expect(result.status == 10)
+        #expect(result.out.contains("Fable"))
+        #expect(!result.out.contains("model auto"))
+    }
+
+    @Test func aBareWaitAsksAgainWhenTheGateWasAuto() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-fable-5-1"])
+        defer { server.stop() }
+        let env = ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base]
+        #expect(runPace(box, ["gate", "--cap", "85"], extra: env).status == 10)
+        let wait = runPace(box, ["wait", "--interval", "5", "--max-wait", "60"], extra: env)
+        #expect(wait.out.contains("--model auto"), "\(wait.out)")
+        #expect(wait.status == 20)
+    }
+
+    @Test func statusModelAutoTakesAnAutoVerdictWithoutAskingPacer() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        let server = try sessionStub(["claude-opus-5"])
+        defer { server.stop() }
+        let env = ["CLAUDE_CODE_SESSION_ID": "abc-123", "PACE_SESSION_API": server.base]
+        #expect(runPace(box, ["gate", "--cap", "85", "--margin", "2"], extra: env).status == 0)
+        let log = PaceRequestLog()
+        #expect(runPace(box, ["status", "--model", "auto"], extra: env, onGet: log.record).status == 0)
+        #expect(log.all.isEmpty, "\(log.all)")
+        // ...but still by its margin.
+        #expect(runPace(box, ["status", "--model", "auto", "--margin", "0"], extra: env).status == 3)
+    }
+
+    @Test func aBareStatusInAKnownSessionJudgesTheVerdictItFinds() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        #expect(runPace(box, ["gate", "--cap", "85", "--model", "opus"]).status == 0)
+        let status = runPace(box, ["status"], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
+                                                      "PACE_SESSION_API": "http://127.0.0.1:9"])
+        #expect(status.status == 0, "\(status.out)")
+        #expect(status.out == "go\n")
     }
 
     @Test func aSingleAccountNeedsNoActiveMarker() throws {

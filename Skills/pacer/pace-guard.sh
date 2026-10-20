@@ -8,8 +8,10 @@
 #         pace-guard.sh -p "keep working on the migration"
 #
 # Env: PACE_THRESHOLD (default: pace's safe limit, just before the limit),
-#      plus PACER_API / PACE_TOKEN / PACE_STATE / PACE_ACCOUNT. PACE_WINDOW
-#      narrows which windows count.
+#      plus PACER_API / PACE_TOKEN / PACE_STATE / PACE_RUN / PACE_ACCOUNT.
+#      PACE_WINDOW narrows which windows count. Run from a terminal, `wait`
+#      reads and writes ~/.claude/pace/state.json; inside a Claude Code
+#      session, that session's own state-session-<id>.json.
 #
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -23,13 +23,19 @@ read — **no signal, not no budget: proceed ungated.**
   `pacer sessions` shows where they are. Concurrency is already inside a burn
   rate rather than added to it, but every live session is another claim on the
   same percentage.
-- **Pass `--model auto`** so a per-model cap only gates work that actually uses
-  that model, and so the right account is read when several are signed in.
-- **In a fan-out, name the model instead.** A subagent's turns are recorded
-  under its parent's session id and nothing names a per-agent model, so `auto`
-  cannot tell a builder from its orchestrator. With more than one model in
-  flight it binds only the account-wide windows and says so; pass
-  `--model <yours>` to gate on your own cap.
+- **In a session, `pacer` already judges by your model** (`--model auto` is the
+  default when `CLAUDE_CODE_SESSION_ID` is set), so a per-model cap only gates
+  work that uses that model. **In a fan-out, name the model**: a subagent's
+  turns are recorded under its parent's session id, so `auto` cannot tell a
+  builder from its orchestrator, and with several models in flight binds only
+  the account-wide windows. Pass `--model <yours>` to gate on your own cap.
+- **Work until the gate pauses.** Its default stops just before the limit;
+  `--eta` pauses earlier and is an option, not a default. Before a pause,
+  dispatch CI that can run while you wait.
+- **If Pacer gives a wrong verdict, mis-detects your model, or lacks a flag
+  you need**, report it with
+  `pacer feedback "<what you ran, what it printed>"` — never save a
+  workaround for a Pacer quirk in memory or a brief; it outlives the fix.
 
 The skill is the current word on flags and protocol. Don't restate its usage in
 CLAUDE.md — point at this file instead.

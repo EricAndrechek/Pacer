@@ -22,6 +22,12 @@ ships inside Pacer.app and updates when Pacer does. With Pacer's local API on
 it reads the API; with it off it reads Pacer's data directly, so pacing works
 either way.
 
+**If Pacer gives a wrong verdict, mis-detects your model, or lacks a flag you
+need, report it** with `pacer feedback "<what you ran, what it printed>"` —
+never save a workaround for a Pacer quirk in memory or a brief; it outlives
+the fix. The report goes to a local inbox (`~/.claude/pace/feedback.jsonl`)
+and `feedback` prints a pre-filled GitHub issue link; nothing is sent.
+
 ## 1. Just report where I'm at
 
 ```
@@ -106,8 +112,13 @@ each curling it. So it is **one poller, many cheap readers**:
 - **One poller** — the orchestrator runs `pacer gate` once per
   fan-out *wave*. That is the single read of Pacer; it writes a shared
   **state file**.
-- **Many cheap readers** — every subagent runs `pacer status`, a plain
-  **file read** (Pacer is not asked), and obeys it.
+- **Many cheap readers** — every subagent runs `pacer status`, a **file
+  read**, and obeys it. When the verdict has gone stale (older than
+  `--max-age`, or a pause whose window has reset) or there is none yet,
+  `status` re-gates it by the verdict's own settings — one reader takes a lock
+  and reads Pacer, the rest wait up to ~3 s for its answer — so a lane that
+  runs for an hour never goes blind, and a hundred lanes still cost one read
+  per staleness period. `--no-refresh` keeps the pure file read.
 
 Exit codes:
 
@@ -127,19 +138,22 @@ same as each other:
 - **4, misconfigured** — Pacer answered and rejected the request, almost always
   a token set in Pacer but not in `PACE_TOKEN`. Proceed if you must, but **tell
   the user**: the run is unpaced and one line of configuration would fix it.
-- **3, unknown or stale** — no gate has run, the last verdict is older than
-  `--max-age` (default 15 min), or it was a pause and the window that caused it
-  has reset since. A verdict has a shelf life: an orchestrator that died an
-  hour ago left its last word on disk, and obeying it is obeying a window that
-  has since moved. Re-gate.
+- **3, unknown or stale** — the verdict is about another model or margin,
+  Pacer could not be read to refresh it, or (with `--no-refresh`) no gate has
+  run, the last verdict is older than `--max-age` (default 15 min), or it was a
+  pause whose window has reset since. A verdict has a shelf life: an
+  orchestrator that died an hour ago left its last word on disk, and obeying
+  it is obeying a window that has since moved.
 
 A bad `--window` (1) *does* stop you, because a selector that matches nothing
 would otherwise report GO forever.
 
-**Two runs at once need two state files.** The shared default is what makes
-`status` free; two orchestrations sharing it means last-writer-wins on a
-verdict the other is about to obey. Set `PACE_RUN=<name>` (or `--state`) per
-orchestration.
+**Each session has its own state file.** In a Claude Code session the default
+is `~/.claude/pace/state-session-<first 8 of CLAUDE_CODE_SESSION_ID>.json`;
+subagents run under their parent's session id, so a session's lanes share one
+verdict and no other session obeys it. Outside a session (a terminal) it is
+`state.json`. Two orchestrations in one session still need two files — set
+`PACE_RUN=<name>` (or `--state`) per orchestration.
 
 ## 4. Say which model you are
 
@@ -148,21 +162,22 @@ at 95% has nothing to say to an Opus agent, and pausing one for it is a pause
 nobody needed. So pass the model your work will actually use:
 
 ```
-$ pacer gate                          # every window binds — the safe reading
+$ pacer gate --model all              # every window binds
 pace: PAUSE — Fable at 99% >= safe limit 98%, resets in 3d 17h.
 
 $ pacer gate --model opus             # Fable is not this agent's problem
 pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
 
-$ pacer gate --model auto             # ask Pacer what this session runs
-pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%).
+$ pacer gate                          # in a session: what this session runs
+pace: GO — 5h 40%, 7d 32% (safe limit 5h 96%, 7d 99%). (model auto: detected claude-opus-5)
 ```
 
-**`--model auto` asks Pacer what this session runs.** Claude Code exports
+**With no `--model`, a session gates as `--model auto`.** Claude Code exports
 `CLAUDE_CODE_SESSION_ID` into every command it runs, and that id names the
 transcript Pacer already parses — so Pacer can answer what model the session is
-running, and which account its work is billed to. Export `PACE_MODEL=auto` once
-and every call in that session is model-aware.
+running, and which account its work is billed to. The verdict says
+`(model auto: …)` so you can see what it was judged by. Outside a session
+(no id) every window binds, as does `--model all`.
 
 **Inside a fan-out, `auto` cannot tell you apart — so name your model.** A
 subagent does *not* get its own session id; its turns are written under the
@@ -172,8 +187,8 @@ the account-wide windows and says so.
 
 ```
 $ pacer gate --model auto              # Fable orchestrator, Sonnet builders
-pace: GO — 5h 12%, 7d 32% (safe limit 5h 97%, 7d 99%). [model ambiguous (claude-fable-5-1,
-claude-sonnet-5) — account-wide windows only; pass --model to gate on yours]
+pace: GO — 5h 12%, 7d 32% (safe limit 5h 97%, 7d 99%). (model auto: ambiguous (claude-fable-5-1,
+claude-sonnet-5) — account-wide windows only; pass --model to gate on yours)
 ```
 
 That is deliberate, and it is the lesser of two wrong answers. Guessing used to
@@ -191,9 +206,9 @@ It falls back to "every window binds" when Pacer has not yet seen a turn from
 the session at all, which is the safe reading of "cannot tell".
 
 Account-wide windows (5h, 7d) bind everything, always — those are never
-skipped. Only per-model caps are filtered, and only when you name a model. With
-no `--model` every window binds, because a caller that did not say is a caller
-that might be using anything.
+skipped. Only per-model caps are filtered: by the model you name, or in a
+session by `auto`. A caller with no session id and no `--model` might be using
+anything, so every window binds it.
 
 **A verdict belongs to the model it was gated for.** The state file records it,
 and `status --model opus` refuses a verdict gated for something else (exit 3,
@@ -205,20 +220,20 @@ PACE_RUN=opus-wave  pacer gate --model opus
 PACE_RUN=fable-wave pacer gate --model fable
 ```
 
-## 5. Gate on the forecast, not just the level
+## 5. Optionally, gate on the forecast
 
-The default asks "am I about to run out". `--eta` asks the better question for a
-long wave — **"will this wave finish before I run out"**:
+The default asks "am I about to run out", and stops just before the limit —
+work continues until then. `--eta` asks a different question, **"will this
+finish before I run out"**, and pauses *earlier*, with room still left:
 
 ```
 $ pacer gate --eta 90m
 pace: PAUSE — 5h at 40% is projected to fill in 45m (horizon 1h 30m).
 ```
 
-40% is nowhere near any cap, but it is climbing at 24%/h and the wave you are
-about to launch takes an hour. Pacer already forecasts every window with a
-calibrated band; this is the one line that uses it. Set the horizon to roughly
-how long your wave runs.
+40% is nowhere near any cap, but it is climbing at 24%/h. Use it only when
+stopping early is worth it — work that cannot be checkpointed mid-way, say —
+not as a default before every wave.
 
 ## 6. Orchestrator protocol
 
@@ -226,7 +241,7 @@ For a big fan-out:
 
 1. **Pre-flight:** `pacer report` so you and the user see the starting
    headroom.
-2. **Before each wave:** `pacer gate --model <yours> --eta <wave length>`.
+2. **Before each wave:** `pacer gate --model <yours>`.
    - exit 0 → spawn the wave; give every subagent the clause in §7.
    - exit 10 → do **not** spawn; go to step 4.
 3. Keep waves small enough to finish in a few minutes, so a mid-wave trip is
@@ -236,6 +251,9 @@ For a big fan-out:
      active worktree: `git add -A && git commit -m "pace-checkpoint"` (or
      `git stash push -u`).
    - Write or refresh the **resume manifest** (§8): done / in-flight / pending.
+   - Push the checkpoints and **dispatch any CI that can run while you
+     wait** — it does not draw on the window, and its results are ready
+     when you resume.
    - Tell the user which window tripped, at what %, and its reset time.
 5. **Sleep until reset without burning turns** — launch the waiter in the
    background (`run_in_background: true`):
@@ -244,22 +262,24 @@ For a big fan-out:
    ~/.claude/skills/pacer/pacer wait
    ```
 
-   It judges by the same `--cap`, `--eta`, `--model` and `--window` as the
-   gate that paused (they are in the state file), unless you pass your own.
-   It blocks *across turns* until there is headroom again, then **exits —
-   which re-invokes you**. Two things can end the wait, and it says which:
+   It judges by the same `--cap`, `--margin`, `--eta`, `--model` and
+   `--window` as the gate that paused (they are in the state file), unless
+   you pass your own, and it holds **the window that tripped**, at the limit
+   it tripped at. It blocks *across turns* until there is headroom again,
+   then **exits — which re-invokes you**. Three things end the wait, and it
+   says which:
 
    ```
-   pace: reset — headroom restored (5h 4%, 7d 61%). Resume.
-   pace: account switched (427af130 → 74598a77) — headroom on the new login. Resume.
+   pace: reset — the 5h window rolled over; headroom restored (5h 4%, 7d 61%). Resume.
+   pace: account switched (427af130 → 74598a77) — headroom on the new login (5h 0%, 7d 39%). Resume.
+   pace: usage fell — 5h at 95%, below the 97% it paused at (5h 95%, 7d 26%). Resume.
    ```
 
-   The second is the common one under sequential accounts: switching logins
-   restores headroom immediately, and a waiter that called that "reset" would
-   be telling you something false about where your budget went. A waiting
-   process polls every 60 s rather than every 5 minutes for exactly this
-   reason — a reset cannot arrive faster than Pacer's readings, but a switch
-   can. On wake: read the manifest, re-dispatch the in-flight and
+   A safe limit that rises while you wait (paused sessions cut the burn) is
+   none of these, so it does not end the pause. The switch is the common one
+   under sequential accounts: it restores headroom immediately, and Pacer
+   pushes it to a waiting process within seconds. On wake: read the manifest,
+   re-dispatch the in-flight and
    pending items (in-flight ones resume from their checkpoint commits), and
    merge the finished worktrees as usual.
    - If `wait` exits **20**, the blocker resets further out than `--max-wait`
@@ -314,10 +334,13 @@ One JSON file per run: `~/.claude/pace/resume-<run>.json`, or
 It is on disk, so a crash *during* the pause is recoverable: on restart, re-read
 it and continue. Keep it current as items complete.
 
-**`~/.claude/pace/` is `pacer`'s store, and it holds exactly two kinds of
+**`~/.claude/pace/` is `pacer`'s store, and it holds exactly three kinds of
 file:**
-- the state files `pacer gate` writes (`state*.json`);
-- one resume manifest per run (`resume-<run>.json`).
+- the state files `pacer gate` writes (`state*.json`, each with the empty
+  `.lock` a refreshing `status` holds); another session's
+  `state-session-*.json` is removed after a week untouched;
+- one resume manifest per run (`resume-<run>.json`);
+- `feedback.jsonl`, the inbox `pacer feedback` appends to.
 
 Write nothing else there: no notes, plans, scripts, logs or directories.
 
@@ -328,15 +351,22 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   100% minus how far usage can climb before a fresher reading. That's the
   window's recent burn × (the reading's age + one worst-case 5-minute poll),
   at least 1 point. Heavy use stops near 90%, light use near 99%; `report` and
-  `json` show each window's figure. **Pass `--cap` only when the user, or the
-  task, decides to keep part of a window in reserve.** How much to spend is
-  their call, not a default's.
-- `--model NAME|auto` (default: every window binds): only gate on windows that
-  constrain this model. `auto` asks Pacer what this session is running. Account-wide windows always bind; per-model caps bind
-  only when the name matches theirs, compared loosely so `opus`,
+  `json` show each window's figure, and `pacer safecap` prints the limit
+  `gate` would apply to each binding window, one per line, for scripts.
+  **Pass `--cap` only when the user, or the task, decides to keep part of a
+  window in reserve.** How much to spend is their call, not a default's.
+- `--margin N` (default 0; `PACE_MARGIN`): stop N points below each window's
+  safe limit, so the reserve tracks the burn instead of being a fixed number.
+  With `--cap`, each window takes the lower of the two. `status` refuses a
+  verdict gated with a different margin.
+- `--model NAME|auto|all` (default: `auto` in a Claude Code session, else
+  `all`): only gate on windows that constrain this model. `auto` asks Pacer
+  what this session is running. Account-wide windows always bind; per-model
+  caps bind only when the name matches theirs, compared loosely so `opus`,
   `claude-opus-5` and `Opus 5` all mean the same window.
 - `--eta DURATION` (default off): also pause when a binding window is projected
-  to fill within that horizon — `90m`, `2h`, or plain seconds.
+  to fill within that horizon — `90m`, `2h`, or plain seconds. It pauses with
+  room left (§5); an option, not a default.
 - `--window SEL` (default all): case-insensitive substring of a window's label
   or identity — `5h`, `7d`, `fable`. Use it to ignore a window you do not care
   about; a selector matching nothing is an error, not a free pass. `--window`
@@ -349,13 +379,14 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   this. A further-out reset returns exit 20 so you checkpoint and stop instead
   of sleeping for days.
 - `--max-age S` (default 900 = 15 min): how old a state file may be before
-  `status` calls it stale. It is also how long `wait` holds a pause through an
-  unreadable API before giving up.
+  `status` re-gates it (or, with `--no-refresh`, calls it stale). It is also
+  how long `wait` holds a pause through an unreadable API before giving up.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer
-  requires a bearer), `PACE_MODEL`, `PACE_ACCOUNT`, `PACE_RUN` (names a per-run
-  state file), `PACE_STATE` (default `~/.claude/pace/state.json`).
+  requires a bearer), `PACE_MODEL`, `PACE_MARGIN`, `PACE_ACCOUNT`, `PACE_RUN`
+  (names a per-run state file), `PACE_STATE` (default this session's
+  `~/.claude/pace/state-session-<id>.json`, or `state.json` outside a session).
   `CLAUDE_CONFIG_DIR` is read if the session has one, to pick the right
   account.
 

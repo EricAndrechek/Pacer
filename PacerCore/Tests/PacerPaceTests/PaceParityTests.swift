@@ -19,8 +19,22 @@ import Testing
 ///   the port reads Pacer's data when the API is off, so exit 2 now means
 ///   there is no Pacer at all. `renamed` maps the script's two sentences.
 /// - The state file also records the gate's `eta` and `window`, so a later
-///   `wait` judges by the same rules (#258); `withoutAddedKeys` drops those
-///   two lines from the port's file before comparing.
+///   `wait` judges by the same rules (#258), and whether its model came from
+///   `auto` (#264), so that `wait` asks again, the gate's `--margin`
+///   (#263), and for a pause, which window tripped on which account at what
+///   limit, so a `wait` holds that window until it clears (#267);
+///   `withoutAddedKeys` drops those lines from the port's file before
+///   comparing.
+/// - `status` re-gates a stale, expired or missing verdict (#266); the
+///   script only reported it. The port's `status` steps run with
+///   `--no-refresh`, which is the script's pure file read, so what they
+///   print is still compared.
+/// - The port has subcommands the script did not (`safecap`, #263;
+///   `feedback`, #268), so its
+///   "unknown subcommand" message lists more; `renamed` maps the list.
+/// - With `CLAUDE_CODE_SESSION_ID` set and no `--model`, the port gates as
+///   `--model auto` (#264); `pace.sh` let every window bind. Not exercised:
+///   the harness runs without a session id, where both bind every window.
 @Suite("pace: parity with pace.sh")
 struct PaceParityTests {
 
@@ -120,7 +134,8 @@ struct PaceParityTests {
             let capture = PaceCapture()
             let io = PaceIO(out: capture.append, err: capture.append, now: Date.init,
                             sleep: { _ in }, get: PaceHTTP.get, gitBranch: { _ in nil })
-            return PaceResult(status: Pace.run(args, environment: env, io: io), out: capture.text)
+            let ported = args.first == "status" ? args + ["--no-refresh"] : args
+            return PaceResult(status: Pace.run(ported, environment: env, io: io), out: capture.text)
         }.map { Outcome(status: $0.status, output: $0.output, state: Self.withoutAddedKeys($0.state)) }
         #expect(port.count == script.count)
         for (i, (s, p)) in zip(script, port).enumerated() {
@@ -145,10 +160,13 @@ struct PaceParityTests {
         }
     }
 
+    /// The keys the script never wrote.
+    static let addedKeys = ["eta", "window", "autoModel", "margin", "tripIdentity", "tripAccount", "tripLimit"]
+
     /// The port's state file minus the keys the script never wrote.
     static func withoutAddedKeys(_ state: String) -> String {
         state.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.contains("\"eta\": ") && !$0.contains("\"window\": ") }
+            .filter { line in !addedKeys.contains { line.contains("\"\($0)\": ") } }
             .joined(separator: "\n")
     }
 
@@ -159,6 +177,8 @@ struct PaceParityTests {
                 with: "pace: no Pacer to read — nothing answered at $1 and Pacer's data could not be opened. Proceeding ungated.",
                 options: .regularExpression)
             .replacingOccurrences(of: "pace: API off — proceeding ungated.", with: "pace: no Pacer — proceeding ungated.")
+            .replacingOccurrences(of: "(report|json|accounts|sessions|gate|status|wait)",
+                                  with: "(\(Pace.subcommands.joined(separator: "|")))")
     }
 
     static func normalised(_ text: String, _ box: PaceSandbox) -> String {
