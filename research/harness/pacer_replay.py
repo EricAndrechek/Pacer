@@ -62,6 +62,12 @@ class Params:
     recency_half_life_fraction: float = 0.15
     shadow_promotion_min_periods: int = 15
     conformal_block_min_cycles: int = 40
+    # Rate-limit selection knobs (#305). Not in `canonical()` until a value is
+    # adopted, so the defaults (today's rule) keep the version tag unchanged.
+    rl_select_by_phase: bool = False         # select early (<50%) and late cuts separately
+    rl_selection_recency: int = 0            # rank on the last N scored periods; 0 = all-time
+    rl_tie_relative: float = 0.0             # tie band relative to the best; 0 = absolute 1.5 pp
+    shadow_promotion_min_periods_weekly: int = 15   # the shadow floor on weekly-scale windows
 
     def canonical(self) -> str:
         def g(v: float) -> str:
@@ -747,8 +753,8 @@ def collect_residuals(model_fit, params: Params, history: list[Cycle],
             if k == "pooled" or kish_n(v) >= params.rl_stratum_min_scores}
 
 
-def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[str, list[float]]],
-                  shadow_set: set[str], params: Params, weekly: bool = False):
+def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[str, list[tuple[float, float]]]],
+                  shadow_set: set[str], params: Params, weekly: bool = False, phase: str | None = None):
     """Port of UsageIntelligenceEngine.resolveModel (#301): the chosen model if
     it fits this moment, else the best-recorded model that does — promoted
     models before unpromoted shadows, then the lowest typical error, then the
@@ -761,15 +767,8 @@ def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[
 
     def rank(mid: str):
         per = record.get(mid, {})
-        errs = sorted(e for es in per.values() for e in es)
-        n = len(errs)
-        if not n:
-            err = math.inf
-        elif weekly:
-            err = sum(errs) / n
-        else:
-            err = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
-        unpromoted = mid in shadow_set and len(per) < params.shadow_promotion_min_periods
+        err = typical(method_errors(per, params, phase), weekly)
+        unpromoted = mid in shadow_set and len(per) < shadow_floor(params, weekly)
         return (1 if unpromoted else 0, err, MODEL_COMPLEXITY.get(mid, 3))
 
     best = None
@@ -778,6 +777,36 @@ def resolve_model(roster, chosen: str, partial: Partial, record: dict[str, dict[
         if p is not None and (best is None or rank(mid) < best[0]):
             best = (rank(mid), mid, p)
     return (best[1], best[2]) if best else (None, None)
+
+
+def phase_of(cut_fraction: float) -> str:
+    return "early" if cut_fraction < 0.5 else "late"
+
+
+def method_errors(per_period: dict[str, list[tuple[float, float]]], params: Params,
+                  phase: str | None) -> list[float]:
+    """A method's displayed-value errors for selection (#305): only `phase`'s
+    cuts when selecting by phase, only the last `rl_selection_recency` scored
+    periods when set (period keys are reset instants, so they sort in time)."""
+    periods = sorted(per_period, key=float)
+    if params.rl_selection_recency:
+        periods = periods[-params.rl_selection_recency:]
+    return [e for p in periods for cf, e in per_period[p]
+            if phase is None or not params.rl_select_by_phase or phase_of(cf) == phase]
+
+
+def typical(errs: list[float], weekly: bool) -> float:
+    if not errs:
+        return math.inf
+    errs = sorted(errs)
+    n = len(errs)
+    if weekly:
+        return sum(errs) / n
+    return errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
+
+
+def shadow_floor(params: Params, weekly: bool) -> int:
+    return params.shadow_promotion_min_periods_weekly if weekly else params.shadow_promotion_min_periods
 
 
 CLAIM_USED_FLOOR = 50.0   # BurnRate.warningUsedFloor
@@ -794,28 +823,26 @@ def hit_claimable(raw_at_reset: float, used_now: float, q10: float | None) -> bo
     return raw_at_reset + min(q10, 0.0) >= 100.0 if q10 is not None else raw_at_reset >= 100.0
 
 
-def best_method(record: dict[str, dict[str, list[float]]], shadow_set: set[str], params: Params,
-                weekly: bool = False) -> str | None:
+def best_method(record: dict[str, dict[str, list[tuple[float, float]]]], shadow_set: set[str], params: Params,
+                weekly: bool = False, phase: str | None = None) -> str | None:
     """Port of EngineSelfEval.bestMethod: lowest typical |err| (the median, the
     mean on weekly-scale windows — EngineSelfEval.typicalError / headline_key),
-    ties within 1.5pp to the simpler model, shadow floors applied."""
+    over `method_errors` (phase and recency, #305); ties within the band (1.5 pp,
+    or `rl_tie_relative` of the best) to the simpler model; shadow floors applied."""
     scored = []
     for mid, per_period in record.items():
-        floor = params.shadow_promotion_min_periods if mid in shadow_set else 2
+        floor = shadow_floor(params, weekly) if mid in shadow_set else 2
         if len(per_period) < floor:
             continue
-        errs = [e for es in per_period.values() for e in es]
-        errs.sort()
-        n = len(errs)
-        if weekly:
-            err = sum(errs) / n
-        else:
-            err = errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2
-        scored.append((mid, err, MODEL_COMPLEXITY.get(mid, 3)))
+        errs = method_errors(per_period, params, phase)
+        if not errs:
+            continue
+        scored.append((mid, typical(errs, weekly), MODEL_COMPLEXITY.get(mid, 3)))
     if not scored:
         return None
     best = min(scored, key=lambda x: x[1])
-    near = [x for x in scored if x[1] <= best[1] + 1.5]
+    band = best[1] * params.rl_tie_relative if params.rl_tie_relative else 1.5
+    near = [x for x in scored if x[1] <= best[1] + band]
     return min(near, key=lambda x: (x[2], x[1]))[0]
 
 
@@ -868,8 +895,10 @@ def replay_window(window: str, samples, activity_grid, params: Params,
 
         # Selection and the calibrator depend only on the record/history, not
         # the cut — resolve once per cycle (the walk over cuts is the hot loop).
-        chosen = best_method(record, shadow_set, params, weekly) or (
-            "diurnal-rate" if weekly else "recency-weighted")
+        default = "diurnal-rate" if weekly else "recency-weighted"
+        chosen_by_phase = {ph: best_method(record, shadow_set, params, weekly, ph) or default
+                           for ph in ("early", "late")}
+        chosen = chosen_by_phase["early"]
         # Calibrators for whichever model resolves at a cut, built on demand.
         residual_cache = {chosen: collect_residuals(roster[chosen], params, history, mode=conformal_mode)}
 
@@ -879,7 +908,8 @@ def replay_window(window: str, samples, activity_grid, params: Params,
             if len(seen) < 3:
                 continue
             partial = Partial(seen, cut_now, cyc.cycle_start, cyc.resets_at)
-            shown, proj = resolve_model(roster, chosen, partial, record, shadow_set, params, weekly)
+            ph = phase_of(cf)
+            shown, proj = resolve_model(roster, chosen_by_phase[ph], partial, record, shadow_set, params, weekly, ph)
             if proj is None:
                 continue
             if shown not in residual_cache:
@@ -930,7 +960,7 @@ def replay_window(window: str, samples, activity_grid, params: Params,
                 if proj is None:
                     continue
                 record.setdefault(mid, {}).setdefault(period_key, []).append(
-                    abs(displayed_at_reset(proj, partial) - truth))
+                    (cf, abs(displayed_at_reset(proj, partial) - truth)))
     return scores
 
 

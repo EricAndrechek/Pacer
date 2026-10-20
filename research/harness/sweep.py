@@ -39,6 +39,17 @@ DEFAULT_GRID = {
     "recency_half_life_fraction": [0.10, 0.15, 0.25],
     "conformal_min_residuals": [5, 8, 12],
 }
+# Rate-limit selection knobs (#305), swept on their own: `sweep.py --selection`.
+# Harness-only until one passes the adoption rule; then it lands in Swift
+# (EngineSelfEval.bestMethod + EngineParams) in the same commit. On 2026-10-20
+# none did: phase selection was best on 5h (2.93 vs 3.04 pp, 4/4 folds) but
+# short of the 5% bar, with coverage 0.793 -> 0.767.
+SELECTION_GRID = {
+    "rl_select_by_phase": [False, True],
+    "rl_selection_recency": [0, 30, 15],
+    "rl_tie_relative": [0.0, 0.05, 0.10, 0.25],
+    "shadow_promotion_min_periods_weekly": [15, 4],
+}
 FULL_GRID = {
     "linear_recent_lookback_fraction": [0.15, 0.2, 0.3, 0.4, 0.5],
     "recency_half_life_fraction": [0.08, 0.10, 0.15, 0.20, 0.25, 0.35],
@@ -84,6 +95,8 @@ def main() -> None:
     ap.add_argument("--store")
     ap.add_argument("--window", choices=["five_hour", "seven_day"])
     ap.add_argument("--full", action="store_true", help="the larger grid (~360 configs)")
+    ap.add_argument("--selection", action="store_true",
+                    help="the rate-limit selection knobs instead (#305; 48 configs)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -92,7 +105,7 @@ def main() -> None:
     windows = [args.window] if args.window else ["five_hour", "seven_day"]
     samples = {w: rate_samples_by_account(conn, w) for w in windows}
 
-    grid = FULL_GRID if args.full else DEFAULT_GRID
+    grid = SELECTION_GRID if args.selection else FULL_GRID if args.full else DEFAULT_GRID
     keys = sorted(grid)
     configs = [Params(), *(
         replace(Params(), **dict(zip(keys, values)))
