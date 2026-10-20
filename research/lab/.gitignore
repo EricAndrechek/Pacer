@@ -4,3 +4,6 @@ reports/
 .venv/
 __pycache__/
 *.parquet
+afm/prompts-*.jsonl
+afm/out-*.jsonl
+afm/.build/
