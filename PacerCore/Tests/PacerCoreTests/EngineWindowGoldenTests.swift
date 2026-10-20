@@ -13,6 +13,11 @@ import Testing
 /// windows fails loudly. The pre-refactor tree produced this exact
 /// serialization (verified by a stash/replay before/after diff during the
 /// refactor), so it is a genuine "unchanged" gate, not just a snapshot.
+///
+/// Deliberately moved once since: #300 measures the conformal residuals from
+/// the displayed (anchored, clamped) value and centres the band on it, which
+/// changed the 5-hour `cal[pooled]` line and the band built from it — and
+/// nothing else.
 struct EngineWindowGoldenTests {
 
     static let utc = Calendar(identifier: .gregorian).with(timeZone: TimeZone(identifier: "UTC")!)
@@ -91,8 +96,8 @@ struct EngineWindowGoldenTests {
     == five_hour ==
     selectedId=saturating duration=18000.0000 history=12
     cycles obs=12 over90=0 hit100=0
-    cal[pooled] n=12 q10=-6.0472 q50=-6.0472 q90=-6.0472
-    outlook value=87.4769 i80=81.4297...81.4297 i50=81.4297...81.4297 conf=medium support=12 method=rl-saturating note=-
+    cal[pooled] n=12 q10=-8.7325 q50=-8.7325 q90=-8.7325
+    outlook value=87.4769 i80=78.7445...78.7445 i50=78.7445...78.7445 conf=medium support=12 method=rl-saturating note=-
     burn used=55.0000 slope=22.0000 cross=nil early=nil late=nil anchor=2.4050 method=saturating
     traj n=6 selected=saturating pts=25 cross=nil last=87.4769
     == seven_day ==

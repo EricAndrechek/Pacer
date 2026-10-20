@@ -28,8 +28,9 @@ import json
 from dataclasses import replace
 
 from pacer_replay import (
-    CaseScore, Params, load_activity_grid, load_rate_samples, locate_store,
-    open_copy, replay_window, summarize,
+    WINDOW_SECONDS, CaseScore, Params, headline_key, is_weekly_scale,
+    load_activity_grid, load_rate_samples, locate_store, open_copy,
+    replay_window, summarize,
 )
 
 FOLDS = 4
@@ -47,8 +48,9 @@ FULL_GRID = {
 }
 
 
-def fold_medians(scores: list[CaseScore]) -> list[float | None]:
-    """Median |error| per contiguous time fold (by cycle index)."""
+def fold_errors(scores: list[CaseScore], weekly: bool = False) -> list[float | None]:
+    """|error| per contiguous time fold (by cycle index): the median, or the
+    mean on weekly-scale windows, matching `headline_key`."""
     if not scores:
         return [None] * FOLDS
     max_idx = max(s.cycle_index for s in scores) + 1
@@ -57,7 +59,12 @@ def fold_medians(scores: list[CaseScore]) -> list[float | None]:
         lo, hi = max_idx * f / FOLDS, max_idx * (f + 1) / FOLDS
         errs = sorted(s.abs_error for s in scores if lo <= s.cycle_index < hi)
         n = len(errs)
-        out.append(None if n == 0 else (errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2))
+        if n == 0:
+            out.append(None)
+        elif weekly:
+            out.append(sum(errs) / n)
+        else:
+            out.append(errs[n // 2] if n % 2 else (errs[n // 2 - 1] + errs[n // 2]) / 2)
     return out
 
 
@@ -102,13 +109,16 @@ def main() -> None:
     report: dict = {"baseline": Params().version_tag(), "windows": {}}
     for window in windows:
         rows = []
+        metric = headline_key(WINDOW_SECONDS[window])
+        weekly = is_weekly_scale(WINDOW_SECONDS[window])
         for i, p in enumerate(unique):
             scores = replay_window(window, samples[window], grid_prior, p)
             s = summarize(scores)
+            # "median" is the window's headline error: the mean on weekly windows.
             rows.append({
-                "tag": p.version_tag(), "canonical": p.canonical(),
-                "median": s.get("medianAbsErrorPP"), "coverage80": s.get("coverage80"),
-                "brier": s.get("brier"), "folds": fold_medians(scores),
+                "tag": p.version_tag(), "canonical": p.canonical(), "metric": metric,
+                "median": s.get(metric), "coverage80": s.get("coverage80"),
+                "brier": s.get("brier"), "folds": fold_errors(scores, weekly),
                 "isBaseline": i == 0,
             })
             print(f"\r[{window}] {i + 1}/{len(unique)}", end="", flush=True)
@@ -118,6 +128,7 @@ def main() -> None:
             base["folds"], r["folds"], base["median"], r["median"], r["coverage80"])]
         recommendable.sort(key=lambda r: r["median"])
         report["windows"][window] = {
+            "metric": metric,
             "baseline": {k: base[k] for k in ("tag", "median", "coverage80", "brier")},
             "recommend": recommendable[0] if recommendable else None,
             "top5": sorted(rows, key=lambda r: (r["median"] is None, r["median"]))[:5],
@@ -128,14 +139,14 @@ def main() -> None:
         return
     for window, r in report["windows"].items():
         b = r["baseline"]
-        print(f"\n[{window}] baseline {b['tag']}: median {b['median']}pp, coverage {b['coverage80']}, brier {b['brier']}")
+        print(f"\n[{window}] baseline {b['tag']}: {r['metric']} {b['median']}pp, coverage {b['coverage80']}, brier {b['brier']}")
         if r["recommend"]:
             c = r["recommend"]
-            print(f"  RECOMMEND {c['tag']}: median {c['median']}pp, coverage {c['coverage80']} (fold-robust)")
+            print(f"  RECOMMEND {c['tag']}: {r['metric']} {c['median']}pp, coverage {c['coverage80']} (fold-robust)")
             print(f"    {c['canonical']}")
         else:
             print("  no fold-robust improvement — keep the baseline (this is the hysteresis working)")
-        print("  top 5 by median error:")
+        print(f"  top 5 by {r['metric']}:")
         for row in r["top5"]:
             mark = "*" if row["isBaseline"] else " "
             print(f"   {mark} {row['tag']}  median={row['median']}  cov={row['coverage80']}  brier={row['brier']}")
