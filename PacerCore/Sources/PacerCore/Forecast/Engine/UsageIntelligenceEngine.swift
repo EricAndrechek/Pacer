@@ -318,11 +318,16 @@ public actor UsageIntelligenceEngine {
         let rlAccuracy = Dictionary(f.windows.compactMap { w in
             accuracyBySurface[EngineSelfEval.rlSurface(w.key)].map { (w.key, $0) }
         }, uniquingKeysWith: { first, _ in first })
+        // Each window's current-version record: the band and the cycle facts
+        // read every cycle it has scored, not only the 32 days fetched (#306).
+        let rlRecords = Dictionary(f.windows.map { w in
+            (w.key, records(EngineSelfEval.rlSurface(w.key)).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) })
+        }, uniquingKeysWith: { first, _ in first })
         let previousFit = self.fit
         self.fit = timed("makeFit") {
             Self.carryClaimStreaks(
                 f, into: Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
-                                      rateLimits: fitsRateLimits),
+                                      rateLimits: fitsRateLimits, rlRecords: rlRecords),
                 from: previousFit)
         }
 
@@ -987,7 +992,8 @@ public actor UsageIntelligenceEngine {
     /// resolved by `recompute` from the persisted self-eval scoreboard
     /// (empty = median-of-all-candidates, the safe cold-start prior).
     static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
-                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true) -> Fit {
+                        rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true,
+                        rlRecords: [String: [EngineSelfEval.Record]] = [:]) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -1062,19 +1068,24 @@ public actor UsageIntelligenceEngine {
             let model = roster.first { $0.id == resolvedId }
 
             // Cap-hit frequency facts over completed cycles (for honest
-            // natural-frequency risk phrasing in the UI).
-            var over90 = 0, hit100 = 0
+            // natural-frequency risk phrasing in the UI): every cycle the
+            // record has scored, not only the 32 days this refit read (#306).
+            var finals: [String: Double] = [:]
+            for r in rlRecords[key] ?? [] { finals[r.periodKey] = r.truth }
             for c in history {
-                let peak = c.samples.map { $0.usedPercentage }.max() ?? 0
-                if peak >= 90 { over90 += 1 }
-                if peak >= 100 { hit100 += 1 }
+                finals[EngineSelfEval.periodKeyRL(c.resetsAt)] = c.samples.map { $0.usedPercentage }.max() ?? 0
             }
+            let over90 = finals.values.filter { $0 >= 90 }.count
+            let hit100 = finals.values.filter { $0 >= 100 }.count
 
             fit.rl[key] = RateLimitFit(
                 roster: roster, selectedId: selectedId, resolvedId: resolvedId,
-                calibrators: model.map { stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar) } ?? [:],
-                duration: duration, historyCount: history.count,
-                cyclesObserved: history.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
+                calibrators: model.map {
+                    stratifiedRLCalibrators(model: $0, history: history, duration: duration, calendar: f.calendar,
+                                            records: rlRecords[key] ?? [])
+                } ?? [:],
+                duration: duration, historyCount: finals.count,
+                cyclesObserved: finals.count, cyclesPeakOver90: over90, cyclesHit100: hit100)
         }
         return fit
     }
@@ -1248,19 +1259,30 @@ public actor UsageIntelligenceEngine {
     /// honest); with plentiful cycles the within-cycle spread is real tail
     /// information and per-cut counting resumes (5h holds 0.785 coverage).
     /// Validated fold-robust in research/harness (2026-07-06).
+    ///
+    /// **From the record as well as the refit's history (#306).** A refit
+    /// reads 32 days, so a weekly window's calibrator could never hold more
+    /// than ~4 cycles, short of the 8-residual gate forever: the 7-day window
+    /// stated a band in 0.17% of snapshots, per-model weekly windows in none.
+    /// Since #300 a v2 record row's `predicted` IS the displayed value, so
+    /// `truth − predicted` is exactly this residual: the record's rows for
+    /// `model` add every cycle it has scored. Where both cover a cycle they
+    /// agree by construction; the record's row is used.
     static func stratifiedRLCalibrators(
         model: any BurnTrajectory.Model,
         history: [BurnTrajectory.Cycle],
         duration: TimeInterval,
         calendar: Calendar,
+        records: [EngineSelfEval.Record] = [],
         cutFractions: [Double] = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     ) -> [String: ConformalCalibrator] {
-        // (cycle index, residual) pairs per bucket, then grouped per the rule.
-        var byStratum: [String: [(cycle: Int, residual: Double)]] = [:]
-        var pooled: [(cycle: Int, residual: Double)] = []
-        for (ci, cycle) in history.enumerated() {
+        // (period, cut) → (cycle start, residual), from the history walk, then
+        // overridden and extended by the record.
+        var cases: [String: [Double: (cycleStart: Date, residual: Double)]] = [:]
+        for cycle in history {
             let trueFinal = cycle.samples.map { $0.usedPercentage }.max() ?? 0
             guard trueFinal > 0 else { continue }
+            let period = EngineSelfEval.periodKeyRL(cycle.resetsAt)
             for cf in cutFractions {
                 let cutNow = cycle.cycleStart.addingTimeInterval(duration * cf)
                 let seen = cycle.samples.filter { $0.at <= cutNow }
@@ -1271,11 +1293,26 @@ public actor UsageIntelligenceEngine {
                 // Measured from the displayed value, which is what the band is
                 // centred on (#300).
                 let residual = trueFinal - BurnTrajectory.displayedAtReset(projection, partial: partial)
-                pooled.append((ci, residual))
-                byStratum[rlStratum(cutFraction: cf, cycleStart: cycle.cycleStart, calendar: calendar), default: []].append((ci, residual))
+                cases[period, default: [:]][cf] = (cycle.cycleStart, residual)
             }
         }
-        let blocks = history.count < EngineParams.current.conformalBlockMinCycles
+        for r in records where r.method == model.id && r.truth > 0 && EngineSelfEval.isCurrentRLBucket(r.bucket) {
+            guard let cf = EngineSelfEval.rlCutFraction(r.bucket),
+                  let reset = EngineSelfEval.periodDateRL(r.periodKey) else { continue }
+            cases[r.periodKey, default: [:]][cf] = (reset.addingTimeInterval(-duration), r.truth - r.predicted)
+        }
+        // Cycles in time order: the block rule groups by cycle.
+        let periods = cases.keys.sorted()
+        var byStratum: [String: [(cycle: Int, residual: Double)]] = [:]
+        var pooled: [(cycle: Int, residual: Double)] = []
+        for (ci, period) in periods.enumerated() {
+            for (cf, c) in cases[period]!.sorted(by: { $0.key < $1.key }) {
+                pooled.append((ci, c.residual))
+                byStratum[rlStratum(cutFraction: cf, cycleStart: c.cycleStart, calendar: calendar), default: []]
+                    .append((ci, c.residual))
+            }
+        }
+        let blocks = periods.count < EngineParams.current.conformalBlockMinCycles
         func residuals(_ pairs: [(cycle: Int, residual: Double)]) -> [Double] {
             guard blocks else { return pairs.map { $0.residual } }
             let byCycle = Dictionary(grouping: pairs, by: { $0.cycle })
