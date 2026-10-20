@@ -7,3 +7,8 @@ __pycache__/
 afm/prompts-*.jsonl
 afm/out-*.jsonl
 afm/.build/
+foundation/**/.venv/
+foundation/.venv/
+foundation/logs/
+foundation/**/__pycache__/
+ml/**/__pycache__/

@@ -1,0 +1,7 @@
+[project]
+name = "pacer-fm-toto"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["pandas>=2.2", "pyarrow>=17,<20", "setuptools<81", "scipy>=1.16", "toto-ts"]
+[tool.uv]
+package = false
