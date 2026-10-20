@@ -155,6 +155,32 @@ def load_rate_samples(conn: sqlite3.Connection, window: str) -> list[tuple[float
     return [(r[0] + CORE_DATA_EPOCH, float(r[1]), r[2] + CORE_DATA_EPOCH) for r in rows]
 
 
+def _archived(conn: sqlite3.Connection, kind: str, key_col: str, key: str):
+    """Rows of `kind` from AccountUsageArchive, the permanent record. The live
+    tables are a 35-day cache (OAuthPoller.liveWindowDays): every hour older
+    rows are moved into the archive, never deleted. Reading only the live table
+    silently replayed the last 35 days, not the history."""
+    if "ZACCOUNTUSAGEARCHIVE" not in _tables(conn):
+        return []
+    return conn.execute(
+        f"SELECT ZSAMPLEDAT, ZUSEDPERCENTAGE, ZRESETSAT, ZACCOUNTID FROM ZACCOUNTUSAGEARCHIVE "
+        f"WHERE ZKIND = ? AND {key_col} = ? AND ZRESETSAT IS NOT NULL AND ZUSEDPERCENTAGE IS NOT NULL",
+        (kind, key),
+    ).fetchall()
+
+
+def _merge_by_account(*row_sets) -> dict[str, list[tuple[float, float, float]]]:
+    """Union of live and archived rows per account, de-duplicated on the
+    sample instant (a row caught between its archive insert and its live
+    delete must not count twice), time-ordered."""
+    out: dict[str, dict[float, tuple[float, float, float]]] = {}
+    for rows in row_sets:
+        for at, used, reset, acct in rows:
+            t = at + CORE_DATA_EPOCH
+            out.setdefault(acct or "", {})[round(t, 3)] = (t, float(used), reset + CORE_DATA_EPOCH)
+    return {a: sorted(v.values()) for a, v in out.items()}
+
+
 def rate_samples_by_account(conn: sqlite3.Connection, window: str) -> dict[str, list[tuple[float, float, float]]]:
     """`load_rate_samples`, one series per account ("" for rows with none).
     A rate-limit window belongs to one account, and since #303 the app fits
@@ -166,10 +192,7 @@ def rate_samples_by_account(conn: sqlite3.Connection, window: str) -> dict[str, 
         "WHERE ZWINDOW = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
         (window,),
     ).fetchall()
-    out: dict[str, list[tuple[float, float, float]]] = {}
-    for at, used, reset, acct in rows:
-        out.setdefault(acct or "", []).append((at + CORE_DATA_EPOCH, float(used), reset + CORE_DATA_EPOCH))
-    return out
+    return _merge_by_account(rows, _archived(conn, "rate_limit", "ZWINDOW", window))
 
 
 def usagelimit_samples_by_account(conn: sqlite3.Connection, identity: str) -> dict[str, list[tuple[float, float, float]]]:
@@ -182,10 +205,7 @@ def usagelimit_samples_by_account(conn: sqlite3.Connection, identity: str) -> di
         "WHERE ZIDENTITY = ? AND ZRESETSAT IS NOT NULL ORDER BY ZSAMPLEDAT",
         (identity,),
     ).fetchall()
-    out: dict[str, list[tuple[float, float, float]]] = {}
-    for at, used, reset, acct in rows:
-        out.setdefault(acct or "", []).append((at + CORE_DATA_EPOCH, float(used), reset + CORE_DATA_EPOCH))
-    return out
+    return _merge_by_account(rows, _archived(conn, "usage_limit", "ZIDENTITY", identity))
 
 
 def load_usagelimit_samples(conn: sqlite3.Connection, identity: str) -> list[tuple[float, float, float]]:

@@ -260,12 +260,15 @@ public actor UsageIntelligenceEngine {
         if fitsRateLimits && refitsCompleted > 0 && !rateLimitRecordBackfilled {
             rateLimitRecordBackfilled = true
             rlFeatures = timed("rlBackfill") {
-                EngineFeatures.build(
+                let archived = fetchArchivedLimits()
+                return EngineFeatures.build(
                     now: now, calendar: calendar,
                     daily: daily, hourly: hourly,
-                    rate: fetchRate(now: now, since: .distantPast),
+                    rate: Self.merged(fetchRate(now: now, since: .distantPast), archived.rate,
+                                      key: { "\($0.window)|\($0.at.timeIntervalSince1970)" }, at: \.at),
                     lastArrivalAt: arrival,
-                    scoped: fetchScopedLimits(now: now, since: .distantPast))
+                    scoped: Self.merged(fetchScopedLimits(now: now, since: .distantPast), archived.scoped,
+                                        key: { "\($0.identity)|\($0.at.timeIntervalSince1970)" }, at: \.at))
             }
         }
         let newRL = fitsRateLimits
@@ -1628,6 +1631,43 @@ public actor UsageIntelligenceEngine {
         // numbers.
         let rows = (try? modelContext.fetch(descriptor)) ?? []
         return rows.map { .init(window: $0.window, at: $0.sampledAt, usedPercentage: $0.usedPercentage, resetsAt: $0.resetsAt) }
+    }
+
+    /// This scope's readings that have left the live tables. Those tables are a
+    /// 35-day cache (`OAuthPoller.liveWindowDays`): every hour, older rows are
+    /// moved (never deleted) into `AccountUsageArchive`, the permanent record.
+    /// The record backfill reads both, or its "full history" is the last 35
+    /// days. On a real store that hid 307 five-hour and 20 weekly cycles
+    /// (four months), and with them every weekly band.
+    private func fetchArchivedLimits() -> (rate: [EngineFeatures.RateRow], scoped: [EngineFeatures.ScopedRow]) {
+        guard let account = limitAccountId else { return ([], []) }
+        let rateKind = AccountUsageArchive.kindRateLimit, scopedKind = AccountUsageArchive.kindUsageLimit
+        let rows = (try? modelContext.fetch(FetchDescriptor<AccountUsageArchive>(
+            predicate: #Predicate { $0.accountId == account && ($0.kind == rateKind || $0.kind == scopedKind) }))) ?? []
+        var rate: [EngineFeatures.RateRow] = [], scoped: [EngineFeatures.ScopedRow] = []
+        for r in rows {
+            guard let pct = r.usedPercentage else { continue }
+            if r.kind == rateKind, let window = r.window {
+                rate.append(.init(window: window, at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt))
+            } else if r.kind == scopedKind, let identity = r.identity {
+                scoped.append(.init(identity: identity, group: r.group ?? "", label: r.label ?? identity,
+                                    modelId: r.modelId, modelDisplayName: r.modelDisplayName, surface: r.surface,
+                                    at: r.sampledAt, usedPercentage: pct, resetsAt: r.resetsAt,
+                                    inLatestBatch: false, isActive: r.isActive ?? false))
+            }
+        }
+        return (rate, scoped)
+    }
+
+    /// Live and archived rows as one time-ordered series, de-duplicated on
+    /// (series, instant): a row caught between its archive insert and its live
+    /// delete must not count twice. The live copy wins.
+    static func merged<Row>(_ live: [Row], _ archived: [Row], key: (Row) -> String, at: KeyPath<Row, Date>) -> [Row] {
+        guard !archived.isEmpty else { return live }
+        var seen = Set(live.map(key))
+        var out = live
+        for r in archived where seen.insert(key(r)).inserted { out.append(r) }
+        return out.sorted { $0[keyPath: at] < $1[keyPath: at] }
     }
 
     /// ~32 days of scoped `limits[]` samples (`UsageLimitSample`) mapped to the
