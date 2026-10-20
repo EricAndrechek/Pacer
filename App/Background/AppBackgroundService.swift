@@ -623,6 +623,14 @@ final class AppBackgroundService {
             var added = 0
             for engine in engines { added += await engine.backfillRateLimitRecordIfNeeded() }
             if added > 0 { _ = await self?.recomputeEngineIfDue(force: true) }
+            // With a lab helper configured (dev builds), an engine reopens its
+            // pass when the helper serves a model the pass has not covered, so
+            // the next refit must be able to start it again. An engine with
+            // nothing owed returns at once. Without a helper the pass stays
+            // once per launch.
+            if LabHelper.isConfigured {
+                await MainActor.run { self?.recordBackfillTask = nil }
+            }
         }
     }
 

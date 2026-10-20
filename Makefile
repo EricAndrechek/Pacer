@@ -211,3 +211,16 @@ record-relaunch:
 ##        make render-live SCOPES=all
 render-live:
 	@bin/dev-render-live.sh "$(or $(SCOPES),auto)" "$(or $(OUT),$(PWD)/screenshots/live)"
+
+.PHONY: lab-helper lab-helper-stop lab-helper-status lab-helper-test
+## The prediction-lab helper (research/lab/helper/README.md): serves research
+## forecasters to a dev build over 127.0.0.1:7231, reading the live store
+## read-only. Log: ~/Library/Logs/Pacer/lab-helper.log. PACER_LAB_PORT=… for another port.
+lab-helper:  ## Start the prediction-lab helper in the background (no-op if it is up).
+	@bin/lab-helper.sh start
+lab-helper-stop:  ## Stop the prediction-lab helper.
+	@bin/lab-helper.sh stop
+lab-helper-status:  ## Is the prediction-lab helper up, and what is it serving?
+	@bin/lab-helper.sh status
+lab-helper-test:  ## The helper's own tests (a throwaway store, never the live one).
+	@cd research/lab/helper && uv run python -m unittest discover -s tests

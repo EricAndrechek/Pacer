@@ -105,8 +105,8 @@ public actor UsageIntelligenceEngine {
     /// Where this engine is with the full-history record pass
     /// (`backfillRateLimitRecordIfNeeded`) this launch: in memory, so asking
     /// again after every refit costs nothing once it has run or been skipped.
-    private enum RecordBackfill { case idle, running, done }
-    private var recordBackfill = RecordBackfill.idle
+    enum RecordBackfill { case idle, running, done }
+    var recordBackfill = RecordBackfill.idle
     /// When this engine's current fit was made, nil before the first refit.
     private var lastRefitAt: Date?
     /// When this engine's current fit was made, nil before the first refit:
@@ -128,7 +128,7 @@ public actor UsageIntelligenceEngine {
     ///
     /// Safe to hold because nothing else writes these rows: the engine is the
     /// only writer, and `EngineHost` keeps one engine per scope.
-    private var evalRowsCache: [EvalRow]?
+    var evalRowsCache: [EvalRow]?
 
     /// The most recent feature snapshot, or nil before the first recompute.
     private var features: EngineFeatures?
@@ -144,6 +144,35 @@ public actor UsageIntelligenceEngine {
     private var lastSnapshotSig: [String: (at: Date, sig: String)] = [:]
     /// Local-day key of the last retention prune (prune once per day).
     private var lastSnapshotPruneDay: String?
+
+    // MARK: Lab helper state (dev builds; all idle unless a helper is configured)
+
+    /// A fetcher set by a test, which then stands in for the configured URL.
+    var labFetcherOverride: (any LabForecastFetching)?
+    /// The client for the configured URL, rebuilt when the URL changes.
+    var labClientCache: (url: URL, client: LabHelperClient)?
+    /// The helper's models as last served, kept when it stops answering so its
+    /// models stay listed (as unavailable) rather than vanishing.
+    var labCatalog: [LabModelInfo] = []
+    var labCatalogFetchedAt: Date?
+    var labCatalogOK = false
+    /// Last reachability logged, so a helper that is down logs once, not per refit.
+    var labLoggedReachable: Bool?
+    /// `surface|model|period` the live refit already asked the helper about
+    /// this launch, so a cycle a model declines is not re-asked every refit.
+    var labAsked: Set<String> = []
+    /// Lab ids the full-history pass has covered this launch (nil before it
+    /// has run): a model the helper adds later sends the pass round again.
+    /// When a lab batch last failed, so a failing model is retried slowly.
+    var labIdsBackfilled: Set<String>?
+    var labBackfillFailedAt: Date?
+    /// The live refit's request budget, and a batch's in the full-history pass.
+    var labLiveTimeout: Duration = .milliseconds(1500)
+    var labBackfillTimeout: Duration = .seconds(20)
+    /// Refits started / the newest one applied. A refit that waited on the
+    /// helper drops its result when a newer one landed meanwhile.
+    private var recomputeStarts = 0
+    private var appliedRecompute = 0
 
     /// Per-user fitted state cached between scans. Holds the shapes that are
     /// expensive to derive (calibrators, the diurnal rate table); the cheap,
@@ -199,7 +228,15 @@ public actor UsageIntelligenceEngine {
     /// Cheap enough to run per scan: it reads pre-aggregated rows, not raw
     /// samples (save for a single most-recent token timestamp), and the fits
     /// are closed-form. Failures degrade to an empty fit rather than throwing.
-    public func recompute(now: Date = Date(), calendar: Calendar = .current) {
+    ///
+    /// `async` only for the lab helper (`LabHelper`): with one configured, the
+    /// refit fetches its models' predictions between building the features and
+    /// fitting, and that is its only suspension point. Without one there is
+    /// none, and a refit runs start to finish exactly as it did when this was
+    /// synchronous.
+    public func recompute(now: Date = Date(), calendar: Calendar = .current) async {
+        recomputeStarts += 1
+        let generation = recomputeStarts
         // Phase timings. A refit is the most expensive recurring thing Pacer
         // does — measured at ~13 s for a single scope — and until now the only
         // number anyone had was the total, which says nothing about where it
@@ -236,6 +273,19 @@ public actor UsageIntelligenceEngine {
                 daily: daily, hourly: hourly, rate: rate,
                 lastArrivalAt: arrival, scoped: scopedLimits)
         }
+
+        // Lab helper models (dev builds only): fetch their predictions now,
+        // because `fit` is synchronous. Nothing of this refit is applied before
+        // the await, so an ask in the gap reads the previous fit whole.
+        var lab: LabRefit?
+        if fitsRateLimits, let client = labClient() {
+            let started = Date()
+            lab = await labRefit(f, client: client)
+            phase["lab", default: 0] += Int(Date().timeIntervalSince(started) * 1000)
+            // A newer refit landed while this one waited: its fit stands.
+            guard generation > appliedRecompute else { return }
+        }
+        appliedRecompute = generation
         self.features = f
 
         // Self-eval feedback loop: score newly-completed periods into the
@@ -258,7 +308,12 @@ public actor UsageIntelligenceEngine {
             ? newRLOutcomes(features: f, calendar: calendar, now: now, existingKeys: existing)
             : []
         persist(newRL, now: now)
-        allRows.append(contentsOf: (newEOD + newRL).map(Self.evalRow))
+        // Lab models on the cycles this refit fetched for (the most recently
+        // completed ones they have no record for; the full-history pass takes
+        // the rest).
+        let newLab = lab.map { labOutcomes($0, existingKeys: existing) } ?? []
+        persist(newLab, now: now)
+        allRows.append(contentsOf: (newEOD + newRL + newLab).map(Self.evalRow))
         evalRowsCache = allRows
         let bySurface = Dictionary(grouping: allRows, by: { $0.surface })
         func records(_ surface: String) -> [EngineSelfEval.Record] {
@@ -297,10 +352,16 @@ public actor UsageIntelligenceEngine {
         // can never pollute the fixed windows' selection.
         var rlSelection: [String: String] = [:]
         let params = EngineParams.current
+        // Lab models' records count only while a helper is configured: turned
+        // off, a store that once had one selects exactly as if it never had.
+        let labOn = lab != nil
+        let complexities = Self.rlComplexities().merging(lab?.complexities ?? [:]) { builtin, _ in builtin }
         for window in f.windows where fitsRateLimits {
             let surface = EngineSelfEval.rlSurface(window.key)
             // Current-version rows only: v1 graded the raw line, not the value shown.
-            let recs = records(surface).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) }
+            let recs = records(surface).filter {
+                EngineSelfEval.isCurrentRLBucket($0.bucket) && Self.countsRLRecord($0, labOn: labOn)
+            }
             let weekly = WindowSpec.isWeeklyScale(duration: window.duration)
             // Which half of its window the live cycle is in (#305): the pick,
             // the stand-in ranking and the accuracy shown all read that half's
@@ -308,7 +369,11 @@ public actor UsageIntelligenceEngine {
             let phase = params.rlSelectByPhase ? Self.livePhase(f, window: window) : nil
             accuracyBySurface[surface] = EngineSelfEval.accuracy(surface: surface, from: recs, weekly: weekly,
                                                                  phase: phase)
-            if let pick = EngineSelfEval.bestMethod(from: recs, complexity: Self.rlComplexities(),
+            // A lab model competes for the window only when the helper answered
+            // for the live cycle (`LabRefit.selectable`); without a helper the
+            // filter above has already left only built-in rows.
+            let selectable = lab.map { lab in recs.filter { lab.selectable($0.method, window: window.key) } } ?? recs
+            if let pick = EngineSelfEval.bestMethod(from: selectable, complexity: complexities,
                                                     weekly: weekly, phase: phase,
                                                     tieRelative: params.rlTieRelative > 0 ? params.rlTieRelative : nil) {
                 rlSelection[window.key] = pick
@@ -321,13 +386,16 @@ public actor UsageIntelligenceEngine {
         // Each window's current-version record: the band and the cycle facts
         // read every cycle it has scored, not only the 32 days fetched (#306).
         let rlRecords = Dictionary(f.windows.map { w in
-            (w.key, records(EngineSelfEval.rlSurface(w.key)).filter { EngineSelfEval.isCurrentRLBucket($0.bucket) })
+            (w.key, records(EngineSelfEval.rlSurface(w.key)).filter {
+                EngineSelfEval.isCurrentRLBucket($0.bucket) && Self.countsRLRecord($0, labOn: labOn)
+            })
         }, uniquingKeysWith: { first, _ in first })
         let previousFit = self.fit
         self.fit = timed("makeFit") {
             Self.carryClaimStreaks(
                 f, into: Self.makeFit(f, eodPools: pools, rlSelection: rlSelection, rlAccuracy: rlAccuracy,
-                                      rateLimits: fitsRateLimits, rlRecords: rlRecords),
+                                      rateLimits: fitsRateLimits, rlRecords: rlRecords,
+                                      labModels: lab?.models ?? [:]),
                 from: previousFit)
         }
 
@@ -443,9 +511,24 @@ public actor UsageIntelligenceEngine {
     /// model the record has never seen. A tuning change (`EngineParams`) is
     /// deliberately not here: the pass only fills keys that are missing, and
     /// never re-scores ones that exist.
+    ///
+    /// With a lab helper configured the marker is read as a set and lab model
+    /// ids join it (`recordBackfillPlan`), so registering a predictor re-runs
+    /// the pass for that model. Without one it is compared whole, as ever.
     static var recordBackfillFingerprint: String {
-        let models = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]).sorted()
-        return "v1|\(EngineSelfEval.rlBucketVersion)|" + models.joined(separator: ",")
+        recordBackfillMarkerPrefix + recordBackfillBuiltinIds.joined(separator: ",")
+    }
+    static var recordBackfillMarkerPrefix: String { "v1|\(EngineSelfEval.rlBucketVersion)|" }
+    /// The `ClaudeCodeMeta` key this account's pass marker lives under.
+    var recordBackfillMarkerKey: String { "rl_record_backfill|\(limitAccountId ?? "all")" }
+    /// This account's pass marker, nil before any pass.
+    func recordBackfillMarker() -> String? {
+        let key = recordBackfillMarkerKey
+        return (try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(predicate: #Predicate { $0.key == key })))?
+            .first?.value
+    }
+    static var recordBackfillBuiltinIds: [String] {
+        (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]).sorted()
     }
 
     /// Score every completed rate-limit cycle the store holds (the live
@@ -473,12 +556,22 @@ public actor UsageIntelligenceEngine {
             recordBackfill = .done
             return 0
         }
-        let markerKey = "rl_record_backfill|\(limitAccountId ?? "all")"
+        let markerKey = recordBackfillMarkerKey
         let fingerprint = Self.recordBackfillFingerprint
+        // Lab helper models (dev builds only) owe a record too. Their ids join
+        // the marker, so a model the helper adds re-runs the pass for it alone.
+        // Without a helper `labModels` is nil and the pass is what it was.
+        let labClient = labClient()
+        var labModels: [LabModelInfo]?
+        if let labClient {
+            recordBackfill = .running      // the catalog fetch suspends: no second pass may start
+            labModels = await labCatalogForPass(labClient)
+        }
         let marker = try? modelContext.fetch(FetchDescriptor<ClaudeCodeMeta>(
             predicate: #Predicate { $0.key == markerKey })).first
-        if marker?.value == fingerprint {
+        guard let plan = Self.recordBackfillPlan(marker: marker?.value, labIds: labModels?.map(\.id)) else {
             recordBackfill = .done
+            if let labModels { labIdsBackfilled = Set(labModels.map(\.id)) }
             return 0
         }
         recordBackfill = .running
@@ -496,40 +589,66 @@ public actor UsageIntelligenceEngine {
         try? await Task.sleep(for: pause)
 
         var added = 0, cycles = 0, batches = 0
+        var lab = LabPass(models: (labModels ?? []).filter { plan.labIds.contains($0.id) })
+        if labClient != nil, !lab.models.isEmpty {
+            let rows = evalRowsCache ?? fetchEvalRows()
+            evalRowsCache = rows
+            lab.loadRecord(rows)
+        }
         for window in f.windows {
             guard let samples = f.rateLimit[window.key], !samples.isEmpty else { continue }
             let (_, history) = BurnTrajectory.segment(samples: samples, duration: window.duration, now: now)
             let completed = history.filter { $0.resetsAt <= now }.sorted { $0.cycleStart < $1.cycleStart }
             cycles += completed.count
+            let labHere = lab.models.filter { $0.serves(window.key) }
+            // Only lab work left, and none for this window: nothing to walk.
+            guard plan.builtins || !labHere.isEmpty else { continue }
             var start = 0
             while start < completed.count {
                 let range = start..<min(start + batch, completed.count)
-                var rows = evalRowsCache ?? fetchEvalRows()
-                let news = EngineSelfEval.newOutcomesRL(
-                    window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
-                    existingKeys: Set(rows.map(\.key)), includeDiurnal: true, indices: range)
-                persist(news, now: now)
-                rows.append(contentsOf: news.map(Self.evalRow))
-                evalRowsCache = rows
-                added += news.count
+                if plan.builtins {
+                    var rows = evalRowsCache ?? fetchEvalRows()
+                    let news = EngineSelfEval.newOutcomesRL(
+                        window: window.key, cycles: completed, activityGrid: f.activityGrid, calendar: calendar,
+                        existingKeys: Set(rows.map(\.key)), includeDiurnal: true, indices: range)
+                    persist(news, now: now)
+                    rows.append(contentsOf: news.map(Self.evalRow))
+                    evalRowsCache = rows
+                    added += news.count
+                }
+                if let labClient, !labHere.isEmpty {
+                    added += await labBackfillBatch(client: labClient, window: window,
+                                                    cycles: Array(completed[range]), models: labHere,
+                                                    pass: &lab, now: now)
+                }
                 batches += 1
                 start = range.upperBound
                 try? await Task.sleep(for: pause)
             }
         }
 
-        if let marker { marker.value = fingerprint } else {
-            modelContext.insert(ClaudeCodeMeta(key: markerKey, value: fingerprint))
+        let value = labModels == nil
+            ? fingerprint
+            : Self.recordBackfillMarker(previous: marker?.value, ranBuiltins: plan.builtins,
+                                        labDone: Set(lab.models.map(\.id)).subtracting(lab.failed))
+        if let marker { marker.value = value } else {
+            modelContext.insert(ClaudeCodeMeta(key: markerKey, value: value))
         }
         try? modelContext.save()
         recordBackfill = .done
+        if let labModels {
+            labIdsBackfilled = Set(labModels.map(\.id)).subtracting(lab.failed)
+            if !lab.failed.isEmpty { labBackfillFailedAt = Date() }
+        }
         let took = SuspendingClock.now - started
+        let labNote = labModels == nil ? "" : ", lab +\(lab.added) for \(lab.models.count) model(s)"
+            + (lab.failed.isEmpty ? "" : ", lab failed: \(lab.failed.sorted().joined(separator: ","))")
         Log.write("Engine", "record backfill \(String((limitAccountId ?? "all").suffix(4))): "
-                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake")
+                  + "+\(added) outcome(s) over \(cycles) cycle(s) in \(batches) batch(es), \(took) awake" + labNote)
         return added
     }
 
-    private static func evalRow(_ n: EngineSelfEval.NewOutcome) -> EvalRow {
+    static func evalRow(_ n: EngineSelfEval.NewOutcome) -> EvalRow {
         (key: EngineEvalOutcome.makeKey(surface: n.surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey),
          surface: n.surface,
          record: EngineSelfEval.Record(method: n.method, bucket: n.bucket, periodKey: n.periodKey,
@@ -1015,20 +1134,35 @@ public actor UsageIntelligenceEngine {
         // and went with the cycle.
         let fitted = Set(scored.map(\.modelId))
         let recorded = Set(accuracy?.methods.map(\.method) ?? [])
+        // Lab helper models the roster carries or the record holds (only while
+        // a helper is configured: off, neither has any), after the built-ins.
+        var labKnown: [String] = []
+        for id in rf.roster.map(\.id) + (accuracy?.methods.map(\.method) ?? []).sorted()
+        where LabHelper.isExternal(id) && !labKnown.contains(id) { labKnown.append(id) }
         let known = (BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"])
-            .filter { id in rf.roster.contains { $0.id == id } || recorded.contains(id) }
+            .filter { id in rf.roster.contains { $0.id == id } || recorded.contains(id) } + labKnown
         let complexities = Self.rlComplexities()
         let unavailable = known.filter { !fitted.contains($0) }.map { id -> BurnTrajectory.ScoredTrajectory in
             let stat = statFor(id)
+            let member = rf.roster.first { $0.id == id }
             return BurnTrajectory.ScoredTrajectory(
-                modelId: id, complexity: complexities[id] ?? 3,
+                modelId: id, complexity: member?.complexity ?? complexities[id] ?? 3,
                 trajectory: .init(modelId: id, points: [], crossesFullAt: nil),
                 typicalAbsError: stat?.typicalAbsError ?? .infinity,
                 coverage: stat == nil ? 0 : 1, isSelected: false,
-                unavailableReason: Self.unavailableReason(inRoster: rf.roster.contains { $0.id == id },
-                                                          current: current))
+                unavailableReason: Self.unavailableReason(id: id, member: member, current: current))
         }
         return scored + unavailable
+    }
+
+    /// `unavailableReason(inRoster:current:)`, plus what a lab helper model
+    /// says about itself: the helper was unreachable, or its model gave no
+    /// forecast for this cycle.
+    static func unavailableReason(id: String, member: (any BurnTrajectory.Model)?,
+                                  current: BurnTrajectory.PartialCycle) -> String {
+        if let lab = member as? LabForecastModel { return lab.unavailableNote }
+        if member == nil, LabHelper.isExternal(id) { return "not served by the lab helper" }
+        return unavailableReason(inRoster: member != nil, current: current)
     }
 
     /// Why a known model has no line this cycle: the conditions its `fit`
@@ -1140,7 +1274,8 @@ public actor UsageIntelligenceEngine {
     /// (empty = median-of-all-candidates, the safe cold-start prior).
     static func makeFit(_ f: EngineFeatures, eodPools: [Int: [String]] = [:], rlSelection: [String: String] = [:],
                         rlAccuracy: [String: EngineSelfEval.Accuracy] = [:], rateLimits: Bool = true,
-                        rlRecords: [String: [EngineSelfEval.Record]] = [:]) -> Fit {
+                        rlRecords: [String: [EngineSelfEval.Record]] = [:],
+                        labModels: [String: [any BurnTrajectory.Model]] = [:]) -> Fit {
         var fit = Fit()
         fit.eodPools = eodPools
         fit.eodRemainder = eodRemainderCalibrator(periods: f.dailyPeriods, calendar: f.calendar, pools: eodPools)
@@ -1181,6 +1316,9 @@ public actor UsageIntelligenceEngine {
                     cycles: history, calendar: f.calendar, prior: f.activityGrid)
                 roster.append(DiurnalBurnModel(rate: table, calendar: f.calendar))
             }
+            // Lab helper models (dev builds), after every built-in: on an exact
+            // tie anywhere the roster is scanned in order, the built-in stands.
+            roster += labModels[key] ?? []
 
             // Prefer the accumulated per-user track record (`rlSelection`);
             // fall back to a cold on-the-fly backtest, then a hardcoded default
@@ -1665,7 +1803,7 @@ public actor UsageIntelligenceEngine {
         return config.url
     }
 
-    private var limitAccountId: String? {
+    var limitAccountId: String? {
         scope.accountId ?? Account.activeId(in: modelContext)
     }
 
@@ -1841,7 +1979,7 @@ public actor UsageIntelligenceEngine {
     /// Scoping happens at exactly two points — here on the way in and in
     /// `persist` on the way out — so everything between them works in base
     /// surface ids and needs no notion of accounts at all.
-    private func fetchEvalRows() -> [EvalRow] {
+    func fetchEvalRows() -> [EvalRow] {
         // Only this scope's rows reach memory. A scoped surface id ends in
         // `#<account>` and a global one has no `#` (`EngineScope.suffix`), so
         // `contains` narrows the fetch; `unqualify` below still makes the
@@ -1868,7 +2006,7 @@ public actor UsageIntelligenceEngine {
         }
     }
 
-    private func persist(_ news: [EngineSelfEval.NewOutcome], now: Date) {
+    func persist(_ news: [EngineSelfEval.NewOutcome], now: Date) {
         guard !news.isEmpty else { return }
         for n in news {
             modelContext.insert(EngineEvalOutcome(

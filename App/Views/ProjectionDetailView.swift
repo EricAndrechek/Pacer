@@ -214,7 +214,18 @@ struct ProjectionDetailView: View {
         "diurnal-rate": .teal,
         "recent-rate": .indigo,
     ]
-    private func color(_ id: String) -> Color { Self.palette[id] ?? .gray }
+    private func color(_ id: String) -> Color {
+        Self.palette[id] ?? (LabHelper.isExternal(id) ? Self.labColor(id) : .gray)
+    }
+
+    /// Lab helper models (dev builds) get a stable colour of their own, so two
+    /// of them are not both gray. Red stays reserved for a claimed cap hit.
+    private static let labPalette: [Color] = [.mint, .cyan, .brown, .yellow]
+    private static func labColor(_ id: String) -> Color {
+        var hash: UInt64 = 0xcbf29ce484222325           // FNV-1a: stable across launches
+        for byte in id.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return labPalette[Int(hash % UInt64(labPalette.count))]
+    }
 
     /// The models with a line this cycle. The chart, its domain and spread are
     /// built from these; the table lists every model (#307).
@@ -656,7 +667,8 @@ struct ModelInfoGallery: View {
     @State private var accuracy: EngineSelfEval.Accuracy?
 
     var body: some View {
-        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"]
+        // Plus any lab helper models this launch has heard of (dev builds).
+        let ids = BurnTrajectory.defaultModels.map(\.id) + ["diurnal-rate"] + LabModelCatalog.shared.ids
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 330), alignment: .top)],
                   alignment: .leading, spacing: 12) {
             ForEach(ids, id: \.self) { id in

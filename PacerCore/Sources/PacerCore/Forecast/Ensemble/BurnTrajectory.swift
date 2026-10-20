@@ -270,7 +270,8 @@ public enum BurnTrajectory {
         case "kalman-trend": return "Smoothed trend (Kalman filter)"
         case "recent-rate": return "Latest pace, held"
         case "diurnal-rate": return "Your daily rhythm"
-        default: return modelId
+        // A lab helper model (dev builds): the name its helper served.
+        default: return LabModelCatalog.shared.info(modelId)?.displayName ?? modelId
         }
     }
 
@@ -284,7 +285,7 @@ public enum BurnTrajectory {
         case "kalman-trend": return "A filter that tracks your level and pace through noisy readings."
         case "recent-rate": return "Your most recent rise, held at the same pace until the reset."
         case "diurnal-rate": return "Your usual pace at each hour of each weekday, added up to the reset."
-        default: return nil
+        default: return LabModelCatalog.shared.info(modelId)?.summary
         }
     }
 
@@ -321,7 +322,7 @@ public enum BurnTrajectory {
                 + "left until the reset, so quiet nights and weekends add little. One scale factor matches it to "
                 + "this window's pace so far."
         default:
-            return nil
+            return LabModelCatalog.shared.info(modelId)?.howItWorks
         }
     }
 

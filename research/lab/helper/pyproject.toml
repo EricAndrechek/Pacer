@@ -1,0 +1,11 @@
+[project]
+name = "pacer-lab-helper"
+version = "0.1.0"
+description = "Serves research-lab forecasters to a dev build of Pacer over loopback HTTP, so they compete live in the app."
+requires-python = ">=3.11"
+# Standard library only. A predictor that needs numpy, pandas, lightgbm …
+# adds it here with `uv add <package>` (see README).
+dependencies = []
+
+[tool.uv]
+package = false
