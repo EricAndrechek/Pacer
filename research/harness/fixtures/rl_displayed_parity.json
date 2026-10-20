@@ -791,6 +791,13 @@
   },
   {
    "cycle": 0,
+   "bucket": "cut=0.20|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
    "bucket": "cut=0.30|v2",
    "method": "linear-recent",
    "predicted": 59.99999999999998,
@@ -822,6 +829,13 @@
    "bucket": "cut=0.30|v2",
    "method": "kalman-trend",
    "predicted": 59.94557410223403,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
+   "bucket": "cut=0.30|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
    "truth": 60.0
   },
   {
@@ -861,6 +875,13 @@
   },
   {
    "cycle": 0,
+   "bucket": "cut=0.40|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
    "bucket": "cut=0.50|v2",
    "method": "linear-recent",
    "predicted": 59.999999999999936,
@@ -892,6 +913,13 @@
    "bucket": "cut=0.50|v2",
    "method": "kalman-trend",
    "predicted": 60.019676262492695,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
+   "bucket": "cut=0.50|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
    "truth": 60.0
   },
   {
@@ -931,6 +959,13 @@
   },
   {
    "cycle": 0,
+   "bucket": "cut=0.60|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
    "bucket": "cut=0.70|v2",
    "method": "linear-recent",
    "predicted": 59.99999999999996,
@@ -962,6 +997,13 @@
    "bucket": "cut=0.70|v2",
    "method": "kalman-trend",
    "predicted": 60.0042811273628,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
+   "bucket": "cut=0.70|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
    "truth": 60.0
   },
   {
@@ -1001,6 +1043,13 @@
   },
   {
    "cycle": 0,
+   "bucket": "cut=0.80|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
    "bucket": "cut=0.90|v2",
    "method": "linear-recent",
    "predicted": 60.00000000000003,
@@ -1032,6 +1081,13 @@
    "bucket": "cut=0.90|v2",
    "method": "kalman-trend",
    "predicted": 60.000000430885365,
+   "truth": 60.0
+  },
+  {
+   "cycle": 0,
+   "bucket": "cut=0.90|v2",
+   "method": "recent-rate",
+   "predicted": 60.0,
    "truth": 60.0
   },
   {
@@ -1071,6 +1127,13 @@
   },
   {
    "cycle": 1,
+   "bucket": "cut=0.20|v2",
+   "method": "recent-rate",
+   "predicted": 10.0,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
    "bucket": "cut=0.30|v2",
    "method": "linear-recent",
    "predicted": 9.999985263157889,
@@ -1102,6 +1165,13 @@
    "bucket": "cut=0.30|v2",
    "method": "kalman-trend",
    "predicted": 9.990911036592259,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
+   "bucket": "cut=0.30|v2",
+   "method": "recent-rate",
+   "predicted": 10.0,
    "truth": 43.0
   },
   {
@@ -1141,6 +1211,13 @@
   },
   {
    "cycle": 1,
+   "bucket": "cut=0.40|v2",
+   "method": "recent-rate",
+   "predicted": 10.0,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
    "bucket": "cut=0.50|v2",
    "method": "linear-recent",
    "predicted": 15.63156842105261,
@@ -1172,6 +1249,13 @@
    "bucket": "cut=0.50|v2",
    "method": "kalman-trend",
    "predicted": 16.332162398224924,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
+   "bucket": "cut=0.50|v2",
+   "method": "recent-rate",
+   "predicted": 20.5,
    "truth": 43.0
   },
   {
@@ -1211,6 +1295,13 @@
   },
   {
    "cycle": 1,
+   "bucket": "cut=0.60|v2",
+   "method": "recent-rate",
+   "predicted": 37.0,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
    "bucket": "cut=0.70|v2",
    "method": "linear-recent",
    "predicted": 41.42104631578943,
@@ -1242,6 +1333,13 @@
    "bucket": "cut=0.70|v2",
    "method": "kalman-trend",
    "predicted": 40.162071251324925,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
+   "bucket": "cut=0.70|v2",
+   "method": "recent-rate",
+   "predicted": 43.0,
    "truth": 43.0
   },
   {
@@ -1281,6 +1379,13 @@
   },
   {
    "cycle": 1,
+   "bucket": "cut=0.80|v2",
+   "method": "recent-rate",
+   "predicted": 43.0,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
    "bucket": "cut=0.90|v2",
    "method": "linear-recent",
    "predicted": 42.99999789473687,
@@ -1312,6 +1417,13 @@
    "bucket": "cut=0.90|v2",
    "method": "kalman-trend",
    "predicted": 43.25514192679077,
+   "truth": 43.0
+  },
+  {
+   "cycle": 1,
+   "bucket": "cut=0.90|v2",
+   "method": "recent-rate",
+   "predicted": 43.0,
    "truth": 43.0
   },
   {
@@ -1351,6 +1463,13 @@
   },
   {
    "cycle": 2,
+   "bucket": "cut=0.20|v2",
+   "method": "recent-rate",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
    "bucket": "cut=0.30|v2",
    "method": "linear-recent",
    "predicted": 100.0,
@@ -1381,6 +1500,13 @@
    "cycle": 2,
    "bucket": "cut=0.30|v2",
    "method": "kalman-trend",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
+   "bucket": "cut=0.30|v2",
+   "method": "recent-rate",
    "predicted": 100.0,
    "truth": 100.0
   },
@@ -1421,6 +1547,13 @@
   },
   {
    "cycle": 2,
+   "bucket": "cut=0.40|v2",
+   "method": "recent-rate",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
    "bucket": "cut=0.50|v2",
    "method": "linear-recent",
    "predicted": 100.0,
@@ -1451,6 +1584,13 @@
    "cycle": 2,
    "bucket": "cut=0.50|v2",
    "method": "kalman-trend",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
+   "bucket": "cut=0.50|v2",
+   "method": "recent-rate",
    "predicted": 100.0,
    "truth": 100.0
   },
@@ -1491,6 +1631,13 @@
   },
   {
    "cycle": 2,
+   "bucket": "cut=0.60|v2",
+   "method": "recent-rate",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
    "bucket": "cut=0.70|v2",
    "method": "linear-recent",
    "predicted": 100.0,
@@ -1526,6 +1673,13 @@
   },
   {
    "cycle": 2,
+   "bucket": "cut=0.70|v2",
+   "method": "recent-rate",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
    "bucket": "cut=0.80|v2",
    "method": "linear-recent",
    "predicted": 100.0,
@@ -1561,6 +1715,13 @@
   },
   {
    "cycle": 2,
+   "bucket": "cut=0.80|v2",
+   "method": "recent-rate",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
    "bucket": "cut=0.90|v2",
    "method": "linear-recent",
    "predicted": 100.0,
@@ -1591,6 +1752,13 @@
    "cycle": 2,
    "bucket": "cut=0.90|v2",
    "method": "kalman-trend",
+   "predicted": 100.0,
+   "truth": 100.0
+  },
+  {
+   "cycle": 2,
+   "bucket": "cut=0.90|v2",
+   "method": "recent-rate",
    "predicted": 100.0,
    "truth": 100.0
   }

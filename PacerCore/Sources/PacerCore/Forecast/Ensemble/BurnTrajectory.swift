@@ -99,6 +99,7 @@ public enum BurnTrajectory {
             DampedAcceleration(),
             Saturating(),
             KalmanTrend(),
+            RecentRate(),
         ]
     }
 
@@ -250,6 +251,7 @@ public enum BurnTrajectory {
         case "damped-acceleration": return "Damped acceleration"
         case "saturating": return "Saturating"
         case "kalman-trend": return "Smoothed trend"
+        case "recent-rate": return "Last hour's rate"
         case "diurnal-rate": return "Your daily rhythm"
         default: return modelId
         }

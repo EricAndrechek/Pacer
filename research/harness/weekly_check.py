@@ -34,7 +34,8 @@ HERE = Path(__file__).resolve().parent
 REPORTS = HERE / "reports"
 BASELINES = HERE / "baselines.json"
 
-SHADOWS = {"rl-five_hour": ["kalman-trend", "diurnal-rate"], "rl-seven_day": ["kalman-trend"]}
+SHADOWS = {"rl-five_hour": ["kalman-trend", "diurnal-rate", "recent-rate"],
+           "rl-seven_day": ["kalman-trend", "recent-rate"]}
 COVERAGE_OK = (0.70, 0.92)
 MIN_BANDED_FOR_ALARM = 20
 MEDIAN_WORSEN_FACTOR = 1.25
