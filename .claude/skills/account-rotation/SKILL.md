@@ -12,6 +12,18 @@ A detached bash controller does the switching. No model is needed for that: it
 reads usage every minute, decides, and runs `cswap switch`. Your job is to keep
 it running, watch what it does, and handle the people and sessions around it.
 
+## Requirements
+
+- macOS with more than one Claude login managed by
+  [claude-swap](https://github.com/realiti4/claude-swap) (`cswap`, a version
+  with `cswap list --json`). Without it there is nothing to rotate.
+- Pacer, for burn rates and fresher readings through its local API
+  (`http://127.0.0.1:7223/metrics`). Without it the controller still runs on
+  cswap's readings and assumes `BURN_UNKNOWN`.
+- bash 4+ at `/opt/homebrew/bin/bash` (associative arrays), `jq`, `python3`.
+- `analysis/` only: `uv` (it runs with `uv run --with duckdb --with pyarrow`)
+  and the `duckdb` CLI for the queries.
+
 ## Commands
 
 ```sh
