@@ -119,6 +119,10 @@ each curling it. So it is **one poller, many cheap readers**:
   and reads Pacer, the rest wait up to ~3 s for its answer — so a lane that
   runs for an hour never goes blind, and a hundred lanes still cost one read
   per staleness period. `--no-refresh` keeps the pure file read.
+- **A GO lasts only while there is room.** `gate` records when the soonest
+  binding window reaches its limit at its recent burn (within `--max-age`),
+  and `status` prints `go (until 22:41Z)` and re-gates after that: near a
+  limit, every few minutes instead of every 15.
 
 Exit codes:
 
@@ -140,8 +144,8 @@ same as each other:
   the user**: the run is unpaced and one line of configuration would fix it.
 - **3, unknown or stale** — the verdict is about another model or margin,
   Pacer could not be read to refresh it, or (with `--no-refresh`) no gate has
-  run, the last verdict is older than `--max-age` (default 15 min), or it was a
-  pause whose window has reset since. A verdict has a shelf life: an
+  run, the last verdict is older than `--max-age` (default 15 min), it was a
+  pause whose window has reset since, or a GO past its projected expiry. A verdict has a shelf life: an
   orchestrator that died an hour ago left its last word on disk, and obeying
   it is obeying a window that has since moved.
 
@@ -262,8 +266,8 @@ For a big fan-out:
    ~/.claude/skills/pacer/pacer wait
    ```
 
-   It judges by the same `--cap`, `--margin`, `--eta`, `--model` and
-   `--window` as the gate that paused (they are in the state file), unless
+   It judges by the same `--cap`, `--margin`, `--eta`, `--model`,
+   `--window` and `--resume-headroom` as the gate that paused (they are in the state file), unless
    you pass your own, and it holds **the window that tripped**, at the limit
    it tripped at. It blocks *across turns* until there is headroom again,
    then **exits — which re-invokes you**. Three things end the wait, and it
@@ -278,7 +282,11 @@ For a big fan-out:
    A safe limit that rises while you wait (paused sessions cut the burn) is
    none of these, so it does not end the pause. The switch is the common one
    under sequential accounts: it restores headroom immediately, and Pacer
-   pushes it to a waiting process within seconds. On wake: read the manifest,
+   pushes it to a waiting process within seconds. A switch onto a login with
+   little room left does not count: the window that paused needs
+   `--resume-headroom` points below its limit there (default: 20 minutes at
+   the higher of the old and new login's recent burn, at least 5), or `wait`
+   holds on the new login and says why. On wake: read the manifest,
    re-dispatch the in-flight and
    pending items (in-flight ones resume from their checkpoint commits), and
    merge the finished worktrees as usual.
@@ -295,7 +303,7 @@ For a big fan-out:
 > (`git add -A && git commit -m "pace-checkpoint"`), append one line to
 > `<MANIFEST_PATH>` saying exactly where you stopped and what is left, and
 > return `RESUME-NEEDED: <that line>`. Do not begin new expensive work. If it
-> prints `go`, proceed. If it prints `unknown` or `stale`, proceed but say so
+> prints `go` (or `go (until …)`), proceed. If it prints `unknown` or `stale`, proceed but say so
 > in your final message — nobody is pacing this. It is a local file read — call
 > it freely.
 
@@ -379,12 +387,18 @@ Write nothing else there: no notes, plans, scripts, logs or directories.
   this. A further-out reset returns exit 20 so you checkpoint and stop instead
   of sleeping for days.
 - `--max-age S` (default 900 = 15 min): how old a state file may be before
-  `status` re-gates it (or, with `--no-refresh`, calls it stale). It is also
-  how long `wait` holds a pause through an unreadable API before giving up.
+  `status` re-gates it (or, with `--no-refresh`, calls it stale). A GO's own
+  projected expiry (`goUntil` in the state file) can only shorten it. It is
+  also how long `wait` holds a pause through an unreadable API before giving up.
+- `--resume-headroom N|auto` (default auto; `PACE_RESUME_HEADROOM`): the points
+  `wait` needs below the paused window's limit on a newly switched-to login
+  before it resumes onto it. `auto` is 20 minutes at the higher of the old
+  and new login's recent burn (the sessions move with the work), at least 5;
+  `0` resumes on any room.
 - **Short windows vs long ones:** a 5-hour window is the one you actually wait
   out. A weekly cap — account-wide or per-model — is usually stop-and-notify.
 - Env: `PACER_API` (default `http://127.0.0.1:7223`), `PACE_TOKEN` (if Pacer
-  requires a bearer), `PACE_MODEL`, `PACE_MARGIN`, `PACE_ACCOUNT`, `PACE_RUN`
+  requires a bearer), `PACE_MODEL`, `PACE_MARGIN`, `PACE_RESUME_HEADROOM`, `PACE_ACCOUNT`, `PACE_RUN`
   (names a per-run state file), `PACE_STATE` (default this session's
   `~/.claude/pace/state-session-<id>.json`, or `state.json` outside a session).
   `CLAUDE_CONFIG_DIR` is read if the session has one, to pick the right

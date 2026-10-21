@@ -311,7 +311,7 @@ struct PaceCommandTests {
         let box = try PaceSandbox(metrics: Self.metrics)
         let result = runPace(box, ["status"])
         #expect(result.status == 0, "\(result.out)")
-        #expect(result.out.hasSuffix("go\n"), "\(result.out)")
+        #expect(result.out.contains("\ngo (until "), "\(result.out)")
         #expect(result.out.contains("no verdict yet — re-gated"))
         #expect(box.stateText.contains("\"status\": \"go\""))
     }
@@ -912,6 +912,364 @@ struct PaceCommandTests {
         #expect(PaceRules.cycleLength(identity: "something||cli") == 18_000)
     }
 
+    // MARK: - A GO runs out near the limit (#313)
+
+    /// 5h at 88%, climbing 45%/h, read a minute ago: a safe limit of 95, so
+    /// 7 points of headroom, which 45%/h uses up in 9 minutes 20 seconds.
+    private static func nearing(_ ratio: String = "0.88", burn: String = "45",
+                                resets: String = "3600") -> String {
+        """
+        pacer_rate_limit_used_ratio{account="org-work",window="five_hour"} \(ratio)
+        pacer_rate_limit_reset_seconds{account="org-work",window="five_hour"} \(resets)
+        pacer_rate_limit_recent_burn_percent_per_hour{account="org-work",window="five_hour"} \(burn)
+        pacer_rate_limit_sample_age_seconds{account="org-work",window="five_hour"} 60
+        pacer_rate_limit_used_ratio{account="org-work",window="seven_day"} 0.30
+        pacer_rate_limit_reset_seconds{account="org-work",window="seven_day"} 300000
+        pacer_account_info{account="org-work",name="w",active="true"} 1
+        """
+    }
+
+    /// Seconds from a verdict's `updatedAt` to its `goUntil`.
+    private func goLife(_ box: PaceSandbox) throws -> TimeInterval {
+        let state = PaceStateFile(path: box.stateURL.path)
+        let until = try #require(state.goUntil, "\(box.stateText)")
+        let written = try #require(state.quoted("updatedAt").flatMap(PaceFormat.isoFormatter.date(from:)))
+        return until.timeIntervalSince(written)
+    }
+
+    /// The issue's numbers: 88% used against a 95% limit at 45%/h is wrong
+    /// after about 9.3 minutes, and lanes used to obey it for 15.
+    @Test func aGoNearTheLimitRunsOutWhenTheWindowWouldReachIt() throws {
+        let box = try PaceSandbox(metrics: Self.nearing())
+        let gate = runPace(box, ["gate"])
+        #expect(gate.status == 0, "\(gate.out)")
+        #expect(gate.out.contains("(safe limit 5h 95%, 7d 98%)"), "\(gate.out)")
+        #expect(gate.out.contains("5h reaches its 95% limit in ~9m at 45%/h."), "\(gate.out)")
+        let life = try goLife(box)
+        #expect(abs(life - 560) <= 1, "\(life)")
+        let until = try #require(PaceStateFile(path: box.stateURL.path).goUntil)
+        #expect(gate.out.contains("Good until \(PaceFormat.utcClock(until))"), "\(gate.out)")
+
+        // Still good after 9 minutes, and says until when.
+        let fresh = runPace(box, ["status", "--no-refresh"], later: 530)
+        #expect(fresh.status == 0)
+        #expect(fresh.out == "go (until \(PaceFormat.utcClock(until)))\n", "\(fresh.out)")
+        // Spent after 10, with 5 minutes of its old shelf life to go.
+        let spent = runPace(box, ["status", "--no-refresh"], later: 600)
+        #expect(spent.status == 3, "\(spent.out)")
+        #expect(spent.out.hasPrefix("stale: the go verdict ran out at \(PaceFormat.utcClock(until))"), "\(spent.out)")
+    }
+
+    @Test func aSpentGoIsReGatedOnceForEveryReader() throws {
+        let box = try PaceSandbox(metrics: Self.nearing())
+        #expect(runPace(box, ["gate"]).status == 0)
+        // Ten minutes on, the window is where the projection put it.
+        try box.setMetrics(Self.nearing("0.955"))
+        let log = PaceRequestLog()
+        let result = runPace(box, ["status"], later: 600, onGet: log.record)
+        #expect(result.status == 10, "\(result.out)")
+        #expect(result.out.contains("the go verdict ran out at"), "\(result.out)")
+        #expect(result.out.contains("— re-gated."), "\(result.out)")
+        #expect(result.out.contains("paused: 5h at 95.5% >= safe limit 95%"), "\(result.out)")
+        #expect(log.count("metrics") == 1)
+        #expect(box.stateText.contains("\"goUntil\": null"))
+    }
+
+    @Test func withRoomAGoKeepsItsShelfLife() throws {
+        let box = try PaceSandbox(metrics: Self.nearing("0.30", burn: "10"))
+        let gate = runPace(box, ["gate"])
+        #expect(gate.status == 0)
+        #expect(!gate.out.contains("Good until"), "the shelf life decides, so the line is as it was:\n\(gate.out)")
+        #expect(abs(try goLife(box) - 900) <= 1)
+        #expect(runPace(box, ["status", "--no-refresh"], later: 880).status == 0)
+        // No burn at all: the shelf life, as before.
+        let idle = try PaceSandbox(metrics: Self.nearing("0.30", burn: "").replacingOccurrences(
+            of: "pacer_rate_limit_recent_burn_percent_per_hour{account=\"org-work\",window=\"five_hour\"} \n", with: ""))
+        #expect(runPace(idle, ["gate", "--max-age", "600"]).status == 0)
+        #expect(abs(try goLife(idle) - 600) <= 1)
+    }
+
+    @Test func aGoAtTheLimitStillLastsAMinute() throws {
+        // A tenth of a point at 45%/h is 8 seconds.
+        let box = try PaceSandbox(metrics: Self.nearing("0.949"))
+        #expect(runPace(box, ["gate"]).status == 0)
+        #expect(abs(try goLife(box) - PaceRules.minimumGoLife) <= 1)
+    }
+
+    @Test func aGoUnderAHorizonRunsOutWhenTheFillComesInsideIt() throws {
+        let box = try PaceSandbox(metrics: Self.nearing("0.30", burn: "10") + """
+
+        pacer_rate_limit_will_hit{account="org-work",window="five_hour"} 1
+        pacer_rate_limit_hit_eta_seconds{account="org-work",window="five_hour"} 3900
+        """)
+        let gate = runPace(box, ["gate", "--eta", "1h"])
+        #expect(gate.status == 0, "\(gate.out)")
+        #expect(gate.out.contains("5h is then projected to fill within 1h 0m."), "\(gate.out)")
+        #expect(abs(try goLife(box) - 300) <= 1)
+    }
+
+    @Test func aWaitsResumeCarriesAnExpiryAndAPauseNone() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        #expect(runPace(box, ["gate"]).status == 10)
+        #expect(box.stateText.contains("\"goUntil\": null"))
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.burning("0.03", burn: "12", resets: "18000")) }
+        })
+        #expect(result.status == 0)
+        // 3% to a 99% limit at 12%/h is eight hours: the shelf life decides.
+        #expect(abs(try goLife(box) - 900) <= 1)
+    }
+
+    @Test func aVerdictWithoutAnExpiryReadsAsItDid() throws {
+        let box = try PaceSandbox(metrics: Self.nearing())
+        #expect(runPace(box, ["gate"]).status == 0)
+        // As a verdict written before there was a `goUntil`.
+        try box.stateText.replacingOccurrences(of: #"  "goUntil": "[^"]+",\n"#, with: "", options: .regularExpression)
+            .write(to: box.stateURL, atomically: true, encoding: .utf8)
+        #expect(!box.stateText.contains("goUntil"))
+        let result = runPace(box, ["status", "--no-refresh"], later: 600)
+        #expect(result.status == 0)
+        #expect(result.out == "go\n")
+    }
+
+    private static func window(_ label: String, identity: String, percent: Double, resets: String? = "3600",
+                               recent: String? = nil, willHit: String = "0", hitEta: String? = nil) -> PaceRow {
+        PaceRow(account: "org", identity: identity, label: label, model: "", percent: percent,
+                resetsIn: resets, hitEta: hitEta, burn: nil, willHit: willHit, recentBurn: recent, sampleAge: "0")
+    }
+
+    @Test func goExpiryTakesTheSoonestWindowThatGetsThereThisCycle() {
+        let fiveHour = Self.window("5h", identity: "five_hour", percent: 80, recent: "30")
+        let weekly = Self.window("7d", identity: "seven_day", percent: 97, resets: "300000", recent: "1")
+        // 5h: limit 100 − ceil(30 × 300 / 3600 = 2.5) = 97, 17 points at 30%/h
+        // is 34 minutes; 7d: limit 99, 2 points at 1%/h is two hours.
+        let soonest = PaceRules.goExpiry([weekly, fiveHour], cap: .safe, horizon: 0)
+        #expect(soonest?.label == "5h")
+        #expect(soonest.map { abs($0.seconds - 2_040) < 0.01 } == true, "\(String(describing: soonest))")
+        // A window that resets before it fills does not end the verdict.
+        let resetsFirst = Self.window("5h", identity: "five_hour", percent: 80, resets: "600", recent: "30")
+        #expect(PaceRules.goExpiry([resetsFirst, weekly], cap: .safe, horizon: 0)?.label == "7d")
+        // Nor does one already due, or one not climbing.
+        let due = Self.window("5h", identity: "five_hour", percent: 96, resets: "0", recent: "30")
+        let falling = Self.window("5h", identity: "five_hour", percent: 50, recent: "-4")
+        #expect(PaceRules.goExpiry([due, falling], cap: .safe, horizon: 0) == nil)
+        // A cap and a margin move the limit it is reached at.
+        #expect(PaceRules.goExpiry([fiveHour], cap: .value("85"), horizon: 0).map { abs($0.seconds - 600) < 0.01 } == true)
+        #expect(PaceRules.goExpiry([fiveHour], cap: .safe, margin: 2, horizon: 0).map { abs($0.seconds - 1_800) < 0.01 } == true)
+    }
+
+    @Test func goLifeIsBetweenAMinuteAndTheShelfLife() {
+        func expiry(_ s: Double) -> PaceRules.Expiry { .init(seconds: s, label: "5h", why: "limit", limit: 95, burn: 45) }
+        #expect(PaceRules.goLife(nil, maxAge: 900) == 900)
+        #expect(PaceRules.goLife(expiry(560), maxAge: 900) == 560)
+        #expect(PaceRules.goLife(expiry(5_000), maxAge: 900) == 900)
+        #expect(PaceRules.goLife(expiry(8), maxAge: 900) == 60)
+        #expect(PaceRules.goLife(expiry(8), maxAge: 30) == 30)
+    }
+
+    @Test func utcClockIsTheTimeOfDayInUTC() {
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: 1_800_000_000)) == "08:00Z")
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: 1_800_000_000 + 14 * 3_600 + 41 * 60 + 59)) == "22:41Z")
+        #expect(PaceFormat.utcClock(Date(timeIntervalSince1970: -60)) == "23:59Z")
+    }
+
+    // MARK: - A switch resumes only onto a login with room (#313)
+
+    /// The login switched to: 5h at `ratio`, resetting in 15 minutes.
+    private static func switched(to ratio: String, recent: String? = "0", resets: String = "900") -> String {
+        var text = """
+        pacer_rate_limit_used_ratio{account="org-home",window="five_hour"} \(ratio)
+        pacer_rate_limit_reset_seconds{account="org-home",window="five_hour"} \(resets)
+        pacer_rate_limit_sample_age_seconds{account="org-home",window="five_hour"} 0
+        pacer_rate_limit_used_ratio{account="org-home",window="seven_day"} 0.40
+        pacer_rate_limit_reset_seconds{account="org-home",window="seven_day"} 300000
+        pacer_account_info{account="org-home",name="h",active="true"} 1
+        """
+        if let recent {
+            text += "\npacer_rate_limit_recent_burn_percent_per_hour{account=\"org-home\",window=\"five_hour\"} \(recent)"
+        }
+        return text
+    }
+
+    /// The issue's second case: every waiting session resumed onto a login
+    /// at 97%, under its 99% limit, and filled it in four minutes.
+    @Test func aSwitchOntoANearlyFullLoginDoesNotResume() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+            // That login's 5h window resets.
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(result.status == 0, "\(result.out)")
+        #expect(polls == 3, "it resumed onto 97%:\n\(result.out)")
+        // The new login is idle (0%/h); the sessions about to move were
+        // burning 36%/h, and 20 minutes of that is 12 points.
+        #expect(result.out.contains("account switched (org-work → org-home), but 5h at 97% on org-home is 2 points below its 99% limit, short of the 12 a resume needs (20m at the old login's 36%/h) — holding for more room or its reset in ~15m"),
+                "\(result.out)")
+        #expect(result.out.components(separatedBy: "account switched").count == 2, "said once:\n\(result.out)")
+        #expect(!result.out.contains("would pass the limit now"), "\(result.out)")
+        #expect(result.out.contains("pace: reset — the 5h window rolled over"), "\(result.out)")
+    }
+
+    @Test func aSwitchHoldIsWhatStatusReads() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var read = ""
+        _ = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+            if n == 2 { read = runPace(box, ["status", "--no-refresh"]).out }
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(read.hasPrefix("paused: waiting for room: 5h at 97% on org-home is 2 points below its 99% limit"), "\(read)")
+    }
+
+    @Test func aSwitchOntoALoginWithRoomResumes() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let result = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.60")) }
+        })
+        #expect(result.status == 0)
+        #expect(polls == 1, "\(result.out)")
+        #expect(result.out.contains("account switched (org-work → org-home) — headroom on the new login (5h 60%, 7d 40%). Resume."),
+                "\(result.out)")
+    }
+
+    @Test func theRoomAResumeNeedsIsTwentyMinutesOfBurn() throws {
+        // 85% against 96% (45%/h, read just now): 11 points, where 20
+        // minutes at 45%/h is 15.
+        let busy = Self.switched(to: "0.85", recent: "45")
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let held = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(busy) }
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(polls == 3, "\(held.out)")
+        #expect(held.out.contains("5h at 85% on org-home is 11 points below its 96% limit, short of the 15 a resume needs (20m at 45%/h)"),
+                "\(held.out)")
+        // A fixed headroom is what it says.
+        try box.setMetrics(Self.burning())
+        let fixed = runPace(box, ["wait", "--interval", "5", "--resume-headroom", "10"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(busy) }
+        })
+        #expect(fixed.status == 0)
+        #expect(fixed.out.contains("headroom on the new login"), "\(fixed.out)")
+    }
+
+    @Test func withoutABurnOnTheNewLoginTheOldLoginsRateDecides() throws {
+        // 88% against 98%: 10 points. org-work was burning 36%/h: 12 needed.
+        let quiet = Self.switched(to: "0.88", recent: nil)
+        let box = try PaceSandbox(metrics: Self.burning())
+        var polls = 0
+        let held = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(quiet) }
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(polls == 3, "\(held.out)")
+        #expect(held.out.contains("5h at 88% on org-home is 10 points below its 98% limit, short of the 12 a resume needs (20m at the old login's 36%/h)"),
+                "\(held.out)")
+        try box.setMetrics(Self.burning())
+        let env = runPace(box, ["wait", "--interval", "5"], extra: ["PACE_RESUME_HEADROOM": "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(quiet) }
+        })
+        #expect(env.status == 0)
+        #expect(env.out.contains("headroom on the new login"), "\(env.out)")
+    }
+
+    @Test func noResumeHeadroomResumesOnAnyRoomAsBefore() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        let result = runPace(box, ["wait", "--interval", "5", "--resume-headroom", "0"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+        })
+        #expect(result.status == 0)
+        #expect(result.out.contains("headroom on the new login"), "\(result.out)")
+    }
+
+    @Test func aResumeHeadroomMustBeWholePointsOrAuto() throws {
+        let box = try PaceSandbox(metrics: Self.metrics)
+        for bad in ["-1", "lots", "2.5"] {
+            let result = runPace(box, ["wait", "--resume-headroom", bad])
+            #expect(result.status == 1, "\(bad): \(result.out)")
+            #expect(result.out.contains("--resume-headroom takes a whole number"), "\(result.out)")
+        }
+        let env = runPace(box, ["wait"], extra: ["PACE_RESUME_HEADROOM": "x"])
+        #expect(env.status == 1)
+        #expect(env.out.contains("PACE_RESUME_HEADROOM"))
+    }
+
+    @Test func resumeHeadroomRule() {
+        typealias Room = PaceRules.Room
+        let row = Self.window("5h", identity: "five_hour", percent: 90, recent: "45")
+        #expect(PaceRules.resumeHeadroom(row, fixed: nil, oldBurn: nil) == Room(points: 15, burn: 45))
+        #expect(PaceRules.resumeHeadroom(row, fixed: nil, oldBurn: 30) == Room(points: 15, burn: 45))
+        #expect(PaceRules.resumeHeadroom(row, fixed: 3, oldBurn: 90) == Room(points: 3))
+        // The higher of the two: the workload moves with the sessions.
+        let idle = Self.window("5h", identity: "five_hour", percent: 90, recent: "0")
+        #expect(PaceRules.resumeHeadroom(idle, fixed: nil, oldBurn: 60) == Room(points: 20, burn: 60, fromOldLogin: true))
+        let unknown = Self.window("5h", identity: "five_hour", percent: 90)
+        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, oldBurn: 60) == Room(points: 20, burn: 60, fromOldLogin: true))
+        #expect(PaceRules.resumeHeadroom(unknown, fixed: nil, oldBurn: nil) == Room(points: 5))
+        #expect(PaceRules.resumeHeadroom(idle, fixed: nil, oldBurn: 12) == Room(points: 5), "4 points: the floor")
+    }
+
+    /// The old login's burn counts even where the new login reports its own:
+    /// an idle login's 0%/h says nothing about the sessions about to arrive.
+    @Test func theOldLoginsBurnDecidesWhenItIsTheHigher() throws {
+        let fast = Self.burning(burn: "45")   // 97% against 96%: paused
+        // 90% against 99%, idle: 9 points, where 20 minutes at 45%/h is 15.
+        let box = try PaceSandbox(metrics: fast)
+        var polls = 0
+        let held = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            polls = n
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.90")) }
+            if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+        })
+        #expect(held.status == 0)
+        #expect(polls == 3, "it resumed onto 90%:\n\(held.out)")
+        #expect(held.out.contains("5h at 90% on org-home is 9 points below its 99% limit, short of the 15 a resume needs (20m at the old login's 45%/h)"),
+                "\(held.out)")
+        // 60% has 39 points: room.
+        try box.setMetrics(fast)
+        let roomy = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.60")) }
+        })
+        #expect(roomy.status == 0)
+        #expect(roomy.out.contains("account switched (org-work → org-home) — headroom on the new login"), "\(roomy.out)")
+    }
+
+    @Test func aBareWaitTakesTheGatesResumeHeadroom() throws {
+        let box = try PaceSandbox(metrics: Self.burning())
+        #expect(runPace(box, ["gate"]).status == 10)
+        #expect(box.stateText.contains("\"resumeHeadroom\": \"auto\""), "\(box.stateText)")
+        #expect(runPace(box, ["gate", "--resume-headroom", "0"]).status == 10)
+        #expect(box.stateText.contains("\"resumeHeadroom\": 0,"), "\(box.stateText)")
+        // The gate said 0, so 97% on the new login is room enough.
+        let bare = runPace(box, ["wait", "--interval", "5"], onSleep: { n in
+            if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+        })
+        #expect(bare.status == 0)
+        #expect(bare.out.contains("waiting by the gate's settings (--resume-headroom 0)"), "\(bare.out)")
+        #expect(bare.out.contains("headroom on the new login"), "\(bare.out)")
+        // The wait's own setting, flag or environment, beats the gate's.
+        for own in [(["--resume-headroom", "auto"], [String: String]()), ([], ["PACE_RESUME_HEADROOM": "auto"])] {
+            try box.setMetrics(Self.burning())
+            #expect(runPace(box, ["gate", "--resume-headroom", "0"]).status == 10)
+            var polls = 0
+            let result = runPace(box, ["wait", "--interval", "5"] + own.0, extra: own.1, onSleep: { n in
+                polls = n
+                if n == 1 { try? box.setMetrics(Self.switched(to: "0.97")) }
+                if n == 3 { try? box.setMetrics(Self.switched(to: "0.04", resets: "18000")) }
+            })
+            #expect(polls == 3, "\(own): \(result.out)")
+            #expect(!result.out.contains("--resume-headroom 0"), "\(result.out)")
+        }
+    }
+
     // MARK: - pacer feedback (#268)
 
     private func inbox(_ box: PaceSandbox) -> [[String: Any]] {
@@ -1306,7 +1664,7 @@ struct PaceCommandTests {
         let status = runPace(box, ["status"], extra: ["CLAUDE_CODE_SESSION_ID": "abc-123",
                                                       "PACE_SESSION_API": "http://127.0.0.1:9"])
         #expect(status.status == 0, "\(status.out)")
-        #expect(status.out == "go\n")
+        #expect(status.out.hasPrefix("go (until "), "\(status.out)")
     }
 
     @Test func aSingleAccountNeedsNoActiveMarker() throws {
