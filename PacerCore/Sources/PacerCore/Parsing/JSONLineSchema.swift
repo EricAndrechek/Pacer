@@ -157,9 +157,16 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// Whether this entry carries something a row stored before #218 can't
     /// have: a fast-mode or residency marker, or a per-iteration split. A
     /// re-read of history patches those onto the stored row.
+    ///
+    /// Residency counts only where pricing reads it: through
+    /// `Region(usageGeo:)`, which prices anything but `us`/`eu` as global.
+    /// Claude Code writes `"not_available"` on about a third of turns, and
+    /// counting that as detail had the upgrade rewrite 262k of a real store's
+    /// 744k rows — a whole-table fetch, then the largest save of the cycle —
+    /// to change nothing any cost reads.
     public var carriesPricingDetail: Bool {
         speed?.lowercased() == "fast"
-            || (inferenceGeo.map { !$0.isEmpty && $0.lowercased() != "global" } ?? false)
+            || (inferenceGeo.flatMap(CanonicalModelID.Region.init(usageGeo:)).map { $0 != .global } ?? false)
             || isIterationPart
     }
 

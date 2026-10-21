@@ -96,4 +96,61 @@ import Testing
         let days = Set(rows.map { DateModelPair(date: $0.date, model: $0.model) })
         #expect(days.isSubset(of: reread.pollutedDailyPairs))
     }
+
+    /// Only what pricing reads is pricing detail. Claude Code writes
+    /// `inference_geo: "not_available"` on a third of turns; `Region(usageGeo:)`
+    /// prices that as global, so a re-read must not rewrite rows for it.
+    @Test func onlyAPricedGeoOrFastModeIsPricingDetail() {
+        func entry(speed: String? = nil, geo: String? = nil) -> ParsedUsageEntry {
+            ParsedUsageEntry(timestamp: Date(), model: "claude-opus-5", breakdown: TokenBreakdown(),
+                             dedupKey: "m:r", speed: speed, inferenceGeo: geo)
+        }
+        #expect(!entry().carriesPricingDetail)
+        #expect(!entry(speed: "standard", geo: "not_available").carriesPricingDetail)
+        #expect(!entry(geo: "global").carriesPricingDetail)
+        #expect(!entry(geo: "").carriesPricingDetail)
+        #expect(!entry(geo: "somewhere-new").carriesPricingDetail)
+        #expect(entry(speed: "fast").carriesPricingDetail)
+        #expect(entry(geo: "us").carriesPricingDetail)
+        #expect(entry(geo: "EU").carriesPricingDetail)
+    }
+
+    /// The re-read itself: a stored row that predates the fields is left
+    /// alone for a geo that prices as global, and patched for one that
+    /// doesn't.
+    @ScanActor
+    @Test func aReReadPatchesOnlyRowsWhosePriceTheDetailChanges() throws {
+        let c = try container()
+        let context = ModelContext(c)
+        let first = try SamplePersister(context: context)
+        try first.insert(entry(1, complete: true))
+        try first.insert(entry(2, complete: true))
+        try first.flush()
+        try context.save()
+
+        let reread = try SamplePersister(context: context)
+        reread.backfillsPricingDetail = true
+        var unavailable = entry(1, complete: true)
+        unavailable = ParsedUsageEntry(
+            timestamp: unavailable.timestamp, model: unavailable.model, breakdown: unavailable.breakdown,
+            storedCostUSD: unavailable.storedCostUSD, dedupKey: unavailable.dedupKey,
+            sessionId: unavailable.sessionId, projectPath: unavailable.projectPath,
+            isComplete: true, speed: "standard", inferenceGeo: "not_available")
+        let us = entry(2, complete: true)
+        let usCopy = ParsedUsageEntry(
+            timestamp: us.timestamp, model: us.model, breakdown: us.breakdown,
+            storedCostUSD: us.storedCostUSD, dedupKey: us.dedupKey,
+            sessionId: us.sessionId, projectPath: us.projectPath,
+            isComplete: true, speed: "standard", inferenceGeo: "us")
+        try reread.insert(unavailable)
+        try reread.insert(usCopy)
+        try reread.flush()
+        try context.save()
+        #expect(reread.stats.patchedPricingDetail == 1)
+
+        let rows = try ModelContext(c).fetch(FetchDescriptor<TokenSample>())
+        let byKey = Dictionary(uniqueKeysWithValues: rows.map { ($0.dedupKey ?? "", $0) })
+        #expect(byKey["m1:r1"]?.inferenceGeo == nil)
+        #expect(byKey["m2:r2"]?.inferenceGeo == "us")
+    }
 }
