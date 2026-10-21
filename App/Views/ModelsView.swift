@@ -288,8 +288,6 @@ private struct ModelsContent: View {
         /// array — see `shareCumulative` for what happens when they don't.
         var shareRows: [ModelRow] = []
         var shareCumulative: [(row: ModelRow, max: Double)] = []
-        /// Every row in range, by priced part — the Cost breakdown card.
-        var rangeBreakdown: CostBreakdown = .zero
     }
 
     /// What body reads. Resolves to the cached snapshot when populated,
@@ -472,8 +470,7 @@ private struct ModelsContent: View {
             trendDayCount: Set(dailyMix.map(\.date)).count,
             trendBuckets: buckets,
             shareRows: shareRows,
-            shareCumulative: cumulative,
-            rangeBreakdown: CostBreakdown.sum(aggregates, \.costBreakdown)
+            shareCumulative: cumulative
         )
     }
 
@@ -547,7 +544,6 @@ private struct ModelsContent: View {
                 VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
                     shareCard
                     trendCard
-                    if PacerCostBreakdownView.hasContent(derived.rangeBreakdown) { breakdownCard }
                     listCard
                 }
             }
@@ -824,15 +820,6 @@ private struct ModelsContent: View {
                     .padding(.top, 2)
                 }
             }
-        }
-    }
-
-    /// Which of the five priced parts made up the range's cost (#225) — the
-    /// shared `PacerCostBreakdownView`. Each model's own mix is the Mix bar in
-    /// the list below, drawn in the same colours.
-    private var breakdownCard: some View {
-        PacerCard("Cost breakdown") {
-            PacerCostBreakdownView(derived.rangeBreakdown)
         }
     }
 

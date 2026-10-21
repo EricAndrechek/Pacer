@@ -192,8 +192,27 @@ private struct LifetimeSummaryContent: View {
         }
     }
 
+    /// Which of the five priced parts made up the range's cost (#225). It
+    /// sits here, not on the Models tab, because it answers "where did this
+    /// period's money go", so it follows this page's range and account scope.
+    /// It is summed from the rows the Lifetime card already holds, so it adds
+    /// no query.
+    private var breakdown: CostBreakdown { CostBreakdown.sum(aggregates, \.costBreakdown) }
+
     var body: some View {
         let t = totals
+        let parts = breakdown
+        VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
+            lifetimeCard(t)
+            if t.distinctDays > 0, PacerCostBreakdownView.hasContent(parts) {
+                PacerCard("Cost breakdown") {
+                    PacerCostBreakdownView(parts)
+                }
+            }
+        }
+    }
+
+    private func lifetimeCard(_ t: Totals) -> some View {
         PacerCard(cardTitle, trailing: {
             if range == .all, let first = t.firstDate {
                 Text("since \(first)")
