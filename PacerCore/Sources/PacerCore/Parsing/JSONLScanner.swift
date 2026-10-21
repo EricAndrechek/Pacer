@@ -180,28 +180,31 @@ public actor JSONLScanner {
                     from: c.url,
                     startingAt: startOffset
                 ) { lineData in
-                    guard let entry = JSONLLineParser.parse(
+                    // Usually one entry; one per model call when the response
+                    // fell back to another model (#218).
+                    for entry in JSONLLineParser.parseAll(
                         line: lineData, aliases: aliases, rootPath: c.rootPath,
                         fixedProjectPath: c.fixedProjectPath
-                    ) else { return }
-                    entriesParsed += 1
-                    if let key = entry.dedupKey {
-                        if let prior = bestByKey[key] {
-                            // Not simply "already seen, drop it": a streamed
-                            // message appears several times and only the last
-                            // copy carries the real output_tokens. Keep the
-                            // better one and re-emit so the persister can
-                            // upgrade what it stored.
-                            duplicatesDropped += 1
-                            guard entry.supersedes(prior) else { return }
+                    ) {
+                        entriesParsed += 1
+                        if let key = entry.dedupKey {
+                            if let prior = bestByKey[key] {
+                                // Not simply "already seen, drop it": a streamed
+                                // message appears several times and only the last
+                                // copy carries the real output_tokens. Keep the
+                                // better one and re-emit so the persister can
+                                // upgrade what it stored.
+                                duplicatesDropped += 1
+                                guard entry.supersedes(prior) else { continue }
+                                bestByKey[key] = entry
+                                emit(entry)
+                                continue
+                            }
                             bestByKey[key] = entry
-                            emit(entry)
-                            return
                         }
-                        bestByKey[key] = entry
+                        entriesAccepted += 1
+                        emit(entry)
                     }
-                    entriesAccepted += 1
-                    emit(entry)
                 } byteCounter: { delta in
                     bytesConsumed += delta
                 }

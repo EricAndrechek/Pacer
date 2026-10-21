@@ -103,7 +103,10 @@ public struct CostCalculator: Sendable {
     ) -> SampleCost {
         sampleCost(
             storedCostUSD: sample.sourceCostUSD, model: sample.model,
-            sampledAt: sample.sampledAt, breakdown: sample.breakdown,
+            sampledAt: sample.sampledAt,
+            speed: PriceSpeed(usageSpeed: sample.speed),
+            geo: sample.inferenceGeo.flatMap(CanonicalModelID.Region.init(usageGeo:)),
+            breakdown: sample.breakdown,
             mode: mode, ledger: snapshot.ledger)
     }
 

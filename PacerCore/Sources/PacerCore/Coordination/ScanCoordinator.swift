@@ -49,7 +49,12 @@ public final class ScanCoordinator {
     ///         Rows whose transcripts Claude Code has since rotated
     ///         away keep their old values — we never delete a sample we
     ///         can no longer re-derive.
-    public static let currentScanVersion = "3"
+    /// - "4" — `usage.speed`, `usage.inference_geo` and `usage.iterations[]`
+    ///         are parsed (#218). The re-read gives stored fast-mode and
+    ///         US-residency turns their marker, so the v17 cost rebuild can
+    ///         price them at their premium, and splits multi-call responses
+    ///         into one row per call (`SamplePersister.backfillsPricingDetail`).
+    public static let currentScanVersion = "4"
 
     /// Bumped when a code change requires recomputing the cost columns
     /// on existing aggregates.
@@ -1458,6 +1463,7 @@ public final class ScanCoordinator {
 
         let activePersister = try persister ?? makePersister()
         if persister == nil { persister = activePersister }
+        activePersister.backfillsPricingDetail = isFullScan
         // Taken before anything this cycle can pollute a session: re-stamps,
         // carried-over marks and recovery all run before `beforeStats` below.
         let pollutionBefore = activePersister.stats.sessionPollution

@@ -66,6 +66,16 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// that says they are not the CLI's. See `DesktopSessionDirectory`.
     public let entrypoint: String?
     public let isApiErrorMessage: Bool
+    /// `usage.speed`: `"fast"` for a fast-mode response, `"standard"` (or
+    /// nil, on lines older than the field) otherwise. Fast mode bills at a
+    /// premium (#218); see `PriceLedger.cost`.
+    public let speed: String?
+    /// `usage.inference_geo`: where the request ran when the caller asked
+    /// for data residency (`"us"` costs 1.1x on Claude 4.6+), nil otherwise.
+    public let inferenceGeo: String?
+    /// One of several model calls split out of a multi-iteration response
+    /// (`JSONLLineParser.expand`).
+    public let isIterationPart: Bool
 
     /// Whether this line is the **finished** message rather than a
     /// mid-stream snapshot of it — i.e. whether `message.stop_reason` was
@@ -121,9 +131,15 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         rootPath: String? = nil,
         entrypoint: String? = nil,
         isApiErrorMessage: Bool = false,
-        isComplete: Bool = true
+        isComplete: Bool = true,
+        speed: String? = nil,
+        inferenceGeo: String? = nil,
+        isIterationPart: Bool = false
     ) {
         self.isComplete = isComplete
+        self.speed = speed
+        self.inferenceGeo = inferenceGeo
+        self.isIterationPart = isIterationPart
         self.timestamp = timestamp
         self.model = model
         self.breakdown = breakdown
@@ -136,6 +152,15 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
         self.rootPath = rootPath
         self.entrypoint = entrypoint
         self.isApiErrorMessage = isApiErrorMessage
+    }
+
+    /// Whether this entry carries something a row stored before #218 can't
+    /// have: a fast-mode or residency marker, or a per-iteration split. A
+    /// re-read of history patches those onto the stored row.
+    public var carriesPricingDetail: Bool {
+        speed?.lowercased() == "fast"
+            || (inferenceGeo.map { !$0.isEmpty && $0.lowercased() != "global" } ?? false)
+            || isIterationPart
     }
 
     /// The `entrypoint` Claude Desktop's built-in Claude Code writes.
@@ -233,6 +258,57 @@ struct RawJSONLine: Decodable {
         let cache_read_input_tokens: Int64?
         let cache_creation_input_tokens: Int64?
         let cache_creation: RawCacheCreation?
+        let speed: String?
+        let inference_geo: String?
+        /// One entry per model call behind this response — e.g. a `message`
+        /// attempt on one model and a `fallback_message` on another (#218).
+        let iterations: [RawIteration]?
+
+        enum CodingKeys: String, CodingKey {
+            case input_tokens, output_tokens, cache_read_input_tokens,
+                 cache_creation_input_tokens, cache_creation, speed, inference_geo, iterations
+        }
+
+        /// The token counts decode as before (a bad one fails the line, as it
+        /// always has). The newer fields are decoded leniently: a shape Pacer
+        /// doesn't expect drops that field, never the whole billable turn.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            input_tokens = try c.decodeIfPresent(Int64.self, forKey: .input_tokens)
+            output_tokens = try c.decodeIfPresent(Int64.self, forKey: .output_tokens)
+            cache_read_input_tokens = try c.decodeIfPresent(Int64.self, forKey: .cache_read_input_tokens)
+            cache_creation_input_tokens = try c.decodeIfPresent(Int64.self, forKey: .cache_creation_input_tokens)
+            cache_creation = try? c.decodeIfPresent(RawCacheCreation.self, forKey: .cache_creation)
+            speed = try? c.decodeIfPresent(String.self, forKey: .speed)
+            inference_geo = try? c.decodeIfPresent(String.self, forKey: .inference_geo)
+            iterations = (try? c.decodeIfPresent(LenientList<RawIteration>.self, forKey: .iterations))?
+                .flatMap(\.items)
+        }
+    }
+
+    struct RawIteration: Decodable {
+        let type: String?
+        let model: String?
+        let input_tokens: Int64?
+        let output_tokens: Int64?
+        let cache_read_input_tokens: Int64?
+        let cache_creation_input_tokens: Int64?
+        let cache_creation: RawCacheCreation?
+    }
+
+    /// An array whose unreadable elements are skipped rather than failing it.
+    struct LenientList<T: Decodable>: Decodable {
+        let items: [T]
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            var out: [T] = []
+            while !c.isAtEnd {
+                if let item = try? c.decode(T.self) { out.append(item) }
+                else { _ = try? c.decode(Skip.self) }
+            }
+            items = out
+        }
+        private struct Skip: Decodable {}
     }
 
     struct RawCacheCreation: Decodable {

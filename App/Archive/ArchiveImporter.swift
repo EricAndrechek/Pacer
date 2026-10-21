@@ -72,6 +72,12 @@ struct ArchiveImporter: BulkTranscriptImporter {
             json_extract_string(j, '$.message.stop_reason') IS NOT NULL  AS is_complete,
             COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error,
             json_extract_string(j, '$.entrypoint')                       AS entrypoint,
+            json_extract_string(j, '$.message.usage.speed')              AS speed,
+            json_extract_string(j, '$.message.usage.inference_geo')      AS inference_geo,
+            -- Only multi-call responses need the per-iteration split (#218);
+            -- everything else stays on the top-level fields, as before.
+            CASE WHEN json_array_length(json_extract(j, '$.message.usage.iterations')) > 1
+                 THEN CAST(json_extract(j, '$.message.usage.iterations') AS VARCHAR) END AS iterations,
             fname
         FROM lines
         WHERE json_extract_string(j, '$.type') = 'assistant'
@@ -99,7 +105,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
         SELECT ts, model, input_tokens, output_tokens, cache_read,
                explicit_5m, explicit_1h, summed_cc, source_cost,
                message_id, request_id, session_id, cwd, cc_version,
-               is_complete, api_error, entrypoint, fname
+               is_complete, api_error, entrypoint, fname,
+               speed, inference_geo, iterations
         FROM ranked WHERE rn = 1
         """
     }
@@ -149,6 +156,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
             let sessionId = Column(chunk, 11), cwd = Column(chunk, 12), version = Column(chunk, 13)
             let complete = Column(chunk, 14), apiError = Column(chunk, 15)
             let entrypoint = Column(chunk, 16), fileName = Column(chunk, 17)
+            let speed = Column(chunk, 18), inferenceGeo = Column(chunk, 19)
+            let iterations = Column(chunk, 20)
 
             for row in 0..<rows {
                 guard let timestampText = ts.string(row),
@@ -181,7 +190,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     return found
                 }
 
-                entries.append(ParsedUsageEntry(
+                let base = ParsedUsageEntry(
                     timestamp: timestamp,
                     model: modelName,
                     breakdown: TokenBreakdown(
@@ -203,7 +212,12 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     rootPath: root?.root.path,
                     entrypoint: entrypoint.string(row),
                     isApiErrorMessage: apiError.bool(row),
-                    isComplete: complete.bool(row)))
+                    isComplete: complete.bool(row),
+                    speed: speed.string(row),
+                    inferenceGeo: inferenceGeo.string(row))
+                // The same per-iteration split the line parser makes, by the
+                // same code, so the two ingest paths agree.
+                entries.append(contentsOf: JSONLLineParser.expand(base, iterationsJSON: iterations.string(row)))
             }
         }
 

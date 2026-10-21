@@ -35,12 +35,18 @@ public struct SampleSnapshot: Sendable {
         /// `TokenSample.accountId`. nil for turns recorded before the
         /// activation trail existed — see `AccountActivation`.
         public let accountId: String?
+        /// `TokenSample.speed` / `.inferenceGeo` — what selects a premium price.
+        public let speed: String?
+        public let inferenceGeo: String?
 
         public init(
             date: String, model: String, projectPath: String?, sessionId: String?,
             sampledAt: Date, localHour: Int, ccVersion: String?, breakdown: TokenBreakdown,
-            sourceCostUSD: Double?, accountId: String? = nil
+            sourceCostUSD: Double?, accountId: String? = nil,
+            speed: String? = nil, inferenceGeo: String? = nil
         ) {
+            self.speed = speed
+            self.inferenceGeo = inferenceGeo
             self.date = date
             self.model = model
             self.projectPath = projectPath
@@ -79,7 +85,9 @@ public struct SampleSnapshot: Sendable {
                     cacheCreation5mTokens: sample.cacheCreation5mTokens,
                     cacheCreation1hTokens: sample.cacheCreation1hTokens),
                 sourceCostUSD: sample.sourceCostUSD,
-                accountId: sample.accountId)
+                accountId: sample.accountId,
+                speed: sample.speed,
+                inferenceGeo: sample.inferenceGeo)
         })
     }
 }
@@ -141,6 +149,9 @@ public protocol AggregatableSample {
     /// per-bucket and bulk paths must split by account identically or the
     /// two rollups disagree depending on which path last touched a bucket.
     var accountId: String? { get }
+    /// What picks a premium price variant: fast mode, US residency (#218).
+    var speed: String? { get }
+    var inferenceGeo: String? { get }
 }
 
 extension SampleSnapshot.Row: AggregatableSample {}

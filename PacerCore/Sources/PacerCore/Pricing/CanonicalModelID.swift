@@ -41,6 +41,18 @@ public struct CanonicalModelID: Hashable, Sendable, Codable, CustomStringConvert
         public static func < (a: Region, b: Region) -> Bool {
             allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
         }
+
+        /// Claude Code's `usage.inference_geo`. nil for anything unknown, so
+        /// an unexpected value prices at the id's own region, never at a
+        /// guessed premium.
+        public init?(usageGeo: String) {
+            switch usageGeo.lowercased() {
+            case "global", "": self = .global
+            case "us": self = .us
+            case "eu": self = .eu
+            default: return nil
+            }
+        }
     }
 
     /// Lowercased, with provider prefixes, region prefixes, Bedrock `-v1:0`

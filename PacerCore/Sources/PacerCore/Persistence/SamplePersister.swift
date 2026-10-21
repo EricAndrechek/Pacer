@@ -235,6 +235,10 @@ public final class SamplePersister {
         /// (a genuine replay we correctly ignored) — this one changed
         /// stored numbers, so it's worth seeing in the scan log.
         public var upgradedFromPartial: Int = 0
+        /// Stored rows given the pricing detail a re-read found (#218): a
+        /// fast-mode or residency marker, or a multi-call response's own
+        /// per-call counts.
+        public var patchedPricingDetail: Int = 0
         /// Sessions newly marked polluted, by why (`SessionPollution`) — the
         /// scan log's `sPol=`. A polluted session skips the rollup fast path
         /// and re-fetches every sample it has, which on a long session is most
@@ -425,6 +429,14 @@ public final class SamplePersister {
         }
     }
 
+    /// Set for a full re-read of history (a `currentScanVersion` bump): a
+    /// duplicate of a stored turn that carries pricing detail the stored
+    /// row predates is applied to it, through the same rewrite an upgrade
+    /// uses. Off for live cycles, where the first copy already carried it.
+    public var backfillsPricingDetail = false
+    /// Keys patched this lifetime, so a turn is patched at most once.
+    private var patchedKeys: Set<String> = []
+
     /// Returns true if the entry was inserted, false if it was a
     /// duplicate. Marks `(date, model)` and `(projectPath, date)` dirty
     /// on insert.
@@ -440,6 +452,14 @@ public final class SamplePersister {
                 // finished message and what we stored was a mid-stream
                 // snapshot; anything else is a true duplicate.
                 guard entry.breakdown.outputTokens > bestSoFar else {
+                    // The same finished copy (equal output, never a smaller
+                    // partial one) carrying detail an old row lacks.
+                    if backfillsPricingDetail, entry.carriesPricingDetail,
+                       entry.breakdown.outputTokens == bestSoFar,
+                       pendingUpgrades[key] == nil, patchedKeys.insert(key).inserted {
+                        pendingUpgrades[key] = entry
+                        stats.patchedPricingDetail += 1
+                    }
                     stats.skippedAsDuplicate += 1
                     return false
                 }
@@ -597,13 +617,16 @@ public final class SamplePersister {
                 sessionId: sample.sessionId, sampledAt: sample.sampledAt,
                 localHour: sample.localHour, ccVersion: sample.ccVersion,
                 breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
-                accountId: sample.accountId)
+                accountId: sample.accountId, speed: sample.speed,
+                inferenceGeo: sample.inferenceGeo)
             sample.inputTokens = entry.breakdown.inputTokens
             sample.outputTokens = entry.breakdown.outputTokens
             sample.cacheReadTokens = entry.breakdown.cacheReadTokens
             sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
             sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
             sample.sourceCostUSD = entry.storedCostUSD
+            sample.speed = entry.speed
+            sample.inferenceGeo = entry.inferenceGeo
 
             let pair = DateModelPair(date: sample.date, model: sample.model)
             dirtyPairs.insert(pair)

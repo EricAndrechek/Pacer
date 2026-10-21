@@ -133,6 +133,13 @@ public final class TokenSample {
     /// `AccountActivation` for why attribution has to be recorded live.
     public var accountId: String?
 
+    /// `usage.speed` — `"fast"` for a fast-mode turn, which bills at a
+    /// premium (#218); nil or `"standard"` otherwise.
+    public var speed: String?
+    /// `usage.inference_geo` — `"us"` for a US-residency turn (1.1x on
+    /// Claude 4.6+); nil otherwise.
+    public var inferenceGeo: String?
+
     public init(
         sampledAt: Date,
         date: String,
@@ -223,5 +230,7 @@ extension TokenSample {
             originalProjectPath: entry.originalProjectPath,
             ccVersion: entry.claudeCodeVersion
         )
+        self.speed = entry.speed
+        self.inferenceGeo = entry.inferenceGeo
     }
 }
