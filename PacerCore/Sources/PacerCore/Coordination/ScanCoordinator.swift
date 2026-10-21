@@ -765,8 +765,10 @@ public final class ScanCoordinator {
     /// breaking the scan.
     private func resolveAllRoots() throws -> [ClaudePathResolver.ResolvedRoot] {
         let primary = try resolver.resolve()
+        // This coordinator's home, not the process's: a test or probe that
+        // gives it a home of its own must not scan the machine's profiles.
         let discovered = resolver.resolveAdditional(
-            ExternalAccountDirectory.discoverProfileRoots()
+            ExternalAccountDirectory.discoverProfileRoots(homeDirectory: homeDirectory)
         )
         sessionProfileRoots = discovered.filter { !primary.contains($0) }
         if !sessionProfileRoots.isEmpty {

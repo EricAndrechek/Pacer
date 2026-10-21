@@ -36,7 +36,7 @@ LEGACY_STORE   := $(HOME)/Library/Group Containers/group.com.ericandrechek.pacer
 # get confused if a file with the same name appears.
 .PHONY: help build vendor prune verify test app install uninstall reinstall \
         logs logs-tail status open clean-data perf-snapshot screenshots verify-data \
-        verify-archive \
+        verify-archive test-ingest-parity \
         assign-accounts reassign-account \
         pricing-snapshot
 
@@ -104,6 +104,9 @@ test:  ## Run the PacerCore unit + ground-truth tests.
 	@# screenshot renderer) to an account with no rows. PacerPreferences also
 	@# detects a test process on its own; this is the half that cannot drift.
 	@cd PacerCore && PACER_ISOLATED_DEFAULTS=1 swift test 2>&1 | tail -3
+
+test-ingest-parity: vendor  ## Both ingest paths (line parser, DuckDB importer) over one fixture tree must leave identical rows (#334). CI runs it.
+	@bin/dev-ingest-parity.sh --fixtures
 
 verify-tooltip:  ## THE ONE SCREEN-TOUCHING CHECK. Takes the cursor for ~4s — only run it with the machine owner's explicit go-ahead, for that run. See AGENTS.md "Never take over the machine".
 	@bin/verify-menubar-tooltip.sh
