@@ -84,17 +84,36 @@ struct ArchiveImporter: BulkTranscriptImporter {
     /// it: handing the persister every copy meant 149,395 inserts and 17,786
     /// fetch-and-upgrade round-trips instead of 54,046 clean inserts, and the
     /// persist phase dominated the import. The rule is small enough to state
-    /// exactly once in each language, and the differential test pins them
-    /// together — the six token totals must match the Swift path to the token.
+    /// exactly once in each language — `ParsedUsageEntry.isKept` and the
+    /// ORDER BY below — and `IngestParityTests` pins them together on every
+    /// row the two paths leave, not only on the six token totals.
     ///
-    /// The rule mirrors `ParsedUsageEntry.supersedes`: prefer the *finished*
-    /// message (`stop_reason` present — Claude Code appends the same turn
-    /// several times while streaming and only the last copy carries the real
-    /// `output_tokens`), then the largest output. Rows with no dedup key fall
-    /// through untouched, exactly as the Swift path leaves them.
-    static func extractionSQL(globs: [String]) -> String {
-        let sources = globs.map { "'\($0.replacingOccurrences(of: "'", with: "''"))'" }
-            .joined(separator: ", ")
+    /// The ordering is `ParsedUsageEntry.isKept`, the rule the line scanner
+    /// keeps a copy by, written as SQL: the *finished* message first
+    /// (`stop_reason` present — Claude Code appends the same turn several
+    /// times while streaming and only the last copy carries the real
+    /// `output_tokens`), then the largest output, then the earliest instant,
+    /// then the file path. Rows with no dedup key fall through untouched,
+    /// exactly as the Swift path leaves them. The rows still pass through
+    /// `CopySelection` on the way out, which keeps one per key whatever this
+    /// returns; it is what ranks multi-call responses (below).
+    ///
+    /// `projectsDirectories` are the roots' `projects/` folders, read the way
+    /// the line scanner walks them: every `*.jsonl` beneath, except under a
+    /// hidden name. DuckDB's glob, unlike `FileManager`'s `.skipsHiddenFiles`,
+    /// matches dot-files and descends into dot-directories, so without the
+    /// filter a transcript there would be read by one path and not the other.
+    static func extractionSQL(projectsDirectories: [String]) -> String {
+        func quoted(_ s: String) -> String { "'\(s.replacingOccurrences(of: "'", with: "''"))'" }
+        let sources = projectsDirectories.map { quoted($0 + "/**/*.jsonl") }.joined(separator: ", ")
+        // The part of each file's path below its root, from its leading
+        // slash, for the hidden-name test: the roots themselves live under
+        // `~/.claude`. `replace` rather than `substr`, which counts characters
+        // where Swift would count bytes.
+        let relative = projectsDirectories.isEmpty ? "fname" : "CASE "
+            + projectsDirectories.map {
+                "WHEN starts_with(fname, \(quoted($0 + "/"))) THEN replace(fname, \(quoted($0 + "/")), '/')"
+            }.joined(separator: " ") + " ELSE fname END"
         return """
         WITH lines AS (
             SELECT json AS j, filename AS fname FROM read_ndjson_objects([\(sources)],
@@ -104,6 +123,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
             -- fifths of the bytes are user lines (tool results, up to MBs),
             -- and parsing them only to discard them was most of the work.
             WHERE contains(json, '"assistant"')
+              AND NOT contains(\(relative), '/.')
         ),
         -- Each line parsed twice, not once per field. DuckDB parses the
         -- document again for every `json_extract`, and with ~22 per line the
@@ -161,17 +181,31 @@ struct ArchiveImporter: BulkTranscriptImporter {
             SELECT *, CASE
                 -- No dedup key ⇒ never a duplicate, same as the Swift path.
                 WHEN message_id IS NULL OR request_id IS NULL THEN 1
+                -- A multi-call response is split into one entry per call
+                -- (#218), and the line scanner keeps a copy per CALL. Ranking
+                -- its lines here would pick every call from one line, by the
+                -- final call's numbers, where the line scanner can pick each
+                -- call's copy from a different line. So all of its lines go
+                -- through, and `CopySelection` ranks the calls after the
+                -- split, by the same code the line scanner uses.
+                WHEN bool_or(iterations IS NOT NULL)
+                    OVER (PARTITION BY message_id || ':' || request_id) THEN 1
                 ELSE ROW_NUMBER() OVER (
                     PARTITION BY message_id || ':' || request_id
-                    -- `supersedes`, expressed as an ordering: finished first,
-                    -- then largest output, then the earliest. The file breaks
-                    -- what is left: the same message replayed into several
-                    -- transcripts (subagent sidechains, resumed sessions) ties
-                    -- on all three, and without it which copy's session and
-                    -- cwd won depended on how DuckDB's threads happened to
+                    -- `ParsedUsageEntry.isKept` as an ordering: finished first,
+                    -- then largest output, then the earliest, then the file.
+                    -- The instant, not the text: a line without fractional
+                    -- seconds sorts after one with them at the same second as
+                    -- text, and offsets don't sort as text at all. The file
+                    -- breaks what is left: the same message replayed into
+                    -- several transcripts (subagent sidechains, resumed
+                    -- sessions) ties on all the rest, and without it which
+                    -- copy won depended on how DuckDB's threads happened to
                     -- read the files — 875 of 386k rows differed between 2
-                    -- and 4 threads on a real corpus.
-                    ORDER BY is_complete DESC, output_tokens DESC, ts ASC, fname ASC)
+                    -- and 4 threads on a real corpus. DuckDB compares text by
+                    -- bytes, as `isKept` does.
+                    ORDER BY is_complete DESC, output_tokens DESC,
+                             TRY_CAST(ts AS TIMESTAMPTZ) ASC NULLS LAST, ts ASC, fname ASC)
             END AS rn
             FROM turns
         )
@@ -210,9 +244,8 @@ struct ArchiveImporter: BulkTranscriptImporter {
         let marks = Self.fileMarks(roots: roots.map(\.projectsDirectory))
         let marked = Date()
 
-        let globs = roots.map { $0.projectsDirectory.appendingPathComponent("**/*.jsonl").path }
         var result = duckdb_result()
-        let sql = Self.extractionSQL(globs: globs)
+        let sql = Self.extractionSQL(projectsDirectories: roots.map(\.projectsDirectory.path))
         guard sql.withCString({ duckdb_query(con, $0, &result) }) == DuckDBSuccess else {
             let message = duckdb_result_error(&result).map { String(cString: $0) } ?? "unknown"
             duckdb_destroy_result(&result)
@@ -221,8 +254,15 @@ struct ArchiveImporter: BulkTranscriptImporter {
         defer { duckdb_destroy_result(&result) }
         let queried = Date()
 
-        var entries: [ParsedUsageEntry] = []
-        entries.reserveCapacity(64 * 1024)
+        // One copy per key, by the line scanner's own rule. The query has
+        // already ranked every key but a multi-call response's, so for the
+        // rest this keeps the one row it is handed.
+        var kept = CopySelection()
+        kept.reserveCapacity(64 * 1024)
+        // One string per file, not per row: `CopySelection` holds the file
+        // of every kept copy, and DuckDB hands back a fresh copy of the path
+        // on each of ~400k rows.
+        var fileNames: [String: String] = [:]
         var rootByFile: [String: ClaudePathResolver.ResolvedRoot?] = [:]
         // Each row's project, by root and cwd: canonicalizing is two regex
         // searches, run per row on a few hundred distinct answers. The
@@ -271,16 +311,18 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     return "\(mid):\(rid)"
                 }()
                 let rawCwd = cwd.string(row)
+                var file = fileName.string(row) ?? ""
+                if let known = fileNames[file] { file = known } else { fileNames[file] = file }
                 // The root the line parser would have stamped (see
                 // `rootPath(forFile:among:)`), without which a pinned
                 // profile's turns are attributed by the default login's
                 // trail. One lookup per file, not per row.
-                let root: ClaudePathResolver.ResolvedRoot? = fileName.string(row).flatMap { file in
+                let root: ClaudePathResolver.ResolvedRoot? = {
                     if let known = rootByFile[file] { return known }
                     let found = ClaudePathResolver.ResolvedRoot.root(forFile: file, among: roots)
                     rootByFile[file] = .some(found)
                     return found
-                }
+                }()
 
                 let base = ParsedUsageEntry(
                     timestamp: timestamp,
@@ -315,13 +357,16 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     inferenceGeo: inferenceGeo.string(row))
                 // The same per-iteration split the line parser makes, by the
                 // same code, so the two ingest paths agree.
-                entries.append(contentsOf: JSONLLineParser.expand(base, iterationsJSON: iterations.string(row)))
+                for entry in JSONLLineParser.expand(base, iterationsJSON: iterations.string(row)) {
+                    kept.offer(entry, from: file)
+                }
             }
         }
 
-        // Entries must reach the persister in time order: `supersedes` breaks
-        // ties on output size, but the rollups' pending-sample lists and the
-        // session recomputer both assume ascending arrival.
+        // Entries must reach the persister in time order: the rollups'
+        // pending-sample lists and the session recomputer both assume
+        // ascending arrival.
+        var entries = kept.takeEntries()
         entries.sort { $0.timestamp < $1.timestamp }
         Log.write("ArchiveImporter", String(
             format: "marks %.1f s · query %.1f s · rows %.1f s (%d threads, %@ cap)",

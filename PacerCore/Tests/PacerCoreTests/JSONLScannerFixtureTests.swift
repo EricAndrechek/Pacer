@@ -202,10 +202,10 @@ private actor FixtureCollector {
 /// finished token counts, not the first mid-stream snapshot.
 ///
 /// This is the end-to-end companion to `StreamingDedupTests`: those pin the
-/// parser and the persister, this pins the *scanner*, which has to notice
-/// that a repeat key superseded what it already emitted and re-emit rather
-/// than dropping it as a duplicate. Getting that wrong silently under-counts
-/// output by ~63% (correctness rule §7) while every row count stays right.
+/// parser and the persister, this pins the *scanner*, which has to keep the
+/// copy that superseded the first rather than dropping it as a duplicate.
+/// Getting that wrong silently under-counts output by ~63% (correctness rule
+/// §7) while every row count stays right.
 @Test func scannerKeepsFinishedCopyOfStreamedMessage() async throws {
     let dir = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("pacer-stream-\(UUID().uuidString)", isDirectory: true)
@@ -236,17 +236,17 @@ private actor FixtureCollector {
     _ = try await JSONLScanner().scan(roots: [root]) { entry in await emitted.add(entry) }
     let entries = await emitted.all
 
-    // The scanner's contract is "emit the best copy so far", which means it
-    // MAY emit a key more than once as better copies arrive — the persister
-    // is what collapses them onto one row (see StreamingDedupTests). So this
-    // asserts on the emissions themselves, not on a naive sum, which would
-    // double-count by design.
-    #expect(entries.count == 2)                    // the partial, then the finished one
-    #expect(entries.last?.breakdown.outputTokens == 289)
-    #expect(entries.last?.isComplete == true)
-    #expect(entries.allSatisfy { $0.dedupKey == "msgStream:req1" })
-    // The mid-stream copy that added nothing was dropped, not re-emitted.
-    #expect(!entries.contains { $0.breakdown.outputTokens == 1 && $0.isComplete })
+    // One emission per key per scan: the finished copy, as itself. It used
+    // to emit the first mid-stream copy and then each improvement, so the
+    // persister inserted the partial copy and upgraded it in place — the
+    // finished tokens on the partial's timestamp, where the bulk importer
+    // inserted the finished copy (#334). Copies split across scans still
+    // reach the persister one scan at a time; that is its job.
+    #expect(entries.count == 1)
+    #expect(entries.first?.breakdown.outputTokens == 289)
+    #expect(entries.first?.isComplete == true)
+    #expect(entries.first?.dedupKey == "msgStream:req1")
+    #expect(entries.first?.timestamp == JSONLLineParser.parseTimestampForImport("2026-03-01T10:00:03.000Z"))
 }
 
 /// Collects raw emissions, for tests that care about what the scanner emitted

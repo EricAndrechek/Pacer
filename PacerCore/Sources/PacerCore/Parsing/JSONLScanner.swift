@@ -135,23 +135,26 @@ public actor JSONLScanner {
         } else {
             candidates = collectCandidates(roots: roots, cursors: cursors)
         }
-        // Sort by mtime ascending. Older files first means cross-file
-        // dedup is deterministic: when two files share a dedupKey
-        // (resumed sessions replay turns into a new file), the older
-        // file's instance gets emitted first. Order is cosmetic only —
-        // the SamplePersister's DB-backed Set catches subsequent
-        // duplicates regardless.
+        // Sort by mtime ascending: older files first, so entries go out in
+        // roughly the order their turns happened. Which copy of a message
+        // is kept does NOT depend on this order — see `CopySelection`.
         let sorted = candidates.sorted { $0.mtime < $1.mtime }
 
-        // Best copy seen so far per dedup key, not merely "seen". A streamed
-        // message lands in the transcript several times; the winner is
-        // decided by `ParsedUsageEntry.supersedes`, not by arrival order.
-        var bestByKey: [String: ParsedUsageEntry] = [:]
+        // One copy per dedup key, decided by `ParsedUsageEntry.isKept` over
+        // every copy this scan reads, and emitted once, after the last file.
+        // A streamed message lands in the transcript several times and only
+        // the last copy carries the real output (correctness rule 7), so the
+        // kept copy is not the first one seen; and emitting each improvement
+        // as it arrived, as this used to, had the persister insert a new
+        // message's mid-stream copy and then upgrade it in the same pass —
+        // the finished tokens on the partial copy's timestamp, where the bulk
+        // importer, reading the same lines, inserted the finished copy (#334).
+        // Copies split across scans still reach the persister as an upgrade;
+        // that is the persister's job.
+        var kept = CopySelection()
         var filesScanned = 0
         var filesSkipped = 0
         var entriesParsed = 0
-        var entriesAccepted = 0
-        var duplicatesDropped = 0
         var updatedCursors: [String: CursorState] = [:]
 
         for c in sorted {
@@ -187,23 +190,7 @@ public actor JSONLScanner {
                         fixedProjectPath: c.fixedProjectPath
                     ) {
                         entriesParsed += 1
-                        if let key = entry.dedupKey {
-                            if let prior = bestByKey[key] {
-                                // Not simply "already seen, drop it": a streamed
-                                // message appears several times and only the last
-                                // copy carries the real output_tokens. Keep the
-                                // better one and re-emit so the persister can
-                                // upgrade what it stored.
-                                duplicatesDropped += 1
-                                guard entry.supersedes(prior) else { continue }
-                                bestByKey[key] = entry
-                                emit(entry)
-                                continue
-                            }
-                            bestByKey[key] = entry
-                        }
-                        entriesAccepted += 1
-                        emit(entry)
+                        kept.offer(entry, from: c.path)
                     }
                 } byteCounter: { delta in
                     bytesConsumed += delta
@@ -225,13 +212,15 @@ public actor JSONLScanner {
             }
         }
 
+        for entry in kept.entries { emit(entry) }
+
         return ScanResult(
             progress: ScanProgress(
                 filesScanned: filesScanned,
                 filesSkipped: filesSkipped,
                 entriesParsed: entriesParsed,
-                entriesAccepted: entriesAccepted,
-                duplicatesDropped: duplicatesDropped
+                entriesAccepted: kept.entries.count,
+                duplicatesDropped: kept.repeats
             ),
             updatedCursors: updatedCursors
         )
