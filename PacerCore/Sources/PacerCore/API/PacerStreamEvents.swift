@@ -83,6 +83,39 @@ public struct PacerAccountChange: Codable, Sendable, Equatable {
     }
 }
 
+/// The `clients` event `/v1/stream` pushes when the set of active
+/// (account, client) pairs changes (#245): a Claude Desktop install starting a
+/// session on an account, its 30 minutes running out, a pinned profile
+/// writing. `account` stays the CLI login's own event, unchanged, so a client
+/// waiting on a switch is not woken by Desktop.
+///
+///     event: clients
+///     data: { "active" : [ { "accountId" : "<id>", "kind" : "desktop",
+///             "label" : "Desktop · Work", "activeUntil" : "…" }, … ] }
+///
+/// Only on a change, never on connect; `/v1/accounts` has the same per row.
+public struct PacerClientsChange: Codable, Sendable, Equatable {
+    public static let eventName = "clients"
+
+    public struct Pair: Codable, Sendable, Equatable {
+        public let accountId: String
+        public let kind: String
+        public let label: String
+        public let activeUntil: Date?
+    }
+
+    public let active: [Pair]
+
+    public init(_ clients: AccountClients, now: Date) {
+        active = clients.entries.filter { $0.isActive(at: now) }.map {
+            Pair(accountId: $0.accountId, kind: $0.kind.rawValue, label: $0.label,
+                 activeUntil: $0.activeUntil)
+        }
+    }
+
+    public func encodedJSON() throws -> String { try pacerAPIEncodedJSON(self) }
+}
+
 /// Server-Sent Events framing for `/v1/stream`.
 public enum PacerSSE {
     /// One event: `event:` line, one `data:` line per physical line of the

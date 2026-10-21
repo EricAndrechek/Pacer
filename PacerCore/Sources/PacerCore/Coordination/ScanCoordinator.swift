@@ -1071,6 +1071,7 @@ public final class ScanCoordinator {
         if let credential = signedInCredential.current { recorder.reconcile(with: credential) }
         let observedAccount = polled.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         persister?.accountTrail = recorder.trail()
+        publishClients(trail: recorder.trail())
         // The activation now, not at the next cycle's terminal save: the
         // session lookup (`/v1/session`'s `currentAccountId`) reads the trail
         // from the store. Nothing else is pending — passes run between cycles.
@@ -1488,6 +1489,7 @@ public final class ScanCoordinator {
         activePersister.desktopSessions = desktopSessions
         let desktopRecorded = desktopSessions?.drainDiscovered() ?? [:]
         ensureDesktopAccounts(Set(desktopRecorded.values))
+        publishClients(trail: recorder.trail())
 
         if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
             Task { await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: nil) }
@@ -2153,6 +2155,36 @@ public final class ScanCoordinator {
 
     /// Give every account a Desktop session ran under a row, so the turns
     /// attributed to it have somewhere to show. Create-only (`Account.ensure`).
+    /// Which clients are on which account now (#245), for the views and the
+    /// HTTP API. Cheap: the trail is in memory, Desktop's records are listed
+    /// at most every 30 s, and a profile's newest write comes from the cursor
+    /// cache. Posts to the main actor only when something changed.
+    private func publishClients(trail: AccountTrail) {
+        desktopSessions?.refreshIfDue()
+        let installs = desktopSessions?.installs ?? []
+        let pinned = trail.openPinnedRoots
+        var profileActivity: [String: Date] = [:]
+        if !pinned.isEmpty, let cursors = cursorsCache {
+            let prefixes = pinned.keys.map {
+                ($0, URL(fileURLWithPath: $0).appendingPathComponent("projects").path + "/")
+            }
+            for (path, state) in cursors {
+                for (root, prefix) in prefixes where path.hasPrefix(prefix)
+                    && state.lastSeenMtime > (profileActivity[root] ?? .distantPast) {
+                    profileActivity[root] = state.lastSeenMtime
+                }
+            }
+        }
+        let login = trail.currentDefaultLogin
+        let clients = AccountClients.build(
+            cliAccount: login?.accountId, cliSince: login?.startedAt,
+            desktop: desktopSessions?.activity ?? [:],
+            installLabels: DesktopInstall.labels(for: installs),
+            profiles: pinned, profileActivity: profileActivity)
+        guard AccountClientsStore.publish(clients) else { return }
+        Task { @MainActor in AccountClientsMonitor.shared.update(clients) }
+    }
+
     private func ensureDesktopAccounts(_ accountIds: Set<String>) {
         for id in accountIds {
             let seed = Account.Seed(id: Account.key(forOrg: id), organizationId: id)

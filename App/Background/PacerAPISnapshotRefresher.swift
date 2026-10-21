@@ -74,6 +74,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// The next build follows an account change: no spacing before it.
     private var pendingUrgent = false
     private var onAccountChange: (@Sendable (PacerAccountChange) -> Void)?
+    private var onClientsChange: (@Sendable (PacerClientsChange) -> Void)?
     /// Shared by the poller's announcement and the `UsageScope` watch.
     private var accountDetector = PacerAccountChange.Detector(last: nil)
     private var lastStartedAt: Date?
@@ -94,8 +95,12 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
     /// active login, on whichever thread announced it (usually the poller's),
     /// before the rebuild it causes.
     /// Restarting replaces the previous run.
+    ///
+    /// `onClientsChange` receives each change of the active (account, client)
+    /// set (#245), on the main queue where `AccountClientsMonitor` posts it.
     func start(onBroadcast: @escaping @Sendable (PacerAPISnapshot) -> Void,
-               onAccountChange: @escaping @Sendable (PacerAccountChange) -> Void) {
+               onAccountChange: @escaping @Sendable (PacerAccountChange) -> Void,
+               onClientsChange: @escaping @Sendable (PacerClientsChange) -> Void = { _ in }) {
         stop()
 
         let center = NotificationCenter.default
@@ -112,6 +117,16 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
                 [weak self] note in
                 guard let change = PacerAccountChange(note) else { return }
                 self?.observeActiveLogin(change.activeAccountId, since: change.since)
+            },
+            // `/v1/accounts` carries each account's clients, so a change is
+            // a rebuild as well as an event.
+            center.addObserver(forName: AccountClientsStore.didChange, object: nil, queue: nil) {
+                [weak self] _ in
+                guard let self else { return }
+                let change = PacerClientsChange(AccountClientsStore.current, now: Date())
+                let callback = self.lock.withLock { self.running ? self.onClientsChange : nil }
+                callback?(change)
+                self.trigger()
             },
         ]
 
@@ -140,6 +155,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             pendingBroadcast = true
             self.onBroadcast = onBroadcast
             self.onAccountChange = onAccountChange
+            self.onClientsChange = onClientsChange
             // The mirror, not `UsageScope.shared`: this is not the main actor,
             // and the two agree at rest.
             accountDetector = PacerAccountChange.Detector(last: UsageScope.storedActiveAccountId)
@@ -162,6 +178,7 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
             pendingUrgent = false
             onBroadcast = nil
             onAccountChange = nil
+            onClientsChange = nil
             // Under the lock, so a build finishing now sees the new generation
             // and cannot put its snapshot back after this.
             cache.clear()

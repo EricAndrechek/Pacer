@@ -1182,6 +1182,7 @@ struct PaceChartCard: View {
                     .help("Claude Code is using this account right now — these "
                           + "are the numbers your terminal reports.")
             }
+            AccountClientChipsView(accountId: group.id)
             if let usage = group.usageSummary {
                 Text(usage)
                     .font(.system(size: 10))
@@ -1261,6 +1262,18 @@ struct PaceChartCard: View {
 /// pace% line, status + burn chips, the shared `PaceChartView`, and the outlook
 /// caption. The view itself is in PacerUI so the widget extension renders the
 /// same chart pixel-for-pixel.
+/// The other clients active on one account (#245), in the account's header.
+/// Its own view so its own body reads `AccountClientsMonitor`: a Desktop
+/// starting a session, or its 30 minutes running out, redraws this and not
+/// the whole card.
+private struct AccountClientChipsView: View {
+    let accountId: String
+
+    var body: some View {
+        PacerClientChips(PacerClientChip.others(AccountClientsMonitor.shared.active(on: accountId)))
+    }
+}
+
 private struct PaceColumn: View {
     let column: PaceChartCard.Column
     /// Forecast trajectory for this window (nil when unavailable). Drawn only on

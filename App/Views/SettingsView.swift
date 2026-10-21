@@ -2195,6 +2195,7 @@ private struct TokensCard: View {
             ForEach(pool.accounts) { account in
                 AccountSwitchRow(
                     account: account,
+                    showsClients: pool.accounts.count > 1,
                     switching: switchingId == account.id,
                     onSwitch: { switchTo(account.id) },
                     onRename: { name in
@@ -2350,6 +2351,10 @@ private struct TokensCard: View {
 /// account whose usage drives the menu bar, dashboard, and alerts.
 private struct AccountSwitchRow: View {
     let account: AccountStatusSummary
+    /// Whether to name the other clients on this account (#245). Only with
+    /// more than one account: with one, there is nothing to tell apart, and
+    /// the row stays the one it always was.
+    let showsClients: Bool
     let switching: Bool
     let onSwitch: () -> Void
     /// Renaming lives here rather than on the dashboard card: this is the
@@ -2363,7 +2368,12 @@ private struct AccountSwitchRow: View {
             subtitle: subtitle,
             fiveHourPercent: account.fiveHourPct,
             sevenDayPercent: account.sevenDayPct,
-            isActive: account.isActive
+            isActive: account.isActive,
+            // Read here, in this row's own body, so a Desktop starting or
+            // timing out redraws the row.
+            clients: showsClients
+                ? PacerClientChip.others(AccountClientsMonitor.shared.active(on: account.id))
+                : []
         ), onRename: PacerRenameAction(onRename)) {
             if account.isActive {
                 Text("Active")

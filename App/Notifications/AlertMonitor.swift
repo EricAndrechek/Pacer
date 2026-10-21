@@ -141,7 +141,14 @@ final class AlertMonitor {
         let rules = (try? context.fetch(FetchDescriptor<AlertRule>())) ?? []
         var out = LimitsSnapshot()
         if accounts.count > 1 {
-            for account in accounts { out.labels[account.id] = account.shortLabel }
+            // An account the CLI is not on but Desktop (or a pinned profile)
+            // is (#245) says where its usage is coming from: "Work (Desktop ·
+            // Work)". Otherwise the banner names an account you are not using.
+            let clients = AccountClientsStore.current
+            let now = Date()
+            for account in accounts {
+                out.labels[account.id] = clients.alertLabel(account.shortLabel, account: account.id, at: now)
+            }
         }
         for id in ids {
             out.fixed[id] = ((try? context.fetch(

@@ -117,6 +117,11 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     private var discovered: [String: String] = [:]
     /// When each unrecorded session last caused a read.
     private var lastMissRead: [String: Date] = [:]
+    /// Each record's newest activity (#245): its `lastActivityAt`, else its
+    /// modification date, with the modification date it was read at, so a
+    /// record is read again only once Desktop has rewritten it.
+    private var recordActivity: [String: (install: String, org: String, at: Date, modified: Date?)] = [:]
+    private var lastRefresh: Date?
     private var loaded = false
 
     /// A reader of whatever `discover` returns, asked again at most every
@@ -234,6 +239,33 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
         }
     }
 
+    /// `refresh` without the forced discovery, at most every `interval`: what
+    /// the scan cycle calls so Desktop's activity stays current (#245). A
+    /// cycle runs every few seconds while anything is writing, and a record
+    /// listing is a stat per record, so this bounds it.
+    public func refreshIfDue(interval: TimeInterval = 30, now: Date = Date()) {
+        lock.withLock {
+            guard lastRefresh.map({ now.timeIntervalSince($0) >= interval }) ?? true else { return }
+            refreshLocked(now: now)
+        }
+    }
+
+    /// When Desktop last ran a Claude Code or agent-mode session, per install
+    /// and account: `DesktopInstall.id` → `Account.id` → the newest record's
+    /// `lastActivityAt`. The evidence that a Desktop install is active on an
+    /// account (#245). Desktop chat writes no record, so it is not in here.
+    public var activity: [String: [String: Date]] {
+        lock.withLock {
+            loadIfNeededLocked()
+            var out: [String: [String: Date]] = [:]
+            for entry in recordActivity.values
+            where entry.at > (out[entry.install]?[entry.org] ?? .distantPast) {
+                out[entry.install, default: [:]][entry.org] = entry.at
+            }
+            return out
+        }
+    }
+
     private func loadIfNeededLocked() {
         guard !loaded else { return }
         loaded = true
@@ -241,6 +273,7 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
     }
 
     private func refreshLocked(now: Date = Date()) {
+        lastRefresh = now
         if lastDiscovery.map({ now.timeIntervalSince($0) >= Self.discoveryInterval }) ?? true {
             lastDiscovery = now
             installList = discover()
@@ -290,9 +323,13 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
         for file in files where file.pathExtension == "json"
             && file.lastPathComponent.hasPrefix("local_") {
             let path = file.path
-            guard !readFiles.contains(path) else { continue }
             let modified = (try? file.resourceValues(
                 forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if recordActivity[path]?.modified != modified {
+                let at = Self.lastActivityAt(in: file) ?? modified
+                recordActivity[path] = at.map { (install, accountId, $0, modified) }
+            }
+            guard !readFiles.contains(path) else { continue }
             if let seen = emptyFiles[path], seen == modified { continue }
             guard let sessionId = Self.cliSessionId(in: file) else {
                 emptyFiles[path] = modified
@@ -421,6 +458,26 @@ public final class DesktopSessionDirectory: @unchecked Sendable {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = object["cliSessionId"] as? String, !id.isEmpty else { return nil }
         return id
+    }
+
+    /// The record's `lastActivityAt` (milliseconds since 1970), from its head.
+    /// nil when it is not there, and the caller uses the modification date,
+    /// which Desktop moves on every rewrite and so is never earlier.
+    static func lastActivityAt(in file: URL) -> Date? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        let head = (try? handle.read(upToCount: headBytes)) ?? Data()
+        try? handle.close()
+        guard let found = head.range(of: Data(#""lastActivityAt""#.utf8)) else { return nil }
+        var i = skipWhitespace(head, from: found.upperBound)
+        guard i < head.endIndex, head[i] == UInt8(ascii: ":") else { return nil }
+        i = skipWhitespace(head, from: head.index(after: i))
+        var digits = ""
+        while i < head.endIndex, (0x30...0x39).contains(head[i]) {
+            digits.append(Character(UnicodeScalar(head[i])))
+            i = head.index(after: i)
+        }
+        guard let ms = Double(digits), ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: ms / 1000)
     }
 
     /// The string value of `"key"` in a JSON fragment, without parsing it:

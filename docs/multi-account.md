@@ -2,7 +2,8 @@
 
 > Working state, invariants and traps live in
 > [`account-scope-handoff.md`](account-scope-handoff.md). This file is the
-> design.
+> design. Which *clients* are active on which account (CLI, each Desktop
+> install, pinned profiles) is [`multi-client-accounts.md`](multi-client-accounts.md).
 
 How Pacer knows which account a turn belongs to, why that needed a new
 mechanism, and what is still open.
@@ -552,7 +553,9 @@ data: }
 ```
 
 Only on a change — never on connect, never when the same login is re-asserted
-— and `since` is when Pacer made it active. The account may not have a reading
+— and `since` is when Pacer made it active. A Desktop install or a pinned
+profile becoming active on an account is a separate `clients` event (#245), so
+a client waiting on a CLI switch is never woken by Desktop. The account may not have a reading
 yet; its windows are then absent from the snapshot, not 0%. `PacerAccountChange`
 is the definition. A client that waits on a switch (#194's `pacer` CLI) can
 wake on this instead of polling.

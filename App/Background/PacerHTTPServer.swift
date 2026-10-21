@@ -209,7 +209,8 @@ final class PacerHTTPServer: @unchecked Sendable {
             newListener.start(queue: queue)
             refresher.start(
                 onBroadcast: { [weak self] snapshot in self?.broadcast(snapshot) },
-                onAccountChange: { [weak self] change in self?.broadcast(change) })
+                onAccountChange: { [weak self] change in self?.broadcast(change) },
+                onClientsChange: { [weak self] change in self?.broadcast(change) })
             startKeepalive()
         } catch {
             publish("Failed to start: \(error.localizedDescription)", isError: true)
@@ -634,6 +635,16 @@ final class PacerHTTPServer: @unchecked Sendable {
             }
             Log.write("HTTPServer", "SSE account \(change.activeAccountId.prefix(4)) sent to "
                       + "\(sseClients.count) client(s)")
+        }
+    }
+
+    /// Push a change of which clients are active on which account (#245).
+    private func broadcast(_ change: PacerClientsChange) {
+        guard let json = try? change.encodedJSON() else { return }
+        queue.async { [self] in
+            for client in sseClients.values {
+                writeEvent(client, event: PacerClientsChange.eventName, json: json)
+            }
         }
     }
 
