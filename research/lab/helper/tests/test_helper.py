@@ -141,7 +141,7 @@ class HistoryTests(Fixture):
 class RecentRateTests(Fixture):
 
     def test_matches_the_app_rule_by_hand(self):
-        h = server.Helper(Store(self.db), lab_registry.DEFAULT_DIR)
+        h = server.Helper(Store(self.db), lab_registry.DEFAULT_DIR.parent / "staging")
         self.assertIn("lab-recent-rate-py", [p.id for p in h.predictors])
         out = h.forecast({"window": "five_hour", "account": ACCT, "duration": H5,
                           "cycleStart": T0 + 3 * H5, "resetsAt": self.live_reset, "cuts": [self.now]})
@@ -152,7 +152,7 @@ class RecentRateTests(Fixture):
         self.assertAlmostEqual(got, expected, places=6)
 
     def test_declines_with_one_reading(self):
-        h = server.Helper(Store(self.db), lab_registry.DEFAULT_DIR)
+        h = server.Helper(Store(self.db), lab_registry.DEFAULT_DIR.parent / "staging")
         out = h.forecast({"window": "five_hour", "account": ACCT, "duration": H5,
                           "cycleStart": T0 + 3 * H5, "resetsAt": self.live_reset, "cuts": [T0 + 3 * H5 + 60]})
         self.assertIsNone(out["predictions"]["lab-recent-rate-py"][0])
