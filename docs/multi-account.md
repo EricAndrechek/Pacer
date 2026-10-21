@@ -192,6 +192,44 @@ the recorded ones and are protected from trail corrections the same way.
   now matches each hinted file to its root, as the bulk importer always did.
 - **Not held to ccusage.** ccusage does not scan these folders (#299).
 
+### Every Desktop install (#295)
+
+People run several Desktops at once, usually one per account. Every tool for it
+launches the same app with its own Chromium profile (`--user-data-dir`), so an
+install *is* its data folder: its own session records, its own agent-mode
+sessions, its own token cache. **Every install is equal**; the one at the
+standard location is only the one found without being told where to look.
+
+- **Discovery** (`DesktopInstallDiscovery`), from three places and never a
+  search of the home folder: `~/Library/Application Support/Claude*` folders
+  that hold session records or a token cache (`Claude-3p`, one config file,
+  is not one); the `--user-data-dir` of each running Desktop, read from its
+  arguments, with the `CLAUDE_CONFIG_DIR` in its environment when the system
+  shows it (nothing else is kept); and folders added in Settings. An install
+  seen running is remembered, so it still counts while it is not.
+- **One directory, keyed by (install, session).** `DesktopSessionDirectory`
+  reads every install. A session two installs record under one account is one
+  session; two naming different accounts for it is a conflict nobody can
+  settle, so it stays unattributed.
+- **Roots per install**: its agent-mode sessions, and its own
+  `CLAUDE_CONFIG_DIR/projects` when it has one. Turns there are attributed by
+  the install's records like any Desktop session, not by the root: one install
+  can hold logins for several accounts.
+- **Labels** come from the folder ("Desktop · Work" for `Claude-Work`); a
+  single install is just "Desktop". The folder is the only stable identity an
+  install has, for the same reason.
+- **Token caches.** Every install's `config.json` is read. They share one
+  `Claude Safe Storage` key whenever they run the same app, so several installs
+  cost one keychain approval. An install with a key of its own would not
+  decrypt with it and is skipped, never prompted for. Tokens are no longer
+  merged by cache key, which names client, account and scopes: two installs on
+  one account would have shared a key and lost one token's budget.
+- **Desktop chat has no local token record.** Its usage shows only as account
+  utilisation in the readings Pacer polls; Settings says so in one line.
+
+There is no second install on the maintainer's Mac, so all of this is verified
+with fixtures; nothing may launch or set one up there.
+
 ### The data model is always parallel; only the presentation adapts
 
 Activations may overlap. `AccountTrail.hasConcurrentAccounts` reads

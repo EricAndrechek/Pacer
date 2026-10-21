@@ -723,19 +723,23 @@ public final class ScanCoordinator {
         if !sessionProfileRoots.isEmpty {
             log("roots: +\(sessionProfileRoots.count) session profile(s)")
         }
-        desktopAgentRoots = desktopSessions?.agentRoots ?? []
-        if !desktopAgentRoots.isEmpty {
-            log("roots: +\(desktopAgentRoots.count) Claude Desktop agent-mode session(s)")
+        let known = Set((primary + sessionProfileRoots).map(\.root.path))
+        desktopRoots = (desktopSessions?.scanRoots ?? []).filter { !known.contains($0.root.path) }
+        desktopInstallIds = (desktopSessions?.installs ?? []).map(\.id)
+        if !desktopRoots.isEmpty {
+            log("roots: +\(desktopRoots.count) from \(desktopInstallIds.count) Claude Desktop install(s)")
         }
         lastDesktopRootRefresh = Date()
-        return primary + sessionProfileRoots + desktopAgentRoots
+        return primary + sessionProfileRoots + desktopRoots
     }
 
-    /// Claude Desktop's agent-mode roots (#250), one per Cowork session. Kept
-    /// apart from `sessionProfileRoots` because the trail does not bind them:
-    /// each belongs to the org folder it sits in, which
-    /// `DesktopSessionDirectory` answers directly.
-    private var desktopAgentRoots: [ClaudePathResolver.ResolvedRoot] = []
+    /// The roots Claude Desktop adds: one per agent-mode (Cowork) session
+    /// (#250), and each install's own `CLAUDE_CONFIG_DIR` (#295). Kept apart
+    /// from `sessionProfileRoots` because the trail does not bind them:
+    /// `DesktopSessionDirectory` answers their accounts directly.
+    private var desktopRoots: [ClaudePathResolver.ResolvedRoot] = []
+    /// The installs those came from, to notice one appearing or going.
+    private var desktopInstallIds: [String] = []
     private var lastDesktopRootRefresh: Date?
     /// How often a full-walk cycle lists Desktop's agent-mode folders again
     /// for sessions started since. A new session's first write also asks
@@ -770,7 +774,9 @@ public final class ScanCoordinator {
         guard !unclaimed.isEmpty || due else { return (hinted, false) }
         lastDesktopRootRefresh = Date()
         desktopSessions.refresh()
-        let fresh = desktopSessions.agentRoots
+        let others = Set(resolvedRoots.filter { !desktopRoots.contains($0) }.map(\.root.path))
+        let fresh = desktopSessions.scanRoots.filter { !others.contains($0.root.path) }
+        let installIds = desktopSessions.installs.map(\.id)
         // An agent-mode file outside every root (Cowork's own `audit.jsonl`)
         // is not a transcript; it must not reach the scanner, which would
         // read it as the default login's.
@@ -779,10 +785,16 @@ public final class ScanCoordinator {
                 ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: fresh) == nil
             })
         }
-        guard fresh != desktopAgentRoots else { return (cleaned, false) }
-        log("roots: Claude Desktop agent-mode sessions \(desktopAgentRoots.count) → \(fresh.count)")
-        resolvedRoots = resolvedRoots.filter { !desktopAgentRoots.contains($0) } + fresh
-        desktopAgentRoots = fresh
+        guard fresh != desktopRoots || installIds != desktopInstallIds else { return (cleaned, false) }
+        log("roots: Claude Desktop \(desktopRoots.count) → \(fresh.count) from \(installIds.count) install(s)")
+        resolvedRoots = resolvedRoots.filter { !desktopRoots.contains($0) } + fresh
+        desktopRoots = fresh
+        if installIds != desktopInstallIds {
+            // A new install brings a folder to watch; one gone takes its own.
+            desktopInstallIds = installIds
+            let watcher = self.watcher, roots = resolvedRoots, extra = extraWatchPaths
+            Task { await watcher.updateWatchedPaths(roots: roots, extraPaths: extra) }
+        }
         return (nil, true)
     }
 

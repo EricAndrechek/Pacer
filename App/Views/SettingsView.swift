@@ -1724,10 +1724,28 @@ private struct DesktopCredentialsCard: View {
 
     @State private var testResult: TestResult?
     @State private var testInProgress = false
+    /// The Desktop installs Pacer found (#295), loaded off the main thread:
+    /// discovery lists the running processes and a few folders.
+    @State private var installs: [InstallRow] = []
+    /// Folders the user added, which discovery reads back. Plain `@State`
+    /// mirrored to the store rather than `@AppStorage`, which has no
+    /// string-array form.
+    @State private var extraFolders: [String] = PacerPreferences.desktopExtraDataDirectories(
+        from: PacerSettings.store)
+    @State private var addingFolder = false
+    @State private var folderDraft = ""
 
     private enum TestResult: Equatable {
         case success(fiveHourPct: Double?, sevenDayPct: Double?)
         case failure(message: String)
+    }
+
+    struct InstallRow: Identifiable, Equatable {
+        let id: String
+        let label: String
+        let path: String
+        let signedIn: Bool
+        let added: Bool
     }
 
     var body: some View {
@@ -1747,14 +1765,111 @@ private struct DesktopCredentialsCard: View {
                         .pacerDenseControl()
                         .disabled(testInProgress || !enabled)
                 }
+                // One install is the card it always was; several list
+                // themselves, each by its folder.
+                if installs.count > 1 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(installs) { install in installRow(install) }
+                    }
+                }
             }
         }, footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Lets Pacer keep working when you use Claude Desktop / general chat rather than the Claude Code CLI. Pacer decrypts Desktop's stored token (read-only — it never refreshes or writes it) and uses whichever of Desktop or Claude Code is freshest.")
                 Text("Turning this on triggers a one-time macOS keychain approval for “Claude Safe Storage” — click Always Allow so Pacer can read it silently afterward.")
                     .padding(.top, 2)
+                Text("Desktop chat keeps no token record on this Mac. It counts only toward account usage.")
+                    .padding(.top, 2)
+                addFolderControl
+                    .padding(.top, 4)
             }
         })
+        .task(id: extraFolders) { await loadInstalls() }
+    }
+
+    private func installRow(_ install: InstallRow) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "desktopcomputer")
+                .foregroundStyle(.secondary).font(.system(size: 11))
+            Text(install.label)
+                .font(.system(size: 11, weight: .medium))
+            Text(install.path)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.middle)
+                .help(install.path)
+            Spacer(minLength: 8)
+            Text(install.signedIn ? "Signed in" : "Not signed in")
+                .font(.caption)
+                .foregroundStyle(install.signedIn ? .secondary : .tertiary)
+            if install.added {
+                Button {
+                    setExtraFolders(extraFolders.filter { expand($0) != install.id })
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("Stop counting this folder")
+            }
+        }
+    }
+
+    /// A Desktop kept outside Application Support, and not running when Pacer
+    /// looked, is found only by being named here.
+    @ViewBuilder private var addFolderControl: some View {
+        if addingFolder {
+            HStack(spacing: 8) {
+                TextField("Desktop data folder, e.g. ~/ClaudeWork", text: $folderDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+                    .onSubmit(addFolder)
+                Button("Add", action: addFolder)
+                    .pacerDenseControl()
+                    .disabled(folderDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Cancel") { addingFolder = false; folderDraft = "" }
+                    .pacerDenseControl()
+            }
+        } else {
+            Button("Add a Desktop folder…") { addingFolder = true }
+                .buttonStyle(.link)
+                .font(.caption)
+        }
+    }
+
+    private func setExtraFolders(_ folders: [String]) {
+        PacerSettings.store.set(folders, forKey: PacerSettings.Key.desktopExtraDataDirectories)
+        extraFolders = folders
+    }
+
+    private func addFolder() {
+        let path = folderDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+        if !extraFolders.contains(path) { setExtraFolders(extraFolders + [path]) }
+        folderDraft = ""
+        addingFolder = false
+    }
+
+    private func expand(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+
+    private func loadInstalls() async {
+        let added = Set(extraFolders.map(expand))
+        let rows = await Task.detached(priority: .utility) { () -> [InstallRow] in
+            let directory = DesktopSessionDirectory.shared
+            directory.refresh()
+            let found = directory.installs
+            let labels = DesktopInstall.labels(for: found)
+            return found.map { install in
+                InstallRow(
+                    id: install.id,
+                    label: labels[install.id] ?? "Desktop",
+                    path: (install.dataDirectory.path as NSString).abbreviatingWithTildeInPath,
+                    signedIn: DesktopOAuth.cacheBlobs(in: install.tokenCacheFile)?.isEmpty == false,
+                    added: added.contains(install.dataDirectory.path))
+            }
+        }.value
+        installs = rows
     }
 
     @ViewBuilder

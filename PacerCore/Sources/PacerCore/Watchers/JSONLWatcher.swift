@@ -170,6 +170,39 @@ public actor JSONLWatcher {
         }
     }
 
+    /// Watch a new set of folders, for an install that appeared or went
+    /// (#295). Restarts the FSEvents stream only, keeping the trigger stream,
+    /// backstop and cadence; a no-op when nothing changed or in `.manual`.
+    public func updateWatchedPaths(roots: [ClaudePathResolver.ResolvedRoot], extraPaths: [String]) {
+        guard case .live = mode, fsEvents != nil else { return }
+        discoveryPaths = extraPaths.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        let paths = Self.watchPaths(roots: roots, discovery: discoveryPaths, extraPaths: extraPaths)
+        guard paths != liveRootPaths, !paths.isEmpty else { return }
+        liveRootPaths = paths
+        fsEvents?.stop()
+        fsEvents = nil
+        let watcher = FSEventStreamWrapper(handler: { [weak self] paths in
+            guard let self else { return }
+            Task { await self.recordChangedPathsAndCoalesce(paths) }
+        })
+        if watcher.start(paths: paths, latencySeconds: TimeInterval(liveCoalesceNanos) / 1_000_000_000) {
+            fsEvents = watcher
+        } else {
+            Log.write("JSONLWatcher", "FSEventStream failed to restart on new paths; relying on backstop only")
+        }
+    }
+
+    /// A root under a discovery folder is already covered by it: FSEvents
+    /// streams are recursive, and one watch per Cowork session would be
+    /// dozens of paths for one folder.
+    private static func watchPaths(
+        roots: [ClaudePathResolver.ResolvedRoot], discovery: [String], extraPaths: [String]
+    ) -> [String] {
+        roots.map { $0.projectsDirectory.path }
+            .filter { root in !discovery.contains { root.hasPrefix($0) } }
+            + extraPaths
+    }
+
     public func stop() {
         fsEvents?.stop()
         fsEvents = nil
@@ -205,12 +238,7 @@ public actor JSONLWatcher {
         backstopInterval: TimeInterval
     ) {
         discoveryPaths = extraPaths.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
-        // A root under a discovery folder is already covered by it: FSEvents
-        // streams are recursive, and one watch per Cowork session would be
-        // dozens of paths for one folder.
-        let pathStrings = roots.map { $0.projectsDirectory.path }
-            .filter { root in !discoveryPaths.contains { root.hasPrefix($0) } }
-            + extraPaths
+        let pathStrings = Self.watchPaths(roots: roots, discovery: discoveryPaths, extraPaths: extraPaths)
         guard !pathStrings.isEmpty else { return }
         liveRootPaths = pathStrings
 

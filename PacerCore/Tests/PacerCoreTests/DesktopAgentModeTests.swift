@@ -83,7 +83,7 @@ struct DesktopAgentModeDirectoryTests {
         try FileManager.default.createDirectory(at: plugin, withIntermediateDirectories: true)
 
         let directory = DesktopSessionDirectory(dataDirectories: [data])
-        let roots = directory.agentRoots
+        let roots = directory.scanRoots
 
         #expect(roots.count == 3)
         #expect(roots.allSatisfy { $0.fixedProjectPath == DesktopSessionDirectory.agentProjectPath })
@@ -110,7 +110,7 @@ struct DesktopAgentModeDirectoryTests {
         let transcript = try writeAgentSession(in: data, session: session, lines: [
             line("2026-10-01T10:00:00Z", session: session, message: "m1"),
         ])
-        let roots = DesktopSessionDirectory(dataDirectories: [data]).agentRoots
+        let roots = DesktopSessionDirectory(dataDirectories: [data]).scanRoots
         final class Box: @unchecked Sendable { var entries: [ParsedUsageEntry] = [] }
         let box = Box()
         _ = try await JSONLScanner().scan(

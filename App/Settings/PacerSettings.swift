@@ -104,6 +104,7 @@ public enum PacerSettings {
         public static let desktopCredentialsEnabled = PacerPreferenceKeys.desktopCredentialsEnabled
         public static let switcherCredentialsEnabled = PacerPreferenceKeys.switcherCredentialsEnabled
         public static let desktopOnboardingDismissed = PacerPreferenceKeys.desktopOnboardingDismissed
+        public static let desktopExtraDataDirectories = PacerPreferenceKeys.desktopExtraDataDirectories
         public static let apiEnabled             = PacerPreferenceKeys.apiEnabled
         public static let apiPort                = PacerPreferenceKeys.apiPort
         public static let apiBindHost            = PacerPreferenceKeys.apiBindHost
