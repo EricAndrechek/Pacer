@@ -56,6 +56,19 @@ public final class ScanCoordinator {
     ///         into one row per call (`SamplePersister.backfillsPricingDetail`).
     public static let currentScanVersion = "4"
 
+    /// The priority the app runs the scan loop at (`AppBackgroundService`),
+    /// and everything it hangs off the loop's results.
+    ///
+    /// Utility, not the user-initiated priority a bare `Task {}` started from
+    /// the main thread inherits. An incremental cycle is tens of milliseconds
+    /// and doesn't notice. The first cycle after a `currentScanVersion` or
+    /// `costRecomputeVersion` bump re-reads every transcript and rebuilds
+    /// every rollup — minutes of CPU — and at user-initiated it competed on
+    /// equal terms with whatever the user was doing (#326). Utility is the
+    /// class for long-running work the user isn't waiting on; the engine
+    /// refit and the history prune already run there.
+    public nonisolated static let loopPriority: TaskPriority = .utility
+
     /// Bumped when a code change requires recomputing the cost columns
     /// on existing aggregates.
     ///

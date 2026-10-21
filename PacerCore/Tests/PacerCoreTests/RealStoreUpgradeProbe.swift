@@ -44,15 +44,13 @@ struct RealStoreUpgradeProbe {
     static func bulkImporter() -> BulkTranscriptImporter? { nil }
     #endif
 
-    /// The priority the cycle runs at. `PACER_UPGRADE_PROBE_PRIORITY`
-    /// (utility | userInitiated) overrides it, to measure a build from before
-    /// the scan loop chose one.
+    /// The priority the cycle runs at: the app's scan loop's.
+    /// `PACER_UPGRADE_PROBE_PRIORITY` (utility | userInitiated) overrides it.
     static func cyclePriority() -> TaskPriority {
         switch ProcessInfo.processInfo.environment["PACER_UPGRADE_PROBE_PRIORITY"] {
         case "utility": return .utility
         case "userInitiated": return .userInitiated
-        // What a bare `Task {}` started from the main thread inherits.
-        default: return .userInitiated
+        default: return ScanCoordinator.loopPriority
         }
     }
 

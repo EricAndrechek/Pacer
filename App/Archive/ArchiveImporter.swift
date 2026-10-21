@@ -25,6 +25,53 @@ struct ArchiveImporter: BulkTranscriptImporter {
         case queryFailed(String)
     }
 
+    /// Worker threads the import may use. DuckDB's default is one per core,
+    /// and uncapped the import was the heaviest thing Pacer ever does: on a
+    /// real 13 GB transcript tree the process peaked at 10.7 GB footprint,
+    /// on a user's first launch of a new build, while they work. Two threads
+    /// keep it near two cores; the whole upgrade is minutes either way, and
+    /// a menu-bar app that spins the fans is the worse trade (#326).
+    static let threads = 2
+    /// What DuckDB's buffer manager may hold before it spills to
+    /// `temp_directory` (its default is 80% of physical memory).
+    ///
+    /// Sized from measurement, not wished smaller. On that tree the query
+    /// needs ~0.9 GB at two threads — it fails at 768 MB and passes at 1 GB —
+    /// almost all of it parsing, which can't spill. A cap below that is
+    /// worse than none: the import fails within a second and the upgrade
+    /// falls back to the line parser, minutes slower. 512 MB, the first
+    /// figure tried, did exactly that. This leaves headroom for histories
+    /// with larger lines.
+    static let memoryLimit = "1536MB"
+
+    /// An in-memory database, capped (see `threads`, `memoryLimit`). The
+    /// import is a pure parse — nothing is persisted here, the archive is a
+    /// separate concern — but an in-memory database cannot spill without a
+    /// `temp_directory`, and one that cannot spill fails at the cap instead
+    /// of slowing down. The caller removes `spill` afterwards.
+    static func openDatabase(spillingTo spill: URL) throws -> duckdb_database? {
+        var config: duckdb_config?
+        guard duckdb_create_config(&config) == DuckDBSuccess else { throw ImportError.openFailed }
+        defer { duckdb_destroy_config(&config) }
+        let settings = [
+            ("threads", String(threads)),
+            ("memory_limit", memoryLimit),
+            ("temp_directory", spill.path),
+        ]
+        for (name, value) in settings {
+            let set = name.withCString { n in value.withCString { v in duckdb_set_config(config, n, v) } }
+            guard set == DuckDBSuccess else { throw ImportError.queryFailed("config \(name)=\(value)") }
+        }
+        var db: duckdb_database?
+        var message: UnsafeMutablePointer<CChar>?
+        guard duckdb_open_ext(nil, &db, config, &message) == DuckDBSuccess else {
+            let detail = message.map { String(cString: $0) } ?? "unknown"
+            duckdb_free(message)
+            throw ImportError.queryFailed("open: \(detail)")
+        }
+        return db
+    }
+
     /// The extraction, mirroring `JSONLLineParser` rule for rule.
     ///
     /// Reads lines as raw JSON objects rather than letting DuckDB infer a
@@ -52,39 +99,63 @@ struct ArchiveImporter: BulkTranscriptImporter {
         WITH lines AS (
             SELECT json AS j, filename AS fname FROM read_ndjson_objects([\(sources)],
                 ignore_errors = true, maximum_object_size = 67108864, filename = true)
+            -- Before any parsing: an assistant line's `type` is the string
+            -- "assistant", so a line without those bytes can't be one. Four
+            -- fifths of the bytes are user lines (tool results, up to MBs),
+            -- and parsing them only to discard them was most of the work.
+            WHERE contains(json, '"assistant"')
+        ),
+        -- Each line parsed twice, not once per field. DuckDB parses the
+        -- document again for every `json_extract`, and with ~22 per line the
+        -- query needed a 2 GB memory limit at two threads (1 GB with this).
+        -- The list forms return exactly what the single-path calls did,
+        -- field by field.
+        parsed AS (
+            SELECT
+                json_extract_string(j, ['$.type', '$.timestamp', '$.message.model', '$.message.id',
+                                        '$.requestId', '$.sessionId', '$.cwd', '$.version',
+                                        '$.message.stop_reason', '$.entrypoint',
+                                        '$.message.usage.speed', '$.message.usage.inference_geo']) AS s,
+                json_extract(j, ['$.message.usage.input_tokens', '$.message.usage.output_tokens',
+                                 '$.message.usage.cache_read_input_tokens',
+                                 '$.message.usage.cache_creation.ephemeral_5m_input_tokens',
+                                 '$.message.usage.cache_creation.ephemeral_1h_input_tokens',
+                                 '$.message.usage.cache_creation_input_tokens',
+                                 '$.costUSD', '$.isApiErrorMessage', '$.message.usage.iterations']) AS x,
+                fname
+            FROM lines
         ),
         turns AS (
         SELECT
-            json_extract_string(j, '$.timestamp')                        AS ts,
-            json_extract_string(j, '$.message.model')                    AS model,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.input_tokens')  AS BIGINT), 0) AS input_tokens,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.output_tokens') AS BIGINT), 0) AS output_tokens,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.cache_read_input_tokens') AS BIGINT), 0) AS cache_read,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.cache_creation.ephemeral_5m_input_tokens') AS BIGINT), 0) AS explicit_5m,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.cache_creation.ephemeral_1h_input_tokens') AS BIGINT), 0) AS explicit_1h,
-            COALESCE(TRY_CAST(json_extract(j, '$.message.usage.cache_creation_input_tokens') AS BIGINT), 0) AS summed_cc,
-            TRY_CAST(json_extract(j, '$.costUSD') AS DOUBLE)             AS source_cost,
-            json_extract_string(j, '$.message.id')                       AS message_id,
-            json_extract_string(j, '$.requestId')                        AS request_id,
-            json_extract_string(j, '$.sessionId')                        AS session_id,
-            json_extract_string(j, '$.cwd')                              AS cwd,
-            json_extract_string(j, '$.version')                          AS cc_version,
-            json_extract_string(j, '$.message.stop_reason') IS NOT NULL  AS is_complete,
-            COALESCE(TRY_CAST(json_extract(j, '$.isApiErrorMessage') AS BOOLEAN), false) AS api_error,
-            json_extract_string(j, '$.entrypoint')                       AS entrypoint,
-            json_extract_string(j, '$.message.usage.speed')              AS speed,
-            json_extract_string(j, '$.message.usage.inference_geo')      AS inference_geo,
+            s[2]                                                         AS ts,
+            s[3]                                                         AS model,
+            COALESCE(TRY_CAST(x[1] AS BIGINT), 0)                        AS input_tokens,
+            COALESCE(TRY_CAST(x[2] AS BIGINT), 0)                        AS output_tokens,
+            COALESCE(TRY_CAST(x[3] AS BIGINT), 0)                        AS cache_read,
+            COALESCE(TRY_CAST(x[4] AS BIGINT), 0)                        AS explicit_5m,
+            COALESCE(TRY_CAST(x[5] AS BIGINT), 0)                        AS explicit_1h,
+            COALESCE(TRY_CAST(x[6] AS BIGINT), 0)                        AS summed_cc,
+            TRY_CAST(x[7] AS DOUBLE)                                     AS source_cost,
+            s[4]                                                         AS message_id,
+            s[5]                                                         AS request_id,
+            s[6]                                                         AS session_id,
+            s[7]                                                         AS cwd,
+            s[8]                                                         AS cc_version,
+            s[9] IS NOT NULL                                             AS is_complete,
+            COALESCE(TRY_CAST(x[8] AS BOOLEAN), false)                   AS api_error,
+            s[10]                                                        AS entrypoint,
+            s[11]                                                        AS speed,
+            s[12]                                                        AS inference_geo,
             -- Only multi-call responses need the per-iteration split (#218);
             -- everything else stays on the top-level fields, as before.
-            CASE WHEN json_array_length(json_extract(j, '$.message.usage.iterations')) > 1
-                 THEN CAST(json_extract(j, '$.message.usage.iterations') AS VARCHAR) END AS iterations,
+            CASE WHEN json_array_length(x[9]) > 1 THEN CAST(x[9] AS VARCHAR) END AS iterations,
             fname
-        FROM lines
-        WHERE json_extract_string(j, '$.type') = 'assistant'
-          AND json_extract_string(j, '$.message.model') IS NOT NULL
-          AND json_extract_string(j, '$.message.model') <> ''
-          AND json_extract_string(j, '$.message.model') <> '\(JSONLLineParser.syntheticModelSentinel)'
-          AND json_extract_string(j, '$.timestamp') IS NOT NULL
+        FROM parsed
+        WHERE s[1] = 'assistant'
+          AND s[3] IS NOT NULL
+          AND s[3] <> ''
+          AND s[3] <> '\(JSONLLineParser.syntheticModelSentinel)'
+          AND s[2] IS NOT NULL
         ),
         ranked AS (
             SELECT *, CASE
@@ -93,9 +164,14 @@ struct ArchiveImporter: BulkTranscriptImporter {
                 ELSE ROW_NUMBER() OVER (
                     PARTITION BY message_id || ':' || request_id
                     -- `supersedes`, expressed as an ordering: finished first,
-                    -- then largest output. Timestamp last so the choice is
-                    -- total and file order can never change the result.
-                    ORDER BY is_complete DESC, output_tokens DESC, ts ASC)
+                    -- then largest output, then the earliest. The file breaks
+                    -- what is left: the same message replayed into several
+                    -- transcripts (subagent sidechains, resumed sessions) ties
+                    -- on all three, and without it which copy's session and
+                    -- cwd won depended on how DuckDB's threads happened to
+                    -- read the files — 875 of 386k rows differed between 2
+                    -- and 4 threads on a real corpus.
+                    ORDER BY is_complete DESC, output_tokens DESC, ts ASC, fname ASC)
             END AS rn
             FROM turns
         )
@@ -116,13 +192,14 @@ struct ArchiveImporter: BulkTranscriptImporter {
     /// identically to the live path.
     func importAll(roots: [ClaudePathResolver.ResolvedRoot], aliases: [String: String] = [:]) throws -> BulkImportResult {
         let started = Date()
-        var db: duckdb_database?
+        let spill = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pacer-import-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: spill) }
+        var db = try Self.openDatabase(spillingTo: spill)
         var con: duckdb_connection?
-        // An in-memory database: this is a pure parse, nothing is persisted
-        // here. The archive is a separate concern.
-        guard duckdb_open(nil, &db) == DuckDBSuccess,
-              duckdb_connect(db, &con) == DuckDBSuccess else { throw ImportError.openFailed }
-        defer { duckdb_disconnect(&con); duckdb_close(&db) }
+        defer { duckdb_close(&db) }
+        guard duckdb_connect(db, &con) == DuckDBSuccess else { throw ImportError.openFailed }
+        defer { duckdb_disconnect(&con) }
 
         let globs = roots.map { $0.projectsDirectory.appendingPathComponent("**/*.jsonl").path }
         var result = duckdb_result()
