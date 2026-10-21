@@ -249,6 +249,19 @@ public actor UsageIntelligenceEngine {
         // per-surface records ×3) were a measured ~0.4 s, and one whole-table
         // fetch a refit later grew to 0.5–6 s per scope.
         var allRows = timed("evalRows") { evalRowsCache ?? fetchEvalRows() }
+        // Before scoring new days, bring the old ones up to date. The
+        // end-of-day rows are dollars computed from history, and history gets
+        // repriced; a scoreboard left in old dollars skews the pools, the
+        // bands built from them and the evening track record (#329).
+        let dayTotals = f.priorDayHourlyCosts.mapValues { $0.reduce(0, +) }
+        if let stale = EngineSelfEval.staleEODDays(
+            records: allRows.lazy.filter { $0.surface == EngineSelfEval.surfaceEOD }.map { $0.record },
+            dayTotals: dayTotals) {
+            allRows = timed("eodRescore") {
+                rescoreEOD(allRows, from: stale.earliest, staleDays: stale.count, features: f,
+                           calendar: calendar, now: now)
+            }
+        }
         let existing = Set(allRows.map { $0.key })
         let newEOD = EngineSelfEval.newOutcomesEOD(periods: f.dailyPeriods, calendar: calendar, existingKeys: existing)
         persist(newEOD, now: now)
@@ -1598,6 +1611,22 @@ public actor UsageIntelligenceEngine {
         return out
     }
 
+    /// The pricing a cost snapshot's dollars were computed under (#329).
+    ///
+    /// The store's recorded cost-recompute version, not this build's
+    /// constant. The scan writes the version only after the rebuild it
+    /// triggers has saved, so the stored value is the pricing the rollups
+    /// actually hold; a refit that runs before the rebuild finishes still
+    /// tags the old one. The price ledger rewrites its records in place and
+    /// carries no revision of its own, so when it lands it adds its
+    /// fingerprint here.
+    private func costPricingVersion() -> String? {
+        let key = ClaudeCodeMetaKey.costRecomputeVersion
+        var descriptor = FetchDescriptor<ClaudeCodeMeta>(predicate: #Predicate { $0.key == key })
+        descriptor.fetchLimit = 1
+        return (try? modelContext.fetch(descriptor))?.first.map { "cost-v\($0.value)" }
+    }
+
     /// Change/heartbeat write policy — pure, so the policy tests directly.
     static func shouldRecordSnapshot(prev: (at: Date, sig: String)?, now: Date, signature: String) -> Bool {
         guard let prev else { return true }
@@ -1607,9 +1636,15 @@ public actor UsageIntelligenceEngine {
     private func recordPredictionSnapshots(_ f: EngineFeatures, now: Date) {
         let engineVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
         var dirty = false
+        // Read once, and only if a cost snapshot is written.
+        var pricing: String?
+        var pricingRead = false
         for d in Self.snapshotDrafts(f, fit) {
             let sig = d.signature
             guard Self.shouldRecordSnapshot(prev: lastSnapshotSig[d.surface], now: now, signature: sig) else { continue }
+            // Rate-limit surfaces are percentages; the rest are dollars.
+            let isCost = !d.surface.hasPrefix(EngineSelfEval.rlSurface(""))
+            if isCost && !pricingRead { pricing = costPricingVersion(); pricingRead = true }
             modelContext.insert(PredictionSnapshot(
                 recordedAt: now, surface: scope.qualify(d.surface), method: d.method,
                 paramsVersion: EngineParams.version, engineVersion: engineVersion,
@@ -1620,7 +1655,8 @@ public actor UsageIntelligenceEngine {
                 crossingLatest: d.crossingLatest, usedPct: d.usedPct,
                 anchorShift: d.anchorShift, slopePercentPerHour: d.slopePercentPerHour,
                 bandStratum: d.bandStratum, residualCount: d.residualCount,
-                spendSoFar: d.spendSoFar, replacedMethod: d.replacedMethod, hitClaimed: d.hitClaimed))
+                spendSoFar: d.spendSoFar, pricingVersion: isCost ? pricing : nil,
+                replacedMethod: d.replacedMethod, hitClaimed: d.hitClaimed))
             lastSnapshotSig[d.surface] = (now, sig)
             dirty = true
         }
@@ -1866,6 +1902,48 @@ public actor UsageIntelligenceEngine {
                                           periodKey: row.periodKey,
                                           predicted: row.predicted, truth: row.truth))
         }
+    }
+
+    /// Replay the end-of-day scoreboard from `from` on the history as it is
+    /// now and write the result over this scope's stored rows. A row the
+    /// replay reproduces is updated only if its values moved. A row it newly
+    /// scores is added. A row no candidate projects any more is deleted. One
+    /// save. Returns `rows` with the replayed span swapped in.
+    ///
+    /// The rows are fetched here, not kept: this runs once per repricing, and
+    /// the cache holds values, not the objects a write needs.
+    private func rescoreEOD(_ rows: [EvalRow], from: String, staleDays: Int, features f: EngineFeatures,
+                            calendar: Calendar, now: Date) -> [EvalRow] {
+        let days = EngineFeatures.priorPeriods(f.priorDayHourlyCosts, keys: f.priorDayHourlyCosts.keys.sorted(),
+                                               calendar: calendar)
+        let replayed = EngineSelfEval.replayOutcomesEOD(days: days, from: from, calendar: calendar)
+        let surface = scope.qualify(EngineSelfEval.surfaceEOD)
+        let stored = (try? modelContext.fetch(FetchDescriptor<EngineEvalOutcome>(
+            predicate: #Predicate { $0.surface == surface }))) ?? []
+        var byKey: [String: EngineEvalOutcome] = [:]
+        for row in stored where row.periodKey >= from { byKey[row.key] = row }
+        var rescored = 0, added = 0
+        for n in replayed {
+            let key = EngineEvalOutcome.makeKey(surface: surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey)
+            if let row = byKey.removeValue(forKey: key) {
+                // Exact comparison on purpose: an unchanged day replays to
+                // the same bits, and touching it would only churn the save.
+                guard row.predicted != n.predicted || row.truth != n.truth else { continue }
+                row.rescore(predicted: n.predicted, truth: n.truth, at: now)
+                rescored += 1
+            } else {
+                modelContext.insert(EngineEvalOutcome(
+                    surface: surface, method: n.method, bucket: n.bucket, periodKey: n.periodKey,
+                    predicted: n.predicted, truth: n.truth, recordedAt: now))
+                added += 1
+            }
+        }
+        for row in byKey.values { modelContext.delete(row) }
+        try? modelContext.save()
+        Log.write("Engine", "eod scoreboard \(scopeLabel): \(staleDays) day(s) repriced since scored, earliest \(from); "
+                  + "replayed \(replayed.count) outcome(s): \(rescored) rescored, \(added) added, \(byKey.count) removed")
+        return rows.filter { !($0.surface == EngineSelfEval.surfaceEOD && $0.record.periodKey >= from) }
+            + replayed.map(Self.evalRow)
     }
 
     private func persist(_ news: [EngineSelfEval.NewOutcome], now: Date) {

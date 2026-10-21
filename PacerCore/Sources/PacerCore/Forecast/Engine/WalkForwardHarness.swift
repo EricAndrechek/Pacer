@@ -79,22 +79,38 @@ public enum WalkForward {
     ) -> [Case] {
         var out: [Case] = []
         for (i, period) in periods.enumerated() {
-            let truth = period.total
-            guard truth > 0 else { continue }
-            let priors = Array(periods[0..<i])
-            let end = periodEnd(period)
-            let span = end.timeIntervalSince(period.start)
-            guard span > 0 else { continue }
-            for cf in cutFractions {
-                let now = period.start.addingTimeInterval(span * cf)
-                let elapsed = period.points.filter { $0.at <= now }
-                guard !elapsed.isEmpty else { continue }
-                let input = ForecastInput(
-                    now: now, periodStart: period.start, periodEnd: end,
-                    calendar: calendar, elapsed: elapsed, priorPeriods: priors)
-                out.append(Case(input: input, truth: truth,
-                                bucket: "cut=\(String(format: "%.2f", cf))|\(regime(input))"))
-            }
+            out += cases(for: period, priors: Array(periods[0..<i]), periodEnd: periodEnd,
+                         cutFractions: cutFractions, calendar: calendar, regime: regime)
+        }
+        return out
+    }
+
+    /// One period's cases against an explicit prior window. `cases(periods:)`
+    /// is this over every prefix; replaying a single day of a longer history
+    /// with the window live scoring gave it (#329) needs it on its own.
+    public static func cases(
+        for period: ForecastInput.PriorPeriod,
+        priors: [ForecastInput.PriorPeriod],
+        periodEnd: (ForecastInput.PriorPeriod) -> Date,
+        cutFractions: [Double],
+        calendar: Calendar = .current,
+        regime: (ForecastInput) -> String = { _ in "all" }
+    ) -> [Case] {
+        let truth = period.total
+        guard truth > 0 else { return [] }
+        let end = periodEnd(period)
+        let span = end.timeIntervalSince(period.start)
+        guard span > 0 else { return [] }
+        var out: [Case] = []
+        for cf in cutFractions {
+            let now = period.start.addingTimeInterval(span * cf)
+            let elapsed = period.points.filter { $0.at <= now }
+            guard !elapsed.isEmpty else { continue }
+            let input = ForecastInput(
+                now: now, periodStart: period.start, periodEnd: end,
+                calendar: calendar, elapsed: elapsed, priorPeriods: priors)
+            out.append(Case(input: input, truth: truth,
+                            bucket: "cut=\(String(format: "%.2f", cf))|\(regime(input))"))
         }
         return out
     }

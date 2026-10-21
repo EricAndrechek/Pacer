@@ -85,17 +85,72 @@ public enum EngineSelfEval {
         let cases = WalkForward.cases(
             periods: periods, periodEnd: { $0.start.addingTimeInterval(86400) },
             cutFractions: cutFractions, calendar: calendar)
+        return cases.flatMap { outcomesEOD(for: $0, calendar: calendar, skipping: existingKeys, candidates: candidates) }
+    }
+
+    private static func outcomesEOD(for c: WalkForward.Case, calendar: Calendar, skipping existingKeys: Set<String>,
+                                    candidates: [any Forecaster]) -> [NewOutcome] {
+        guard c.truth > 0 else { return [] }
+        let periodKey = TokenSample.formatDate(c.input.periodStart, timeZone: calendar.timeZone)
         var out: [NewOutcome] = []
-        for c in cases {
-            guard c.truth > 0 else { continue }
-            let periodKey = TokenSample.formatDate(c.input.periodStart, timeZone: calendar.timeZone)
-            for cand in candidates {
-                let key = EngineEvalOutcome.makeKey(
-                    surface: surfaceEOD, method: cand.id, bucket: c.bucket, periodKey: periodKey)
-                guard !existingKeys.contains(key) else { continue }
-                guard let pred = cand.projectTotal(c.input), pred.isFinite, pred > 0 else { continue }
-                out.append(NewOutcome(surface: surfaceEOD, method: cand.id, bucket: c.bucket,
-                                      periodKey: periodKey, predicted: pred, truth: c.truth))
+        for cand in candidates {
+            let key = EngineEvalOutcome.makeKey(
+                surface: surfaceEOD, method: cand.id, bucket: c.bucket, periodKey: periodKey)
+            guard !existingKeys.contains(key) else { continue }
+            guard let pred = cand.projectTotal(c.input), pred.isFinite, pred > 0 else { continue }
+            out.append(NewOutcome(surface: surfaceEOD, method: cand.id, bucket: c.bucket,
+                                  periodKey: periodKey, predicted: pred, truth: c.truth))
+        }
+        return out
+    }
+
+    // MARK: - Rescoring after the history changes (#329)
+
+    /// The scored days whose stored truth no longer matches the priced
+    /// history, and the earliest of them, or nil when the scoreboard is
+    /// current.
+    ///
+    /// The end-of-day scoreboard is a backtest over priced history, cached:
+    /// `predicted` and `truth` are both dollars computed from it. A repriced
+    /// day changes underneath its rows. That happens on a cost-recompute bump,
+    /// a price-ledger correction, a late transcript, newly attributed usage or
+    /// a dedup repair. Comparing against the history covers every cause, with
+    /// no notice from any of them. `dayTotals` must be summed the way the
+    /// backtest's truth is (hour by hour, `EngineFeatures.priorDayHourlyCosts`),
+    /// or the two would never agree and every refit would replay.
+    ///
+    /// A day missing from `dayTotals` is stale only inside the span the totals
+    /// cover. Before that there is nothing to check it against.
+    static func staleEODDays(records: some Sequence<Record>, dayTotals: [String: Double],
+                             tolerance: Double = 1e-6) -> (earliest: String, count: Int)? {
+        guard let firstKnown = dayTotals.keys.min() else { return nil }
+        var stale = Set<String>()
+        for r in records where r.periodKey >= firstKnown && !stale.contains(r.periodKey) {
+            if abs(r.truth - (dayTotals[r.periodKey] ?? 0)) > tolerance { stale.insert(r.periodKey) }
+        }
+        return stale.min().map { ($0, stale.count) }
+    }
+
+    /// The end-of-day outcomes for every day from `periodKey` on, recomputed on
+    /// the history as it is now. Each day is scored against the
+    /// `priorWindow - 1` days before it, which is what live scoring gave it
+    /// when it was the newest complete day. A day before a changed one is
+    /// unaffected; every day after it read it as a prior, so all of them
+    /// replay. `days` is every complete day, oldest first.
+    static func replayOutcomesEOD(
+        days: [ForecastInput.PriorPeriod],
+        from periodKey: String,
+        calendar: Calendar,
+        priorWindow: Int = EngineFeatures.eodPriorDays,
+        candidates: [any Forecaster] = eodCandidates
+    ) -> [NewOutcome] {
+        var out: [NewOutcome] = []
+        for (i, day) in days.enumerated()
+        where TokenSample.formatDate(day.start, timeZone: calendar.timeZone) >= periodKey {
+            let priors = Array(days[max(0, i - (priorWindow - 1))..<i])
+            for c in WalkForward.cases(for: day, priors: priors, periodEnd: { $0.start.addingTimeInterval(86400) },
+                                       cutFractions: cutFractions, calendar: calendar) {
+                out += outcomesEOD(for: c, calendar: calendar, skipping: [], candidates: candidates)
             }
         }
         return out

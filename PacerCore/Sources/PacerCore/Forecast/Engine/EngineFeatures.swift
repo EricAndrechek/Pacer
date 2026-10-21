@@ -34,6 +34,17 @@ struct EngineFeatures: Sendable {
     /// to a recent window so old behaviour doesn't anchor the shape.
     let dailyPeriods: [ForecastInput.PriorPeriod]
 
+    /// How many complete days `dailyPeriods` keeps, so the newest day is
+    /// scored against the `eodPriorDays - 1` before it. A replay of an older
+    /// day uses the same window (#329).
+    static let eodPriorDays = 60
+
+    /// Every complete prior day's per-hour cost (`yyyy-MM-dd` → 24 values),
+    /// uncapped: the priced history the end-of-day scoreboard is a backtest
+    /// of. The refit checks the scoreboard's stored truths against it and
+    /// replays what changed (#329). `dailyPeriods` is its recent slice.
+    let priorDayHourlyCosts: [String: [Double]]
+
     /// Today's cumulative-cost series so far (last point at `now`).
     let todayElapsed: [ForecastInput.Point]
 
@@ -105,7 +116,7 @@ struct EngineFeatures: Sendable {
         rate: [RateRow],
         lastArrivalAt: Date?,
         scoped: [ScopedRow] = [],
-        eodPriorDays: Int = 60
+        eodPriorDays: Int = EngineFeatures.eodPriorDays
     ) -> EngineFeatures {
         let todayStart = calendar.startOfDay(for: now)
         let todayKey = TokenSample.formatDate(now, timeZone: calendar.timeZone)
@@ -121,19 +132,10 @@ struct EngineFeatures: Sendable {
         }
 
         // Prior complete days as cumulative-by-hour Point series.
-        let priorKeys = hourCost.keys.filter { $0 < todayKey }.sorted()
-        let kept = priorKeys.suffix(max(0, eodPriorDays))
-        var dailyPeriods: [ForecastInput.PriorPeriod] = []
-        for key in kept {
-            guard let start = parseDay(key, calendar: calendar),
-                  let pts = cumulativePoints(hourCost[key]!, dayStart: start, cap: nil) else { continue }
-            // Carry the per-hour costs alongside the cumulative series — the
-            // walk-forward calibration reads them thousands of times per
-            // refit, and deriving them back from points costs 24 Calendar
-            // operations a call (the difference between a ~1.5s and a
-            // sub-200ms refit on a 50-day store).
-            dailyPeriods.append(.init(start: start, points: pts, cachedHourlyCosts: hourCost[key]!))
-        }
+        let priorHours = hourCost.filter { $0.key < todayKey }
+        let priorKeys = priorHours.keys.sorted()
+        let dailyPeriods = priorPeriods(priorHours, keys: priorKeys.suffix(max(0, eodPriorDays)),
+                                        calendar: calendar)
 
         // Today so far — last point pinned to `now`.
         let nowHour = calendar.component(.hour, from: now)
@@ -175,7 +177,8 @@ struct EngineFeatures: Sendable {
 
         return EngineFeatures(
             now: now, calendar: calendar, todayStart: todayStart,
-            dailyCosts: dailyCosts, dailyPeriods: dailyPeriods, todayElapsed: todayElapsed,
+            dailyCosts: dailyCosts, dailyPeriods: dailyPeriods, priorDayHourlyCosts: priorHours,
+            todayElapsed: todayElapsed,
             rateLimit: rateLimit, windows: windows, activityGrid: activityGrid,
             lastArrivalAt: lastArrivalAt, activeScopedIdentities: activeScoped)
     }
@@ -241,6 +244,25 @@ struct EngineFeatures: Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Complete days as cumulative-by-hour periods, in `keys` order. Live
+    /// scoring and the scoreboard's replay (#329) both build them here, so a
+    /// replayed day is the same input the live day was.
+    static func priorPeriods(_ hours: [String: [Double]], keys: some Sequence<String>,
+                             calendar: Calendar) -> [ForecastInput.PriorPeriod] {
+        var out: [ForecastInput.PriorPeriod] = []
+        for key in keys {
+            guard let costs = hours[key], let start = parseDay(key, calendar: calendar),
+                  let pts = cumulativePoints(costs, dayStart: start, cap: nil) else { continue }
+            // Carry the per-hour costs alongside the cumulative series — the
+            // walk-forward calibration reads them thousands of times per
+            // refit, and deriving them back from points costs 24 Calendar
+            // operations a call (the difference between a ~1.5s and a
+            // sub-200ms refit on a 50-day store).
+            out.append(.init(start: start, points: pts, cachedHourlyCosts: costs))
+        }
+        return out
+    }
 
     /// Cumulative-cost `Point` series from a day's per-hour costs: one point at
     /// the middle of each active hour carrying the running total, so
