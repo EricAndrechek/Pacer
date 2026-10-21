@@ -93,11 +93,17 @@ struct RealStoreRepriceProbe {
             let filtered = fullCatalog.pricingByModel.filter {
                 CanonicalModelID.parse($0.key).model != withheld
             }
+            // Withheld from the curated file too, or it would price the
+            // model all along — which is exactly what the curated file is for.
+            let curated = CuratedPriceHistory.load(cacheURL: noCache)
+            let curatedWithout = CuratedPriceHistory(
+                asOf: curated.asOf, records: curated.records.filter { $0.key.model != withheld })
             await MainActor.run {
                 SampleCostCache.install(catalog: PricingTable.Snapshot(pricingByModel: filtered, ledger: .empty),
-                                        curated: CuratedPriceHistory.load(cacheURL: noCache))
+                                        curated: curatedWithout)
             }
-            log("withholding \(withheld): \(fullCatalog.pricingByModel.count - filtered.count) catalog key(s) removed")
+            log("withholding \(withheld): \(fullCatalog.pricingByModel.count - filtered.count) catalog key(s) "
+                + "and \(curated.records.count - curatedWithout.records.count) curated record(s) removed")
         }
 
         let emptyRoot = FileManager.default.temporaryDirectory
