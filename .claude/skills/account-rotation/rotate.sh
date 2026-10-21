@@ -489,7 +489,12 @@ while :; do
       switch_to "$exp" "expiring: $exp has ${exproom} points of room (at ${expv}%) that reset in $(fmt_left "$expleft"); $act at ${mine}% resets in $(fmt_left "$myleft")"
     elif [ -n "$idle" ] && [ "$myleft" != - ] && [ "$myleft" -le "$STAGGER" ] && [ "$myexp" = 0 ]; then
       switch_to "$idle" "stagger: $idle is idle (7d $(eff7 "${ID[$idle]}")%, 7d resets in $(fmt_left "$(left7 "${ID[$idle]}")")), $act has $(( myleft / 60 ))m left"
-    elif [ -z "$best" ] && { [ "$mine" -ge $(( at - 3 )) ] || [ "$mywk" -ge "$(wkmax "$act")" ]; }; then
+    # A hold starts within 3 points of the switch point and ends only well below
+    # it (8), on a switch or a reset: the switch point moves with the burn, and
+    # without the band one wobble logged HOLD and "hold over" a minute apart
+    # (2026-10-21 15:05Z/15:06Z), each one a wake for the supervisor.
+    elif [ -z "$best" ] && { [ "$mine" -ge $(( at - 3 )) ] || [ "$mywk" -ge "$(wkmax "$act")" ] \
+         || { [ "$hold_said" = 1 ] && [ "$mine" -ge $(( at - 8 )) ]; }; }; then
       held=1
       # One HOLD per episode (the watcher relays it), then a quiet reminder
       # every 30 min so a long hold is still visible in the log.
