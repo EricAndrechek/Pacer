@@ -16,15 +16,21 @@ public final class ProjectAggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
 
     public init(
         container: ModelContainer,
         context: ModelContext,
-        mode: CostMode = .auto
+        mode: CostMode = .auto,
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
+        self.pricing = pricing
     }
 
     public struct Stats: Sendable {
@@ -59,7 +65,7 @@ public final class ProjectAggregateRecomputer {
         if pairs.isEmpty { return stats }
         // One pricing snapshot for every path, per-pair and bulk — see the
         // same comment in `AggregateRecomputer.recompute`.
-        let snapshot = SampleCostCache.current()
+        let snapshot = pricing ?? SampleCostCache.current()
         if pairs.count >= Self.bulkRecomputeThreshold {
             // See AggregateRecomputer — commit any pending main-context
             // inserts so the background worker's separate context can

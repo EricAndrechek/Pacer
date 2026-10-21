@@ -193,3 +193,34 @@ public struct PricingFlags: OptionSet, Sendable, Hashable {
     /// Some rate in use was derived rather than published.
     public static let derivedRate = PricingFlags(rawValue: 1 << 3)
 }
+
+/// The set of ledger tokens a bucket was priced by, accumulated sample by
+/// sample and stored as `pricedByRecordIds` (#217).
+///
+/// Consecutive samples in a bucket nearly always carry the very same token
+/// array (one model, one price segment), so `add` skips a repeat without
+/// hashing — a full rebuild adds several million of these.
+public struct PricedBy: Sendable, Equatable {
+    public private(set) var tokens: Set<String> = []
+    private var last: [String] = []
+
+    public init() {}
+
+    public init(stored: String) {
+        if !stored.isEmpty { tokens = Set(stored.split(separator: "\n").map(String.init)) }
+    }
+
+    public mutating func add(_ more: [String]) {
+        if more == last { return }
+        tokens.formUnion(more)
+        last = more
+    }
+
+    public mutating func add(_ other: PricedBy) { tokens.formUnion(other.tokens) }
+
+    /// Sorted and newline-joined: deterministic, so an unchanged set writes
+    /// an unchanged string.
+    public var stored: String { tokens.sorted().joined(separator: "\n") }
+
+    public static func == (a: PricedBy, b: PricedBy) -> Bool { a.tokens == b.tokens }
+}

@@ -100,6 +100,10 @@ public struct PriceLedger: Sendable {
         let fast: [Choice]
         let standardTokens: [String]
         let fastTokens: [String]
+        /// Every number that decides a price in this segment. Two segments
+        /// with equal signatures price every request identically, whichever
+        /// records they came from.
+        let signature: [Double]
 
         init(start: Date, standard: [Choice], fast: [Choice]) {
             self.start = start
@@ -108,6 +112,16 @@ public struct PriceLedger: Sendable {
             // Base tier first: it is the record that "priced" the bucket.
             standardTokens = standard.reversed().map(\.token)
             fastTokens = fast.reversed().map(\.token)
+            var sig: [Double] = []
+            for (speed, choices) in [(0.0, standard), (1.0, fast)] {
+                for c in choices {
+                    let r = c.record.rates
+                    sig += [speed, Double(c.record.tierAbovePromptTokens), r.input, r.output,
+                            r.cacheRead, r.cacheWrite5m, r.cacheWrite1h,
+                            c.record.fastMultiplier ?? -1, c.record.regionalMultiplier ?? -1]
+                }
+            }
+            signature = sig
         }
     }
 
@@ -234,7 +248,25 @@ public struct PriceLedger: Sendable {
 
     /// The token a request on `key` carries while that key has no records.
     public static func noneToken(_ key: CanonicalModelID) -> String {
-        "none:\(key.model)|\(key.provider.rawValue)|\(key.region.rawValue)"
+        "none|\(key.model)|\(key.provider.rawValue)|\(key.region.rawValue)|"
+    }
+
+    /// The key a `pricedByRecordIds` token names: a record id
+    /// (`source|model|provider|region|speed|tier|from`, maybe `~`-prefixed)
+    /// or a `none|model|provider|region|` token.
+    public static func key(ofToken token: String) -> CanonicalModelID? {
+        let body = token.hasPrefix("~") ? token.dropFirst() : Substring(token)
+        let f = body.split(separator: "|", omittingEmptySubsequences: false)
+        guard f.count >= 4,
+              let provider = CanonicalModelID.Provider(rawValue: String(f[2])),
+              let region = CanonicalModelID.Region(rawValue: String(f[3]))
+        else { return nil }
+        return CanonicalModelID(model: String(f[1]), provider: provider, region: region)
+    }
+
+    /// The substring every token of `key` contains, for a store predicate.
+    public static func needle(_ key: CanonicalModelID) -> String {
+        "|\(key.model)|\(key.provider.rawValue)|\(key.region.rawValue)|"
     }
 
     /// The deciding record among `candidates` (one key, one speed, one tier)
@@ -340,6 +372,66 @@ public struct PriceLedger: Sendable {
     /// Whether `model` has any price at all.
     public func isPriced(_ model: String) -> Bool {
         plan(for: model).timeline?.segments.isEmpty == false
+    }
+}
+
+// MARK: - What changed
+
+/// A stretch of time over which one key's prices differ between two ledgers.
+public struct PriceChange: Sendable, CustomStringConvertible {
+    public let key: CanonicalModelID
+    /// Inclusive.
+    public let from: Date
+    /// Exclusive; nil = open-ended.
+    public let to: Date?
+    /// Base-tier standard rates before and after; nil = unpriced.
+    public let old: PriceRates?
+    public let new: PriceRates?
+
+    public func overlaps(_ start: Date, _ end: Date) -> Bool {
+        end > from && (to.map { start < $0 } ?? true)
+    }
+
+    public var description: String {
+        let day = ISO8601DateFormatter()
+        day.formatOptions = [.withFullDate]
+        let window = (from == .distantPast ? "earliest" : day.string(from: from))
+            + ".." + (to.map { day.string(from: $0) } ?? "open")
+        return "\(key) \(window): \(old?.perMTokSummary ?? "unpriced") → \(new?.perMTokSummary ?? "unpriced")"
+    }
+}
+
+extension PriceLedger {
+
+    /// Where this ledger prices anything differently from `old`, key by key.
+    /// Compares what decides a price (`Segment.signature`), not which
+    /// record holds it: a curated record replacing a catalog one at the same
+    /// numbers changes nothing, so nothing needs rebuilding.
+    public func changes(since old: PriceLedger) -> [PriceChange] {
+        var out: [PriceChange] = []
+        let keys = Set(timelines.keys).union(old.timelines.keys)
+        for key in keys.sorted(by: { $0.description < $1.description }) {
+            let a = old.timelines[key], b = timelines[key]
+            var cuts = Set<Date>([.distantPast])
+            for s in a?.segments ?? [] { cuts.insert(s.start) }
+            for s in b?.segments ?? [] { cuts.insert(s.start) }
+            let starts = cuts.sorted()
+            var open: (from: Date, old: PriceRates?, new: PriceRates?)?
+            for (i, start) in starts.enumerated() {
+                let sa = a?.segment(at: start), sb = b?.segment(at: start)
+                let differs = sa?.signature != sb?.signature
+                if differs, open == nil {
+                    open = (start, sa?.standard.last?.record.rates, sb?.standard.last?.record.rates)
+                } else if !differs, let o = open {
+                    out.append(PriceChange(key: key, from: o.from, to: start, old: o.old, new: o.new))
+                    open = nil
+                }
+                if i == starts.count - 1, let o = open {
+                    out.append(PriceChange(key: key, from: o.from, to: nil, old: o.old, new: o.new))
+                }
+            }
+        }
+        return out
     }
 }
 

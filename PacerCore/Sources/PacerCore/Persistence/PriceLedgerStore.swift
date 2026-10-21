@@ -139,3 +139,109 @@ public enum PriceLedgerStore {
         return result
     }
 }
+
+// MARK: - Rebuilding what a price change touched (#217)
+
+/// The rollup buckets a set of price changes affects.
+public struct RepriceScope: Sendable {
+    public var daily: Set<DateModelPair> = []
+    public var hourly: Set<DateHourModelTriple> = []
+    public var project: Set<ProjectDatePair> = []
+    public var sessions: Set<String> = []
+
+    /// Per change, how many of each it touched and the daily cost it had —
+    /// for the `model, window, old → new` log line.
+    public struct Line: Sendable {
+        public let change: PriceChange
+        public var daily: Set<DateModelPair> = []
+        public var hourly = 0, project = 0, sessions = 0
+        public var costBefore: Double = 0
+    }
+    public var lines: [Line] = []
+
+    public var isEmpty: Bool { daily.isEmpty && hourly.isEmpty && project.isEmpty && sessions.isEmpty }
+}
+
+extension PriceLedgerStore {
+
+    /// Every bucket whose `pricedByRecordIds` names a key that changed price
+    /// over that bucket's time.
+    ///
+    /// Matched by KEY (model, provider, region) and time, not by exact record
+    /// id: a bucket remembers the records that priced it, and any change to
+    /// that key's prices over the bucket's window — a record corrected,
+    /// added, closed, or a curated one taking precedence — can change what
+    /// it costs. A bucket the change doesn't reach is never touched.
+    ///
+    /// Bucket windows are padded by 14 hours either side: a day bucket's
+    /// `date` is the local date at insert time, and a timezone change since
+    /// would otherwise let a sample sit just outside the window computed now.
+    /// Over-including a bucket costs one rebuild; missing one leaves it wrong.
+    public static func affectedBuckets(context: ModelContext, changes: [PriceChange]) throws -> RepriceScope {
+        var scope = RepriceScope()
+        guard !changes.isEmpty else { return scope }
+        scope.lines = changes.map { RepriceScope.Line(change: $0) }
+        let needles = changes.map { PriceLedger.needle($0.key) }
+        let pad: TimeInterval = 14 * 3600
+
+        let dayFormatter = DateFormatter()
+        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dayFormatter.timeZone = .current
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        var dayStart: [String: Date] = [:]
+        func start(of date: String) -> Date? {
+            if let d = dayStart[date] { return d }
+            let d = dayFormatter.date(from: date)
+            dayStart[date] = d
+            return d
+        }
+        /// Indices of the changes `tokens` names whose window overlaps.
+        func hits(_ tokens: String, _ from: Date, _ to: Date) -> [Int] {
+            guard !tokens.isEmpty else { return [] }
+            return needles.indices.filter {
+                tokens.contains(needles[$0]) && changes[$0].overlaps(from - pad, to + pad)
+            }
+        }
+
+        var daily = FetchDescriptor<DailyAggregate>()
+        daily.propertiesToFetch = [\.date, \.model, \.pricedByRecordIds, \.totalCostUSD]
+        for row in try context.fetch(daily) {
+            guard let d = start(of: row.date) else { continue }
+            for i in hits(row.pricedByRecordIds, d, d.addingTimeInterval(86_400)) {
+                let pair = DateModelPair(date: row.date, model: row.model)
+                scope.daily.insert(pair)
+                if scope.lines[i].daily.insert(pair).inserted { scope.lines[i].costBefore += row.totalCostUSD }
+            }
+        }
+        var hourly = FetchDescriptor<HourlyAggregate>()
+        hourly.propertiesToFetch = [\.date, \.hour, \.model, \.pricedByRecordIds]
+        for row in try context.fetch(hourly) {
+            guard let d = start(of: row.date)?.addingTimeInterval(TimeInterval(row.hour) * 3600) else { continue }
+            let found = hits(row.pricedByRecordIds, d, d.addingTimeInterval(3600))
+            if !found.isEmpty {
+                scope.hourly.insert(DateHourModelTriple(date: row.date, hour: row.hour, model: row.model))
+                for i in found { scope.lines[i].hourly += 1 }
+            }
+        }
+        var project = FetchDescriptor<ProjectDailyAggregate>()
+        project.propertiesToFetch = [\.date, \.projectPath, \.pricedByRecordIds]
+        for row in try context.fetch(project) {
+            guard let d = start(of: row.date) else { continue }
+            let found = hits(row.pricedByRecordIds, d, d.addingTimeInterval(86_400))
+            if !found.isEmpty {
+                scope.project.insert(ProjectDatePair(projectPath: row.projectPath, date: row.date))
+                for i in found { scope.lines[i].project += 1 }
+            }
+        }
+        var sessions = FetchDescriptor<SessionInfo>()
+        sessions.propertiesToFetch = [\.sessionId, \.firstSeenAt, \.lastSeenAt, \.pricedByRecordIds]
+        for row in try context.fetch(sessions) {
+            let found = hits(row.pricedByRecordIds, row.firstSeenAt, row.lastSeenAt.addingTimeInterval(1))
+            if !found.isEmpty {
+                scope.sessions.insert(row.sessionId)
+                for i in found { scope.lines[i].sessions += 1 }
+            }
+        }
+        return scope
+    }
+}

@@ -24,15 +24,21 @@ public final class AggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
 
     public init(
         container: ModelContainer,
         context: ModelContext,
-        mode: CostMode = .auto
+        mode: CostMode = .auto,
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
+        self.pricing = pricing
     }
 
     public struct Stats: Sendable {
@@ -97,7 +103,7 @@ public final class AggregateRecomputer {
             return try await worker.bulkRecompute(
                 pairs: pairs,
                 mode: mode,
-                pricing: SampleCostCache.current(),
+                pricing: pricing ?? SampleCostCache.current(),
                 snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
@@ -116,7 +122,7 @@ public final class AggregateRecomputer {
         // Every path — fast, full and bulk — prices through this one
         // snapshot and `CostCalculator.sampleCost`, so a bucket's cost can't
         // depend on which path last touched it.
-        let pricingSnapshot = SampleCostCache.current()
+        let pricingSnapshot = pricing ?? SampleCostCache.current()
         for pair in pairs {
             stats.pairsRecomputed += 1
             let pendingForPair = pending[pair] ?? []
@@ -163,6 +169,7 @@ public final class AggregateRecomputer {
 
         var perAccount: [String: AccountBucket] = [:]
         var components = existing.costComponents
+        var pricedBy = PricedBy(stored: existing.pricedByRecordIds)
         for sample in pending {
             existing.inputTokens += sample.inputTokens
             existing.outputTokens += sample.outputTokens
@@ -172,6 +179,7 @@ public final class AggregateRecomputer {
             let breakdown = sample.breakdown
             let sampleCost = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
             components += sampleCost.components
+            pricedBy.add(sampleCost.pricedBy)
 
             // The account row gets the same increment, from the same cost.
             // Missing this is what made the two rollups drift: this path adds
@@ -192,6 +200,8 @@ public final class AggregateRecomputer {
             perAccount[accountKey] = bucket
         }
         existing.costComponents = components
+        let stored = pricedBy.stored
+        if stored != existing.pricedByRecordIds { existing.pricedByRecordIds = stored }
 
         for (accountId, bucket) in perAccount {
             try applyToAccountRow(
@@ -302,6 +312,7 @@ struct AccountBucket {
 struct DailyBucketValues {
     var sum = TokenBreakdown()
     var cost = CostComponents.zero
+    var pricedBy = PricedBy()
     var perAccount: [String: AccountBucket] = [:]
 
     init<S: AggregatableSample>(samples: [S], mode: CostMode, snapshot: PricingTable.Snapshot) {
@@ -310,6 +321,7 @@ struct DailyBucketValues {
             sum.add(breakdown)
             let c = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
             cost += c.components
+            pricedBy.add(c.pricedBy)
             let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
             var bucket = perAccount[key] ?? AccountBucket()
             bucket.sum.add(breakdown)
@@ -325,6 +337,7 @@ struct DailyBucketValues {
         row.cacheCreation5mTokens = sum.cacheCreation5mTokens
         row.cacheCreation1hTokens = sum.cacheCreation1hTokens
         row.costComponents = cost
+        row.pricedByRecordIds = pricedBy.stored
     }
 }
 

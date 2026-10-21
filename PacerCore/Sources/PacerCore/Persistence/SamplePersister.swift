@@ -260,6 +260,8 @@ public final class SamplePersister {
         case all
         /// Turns whose project path was re-canonicalised.
         case alias
+        /// A price it was costed at changed (#217).
+        case reprice
     }
 
     public private(set) var stats: Stats
@@ -845,9 +847,9 @@ public final class SamplePersister {
     /// each session id so the recomputer's fast path won't apply —
     /// the existing `SessionInfo` row's `topModel` / cumulative
     /// columns can't be trusted under recovery semantics.
-    public func addDirtySessionIds(_ ids: Set<String>) {
+    public func addDirtySessionIds(_ ids: Set<String>, reason: SessionPollution = .recovery) {
         dirtySessionIds.formUnion(ids)
-        for sid in ids { polluteSession(sid, .recovery) }
+        for sid in ids { polluteSession(sid, reason) }
     }
 
     /// Collapse turns that got stored more than once.

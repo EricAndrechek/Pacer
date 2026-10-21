@@ -17,6 +17,10 @@ public final class SessionInfoRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
     private let cache: SessionRollupCache
 
     /// `cache` should outlive the recomputer — `ScanCoordinator` holds one for
@@ -26,11 +30,13 @@ public final class SessionInfoRecomputer {
         container: ModelContainer,
         context: ModelContext,
         mode: CostMode = .auto,
-        cache: SessionRollupCache = SessionRollupCache()
+        cache: SessionRollupCache = SessionRollupCache(),
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
+        self.pricing = pricing
         self.cache = cache
     }
 
@@ -73,7 +79,7 @@ public final class SessionInfoRecomputer {
         if sessionIds.isEmpty { return stats }
         // One pricing snapshot for every path, per-session and bulk — see
         // the same comment in `AggregateRecomputer.recompute`.
-        let snapshot = SampleCostCache.current()
+        let snapshot = pricing ?? SampleCostCache.current()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
             // The bulk worker writes these rows from another context and
             // does not seed the cache, so what the cache holds for them is
@@ -399,6 +405,8 @@ extension SessionRollupValues {
         row.projectPath = projectPath ?? ""
         row.ccVersion = ccVersion
         row.costComponents = cost
+        let stored = pricedBy.stored
+        if stored != row.pricedByRecordIds { row.pricedByRecordIds = stored }
         row.cumulativeInputTokens = inputTokens
         row.cumulativeOutputTokens = outputTokens
         row.cumulativeCacheReadTokens = cacheReadTokens
@@ -436,6 +444,7 @@ extension SessionRollupValues {
             cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
             topModel: topModel)
         row.costComponents = cost
+        row.pricedByRecordIds = pricedBy.stored
         return row
     }
 

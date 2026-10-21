@@ -82,7 +82,23 @@ struct RealStoreRepriceProbe {
         // file (a nonexistent cache path keeps the App Group copy out of it).
         let table = PricingTable()
         try await table.ensureLoaded(cacheURL: env["PACER_REPRICE_PROBE_CATALOG"].map(URL.init(fileURLWithPath:)))
-        await SampleCostCache.reload(table, curatedCacheURL: URL(fileURLWithPath: "/nonexistent/price-history.json"))
+        let noCache = URL(fileURLWithPath: "/nonexistent/price-history.json")
+        await SampleCostCache.reload(table, curatedCacheURL: noCache)
+        // #217 scenario: rebuild with one model missing from the catalog (as
+        // a model is on its launch day), then let the catalog gain it and
+        // watch which buckets the next cycle rebuilds.
+        let withheld = env["PACER_REPRICE_PROBE_WITHHOLD"]
+        let fullCatalog = SampleCostCache.current()
+        if let withheld {
+            let filtered = fullCatalog.pricingByModel.filter {
+                CanonicalModelID.parse($0.key).model != withheld
+            }
+            await MainActor.run {
+                SampleCostCache.install(catalog: PricingTable.Snapshot(pricingByModel: filtered, ledger: .empty),
+                                        curated: CuratedPriceHistory.load(cacheURL: noCache))
+            }
+            log("withholding \(withheld): \(fullCatalog.pricingByModel.count - filtered.count) catalog key(s) removed")
+        }
 
         let emptyRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("pacer-reprice-\(UUID().uuidString)")
@@ -96,6 +112,35 @@ struct RealStoreRepriceProbe {
         let report = try await coordinator.runOnce()
         log("scan: \(coordinator.formatReport(report))")
         log("rebuild took \(Int(Date().timeIntervalSince(started))) s total")
+
+        var costsBeforeGain: [String: Double] = [:]
+        if let withheld {
+            costsBeforeGain = try Self.dailyCosts(ModelContext(container))
+            let zeroed = costsBeforeGain.filter { $0.key.hasSuffix("|" + withheld) }.values.reduce(0, +)
+            log("cycle 1 (\(withheld) unpriced): its daily cost $\(String(format: "%.2f", zeroed))")
+            await MainActor.run {
+                SampleCostCache.install(catalog: fullCatalog,
+                                        curated: CuratedPriceHistory.load(cacheURL: noCache))
+            }
+            let gained = try await coordinator.runOnce()
+            log("cycle 2 (catalog gains \(withheld)): \(coordinator.formatReport(gained))")
+            let after = try Self.dailyCosts(ModelContext(container))
+            var moved: [String: (Double, Double)] = [:]
+            for (key, value) in after where abs(value - (costsBeforeGain[key] ?? 0)) > 1e-9 {
+                let model = String(key.split(separator: "|", maxSplits: 1).last ?? "")
+                var m = moved[model] ?? (0, 0)
+                m.0 += costsBeforeGain[key] ?? 0
+                m.1 += value
+                moved[model] = m
+            }
+            for (model, m) in moved.sorted(by: { $0.key < $1.key }) {
+                log(String(format: "  cycle 2 moved %@: $%.2f → $%.2f", model as NSString, m.0, m.1))
+            }
+            #expect(Set(moved.keys) == [withheld], "a model other than the one that gained a price moved")
+            let quiet = try await coordinator.runOnce()
+            log("cycle 3 (nothing changed): \(coordinator.formatReport(quiet))")
+            #expect(quiet.recomputeStats.pairsRecomputed == 0)
+        }
 
         let after = try Self.tokenTotals(ModelContext(container))
         log("after   TOTALS \(after)")

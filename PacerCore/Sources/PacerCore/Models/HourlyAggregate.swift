@@ -42,6 +42,10 @@ public final class HourlyAggregate {
     /// `HourlyAggregateRecomputer` with the user's current cost mode.
     /// Stored so the read path doesn't have to re-apply pricing.
     public var totalCostUSD: Double
+    /// The price-ledger tokens that priced this bucket, newline-separated
+    /// and sorted (#217): when one of their keys changes price over this
+    /// bucket's time, the bucket is rebuilt. See `PricedBy`.
+    public var pricedByRecordIds: String = ""
     /// `totalCostUSD` split by category (#296). The total is always written
     /// as the sum of these five, so they agree by construction; see
     /// `RollupCostColumns`.

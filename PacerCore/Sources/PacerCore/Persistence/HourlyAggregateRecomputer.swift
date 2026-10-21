@@ -16,15 +16,21 @@ public final class HourlyAggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
+    /// Prices to recompute with; nil = the process-wide `SampleCostCache`.
+    /// Tests pin one so a parallel suite installing another ledger can't
+    /// change what they compute.
+    private let pricing: PricingTable.Snapshot?
 
     public init(
         container: ModelContainer,
         context: ModelContext,
-        mode: CostMode = .auto
+        mode: CostMode = .auto,
+        pricing: PricingTable.Snapshot? = nil
     ) {
         self.container = container
         self.context = context
         self.mode = mode
+        self.pricing = pricing
     }
 
     public struct Stats: Sendable {
@@ -66,7 +72,7 @@ public final class HourlyAggregateRecomputer {
             return try await worker.bulkRecompute(
                 buckets: buckets,
                 mode: mode,
-                pricing: SampleCostCache.current(),
+                pricing: pricing ?? SampleCostCache.current(),
                 snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
@@ -76,7 +82,7 @@ public final class HourlyAggregateRecomputer {
         // nonisolated) — see the same comment in
         // `AggregateRecomputer.recompute` for why we don't `await`
         // `PricingTable.shared` here.
-        let pricingSnapshot = SampleCostCache.current()
+        let pricingSnapshot = pricing ?? SampleCostCache.current()
         for bucket in buckets {
             stats.bucketsRecomputed += 1
             let pendingForBucket = pending[bucket] ?? []
@@ -118,6 +124,7 @@ public final class HourlyAggregateRecomputer {
 
         var perAccount: [String: AccountHourBucket] = [:]
         var components = existing.costComponents
+        var pricedBy = PricedBy(stored: existing.pricedByRecordIds)
         for sample in pending {
             existing.inputTokens += sample.inputTokens
             existing.outputTokens += sample.outputTokens
@@ -127,6 +134,7 @@ public final class HourlyAggregateRecomputer {
             let breakdown = sample.breakdown
             let sampleCost = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
             components += sampleCost.components
+            pricedBy.add(sampleCost.pricedBy)
 
             // Accumulated and written once per account below. The daily
             // rollup learned this the expensive way: writing per sample cost
@@ -141,6 +149,8 @@ public final class HourlyAggregateRecomputer {
             perAccount[accountKey] = acc
         }
         existing.costComponents = components
+        let stored = pricedBy.stored
+        if stored != existing.pricedByRecordIds { existing.pricedByRecordIds = stored }
         for (accountId, acc) in perAccount {
             try addToAccountHourlyRow(
                 context: context, accountId: accountId, date: bucket.date,
@@ -242,6 +252,7 @@ struct HourBucketValues {
     var sum = TokenBreakdown()
     var cost = CostComponents.zero
     var count = 0
+    var pricedBy = PricedBy()
     var perAccount: [String: AccountHourBucket] = [:]
 
     init<S: AggregatableSample>(samples: [S], mode: CostMode, snapshot: PricingTable.Snapshot) {
@@ -250,6 +261,7 @@ struct HourBucketValues {
             sum.add(breakdown)
             let c = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
             cost += c.components
+            pricedBy.add(c.pricedBy)
             count += 1
             let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
             var acc = perAccount[key] ?? AccountHourBucket()
@@ -268,6 +280,7 @@ struct HourBucketValues {
         row.cacheCreation1hTokens = sum.cacheCreation1hTokens
         row.costComponents = cost
         row.sampleCount = count
+        row.pricedByRecordIds = pricedBy.stored
     }
 }
 

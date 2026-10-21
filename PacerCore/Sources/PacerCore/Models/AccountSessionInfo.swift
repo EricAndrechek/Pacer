@@ -97,6 +97,8 @@ public struct SessionRollupValues: Sendable {
     /// Cost by category; `totalCostUSD` is its sum.
     public var cost = CostComponents.zero
     public var totalCostUSD: Double { cost.total }
+    /// The ledger tokens behind `cost`, written to the global `SessionInfo`.
+    public var pricedBy = PricedBy()
     public var modelTokens: [String: Int64] = [:]
     public var projectPath: String?
     public var ccVersion: String?
@@ -124,7 +126,9 @@ public struct SessionRollupValues: Sendable {
         cacheReadTokens += sample.breakdown.cacheReadTokens
         cacheCreation5mTokens += sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens += sample.breakdown.cacheCreation1hTokens
-        cost += CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot).components
+        let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+        cost += priced.components
+        pricedBy.add(priced.pricedBy)
         modelTokens[sample.model, default: 0] +=
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
         if firstModel == nil { firstModel = sample.model }

@@ -151,8 +151,10 @@ public final class ScanCoordinator {
     ///          on a real store, Sonnet 5.5's first week priced at Sonnet 5's
     ///          cache-read rate. Tiers are priced per request on the whole
     ///          prompt (#297): Haiku 5.5 over 100k, and the old Sonnet 4/4.5
-    ///          200k tier, which used to split each category at 200k. One
-    ///          bump for all of it, so the store is rebuilt once.
+    ///          200k tier, which used to split each category at 200k. The
+    ///          rebuild also fills the global rollups' `pricedByRecordIds`
+    ///          (#217), from which later price changes rebuild only what they
+    ///          touch. One bump for all of it, so the store is rebuilt once.
     public static let currentCostRecomputeVersion = "17"
 
     /// Generation of the duplicate-turn repair.
@@ -1904,6 +1906,7 @@ public final class ScanCoordinator {
             snapshots: sampleSnapshots
         )
         phase.dailyRecomputeMs = tickMs()
+        logRepriceOutcome()
 
         // Hourly rollup feeds TodayTimelineCard (24-bar hour-of-day
         // chart) and NowStrip (last-hour burn rate). Order
@@ -2284,6 +2287,9 @@ public final class ScanCoordinator {
     /// from, in this process. nil until the first sync, which therefore runs
     /// on the first cycle after launch.
     private var ledgerSyncedAtCatalogGeneration: UInt64?
+    /// Price changes whose buckets this cycle is rebuilding, logged with
+    /// their new cost once the daily rollup has been recomputed.
+    private var pendingReprice: [RepriceScope.Line] = []
 
     /// Keep the dated price ledger (`PriceRecord`) in step with the catalogs
     /// and the curated file, and install it for pricing (#296).
@@ -2318,6 +2324,8 @@ public final class ScanCoordinator {
                     log("pricing: ledger \(result.ledger.records.count) record(s) — "
                         + "\(result.opened.count) opened, \(result.closed.count) closed, "
                         + "\(result.curatedChanged) curated change(s)")
+                    try rebuildRepricedBuckets(
+                        result.ledger.changes(since: result.previous), persister: persister)
                 }
             } catch {
                 // Keep pricing with what is installed; the next cycle retries.
@@ -2332,11 +2340,12 @@ public final class ScanCoordinator {
             .flatMap { Data($0.utf8) }
             .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
 
-        // Left the unpriced set => gained a price => its history is stale.
+        // Left the unpriced set => gained a price. Its buckets carry a
+        // `none|…` token, so the ledger change above already queued exactly
+        // those for a rebuild.
         let nowPriced = previously.subtracting(unpriced)
         if !nowPriced.isEmpty {
-            try persister.markEverySampleDirty()
-            log("pricing: \(nowPriced.sorted().joined(separator: ", ")) gained pricing — rebuilding cost history")
+            log("pricing: \(nowPriced.sorted().joined(separator: ", ")) gained pricing")
         }
         if unpriced != previously,
            let encoded = try? JSONEncoder().encode(unpriced),
@@ -2345,6 +2354,53 @@ public final class ScanCoordinator {
             if !unpriced.subtracting(previously).isEmpty {
                 log("pricing: no price yet for \(unpriced.sorted().joined(separator: ", ")) — cost reads low until there is")
             }
+        }
+    }
+
+    /// Queue for a from-scratch rebuild every bucket a price change reaches
+    /// (#217), and log each change as `model, window, old → new`.
+    ///
+    /// This is what fixes old data: a corrected curated record, a catalog
+    /// price change, or a model gaining its first price rebuilds exactly the
+    /// buckets that were priced by that model over the affected window —
+    /// and nothing else. Past usage is re-priced at the rate in effect when
+    /// it was made, never at today's.
+    private func rebuildRepricedBuckets(_ changes: [PriceChange], persister: SamplePersister) throws {
+        guard !changes.isEmpty else { return }
+        let scope = try PriceLedgerStore.affectedBuckets(context: context, changes: changes)
+        // One line per change that reaches a bucket. A first sync "changes"
+        // every key from unpriced to priced and reaches none of them, so
+        // those collapse into one count.
+        let reaching = scope.lines.filter {
+            !$0.daily.isEmpty || $0.hourly > 0 || $0.project > 0 || $0.sessions > 0
+        }
+        for line in reaching {
+            log("pricing: \(line.change) — rebuilding \(line.daily.count) daily, \(line.hourly) hourly, "
+                + "\(line.project) project, \(line.sessions) session bucket(s)")
+        }
+        if reaching.count < changes.count {
+            log("pricing: \(changes.count - reaching.count) price change(s) reach no stored bucket")
+        }
+        guard !scope.isEmpty else { return }
+        persister.addDirtyPairs(scope.daily)
+        persister.addDirtyHourBuckets(scope.hourly)
+        persister.addDirtyProjectDates(scope.project)
+        persister.addDirtySessionIds(scope.sessions, reason: .reprice)
+        pendingReprice = scope.lines.filter { !$0.daily.isEmpty }
+    }
+
+    /// The second half of the reprice log: each change's daily cost, before
+    /// and after its rebuild. Reads this cycle's uncommitted rollup rows.
+    private func logRepriceOutcome() {
+        guard !pendingReprice.isEmpty else { return }
+        defer { pendingReprice = [] }
+        guard let rows = try? context.fetch(FetchDescriptor<DailyAggregate>()) else { return }
+        var cost: [DateModelPair: Double] = [:]
+        for r in rows { cost[DateModelPair(date: r.date, model: r.model)] = r.totalCostUSD }
+        for line in pendingReprice {
+            let after = line.daily.reduce(0) { $0 + (cost[$1] ?? 0) }
+            log(String(format: "pricing: rebuilt %@: daily cost $%.2f → $%.2f",
+                       line.change.key.description, line.costBefore, after))
         }
     }
 

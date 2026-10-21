@@ -98,6 +98,9 @@ public struct ProjectRollupValues: Sendable {
     /// Cost by category; `totalCostUSD` is its sum.
     public var cost = CostComponents.zero
     public var totalCostUSD: Double { cost.total }
+    /// The ledger tokens behind `cost` (kept on the global rollup only —
+    /// the per-account rows are rebuilt with their global bucket).
+    public var pricedBy = PricedBy()
     public var sessionIds: Set<String> = []
     public var modelTokens: [String: Int64] = [:]
     public var modelCost: [String: Double] = [:]
@@ -127,6 +130,7 @@ public struct ProjectRollupValues: Sendable {
 
         let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
         cost += priced.components
+        pricedBy.add(priced.pricedBy)
         if let sid = sample.sessionId, !sid.isEmpty { sessionIds.insert(sid) }
         modelTokens[sample.model, default: 0] +=
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
@@ -175,6 +179,9 @@ public extension ProjectRollupValues {
         cacheCreation5mTokens = row.cacheCreation5mTokens
         cacheCreation1hTokens = row.cacheCreation1hTokens
         cost = row.costComponents
+        if let global = row as? ProjectDailyAggregate {
+            pricedBy = PricedBy(stored: global.pricedByRecordIds)
+        }
         lastActive = row.lastActive
         let decoder = JSONDecoder()
         if !row.sessionIdsJSON.isEmpty,
@@ -198,6 +205,10 @@ public extension ProjectRollupValues {
         row.cacheCreation5mTokens = cacheCreation5mTokens
         row.cacheCreation1hTokens = cacheCreation1hTokens
         row.costComponents = cost
+        if let global = row as? ProjectDailyAggregate {
+            let stored = pricedBy.stored
+            if stored != global.pricedByRecordIds { global.pricedByRecordIds = stored }
+        }
         row.sessionCount = sessionCount
         row.modelCount = modelCount
         row.lastActive = lastActive

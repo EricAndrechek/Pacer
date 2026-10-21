@@ -25,6 +25,10 @@ public final class SessionInfo {
     public var projectPath: String
     public var ccVersion: String?
     public var cumulativeCostUSD: Double
+    /// The price-ledger tokens that priced this bucket, newline-separated
+    /// and sorted (#217): when one of their keys changes price over this
+    /// bucket's time, the bucket is rebuilt. See `PricedBy`.
+    public var pricedByRecordIds: String = ""
     /// `cumulativeCostUSD` split by category (#296). The total is always written
     /// as the sum of these five, so they agree by construction; see
     /// `RollupCostColumns`.
