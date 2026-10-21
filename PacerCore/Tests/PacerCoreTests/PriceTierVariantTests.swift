@@ -86,7 +86,8 @@ struct PriceTierVariantTests {
         #expect(Self.close(c.cacheRead, 80_000 * 0.05 * Self.perM))
         #expect(Self.close(c.cacheWrite5m, 10_000 * 0.625 * Self.perM))
         #expect(Self.close(c.output, 1_000 * 2.50 * Self.perM))
-        #expect(Self.close(c.total, 0.0055 + 0.004 + 0.00625 + 0.0025))
+        let expected: Double = 0.0055 + 0.004 + 0.00625 + 0.0025
+        #expect(Self.close(c.total, expected))
     }
 
     @Test func cacheReadsAloneCanCrossTheThreshold() {

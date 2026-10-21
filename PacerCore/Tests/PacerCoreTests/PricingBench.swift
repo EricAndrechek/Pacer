@@ -37,11 +37,13 @@ struct PricingBench {
         var sum2 = 0.0
         for i in 0..<n {
             if let p = snap.pricing(for: models[i % models.count]) {
-                sum2 += Double(b.inputTokens) * (p.inputCostPerToken ?? 0)
-                    + Double(b.outputTokens) * (p.outputCostPerToken ?? 0)
-                    + Double(b.cacheReadTokens) * (p.cacheReadInputTokenCost ?? 0)
-                    + Double(b.cacheCreation5mTokens) * (p.cacheCreationInputTokenCost ?? 0)
-                    + Double(b.cacheCreation1hTokens) * (p.cacheCreationInputTokenCostAbove1hr ?? 0)
+                // Split up: Xcode 16's type checker times out on the one-liner.
+                let input: Double = Double(b.inputTokens) * (p.inputCostPerToken ?? 0)
+                let output: Double = Double(b.outputTokens) * (p.outputCostPerToken ?? 0)
+                let read: Double = Double(b.cacheReadTokens) * (p.cacheReadInputTokenCost ?? 0)
+                let w5m: Double = Double(b.cacheCreation5mTokens) * (p.cacheCreationInputTokenCost ?? 0)
+                let w1h: Double = Double(b.cacheCreation1hTokens) * (p.cacheCreationInputTokenCostAbove1hr ?? 0)
+                sum2 += input + output + read + w5m + w1h
             }
         }
         let flatNs = (Self.cpu() - t1) / Double(n) * 1e9
