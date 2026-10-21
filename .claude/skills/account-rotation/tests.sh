@@ -133,6 +133,8 @@ t "9 weekly cap blocks 3 at 0/92" '^[0-9:]{8} HOLD 1 at 95%.*3: 0% room 93, idle
   1 "1:95:26:63:ok 3:0:-:92:ok $SPENT"
 
 # --- the old behaviour, kept --------------------------------------------------
+t "9b stagger skips 3 at 7d 89 (1 point of weekly room): picks 2" 'WOULD SWITCH → 2 .*\[stagger: 2 is idle' \
+  1 "1:40:100:30:ok 2:0:-:0:ok:8640 3:0:-:89:ok:4320 4:0:-:100:ok"
 t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \
   1 "1:95:26:63:ok 2:null:-:10:ok 3:0:-:99:ok 4:0:-:100:ok"
 t "10a' missing 7d reading is not room" '^[0-9:]{8} HOLD 1 .*2: 0% room 93, idle, 7d -% \[no reading\]' \

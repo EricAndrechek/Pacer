@@ -94,7 +94,7 @@ API=${PACER_API:-http://127.0.0.1:7223}
 load_conf() {
   EARLY=2; WEEK_MAX=90; STAGGER=9000; MIN_SWITCH_GAP=300
   BRIDGE_MIN_PTS=6; BRIDGE_MIN_MINUTES=20; BURN_UNKNOWN=40
-  EXPIRE_WINDOW=2700; EXPIRE_MIN_PTS=8
+  EXPIRE_WINDOW=2700; EXPIRE_MIN_PTS=8; WEEK_ROOM_MIN=3
   EXCLUDE=""; RESERVE_SLOT=""; RESERVE_WEEK_MAX=97
   # A WEEK_MAX_<slot> deleted from the conf must stop applying, not linger
   # from an earlier read.
@@ -419,6 +419,9 @@ while :; do
       # A missing figure is never 0% and room.
       elif [ "$v" = - ] || [ "$w" = - ]; then why="no reading"
       elif [ "$w" -ge "$(wkmax "$s")" ]; then why="7d cap $(wkmax "$s")%, 7d resets in $(fmt_left "$(left7 "$sid")")"
+      # A point or two of weekly room is minutes of work, then a second switch
+      # off it (2026-10-21 10:40Z: stagger chose an account at 7d 89% of 90).
+      elif [ "$w" -gt $(( $(wkmax "$s") - WEEK_ROOM_MIN )) ]; then why="7d within ${WEEK_ROOM_MIN} of its cap"
       elif [ "$room" -lt "$need" ]; then why="room < $need"
       elif just_left "$s"; then why="just left"
       fi

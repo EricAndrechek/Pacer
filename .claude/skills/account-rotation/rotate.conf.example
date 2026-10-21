@@ -31,3 +31,7 @@ EXCLUDE=""
 # (it was account 3 for the week of 2026-10-07 and overshot to 100%).
 RESERVE_SLOT=""
 RESERVE_WEEK_MAX=97
+
+# A target also needs this many points of 7d room below its WEEK_MAX: one
+# point of weekly room is a few minutes of work and then another switch.
+WEEK_ROOM_MIN=3

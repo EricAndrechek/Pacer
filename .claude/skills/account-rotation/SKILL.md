@@ -77,7 +77,9 @@ as now + 5 h. Ties go to the sooner 7d reset, then to the most 5h room.
 The last switch is kept on disk, so a stop/start does not forget it.
 
 A target also needs: not in `EXCLUDE`, `usageStatus` ok, both readings present
-(a missing figure is never read as 0%), 7d below its ceiling.
+(a missing figure is never read as 0%), and 7d at least `WEEK_ROOM_MIN` (3)
+points below its ceiling: one point of weekly room is a few minutes of work,
+then a second switch off it.
 
 Readings: `cswap list --json` (fresh, every account, a quarter of a second);
 Pacer's `/metrics` may only *raise* a figure, and only for the same window. A
