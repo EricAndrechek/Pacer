@@ -1346,5 +1346,23 @@ colour, which had quietly flattened every stacked view.</p>]]></description>
             type="application/octet-stream"
             sparkle:edSignature="cHS7mCs1SroknZxblpWPwk3H4HM+99uVitJfcNfxg6+NfstMu4S1t6EmM4HOlqntqYTT6vAdWAC7y2wrmcpqDw==" />
     </item>
+            <item>
+        <title>Version 0.7.7</title>
+        <description><![CDATA[<p>Two fixes to <code class="notranslate">pacer</code>, so paused work stops before a limit and doesn't stampede back afterwards.</p>
+<h2>A go-ahead now expires before the limit</h2>
+<p>Subagents check <code class="notranslate">pacer status</code> between steps. That check accepted a "go" for up to 15 minutes, so near a limit, work in flight kept running until the account was full. A "go" now lasts only as long as the current burn rate leaves room: <code class="notranslate">status</code> shows <code class="notranslate">go (until 22:41Z)</code>, and once that time passes the next check asks Pacer again. With plenty of room nothing changes. Near a limit, sessions get a fresh answer every minute or two and stop in time.</p>
+<h2>Resuming waits for real room</h2>
+<p>After a pause, <code class="notranslate">pacer wait</code> resumed as soon as you switched to another login, even one with only a few points left. Every waiting session then started at once and filled it within minutes. <code class="notranslate">wait</code> now resumes on a login switch only when the new login has room for 20 minutes at the rate your sessions were using (<code class="notranslate">--resume-headroom</code> to change it). A reset still resumes as before.</p>
+<p><strong>Your data is untouched.</strong> No reset, no re-import.</p>]]></description>
+        <pubDate>Wed, 21 Oct 2026 13:16:56 +0000</pubDate>
+        <sparkle:version>1792588202</sparkle:version>
+        <sparkle:shortVersionString>0.7.7</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+        <enclosure
+            url="https://github.com/EricAndrechek/Pacer/releases/download/v0.7.7/Pacer-0.7.7.dmg"
+            length="25028353"
+            type="application/octet-stream"
+            sparkle:edSignature="jT9fZLkS2WfHqe8P7jXC1XIYOuLQlsrePnN1BnVz+Xf0YLQnpPqB9l4wt0MNACFctr9CtM+HTOM3j98ssHnDDg==" />
+    </item>
         </channel>
 </rss>
