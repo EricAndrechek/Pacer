@@ -2246,6 +2246,9 @@ public final class ScanCoordinator {
             }
         }
         phase.notifMs = tickMs()
+        // The heaviest thing Pacer does; what it leaves behind is the floor
+        // the app then sits on for hours (#337).
+        if rebuilding { MemoryHygiene.report("after history rebuild") }
 
         return ScanReport(
             wasFullScan: isFullScan,

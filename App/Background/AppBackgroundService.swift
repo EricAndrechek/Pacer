@@ -127,6 +127,10 @@ final class AppBackgroundService {
 
         let costMode = PacerPreferences.costMode()
         Log.write("AppBackground", "starting; cost mode: \(costMode)")
+        // An hourly `[Memory]` line (#337): the 1.3 GB footprint that
+        // stalled the main thread under pressure left no trace in this log.
+        MemoryHygiene.report("launch")
+        MemoryHygiene.startHourlyReports()
 
         // No Keychain prompt on first poll: `KeychainOAuth` shells to
         // `/usr/bin/security` (an Apple-signed binary already trusted

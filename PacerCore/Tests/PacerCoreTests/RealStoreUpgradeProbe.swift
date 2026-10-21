@@ -29,11 +29,15 @@ import Testing
 ///
 /// Reports the cycle's phase timings, its wall time, the process's peak cores
 /// (over one-second windows), peak footprint and average cores while the cycle
-/// runs, and fails on: any rollup row whose cost components don't sum to its
+/// runs, then what memory the rebuild leaves behind and what is left after a
+/// steady-state stand-in — `steadyCycles` incremental cycles with the HTTP
+/// snapshot rebuilt between them (#337) — and fails on: any rollup row whose cost components don't sum to its
 /// total; the daily or hourly rollups' tokens disagreeing with the samples;
 /// the six per-field token totals moving. `PACER_UPGRADE_PROBE_OUT` names a
 /// directory for a byte-exact dump of every rollup row and a digest of every
 /// sample, so two builds' results can be compared with `cmp`.
+/// `PACER_UPGRADE_PROBE_FORCE_REBUILD` drops the stored `costRecomputeVersion`
+/// first, so every rollup is rebuilt from every sample.
 @Suite("Real-store upgrade probe",
        .enabled(if: ProcessInfo.processInfo.environment["PACER_UPGRADE_PROBE_STORE"] != nil))
 struct RealStoreUpgradeProbe {
@@ -83,6 +87,19 @@ struct RealStoreUpgradeProbe {
         let before = try Self.tokenSums(ModelContext(container))
         log(String(format: "opened copy (migration applied) in %.1f s", Date().timeIntervalSince(opened)))
         log("before  rows=\(before.rows) tokens=\(before.tokens)")
+        if env["PACER_UPGRADE_PROBE_FORCE_REBUILD"] != nil {
+            // Every rollup rebuilt from every sample, as a `costRecomputeVersion`
+            // bump does: the worst case for memory, and with an empty Claude
+            // root a deterministic one, so two builds' dumps compare bit for bit.
+            let ctx = ModelContext(container)
+            let key = ClaudeCodeMetaKey.costRecomputeVersion
+            for row in try ctx.fetch(FetchDescriptor<ClaudeCodeMeta>(predicate: #Predicate { $0.key == key })) {
+                ctx.delete(row)
+            }
+            try ctx.save()
+            log("forcing a full rollup rebuild")
+        }
+        logMemory("before cycle", ProcessMemory.current())
 
         // Pricing: an explicit catalog copy and the bundled curated file, so
         // two runs price identically whatever the network did in between.
@@ -139,6 +156,34 @@ struct RealStoreUpgradeProbe {
         log("scan: \(coordinator.formatReport(report))")
         if let outDir { try usage.timeline.write(to: outDir.appendingPathComponent("timeline.tsv"), atomically: true, encoding: .utf8) }
 
+        // What the rebuild leaves behind (#337): the floor the app then sits
+        // on. Taken before anything below reads the store back.
+        logMemory("after rebuild", ProcessMemory.current())
+        if let outDir { Self.inspect(into: outDir, label: "rebuild") }
+
+        // A steady-state stand-in: incremental cycles against the live
+        // transcripts, with the HTTP snapshot rebuilt between them as the
+        // app's refresher does.
+        let steadyStarted = Date()
+        var steadyInserted = 0
+        var snapshotMs: [Double] = []
+        for _ in 0..<Self.steadyCycles {
+            let cycle = try await Self.runCycle(coordinator, priority: priority)
+            #expect(!cycle.wasFullScan)
+            steadyInserted += cycle.persisterStats.inserted
+            for _ in 0..<(Self.snapshotBuilds / Self.steadyCycles) {
+                let built = Date()
+                _ = try await Self.buildSnapshot(container)
+                snapshotMs.append(Date().timeIntervalSince(built) * 1000)
+            }
+        }
+        log(String(format: "steady: %d incremental cycle(s) + %d snapshot build(s) in %.1f s "
+                   + "(snapshot median %.0f ms), %d row(s) inserted",
+                   Self.steadyCycles, snapshotMs.count, Date().timeIntervalSince(steadyStarted),
+                   snapshotMs.sorted()[snapshotMs.count / 2], steadyInserted))
+        logMemory("steady state", ProcessMemory.current())
+        if let outDir { Self.inspect(into: outDir, label: "steady") }
+
         // Correctness, read back through a fresh context.
         let ctx = ModelContext(container)
         let after = try Self.sampleTotals(ctx)
@@ -147,7 +192,7 @@ struct RealStoreUpgradeProbe {
         // inserted, and nothing already stored may be lost or shrink.
         log("inserted \(report.persisterStats.inserted) row(s), "
             + "upgraded \(report.persisterStats.upgradedFromPartial)")
-        #expect(after.rows == before.rows + report.persisterStats.inserted)
+        #expect(after.rows == before.rows + report.persisterStats.inserted + steadyInserted)
         #expect(zip(after.tokens, before.tokens).allSatisfy { $0 >= $1 }, "a token total went down")
 
         func check<T: PersistentModel & RollupCostColumns>(_ name: String, _ type: T.Type) throws -> Int {
@@ -204,6 +249,63 @@ struct RealStoreUpgradeProbe {
             try (models.joined(separator: "\n") + "\n").write(
                 to: outDir.appendingPathComponent("models.tsv"), atomically: true, encoding: .utf8)
             log("wrote rollups.tsv, models.tsv and timeline.tsv to \(outDir.path)")
+        }
+    }
+
+    // MARK: - Steady state and memory
+
+    static let steadyCycles = 10
+    static let snapshotBuilds = 20
+
+    /// One cycle at the loop's priority, without escalating it — see the
+    /// full cycle above.
+    @ScanActor
+    static func runCycle(_ coordinator: ScanCoordinator,
+                         priority: TaskPriority) async throws -> ScanCoordinator.ScanReport {
+        let outcome: Result<ScanCoordinator.ScanReport, Error> = await withCheckedContinuation { done in
+            Task.detached(priority: priority) {
+                do { done.resume(returning: .success(try await coordinator.runOnce())) }
+                catch { done.resume(returning: .failure(error)) }
+            }
+        }
+        return try outcome.get()
+    }
+
+    /// The HTTP API's snapshot, built off the scan actor as the app's
+    /// refresher builds it on its own queue.
+    static func buildSnapshot(_ container: ModelContainer) async throws -> PacerAPISnapshot {
+        try await Task.detached(priority: .utility) {
+            try PacerAPISnapshot.build(container: container, activeAccountId: nil,
+                                       desktop: nil, now: Date())
+        }.value
+    }
+
+    func logMemory(_ label: String, _ m: ProcessMemory) {
+        log("memory \(label): \(m.summary) · fragmentation \(ProcessMemory.mb(m.mallocFragmentation)) MB")
+    }
+
+    /// `vmmap --summary` of this process (and, with `PACER_UPGRADE_PROBE_HEAP`,
+    /// `heap`'s count by type) into `outDir`, for what the in-process numbers
+    /// can't say: which zone, which region type, which allocations.
+    static func inspect(into outDir: URL, label: String) {
+        var tools = [("vmmap", ["--summary", String(getpid())])]
+        if ProcessInfo.processInfo.environment["PACER_UPGRADE_PROBE_HEAP"] != nil {
+            tools.append(("heap", ["-sortBySize", String(getpid())]))
+        }
+        for (tool, arguments) in tools {
+            let out = outDir.appendingPathComponent("\(tool)-\(label).txt")
+            FileManager.default.createFile(atPath: out.path, contents: nil)
+            guard let handle = try? FileHandle(forWritingTo: out) else { continue }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/\(tool)")
+            process.arguments = arguments
+            process.standardOutput = handle
+            process.standardError = handle
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {}
+            try? handle.close()
         }
     }
 
