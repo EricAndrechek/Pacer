@@ -148,12 +148,24 @@ private final class Flag {
 
     let (reached, reachedSignal) = AsyncStream.makeStream(of: Void.self)
     let latch = Latch()
+    // However the test leaves, the held cycle is let go.
+    defer { latch.open() }
     coordinator.beforeRecomputeHook = {
         reachedSignal.yield()
         await latch.wait()
     }
-    let cycle = Task { @ScanActor in try await coordinator.runOnce() }
-    for await _ in reached { break }
+    // The stream ends with the cycle, so a cycle that fails before its hook
+    // fails the test instead of leaving it waiting for a signal never sent.
+    let cycle = Task { @ScanActor in
+        defer { reachedSignal.finish() }
+        return try await coordinator.runOnce()
+    }
+    var reachedHook = false
+    for await _ in reached {
+        reachedHook = true
+        break
+    }
+    try #require(reachedHook, "the cycle ended before reaching its rollups")
 
     // The user merges the project while the cycle is suspended with its
     // buckets marked but not yet rebuilt.

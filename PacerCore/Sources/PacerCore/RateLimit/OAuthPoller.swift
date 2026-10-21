@@ -375,6 +375,9 @@ public actor OAuthPoller: TokenPoolTesting {
         }
     }
 
+    /// Test seam: whether the loop is running.
+    var isLoopRunningForTesting: Bool { loopTask != nil }
+
     /// Cancel the loop and wait for it to unwind. Idempotent.
     public func stop() async {
         stopping = true
@@ -1244,12 +1247,26 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Cancellable sleep. `notifyActivity()` / `stop()` cancel the inner
     /// task to return early; `try?` swallows the CancellationError so the
     /// loop simply re-evaluates (or exits on `stopping`).
+    ///
+    /// A nap that starts after `stop()` doesn't sleep. `stop()` cancels the
+    /// sleeper it finds, and when it lands while the loop is suspended
+    /// somewhere else — a poll, a main-actor publish — there is none to find.
+    /// The loop then started a fresh one, an unstructured task that doesn't
+    /// inherit the loop's cancellation, and `stop()` waited it out — up to the
+    /// ten-minute idle interval. That held up the app's quit and hung CI.
+    /// Nothing suspends between the check and `sleeper = task`, so a `stop()`
+    /// either ran before the check or finds this sleeper to cancel.
     private func nap(_ seconds: TimeInterval) async {
-        guard seconds > 0 else { return }
+        guard seconds > 0, !stopping, !Task.isCancelled else { return }
         let clock = self.clock
         let task = Task { _ = try? await clock.sleep(seconds: seconds) }
         sleeper = task
-        await task.value
+        // The loop task's own cancellation reaches the sleep too.
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
         sleeper = nil
     }
 

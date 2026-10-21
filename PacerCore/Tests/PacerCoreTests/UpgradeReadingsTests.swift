@@ -78,17 +78,65 @@ import Testing
             cycles.value += 1
             guard cycles.value == 1 else { return }
             defer { released.value = true }
-            for _ in 0..<150 {
-                readings.value = try ModelContext(container).fetchCount(FetchDescriptor<RateLimitSample>())
-                if readings.value > 0 { return }
-                try await Task.sleep(nanoseconds: 20_000_000)
+            // Holds the first cycle open until a reading lands, or gives up.
+            _ = await eventually {
+                readings.value = (try? ModelContext(container)
+                    .fetchCount(FetchDescriptor<RateLimitSample>())) ?? 0
+                return readings.value > 0
             }
         }
         let run = Task { try await coordinator.runForever() }
-        for _ in 0..<400 where !released.value { try await Task.sleep(nanoseconds: 10_000_000) }
-        await coordinator.stop()
-        try await run.value
+        let reachedHook = await eventually { released.value }
+        let stopped = try await stopAndAwait(coordinator, running: run)
+        #expect(stopped, "stop() or runForever didn't return")
+        #expect(reachedHook, "the first cycle never reached its rollups")
         #expect(readings.value > 0, "no rate-limit reading landed while the first cycle ran")
+    }
+
+    /// `stop()` can land anywhere in `runForever`'s startup — the app's quit
+    /// can come that early, and with the poller, the watcher and a main-actor
+    /// hop now ahead of the first cycle there are more places for it to land.
+    /// Wherever it does, `runForever` returns and leaves no poller running. A
+    /// stop before `triggers()` used to leave it waiting on a stream nothing
+    /// would end, and a poller started after the stop ran on.
+    @ScanActor
+    @Test func aStopAnywhereInStartupIsHonoured() async throws {
+        let r = try root(files: ["a.jsonl": [line("1", at: "2026-04-30T12:00:00.000Z")]])
+        defer { try? FileManager.default.removeItem(at: r) }
+        func make() throws -> ScanCoordinator {
+            ScanCoordinator(
+                container: try PacerStore.makeInMemoryContainer(),
+                configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false),
+                resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": r.path]),
+                oauthClient: try stubClient())
+        }
+
+        // Stopped before it ever ran. Nothing is running for this `stop()` to
+        // wait on; the question is whether `runForever` then returns by itself.
+        let early = try make()
+        await early.stop()
+        let earlyReturned = Box(false)
+        let earlyRun = Task {
+            try await early.runForever()
+            earlyReturned.value = true
+        }
+        let returned = await eventually(timeout: .seconds(30)) { earlyReturned.value }
+        #expect(returned, "runForever after a stop() waited on a stream nothing would end")
+        // Left behind on a failure, so the test fails rather than hangs.
+        if returned { try await earlyRun.value }
+
+        // Each pass lets the startup run a few more steps before the stop.
+        for yields in 0..<12 {
+            let coordinator = try make()
+            let run = Task { try await coordinator.runForever() }
+            for _ in 0..<yields { await Task.yield() }
+            let stopped = try await stopAndAwait(coordinator, running: run, timeout: .seconds(30))
+            #expect(stopped, "stop() or runForever didn't return after a stop \(yields) yield(s) in")
+            guard stopped else { continue }
+            let poller = try #require(coordinator.oauthPollerForTesting)
+            #expect(await !poller.isLoopRunningForTesting,
+                    "the poller ran on after a stop \(yields) yield(s) in")
+        }
     }
 
     /// A rebuild publishes its steps while it runs and clears them when it
@@ -157,10 +205,11 @@ import Testing
         let startupDone = Box(false)
         relaunched.beforeRecomputeHook = { startupDone.value = true }
         let run = Task { try await relaunched.runForever() }
-        for _ in 0..<300 where !startupDone.value { try await Task.sleep(nanoseconds: 10_000_000) }
-        await relaunched.stop()
-        try await run.value
+        let reachedHook = await eventually { startupDone.value }
+        let stopped = try await stopAndAwait(relaunched, running: run)
 
+        #expect(stopped, "stop() or runForever didn't return")
+        #expect(reachedHook, "the startup cycle never reached its rollups")
         #expect(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()) == 4)
     }
 }

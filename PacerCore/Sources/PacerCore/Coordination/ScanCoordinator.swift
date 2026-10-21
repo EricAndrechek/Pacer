@@ -849,9 +849,22 @@ public final class ScanCoordinator {
 
     /// Runs the initial scan, then blocks watching for change events.
     /// Returns when the watcher stream ends (typically on `stop()`).
+    ///
+    /// A `stop()` that lands during startup is honoured: each step below
+    /// checks for it (`abandonIfStopped`) once its `await` returns. Since #328
+    /// the poller, the watcher and a main-actor hop all come before the first
+    /// cycle, and a `stop()` running in any of those gaps used to be undone by
+    /// the steps after it — the poller or watcher started after it was
+    /// stopped and ran on; and a `stop()` before `triggers()` left the loop
+    /// waiting on a stream nothing would end, so `runForever` never returned.
+    /// The app's quit can come that early, and `stop()` arrives at a higher
+    /// priority than the loop's `loopPriority`, so its actor hops can
+    /// overtake a startup step still queued behind them.
     public func runForever() async throws {
+        guard !stopRequested else { return }
         resolvedRoots = try resolveAllRoots()
         let stream = await watcher.triggers()
+        if await abandonIfStopped() { return }
         // One-shot stale-cursor prune: walk the JSONLFileCursor table
         // and drop rows whose paths no longer exist on disk. On the
         // live machine the table had drifted to 1072 cursors vs ~900
@@ -885,6 +898,7 @@ public final class ScanCoordinator {
         // disturbing scans. Both shut down via `stop()`.
         if let oauthPoller {
             await oauthPoller.start()
+            if await abandonIfStopped() { return }
             log("oauth poller started")
         }
         // What the watcher hears during the first cycle can't double-count:
@@ -894,11 +908,13 @@ public final class ScanCoordinator {
         // saved — the persister rejects anything read twice by its key.
         walkEveryFileNextCycle = true
         await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
+        if await abandonIfStopped() { return }
         // Apply whatever visibility state we already have at startup —
         // a login-at-launch invocation has no window, so this widens
         // the watcher's FSEvent latency immediately and saves wakeups
         // until the user actually opens the dashboard.
         let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
+        if await abandonIfStopped() { return }
         applyVisibilityCadence(visible: initialVisible)
         installVisibilityObserver()
         // A login switch is accepted by the next cycle, and the next cycle
@@ -921,6 +937,9 @@ public final class ScanCoordinator {
         }
 
         for await _ in stream {
+            // A finished stream still hands over the trigger it buffered
+            // before `stop()`; that is not a cycle to run.
+            if stopRequested { break }
             // Skip if a scan is already underway. The watcher fires
             // both on FSEvents (debounced 500ms) and the 60s backstop
             // — they CAN overlap during a long scan. Skipping is
@@ -942,6 +961,9 @@ public final class ScanCoordinator {
     }
 
     public func stop() async {
+        // First, before anything suspends: `runForever` reads it after each
+        // startup step, so whatever this call can't reach yet is not started.
+        stopRequested = true
         signedInCredential.setOnAccountChange(nil)
         loginWatcher?.stop()
         loginWatcher = nil
@@ -951,12 +973,33 @@ public final class ScanCoordinator {
         // throttled during normal operation, so without this a clean quit
         // could still leave several minutes of rows to re-walk next launch.
         persister?.writeDedupIndexIfNeeded(force: true)
+        await stopRunningParts()
+    }
+
+    /// Set by `stop()`, and never cleared: a stopped coordinator stays
+    /// stopped, and `runForever` on one returns at once.
+    private var stopRequested = false
+
+    /// What `stop()` shuts down that `runForever` starts. Idempotent, so
+    /// `stop()` and a startup that finds it was stopped can both run it.
+    private func stopRunningParts() async {
         await watcher.stop()
         if let oauthPoller {
             await oauthPoller.stop()
         }
         visibilityObservationTask?.cancel()
         visibilityObservationTask = nil
+    }
+
+    /// `runForever`'s check after each startup step. When `stop()` has run,
+    /// stop again whatever this startup has begun since — `stop()` may have
+    /// reached the watcher or the poller before the step that starts it did
+    /// — and tell the caller to return.
+    private func abandonIfStopped() async -> Bool {
+        guard stopRequested else { return false }
+        await stopRunningParts()
+        log("startup: stopped before the first cycle")
+        return true
     }
 
     // MARK: - Following the login
@@ -1331,15 +1374,23 @@ public final class ScanCoordinator {
 
     /// Bridges the `Observation` API's one-shot `onChange` into an
     /// awaitable. Returns when the next mutation to
-    /// `isMainWindowVisible` lands.
+    /// `isMainWindowVisible` lands, or when the task is cancelled — without
+    /// that, `stop()` cancelled the observer and it stayed parked here until
+    /// the window next opened or closed, one per coordinator ever run.
     @MainActor
     private static func nextVisibilityChange() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            withObservationTracking {
-                _ = PacerWindowVisibility.shared.isMainWindowVisible
-            } onChange: {
-                continuation.resume()
+        let wake = OneShotWake()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                wake.arm(continuation)
+                withObservationTracking {
+                    _ = PacerWindowVisibility.shared.isMainWindowVisible
+                } onChange: {
+                    wake.fire()
+                }
             }
+        } onCancel: {
+            wake.fire()
         }
     }
 
@@ -3141,4 +3192,37 @@ extension ISO8601DateFormatter {
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f
     }()
+}
+
+/// Resumes one continuation once, on whichever comes first: the event it
+/// waits for, or a cancellation — which can arrive before the continuation
+/// is even armed, and then resumes it as soon as it is.
+private final class OneShotWake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func arm(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func fire() {
+        lock.lock()
+        if fired {
+            lock.unlock()
+            return
+        }
+        fired = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
+    }
 }

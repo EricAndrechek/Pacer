@@ -131,9 +131,17 @@ final class PaceStubServer {
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice
         try process.run()
+        // Waits for the port with a deadline. `availableData` alone blocks a
+        // cooperative thread until Python prints or exits, so a server that
+        // did neither would hang the run instead of failing the test.
         var line = Data()
+        let reader = out.fileHandleForReading
+        let deadline = Date().addingTimeInterval(30)
         while !line.contains(UInt8(ascii: "\n")) {
-            let chunk = out.fileHandleForReading.availableData
+            var ready = pollfd(fd: reader.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            let remaining = Int32(deadline.timeIntervalSinceNow * 1000)
+            guard remaining > 0, poll(&ready, 1, remaining) > 0 else { break }
+            let chunk = reader.availableData
             if chunk.isEmpty { break }
             line.append(chunk)
         }
