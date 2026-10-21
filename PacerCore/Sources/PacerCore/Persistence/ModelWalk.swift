@@ -21,20 +21,22 @@ import SwiftData
 ///
 /// **One writer.** Pages are `fetchOffset` windows over the descriptor's own
 /// order — the store's natural order when it has none, as `enumerate`'s was —
-/// so a row inserted or deleted mid-walk would shift a page boundary. Every
-/// caller runs on the scan actor, the only place `TokenSample`s are inserted
-/// or deleted.
-enum ModelWalk {
+/// so a row inserted or deleted mid-walk would shift a page boundary; a
+/// sorted walk tiles because SQLite breaks ties in an index (`sampledAt` has
+/// one) by row id. Every caller walks synchronously on the scan actor, the
+/// only place `TokenSample`s are inserted or deleted, so nothing moves under
+/// a walk.
+public enum ModelWalk {
 
     /// Large on purpose. `fetchOffset` makes SQLite step over every earlier
     /// row again for each page, so 5,000-row pages made a full rebuild's
     /// walks ~25% slower than `enumerate` (a 746k-row cycle: 39.7 s → 46.4 s).
     /// At 25,000 it took 39.0 s, and the cycle peaked at 317 MB against the
     /// 3.5 GB it reached enumerating.
-    static let pageSize = 25_000
+    public static let pageSize = 25_000
 
     /// `descriptor`'s own `fetchLimit` is ignored: the walk sets one per page.
-    static func forEach<T: PersistentModel>(
+    public static func forEach<T: PersistentModel>(
         _ descriptor: FetchDescriptor<T>,
         in container: ModelContainer,
         pageSize: Int = pageSize,

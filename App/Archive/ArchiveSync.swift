@@ -77,7 +77,10 @@ final class ArchiveSync {
             }
             var rows: [ArchiveRow] = []
             var newest = watermark
-            try context.enumerate(descriptor, batchSize: 5_000) { sample in
+            // Paged, not `enumerate`d: that held every row it visited (3.3 GB
+            // for a whole 746k-row table, #337), and the reconcile below walks
+            // thirty days of turns every half hour.
+            try ModelWalk.forEach(descriptor, in: container) { sample in
                 if newest == nil || sample.sampledAt > newest! { newest = sample.sampledAt }
                 rows.append(row(from: sample))
             }
@@ -166,7 +169,7 @@ final class ArchiveSync {
             sortBy: [SortDescriptor(\.sampledAt, order: .forward)])
         var missed: [ArchiveRow] = []
         var upgraded = 0
-        try context.enumerate(descriptor, batchSize: 5_000) { sample in
+        try ModelWalk.forEach(descriptor, in: container) { sample in
             guard let key = sample.dedupKey, !pending.contains(key) else { return }
             guard let archivedOutput = archived[key] else {
                 missed.append(row(from: sample))   // never archived
