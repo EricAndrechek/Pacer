@@ -112,4 +112,60 @@ struct RawSessionTurnReaderParityTests {
         // newest, so it counts; the one an hour before that does not.
         #expect(live["edge"]?.models == ["claude-opus-5", "claude-sonnet-5"])
     }
+
+    /// Between commits the answers are kept, not read again (#337): a later
+    /// build only ages sessions out. A commit, a different binding, or an
+    /// earlier window start works them out afresh.
+    @Test("kept answers are reused until the store or the binding changes")
+    func cacheReusesUntilSomethingChanges() throws {
+        let (container, url) = try makeStore()
+        let context = ModelContext(container)
+        try seed(context)
+        let binding = PacerSessionBinding.load(context: context, desktop: nil)
+        let cache = LiveSessionCache()
+        defer { cache.reset() }
+        var computed = 0
+        func ask(at now: Date, binding: PacerSessionBinding) -> [String: PacerSessionLookup] {
+            PacerSessionLookupBuilder.live(context: context, storeURL: url, binding: binding,
+                                           now: now, cache: cache) {
+                computed += 1
+                return PacerSessionLookupBuilder.answers(rows: $0, liveSince: $1,
+                                                         binding: $2, now: $3)
+            }
+        }
+        let fresh = PacerSessionLookupBuilder.live(
+            context: context, storeURL: url, binding: binding, now: Self.now, cache: LiveSessionCache())
+
+        let first = ask(at: Self.now, binding: binding)
+        #expect(computed == 1)
+        #expect(Set(first.keys) == Set(fresh.keys))
+        for (id, answer) in first {
+            #expect(try answer.encodedJSON() == fresh[id]?.encodedJSON(), "session \(id)")
+        }
+
+        // Two minutes on, nothing committed: kept, restamped, and the session
+        // whose newest turn sat a minute inside the window has aged out.
+        let later = Self.now.addingTimeInterval(120)
+        let second = ask(at: later, binding: binding)
+        #expect(computed == 1)
+        #expect(Set(second.keys) == Set(first.keys).subtracting(["edge"]))
+        #expect(second["fanout"]?.generatedAt == later)
+        #expect(second["fanout"]?.models == first["fanout"]?.models)
+
+        // A different Desktop binding is worked out again…
+        let desktop = PacerSessionBinding(trail: binding.trail, desktopAccounts: ["fanout": "orgD"])
+        #expect(ask(at: later, binding: desktop)["fanout"]?.currentAccountId == "orgD")
+        #expect(computed == 2)
+
+        // …and so is a commit.
+        turn(context, session: "newcomer", secondsAgo: -60, model: "claude-opus-5",
+             account: "orgA", path: "/tmp/acme")
+        try context.save()
+        #expect(ask(at: later, binding: desktop)["newcomer"] != nil)
+        #expect(computed == 3)
+
+        // An earlier window start than the kept answers cover reads again.
+        _ = ask(at: Self.now, binding: desktop)
+        #expect(computed == 4)
+    }
 }

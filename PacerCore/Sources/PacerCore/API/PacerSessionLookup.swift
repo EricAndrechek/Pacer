@@ -215,28 +215,23 @@ public enum PacerSessionLookupBuilder {
     /// session whose newest turn is at the window's edge still has every turn
     /// its `models` can count. Past that, a session's older turns cannot
     /// change its answer.
-    nonisolated static func live(context: ModelContext, storeURL: URL?,
-                                 binding: PacerSessionBinding,
-                                 now: Date) -> [String: PacerSessionLookup] {
+    /// Between commits to the store the answers are kept rather than read and
+    /// grouped again (`LiveSessionCache`, #337); each is stamped `now`.
+    nonisolated static func live(
+        context: ModelContext, storeURL: URL?, binding: PacerSessionBinding, now: Date,
+        cache: LiveSessionCache = .shared,
+        compute: (_ rows: [(sessionId: String, turn: PacerSessionTurn)], _ liveSince: Date,
+                  _ binding: PacerSessionBinding, _ now: Date) -> [String: PacerSessionLookup]
+            = answers(rows:liveSince:binding:now:)
+    ) -> [String: PacerSessionLookup] {
         let liveSince = now.addingTimeInterval(-snapshotWindow)
         if let storeURL,
-           let rows = RawSessionTurnReader.turns(
-               storeURL: storeURL, since: liveSince.addingTimeInterval(-concurrencyWindow)) {
-            var bySession: [String: [PacerSessionTurn]] = [:]
-            for (sessionId, turn) in rows where !sessionId.isEmpty {
-                // Newest first already; the same cap the store fetch applies.
-                if bySession[sessionId, default: []].count < lookupTurnLimit {
-                    bySession[sessionId, default: []].append(turn)
-                }
-            }
-            var out: [String: PacerSessionLookup] = [:]
-            for (sessionId, turns) in bySession {
-                guard let newest = turns.first, newest.sampledAt >= liveSince,
-                      let found = answer(sessionId: sessionId, turns: turns,
-                                         binding: binding, now: now) else { continue }
-                out[sessionId] = found
-            }
-            return out
+           let kept = cache.answers(
+               storeURL: storeURL, liveSince: liveSince,
+               readSince: liveSince.addingTimeInterval(-concurrencyWindow),
+               binding: binding,
+               compute: { compute($0, liveSince, binding, now) }) {
+            return kept.mapValues { $0.rebased(to: now) }
         }
 
         var descriptor = FetchDescriptor<AccountSessionInfo>(
@@ -249,6 +244,28 @@ public enum PacerSessionLookupBuilder {
                                   binding: binding, now: now) {
                 out[row.sessionId] = found
             }
+        }
+        return out
+    }
+
+    /// The answer for every session in `rows` (newest first) whose newest
+    /// turn is at or after `liveSince`.
+    nonisolated static func answers(rows: [(sessionId: String, turn: PacerSessionTurn)],
+                                    liveSince: Date, binding: PacerSessionBinding,
+                                    now: Date) -> [String: PacerSessionLookup] {
+        var bySession: [String: [PacerSessionTurn]] = [:]
+        for (sessionId, turn) in rows where !sessionId.isEmpty {
+            // Newest first already; the same cap the store fetch applies.
+            if bySession[sessionId, default: []].count < lookupTurnLimit {
+                bySession[sessionId, default: []].append(turn)
+            }
+        }
+        var out: [String: PacerSessionLookup] = [:]
+        for (sessionId, turns) in bySession {
+            guard let newest = turns.first, newest.sampledAt >= liveSince,
+                  let found = answer(sessionId: sessionId, turns: turns,
+                                     binding: binding, now: now) else { continue }
+            out[sessionId] = found
         }
         return out
     }

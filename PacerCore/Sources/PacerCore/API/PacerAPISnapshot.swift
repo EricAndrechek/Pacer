@@ -129,6 +129,13 @@ public struct PacerAPISnapshot: Sendable {
                 binding: .load(context: context, desktop: desktop), now: now))
     }
 
+    /// Close what builds keep between them — the live-session answers and
+    /// the store connection they are checked against — when the API is
+    /// switched off and no build is coming.
+    public static func releaseKeptState() {
+        LiveSessionCache.shared.reset()
+    }
+
     /// The store's file, for the raw reads that skip SwiftData; nil for an
     /// in-memory store, which has none.
     static func fileURL(of container: ModelContainer) -> URL? {

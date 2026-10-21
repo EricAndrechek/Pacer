@@ -190,6 +190,9 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         }
         for observer in oldObservers { NotificationCenter.default.removeObserver(observer) }
         oldTimer?.cancel()
+        // A build already running finishes against it and leaves answers
+        // behind; the next start's first build simply reads afresh.
+        PacerAPISnapshot.releaseKeptState()
         // The watch is parked on an observation that only resumes on the next
         // change; it exits then, without triggering, because it was cancelled.
         oldWatch?.cancel()
