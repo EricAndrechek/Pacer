@@ -92,15 +92,30 @@ API=${PACER_API:-http://127.0.0.1:7223}
 # active account's current burn below its own switch point, and never less
 # than BRIDGE_MIN_PTS; the expiring rule's bar is the same with EXPIRE_MIN_PTS.
 load_conf() {
-  EARLY=2; WEEK_MAX=auto; STAGGER=9000; MIN_SWITCH_GAP=300
-  BRIDGE_MIN_PTS=6; BRIDGE_MIN_MINUTES=20; BURN_UNKNOWN=40
-  EXPIRE_WINDOW=2700; EXPIRE_MIN_PTS=8; WEEK_ROOM_MIN=1
-  EXCLUDE=""; RESERVE_SLOT=""; RESERVE_WEEK_MAX=97
+  local -A def=([EARLY]=2 [STAGGER]=9000 [MIN_SWITCH_GAP]=300 [BRIDGE_MIN_PTS]=6
+    [BRIDGE_MIN_MINUTES]=20 [BURN_UNKNOWN]=40 [EXPIRE_WINDOW]=2700 [EXPIRE_MIN_PTS]=8
+    [WEEK_ROOM_MIN]=1 [RESERVE_WEEK_MAX]=97)
+  local k bad=""
+  for k in "${!def[@]}"; do printf -v "$k" %s "${def[$k]}"; done
+  WEEK_MAX=auto; EXCLUDE=""; RESERVE_SLOT=""
   # A WEEK_MAX_<slot> deleted from the conf must stop applying, not linger
   # from an earlier read.
   unset "${!WEEK_MAX_@}"
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
+  # The conf is re-read every loop, so a value the arithmetic can't read (a
+  # typo, or a mode an older running copy doesn't know) killed the loop under
+  # set -u: WEEK_MAX=auto stopped the previous version (2026-10-21 15:21Z).
+  # Fall back to the default and say so once per change.
+  for k in "${!def[@]}"; do
+    [[ ${!k:-} =~ ^[0-9]+$ ]] || { bad+=" $k=${!k:-}"; printf -v "$k" %s "${def[$k]}"; }
+  done
+  [[ ${WEEK_MAX:-} =~ ^([0-9]+|auto)$ ]] || { bad+=" WEEK_MAX=${WEEK_MAX:-}"; WEEK_MAX=auto; }
+  for k in "${!WEEK_MAX_@}"; do [[ ${!k} =~ ^[0-9]+$ ]] || { bad+=" $k=${!k}"; unset "$k"; }; done
+  if [ "$bad" != "${conf_bad:-}" ]; then
+    [ -n "$bad" ] && say "WARN rotate.conf: ignoring$bad (defaults used)"
+    conf_bad=$bad
+  fi
 }
 # The 7d limit for a slot: its own WEEK_MAX_<slot> if set, else a numeric
 # WEEK_MAX, else (auto, the default) the weekly safe limit minus EARLY, from the

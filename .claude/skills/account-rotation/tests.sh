@@ -200,6 +200,11 @@ AUTO=1 BURN7=9 t "W5 WEEK_MAX_1=90, 9%/h: slot 1 at 88 blocked" '^[0-9:]{8} HOLD
   3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
 AUTO=1 BURN7=1 t "W5b WEEK_MAX_1=90, 1%/h: slot 1 at 88 allowed" 'WOULD SWITCH → 1 .*\[limit:' \
   3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
+# A conf value the arithmetic can't read falls back to its default with a
+# WARN, instead of killing the loop.
+AUTO=1 t "C1 unreadable conf values fall back to defaults" 'WOULD SWITCH → 1 .*\[limit:' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" $'EARLY=2x\nWEEK_MAX=bogus\nWEEK_MAX_1=nine' \
+  '' 'WARN rotate.conf: ignoring.*EARLY=2x.*WEEK_MAX=bogus.*WEEK_MAX_1=nine'
 AUTO=1 t "W6 numeric WEEK_MAX in the conf is a fixed cap" '^[0-9:]{8} HOLD 1 .*\[7d cap 80%' \
   1 "1:95:26:63:ok 3:0:-:85:ok $SPENT" 'WEEK_MAX=80'
 
