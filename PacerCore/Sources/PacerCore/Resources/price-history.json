@@ -1,5 +1,460 @@
 {
   "schema": 1,
   "asOf": "2026-10-21",
-  "records": []
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "records": [
+    {
+      "model": "claude-fable-5-1",
+      "effectiveFrom": "2026-09-01",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 10,
+        "output": 50,
+        "cacheWrite5m": 12.5,
+        "cacheWrite1h": 20,
+        "cacheRead": 0.25
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Cache reads at 0.025x input ($0.25) from launch.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-mythos-5-1",
+      "effectiveFrom": "2026-09-01",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 10,
+        "output": 50,
+        "cacheWrite5m": 12.5,
+        "cacheWrite1h": 20,
+        "cacheRead": 0.25
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Limited availability. Same rates as Fable 5.1, cache reads 0.025x. Catalogs first listed it 2026-09-03; dated with Fable 5.1's launch.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-fable-5",
+      "effectiveFrom": "2026-06-09",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 10,
+        "output": 50,
+        "cacheWrite5m": 12.5,
+        "cacheWrite1h": 20,
+        "cacheRead": 1.0
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Launched with Mythos 5 on 2026-06-09.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-mythos-5",
+      "effectiveFrom": "2026-06-09",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 10,
+        "output": 50,
+        "cacheWrite5m": 12.5,
+        "cacheWrite1h": 20,
+        "cacheRead": 1.0
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Limited availability, launched with Fable 5. LiteLLM first listed it 2026-08-10.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-5-5",
+      "effectiveFrom": "2026-09-22",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 4,
+        "output": 20,
+        "cacheWrite5m": 5.0,
+        "cacheWrite1h": 8,
+        "cacheRead": 0.2
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Cache reads 0.05x input ($0.20) from launch. Fast mode $8/$40 (2x).",
+      "fastMultiplier": 2.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-5",
+      "effectiveFrom": "2026-07-24",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Fast mode (research preview) $10/$50 (2x).",
+      "fastMultiplier": 2.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-5-5",
+      "effectiveFrom": "2026-09-28",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 2,
+        "output": 10,
+        "cacheWrite5m": 2.5,
+        "cacheWrite1h": 4,
+        "cacheRead": 0.1
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Cache reads 0.05x input ($0.10) from launch. Both catalogs carried $0.20 until 2026-10-07; Anthropic's rate was 0.05x throughout.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-5",
+      "effectiveFrom": "2026-06-30",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 2,
+        "output": 10,
+        "cacheWrite5m": 2.5,
+        "cacheWrite1h": 4,
+        "cacheRead": 0.2
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "$2/$10 launched as introductory pricing 'through August 31, 2026' and became the standard price; the scheduled rise to $3/$15 on 2026-09-01 did not happen. LiteLLM listed $3/$15 for its first two days (2026-06-30..07-02); the introductory rate applied from launch.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "effectiveFrom": "2026-10-07",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 0.1,
+        "output": 0.5,
+        "cacheWrite5m": 0.125,
+        "cacheWrite1h": 0.2,
+        "cacheRead": 0.01
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Prompts up to 100,000 tokens.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-haiku-5-5",
+      "effectiveFrom": "2026-10-07",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 0.5,
+        "output": 2.5,
+        "cacheWrite5m": 0.625,
+        "cacheWrite1h": 1.0,
+        "cacheRead": 0.05
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "A request whose prompt (input + cache reads + cache writes) is over 100,000 tokens pays these on the whole request, cache hits included.",
+      "tierAbovePromptTokens": 100000,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-8",
+      "effectiveFrom": "2026-05-28",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Fast mode (research preview) $10/$50 (2x).",
+      "fastMultiplier": 2.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-7",
+      "effectiveFrom": "2026-04-16",
+      "effectiveTo": "2026-08-26",
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Fast mode at 6x ($30/$150) while LiteLLM listed it (2026-04-16..08-26); Anthropic's page no longer lists fast mode for Opus 4.7.",
+      "fastMultiplier": 6.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-7",
+      "effectiveFrom": "2026-08-26",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "No fast mode.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-6",
+      "effectiveFrom": "2026-02-05",
+      "effectiveTo": "2026-02-23",
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-6",
+      "effectiveFrom": "2026-02-23",
+      "effectiveTo": "2026-08-26",
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Fast mode at 6x ($30/$150) while LiteLLM listed it (2026-02-23..08-26).",
+      "fastMultiplier": 6.0,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-6",
+      "effectiveFrom": "2026-08-26",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-6",
+      "effectiveFrom": "2026-02-05",
+      "effectiveTo": "2026-03-13",
+      "perMTok": {
+        "input": 10,
+        "output": 37.5,
+        "cacheWrite5m": 12.5,
+        "cacheWrite1h": 20,
+        "cacheRead": 1.0
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "1M-context premium over 200k at launch; Claude 4.6 later moved to standard pricing across the full window. 1h write derived (2x input).",
+      "tierAbovePromptTokens": 200000,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "effectiveFrom": "2026-02-17",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 3,
+        "output": 15,
+        "cacheWrite5m": 3.75,
+        "cacheWrite1h": 6,
+        "cacheRead": 0.3
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "effectiveFrom": "2026-02-17",
+      "effectiveTo": "2026-03-13",
+      "perMTok": {
+        "input": 6,
+        "output": 22.5,
+        "cacheWrite5m": 7.5,
+        "cacheWrite1h": 12,
+        "cacheRead": 0.6
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "1M-context premium over 200k at launch, until 4.6 moved to standard pricing (models.dev 2026-03-13, LiteLLM 2026-03-27). 1h write derived.",
+      "tierAbovePromptTokens": 200000,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-5",
+      "effectiveFrom": "2025-11-24",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 5,
+        "output": 25,
+        "cacheWrite5m": 6.25,
+        "cacheWrite1h": 10,
+        "cacheRead": 0.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-haiku-4-5",
+      "effectiveFrom": "2025-10-15",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 1,
+        "output": 5,
+        "cacheWrite5m": 1.25,
+        "cacheWrite1h": 2,
+        "cacheRead": 0.1
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates.",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "effectiveFrom": "2025-09-29",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 3,
+        "output": 15,
+        "cacheWrite5m": 3.75,
+        "cacheWrite1h": 6,
+        "cacheRead": 0.3
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Standard rates. The 1h write (2x) predates its appearance in LiteLLM (2026-06-17).",
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-sonnet-4-5",
+      "effectiveFrom": "2025-09-29",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 6,
+        "output": 22.5,
+        "cacheWrite5m": 7.5,
+        "cacheWrite1h": 12,
+        "cacheRead": 0.6
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "1M-context (beta) premium over 200k; Anthropic's 'full window at standard pricing' covers 4.6 and later only. 1h write derived (2x input).",
+      "tierAbovePromptTokens": 200000,
+      "regionalMultiplier": 1.1
+    },
+    {
+      "model": "claude-opus-4-1",
+      "effectiveFrom": "2025-08-05",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 15,
+        "output": 75,
+        "cacheWrite5m": 18.75,
+        "cacheWrite1h": 30,
+        "cacheRead": 1.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired except on Bedrock and Google Cloud."
+    },
+    {
+      "model": "claude-opus-4",
+      "effectiveFrom": "2025-05-22",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 15,
+        "output": 75,
+        "cacheWrite5m": 18.75,
+        "cacheWrite1h": 30,
+        "cacheRead": 1.5
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired except on Google Cloud."
+    },
+    {
+      "model": "claude-sonnet-4",
+      "effectiveFrom": "2025-05-22",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 3,
+        "output": 15,
+        "cacheWrite5m": 3.75,
+        "cacheWrite1h": 6,
+        "cacheRead": 0.3
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired except on Bedrock and Google Cloud."
+    },
+    {
+      "model": "claude-sonnet-4",
+      "effectiveFrom": "2025-05-22",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 6,
+        "output": 22.5,
+        "cacheWrite5m": 7.5,
+        "cacheWrite1h": 12,
+        "cacheRead": 0.6
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "1M-context (beta) premium over 200k. 1h write derived (2x input).",
+      "tierAbovePromptTokens": 200000
+    },
+    {
+      "model": "claude-3-7-sonnet",
+      "effectiveFrom": "2025-02-24",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 3,
+        "output": 15,
+        "cacheWrite5m": 3.75,
+        "cacheWrite1h": 6,
+        "cacheRead": 0.3
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired; not on the current page. Standard multipliers."
+    },
+    {
+      "model": "claude-3-5-sonnet",
+      "effectiveFrom": "2025-01-01",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 3,
+        "output": 15,
+        "cacheWrite5m": 3.75,
+        "cacheWrite1h": 6,
+        "cacheRead": 0.3
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired; not on the current page. Standard multipliers. In effect before 2025; earlier history not reviewed."
+    },
+    {
+      "model": "claude-3-5-haiku",
+      "effectiveFrom": "2025-01-01",
+      "effectiveTo": null,
+      "perMTok": {
+        "input": 0.8,
+        "output": 4,
+        "cacheWrite5m": 1,
+        "cacheWrite1h": 1.6,
+        "cacheRead": 0.08
+      },
+      "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "note": "Retired except on Google Cloud. In effect before 2025; earlier history not reviewed. (LiteLLM's $1/$5 before 2025-02-28 and its $0.80 cache read before 2025-04-08 were catalog errors.)"
+    }
+  ]
 }

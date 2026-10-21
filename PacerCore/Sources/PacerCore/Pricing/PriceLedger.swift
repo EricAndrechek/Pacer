@@ -149,11 +149,21 @@ public struct PriceLedger: Sendable {
             if let first = boundaries.first, first > .distantPast { starts.append(.distantPast) }
             starts.append(contentsOf: boundaries)
 
-            func choices(_ pool: [PriceRecordValue], at t: Date) -> [Choice] {
+            /// The deciding record per tier at `t`. Only the standard base
+            /// tier falls back to the nearest record outside its window
+            /// (usage older than the first record still needs a price). An
+            /// upper tier or an explicit fast record that doesn't cover `t`
+            /// simply doesn't exist then: Opus 4.6's 200k premium ended, and
+            /// a request after that pays the base rate, not a stale premium.
+            func choices(_ pool: [PriceRecordValue], at t: Date, fallBack: Bool) -> [Choice] {
                 var byTier: [Int64: [PriceRecordValue]] = [:]
                 for r in pool { byTier[r.tierAbovePromptTokens, default: []].append(r) }
-                return byTier.keys.sorted(by: >).map { tier in
-                    let (winner, outside) = PriceLedger.pick(from: byTier[tier]!, at: t)
+                return byTier.keys.sorted(by: >).compactMap { tier in
+                    let candidates = byTier[tier]!
+                    if !(fallBack && tier == 0), !candidates.contains(where: { $0.covers(t) }) {
+                        return nil
+                    }
+                    let (winner, outside) = PriceLedger.pick(from: candidates, at: t)
                     return Choice(record: winner, outside: outside,
                                   token: (outside ? "~" : "") + winner.id)
                 }
@@ -166,8 +176,8 @@ public struct PriceLedger: Sendable {
                 let t = (i == 0 && start == .distantPast && boundaries.first != .distantPast)
                     ? boundaries.first!.addingTimeInterval(-1) : start
                 return Segment(start: start,
-                               standard: choices(standardPool, at: t),
-                               fast: choices(fastPool, at: t))
+                               standard: choices(standardPool, at: t, fallBack: true),
+                               fast: choices(fastPool, at: t, fallBack: false))
             }
         }
 

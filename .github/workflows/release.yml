@@ -534,9 +534,15 @@ jobs:
           appcast.write_text(xml)
           PY
 
+          # The curated, dated price history rides along: the app refreshes it
+          # from beside the appcast (CuratedPriceHistory.remoteURL) and falls
+          # back to the copy bundled in the release it ships with.
+          cp "${GITHUB_WORKSPACE}/PacerCore/Sources/PacerCore/Resources/price-history.json" \
+             "${worktree}/price-history.json"
+
           (
             cd "${worktree}"
-            git add appcast.xml
+            git add appcast.xml price-history.json
             git -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                 commit -m "appcast: ${version}"
