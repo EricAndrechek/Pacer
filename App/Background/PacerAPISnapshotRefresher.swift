@@ -278,6 +278,10 @@ final class PacerAPISnapshotRefresher: @unchecked Sendable {
         let startedAt = Date()
         let result = Result { try PacerAPISnapshot.build(now: startedAt) }
         let elapsed = Date().timeIntervalSince(startedAt)
+        // Every build reads the window's turns and every account's rollups
+        // into a throwaway context; rate-limited, so a quiet machine isn't
+        // walking its heap every 15 s (#337).
+        MemoryHygiene.relieve(minimumInterval: MemoryHygiene.recurringReliefInterval)
 
         typealias Outcome = (wanted: Bool, first: Bool,
                              broadcast: PacerAPISnapshot?,

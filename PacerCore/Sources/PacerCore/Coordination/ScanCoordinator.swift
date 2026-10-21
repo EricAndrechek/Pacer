@@ -1411,8 +1411,19 @@ public final class ScanCoordinator {
     // MARK: - Internal
 
     private func runScanCycle() async throws -> ScanReport {
-        try await withMarksToItself { try await runScanCycleUnserialized() }
+        let report = try await withMarksToItself { try await runScanCycleUnserialized() }
+        // After the cycle's locals are gone, so what is reported is what the
+        // rebuild left behind: the floor the app then sits on for hours (#337).
+        if lastCycleRebuilt {
+            lastCycleRebuilt = false
+            MemoryHygiene.relieve()
+            MemoryHygiene.report("after history rebuild")
+        }
+        return report
     }
+
+    /// Set by a cycle that re-read history or rebuilt rollups wholesale.
+    private var lastCycleRebuilt = false
 
     /// A pass that finds marks nobody committed means one died before its
     /// save. Worth a line: it's otherwise invisible, and it's the only sign
@@ -1915,6 +1926,9 @@ public final class ScanCoordinator {
         // Bulk-insert everything the scanner collected. One MainActor
         // pass over the entries; see `InsertSink` doc for the rationale.
         try sink.flush()
+        // The import's DuckDB working set and every parsed turn are freed by
+        // now: the largest transient allocation Pacer makes (#337).
+        if bulkResult != nil { MemoryHygiene.relieve() }
         // scanMs is the inner work (scanner actor + file I/O + emit
         // hops). consumeMs is the watcher-actor hop to drain hinted
         // paths. The two are reported separately in PhaseTimings but
@@ -2246,9 +2260,7 @@ public final class ScanCoordinator {
             }
         }
         phase.notifMs = tickMs()
-        // The heaviest thing Pacer does; what it leaves behind is the floor
-        // the app then sits on for hours (#337).
-        if rebuilding { MemoryHygiene.report("after history rebuild") }
+        lastCycleRebuilt = rebuilding
 
         return ScanReport(
             wasFullScan: isFullScan,

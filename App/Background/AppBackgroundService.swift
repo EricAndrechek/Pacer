@@ -129,7 +129,7 @@ final class AppBackgroundService {
         Log.write("AppBackground", "starting; cost mode: \(costMode)")
         // An hourly `[Memory]` line (#337): the 1.3 GB footprint that
         // stalled the main thread under pressure left no trace in this log.
-        MemoryHygiene.report("launch")
+        MemoryHygiene.report("launch · allocator \(MemoryHygiene.allocatorMode)")
         MemoryHygiene.startHourlyReports()
 
         // No Keychain prompt on first poll: `KeychainOAuth` shells to
