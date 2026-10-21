@@ -10,6 +10,15 @@ struct PacerApp: App {
     /// just project the container into their own environments.
     @NSApplicationDelegateAdaptor(PacerAppDelegate.self) private var appDelegate
 
+    /// The modes `PacerAppDelegate` runs as a second instance and closes every
+    /// window for (`suppressWindowsWhileDiagnosticRuns`), minus the README run,
+    /// which photographs the dashboard window.
+    private static var diagnosticRunWithoutWindow: Bool {
+        (ScreenshotMode.isActive && !ScreenshotMode.capturesRealWindow)
+            || ColdStartProbe.isActive || ArchiveBackfill.isActive
+            || ArchiveRoundTrip.isActive || AccountAssignMode.isActive
+    }
+
     /// Sparkle 2.x updater. `init()` starts the on-launch check + 6h
     /// recurrence using the SUFeedURL declared in Info.plist. Owned
     /// here so its lifetime matches the app's, and so the "Check for
@@ -61,6 +70,16 @@ struct PacerApp: App {
                 .environment(\.usageEngines, appDelegate.backgroundService.engines)
         }
         .modelContainer(appDelegate.container)
+        // A diagnostic run (`make render-live`, the probes) is a second
+        // process of this bundle beside the owner's Pacer, and SwiftUI opens
+        // the primary scene's window at launch, at the autosaved frame:
+        // exactly over the owner's dashboard, until
+        // `suppressWindowsWhileDiagnosticRuns` closes it a moment later. That
+        // was a flash on the owner's screen on every render. Don't open it in
+        // the first place. The README run photographs this window, so it
+        // keeps it.
+        .defaultLaunchBehavior(Self.diagnosticRunWithoutWindow ? .suppressed : .automatic)
+        .restorationBehavior(Self.diagnosticRunWithoutWindow ? .disabled : .automatic)
         // First-launch placement. These apply only when AppKit has no
         // autosaved frame to restore (genuinely first ever open or a
         // wiped UserDefaults). Once the user moves or resizes the

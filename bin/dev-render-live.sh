@@ -37,7 +37,13 @@ BIN="$APP/Contents/MacOS/Pacer"
 
 # Re-open the user's Pacer no matter how this exits. `-g` so it comes back
 # without stealing focus.
-restore() { open -g -a Pacer 2>/dev/null || true; }
+#
+# Only when it is NOT already running. `open` on a running Pacer is not a
+# no-op: it delivers a reopen event, and `applicationShouldHandleReopen`
+# answers it by bringing the dashboard back, so a render (or anything that
+# copies this script) would pop the owner's window up on every run.
+ensure_running() { pgrep -xq Pacer || open -g -a Pacer 2>/dev/null || true; }
+restore() { ensure_running; }
 trap restore EXIT INT TERM
 
 mkdir -p "$OUT"
@@ -45,7 +51,7 @@ mkdir -p "$OUT"
 # The render opens the store read-only, and SwiftData needs a *write* to apply
 # a schema migration — so the first render after a model change fails until the
 # app has launched once and migrated. Make sure it has.
-open -g -a Pacer 2>/dev/null || true
+ensure_running
 
 echo "==> Rendering scopes [$SCOPES] to $OUT"
 PACER_SCREENSHOT_MODE=1 \
