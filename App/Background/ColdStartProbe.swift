@@ -26,6 +26,13 @@ import PacerCore
 ///
 ///     cp -R ~/.claude/projects /tmp/frozen/projects
 ///     CLAUDE_CONFIG_DIR=/tmp/frozen PACER_COLD_START_PROBE=1 …/Pacer
+///
+/// Claude Desktop's folders are live too, and since #250 they hold scan roots
+/// (agent mode). `PACER_COLD_START_DESKTOP_DIRS` replaces Desktop's data
+/// folders with frozen copies (comma-separated; empty means none), so a run
+/// can be compared with and without them:
+///
+///     PACER_COLD_START_DESKTOP_DIRS=/tmp/frozen-desktop/Claude …
 @MainActor
 enum ColdStartProbe {
 
@@ -48,9 +55,15 @@ enum ColdStartProbe {
             // that skips the injection measures a path no user is on.
             let useBulk = ProcessInfo.processInfo.environment["PACER_COLD_START_NO_BULK"] != "1"
             log(useBulk ? "ingest: DuckDB bulk importer" : "ingest: line parser (comparison)")
+            var configuration = ScanCoordinator.Configuration(
+                bulkImporter: useBulk ? ArchiveImporter() : nil)
+            if let raw = ProcessInfo.processInfo.environment["PACER_COLD_START_DESKTOP_DIRS"] {
+                let dirs = raw.split(separator: ",").map { URL(fileURLWithPath: String($0)) }
+                log("Claude Desktop data: \(dirs.isEmpty ? "none" : dirs.map(\.path).joined(separator: ", "))")
+                configuration.desktopSessions = DesktopSessionDirectory(dataDirectories: dirs)
+            }
             let report = try await ScanCoordinator(
-                container: container,
-                configuration: .init(bulkImporter: useBulk ? ArchiveImporter() : nil)
+                container: container, configuration: configuration
             ).runOnce()
             let p = report.phaseTimings
             log(String(format: "TOTAL %.1f s", Date().timeIntervalSince(start)))

@@ -386,7 +386,11 @@ final class PacerAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // multi-second cycle before running.
         if ColdStartProbe.isActive || ArchiveBackfill.isActive || ArchiveRoundTrip.isActive
             || AccountAssignMode.isActive {
-            NSApp.setActivationPolicy(.accessory)
+            // The probe has no UI at all, so it takes `.prohibited`, which
+            // cannot activate: like the live render (`LiveRenderMode`), it
+            // runs beside the user's own Pacer, and `.accessory` still counts
+            // as an activatable instance of the same bundle.
+            NSApp.setActivationPolicy(ColdStartProbe.isActive ? .prohibited : .accessory)
             // `.accessory` keeps the diagnostic out of the Dock but does NOT
             // stop macOS restoring a window for the bundle — these modes run
             // as a *second* instance of an app the user already has open, and

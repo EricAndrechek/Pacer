@@ -645,6 +645,9 @@ struct MenuStatusContent: View {
         let id: String
         let label: String
         let isActive: Bool
+        /// Other clients active on it (#245): "Desktop · Work". The CLI is
+        /// `isActive`, said as "signed in".
+        var clients: [String] = []
         let windows: [MenuBarWindowItem]
     }
     @State private var perAccount: [AccountWindows] = []
@@ -655,7 +658,10 @@ struct MenuStatusContent: View {
     /// cold-start fallback.
     var reloadKey: String {
         let account = menuScope.limitAccountId ?? UsageScope.limitAccountId(in: menuModelContext)
+        // Which clients are active moves the grouping (#245), including when
+        // a Desktop's 30 minutes run out with nothing written.
         return "\(RateLimitWriteSignal.shared.generation):\(account ?? "none")"
+            + ":\(AccountClientsMonitor.shared.generation)"
     }
 
     @MainActor
@@ -674,15 +680,27 @@ struct MenuStatusContent: View {
         // that has to stay glanceable. The mode is decided from facts, not a
         // heuristic: a session-mode config root, or activation spans that
         // genuinely overlap.
-        guard AccountParallelism.mode(context: menuModelContext) == .concurrent else {
+        //
+        // Several clients on several accounts at once is the same thing
+        // (#245): Desktop running a routine on one account while the CLI is on
+        // another binds both, so the menu groups whenever more than one
+        // account is active, and shows the active ones.
+        let clients = AccountClientsMonitor.shared
+        let all = ((try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? [])
+            .sorted(by: Account.listOrder)
+        guard let grouped = AccountClients.menuGroupAccounts(
+            all: all.map(\.id),
+            concurrent: AccountParallelism.mode(context: menuModelContext) == .concurrent,
+            active: clients.activeAccountIds)
+        else {
             perAccount = []
             return
         }
-        let accounts = (try? menuModelContext.fetch(FetchDescriptor<Account>())) ?? []
-        perAccount = accounts.sorted(by: Account.listOrder).map { account in
+        perAccount = all.filter { grouped.contains($0.id) }.map { account in
             let its = MenuBarWindowSource.load(menuModelContext, account: account.id)
             return AccountWindows(
                 id: account.id, label: account.shortLabel, isActive: account.isActive,
+                clients: PacerClientChip.others(clients.active(on: account.id)).map(\.label),
                 windows: MenuBarWindowSource.items(
                     fiveHour: its.fixed.first { $0.window == RateLimitWindowName.fiveHour },
                     sevenDay: its.fixed.first { $0.window == RateLimitWindowName.sevenDay },
@@ -894,6 +912,11 @@ struct MenuStatusContent: View {
                             .foregroundStyle(.secondary)
                         if group.isActive {
                             Text("· signed in")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.green)
+                        }
+                        ForEach(group.clients, id: \.self) { client in
+                            Text("· \(client)")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.green)
                         }

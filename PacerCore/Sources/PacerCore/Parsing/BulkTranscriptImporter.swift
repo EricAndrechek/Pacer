@@ -22,7 +22,10 @@ public protocol BulkTranscriptImporter: Sendable {
     ///
     /// Each entry must carry the `rootPath` the line parser would give it
     /// (`ResolvedRoot.rootPath(forFile:among:)`): it is what separates a pinned
-    /// session profile from the default login in `AccountTrail`.
+    /// session profile from the default login in `AccountTrail`. And the
+    /// project the line parser would give it: a root with a
+    /// `fixedProjectPath` (Claude Desktop's agent mode) counts every turn as
+    /// that project (`ResolvedRoot.projectPath(forCwd:aliases:)`).
     ///
     /// Implementations must return entries **in ascending timestamp order**
     /// (the rollups' pending-sample lists and the session recomputer both

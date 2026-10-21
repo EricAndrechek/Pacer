@@ -723,7 +723,79 @@ public final class ScanCoordinator {
         if !sessionProfileRoots.isEmpty {
             log("roots: +\(sessionProfileRoots.count) session profile(s)")
         }
-        return primary + sessionProfileRoots
+        let known = Set((primary + sessionProfileRoots).map(\.root.path))
+        desktopRoots = (desktopSessions?.scanRoots ?? []).filter { !known.contains($0.root.path) }
+        desktopInstallIds = (desktopSessions?.installs ?? []).map(\.id)
+        if !desktopRoots.isEmpty {
+            log("roots: +\(desktopRoots.count) from \(desktopInstallIds.count) Claude Desktop install(s)")
+        }
+        lastDesktopRootRefresh = Date()
+        return primary + sessionProfileRoots + desktopRoots
+    }
+
+    /// The roots Claude Desktop adds: one per agent-mode (Cowork) session
+    /// (#250), and each install's own `CLAUDE_CONFIG_DIR` (#295). Kept apart
+    /// from `sessionProfileRoots` because the trail does not bind them:
+    /// `DesktopSessionDirectory` answers their accounts directly.
+    private var desktopRoots: [ClaudePathResolver.ResolvedRoot] = []
+    /// The installs those came from, to notice one appearing or going.
+    private var desktopInstallIds: [String] = []
+    private var lastDesktopRootRefresh: Date?
+    /// How often a full-walk cycle lists Desktop's agent-mode folders again
+    /// for sessions started since. A new session's first write also asks
+    /// (see `refreshDesktopRootsIfNeeded`), so this is only the backstop.
+    private static let desktopRootRefreshInterval: TimeInterval = 60
+
+    /// The folders the watcher covers besides the scan roots: Desktop's
+    /// agent-mode folders, so a Cowork session that starts after launch is
+    /// heard on its first write rather than at the next restart.
+    private var extraWatchPaths: [String] {
+        (desktopSessions?.agentSessionDirectories ?? []).map(\.path)
+    }
+
+    /// Pick up agent-mode sessions started since the roots were resolved.
+    ///
+    /// Asked on every cycle, and cheap when there is nothing to do: a hinted
+    /// transcript under an agent-mode folder that no root claims is a new
+    /// session, and a full walk (`hinted == nil`) re-lists once a minute.
+    /// Returns the hint with any path no root can claim dropped, plus whether
+    /// the roots changed, in which case this cycle walks every root so the
+    /// new session is read from its first line.
+    private func refreshDesktopRootsIfNeeded(
+        hinted: Set<String>?
+    ) -> (hinted: Set<String>?, rootsChanged: Bool) {
+        guard let desktopSessions else { return (hinted, false) }
+        let unclaimed = (hinted ?? []).filter {
+            desktopSessions.isUnderAgentSessions($0)
+                && ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: resolvedRoots) == nil
+        }
+        let due = hinted == nil && (lastDesktopRootRefresh.map {
+            Date().timeIntervalSince($0) >= Self.desktopRootRefreshInterval } ?? true)
+        guard !unclaimed.isEmpty || due else { return (hinted, false) }
+        lastDesktopRootRefresh = Date()
+        desktopSessions.refresh()
+        let others = Set(resolvedRoots.filter { !desktopRoots.contains($0) }.map(\.root.path))
+        let fresh = desktopSessions.scanRoots.filter { !others.contains($0.root.path) }
+        let installIds = desktopSessions.installs.map(\.id)
+        // An agent-mode file outside every root (Cowork's own `audit.jsonl`)
+        // is not a transcript; it must not reach the scanner, which would
+        // read it as the default login's.
+        let cleaned = hinted.map { paths in
+            paths.subtracting(unclaimed.filter {
+                ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: fresh) == nil
+            })
+        }
+        guard fresh != desktopRoots || installIds != desktopInstallIds else { return (cleaned, false) }
+        log("roots: Claude Desktop \(desktopRoots.count) → \(fresh.count) from \(installIds.count) install(s)")
+        resolvedRoots = resolvedRoots.filter { !desktopRoots.contains($0) } + fresh
+        desktopRoots = fresh
+        if installIds != desktopInstallIds {
+            // A new install brings a folder to watch; one gone takes its own.
+            desktopInstallIds = installIds
+            let watcher = self.watcher, roots = resolvedRoots, extra = extraWatchPaths
+            Task { await watcher.updateWatchedPaths(roots: roots, extraPaths: extra) }
+        }
+        return (nil, true)
     }
 
     /// Runs the initial scan, then blocks watching for change events.
@@ -759,7 +831,7 @@ public final class ScanCoordinator {
             log("startup scan failed: \(error)")
             sessionRollupCache.forgetAll()
         }
-        await watcher.start(roots: resolvedRoots)
+        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
         // Apply whatever visibility state we already have at startup —
         // a login-at-launch invocation has no window, so this widens
         // the watcher's FSEvent latency immediately and saves wakeups
@@ -999,6 +1071,7 @@ public final class ScanCoordinator {
         if let credential = signedInCredential.current { recorder.reconcile(with: credential) }
         let observedAccount = polled.map { recorder.trail().currentDefaultLogin?.accountId ?? $0 }
         persister?.accountTrail = recorder.trail()
+        publishClients(trail: recorder.trail())
         // The activation now, not at the next cycle's terminal save: the
         // session lookup (`/v1/session`'s `currentAccountId`) reads the trail
         // from the store. Nothing else is pending — passes run between cycles.
@@ -1416,6 +1489,7 @@ public final class ScanCoordinator {
         activePersister.desktopSessions = desktopSessions
         let desktopRecorded = desktopSessions?.drainDiscovered() ?? [:]
         ensureDesktopAccounts(Set(desktopRecorded.values))
+        publishClients(trail: recorder.trail())
 
         if let transition = loginTransition(observedAccount, recorder: recorder), let oauthPoller {
             Task { await oauthPoller.setActiveAccount(id: transition.id, seed: transition.seed, seenAt: nil) }
@@ -1652,7 +1726,7 @@ public final class ScanCoordinator {
         // help if we actually visit every file, and a hint from one
         // recent write would otherwise leave the other 700+ files
         // unscanned until their next individual FSEvent.
-        let hintedPaths: Set<String>?
+        var hintedPaths: Set<String>?
         if isFullScan {
             _ = watcher.consumeChangedPaths()  // drain anyway
             hintedPaths = nil
@@ -1660,6 +1734,11 @@ public final class ScanCoordinator {
             let paths = watcher.consumeChangedPaths()
             hintedPaths = paths.isEmpty ? nil : paths
         }
+        // Claude Desktop's agent-mode sessions come and go while Pacer runs.
+        // A new one's first write arrives as a hint no root claims.
+        let desktopRoots = refreshDesktopRootsIfNeeded(hinted: hintedPaths)
+        hintedPaths = desktopRoots.hinted
+        if hintedPaths?.isEmpty == true { hintedPaths = nil }
         let consumeMs = tickMs()
         // A full scan means "read every transcript from byte zero" — a first
         // launch, or a `currentScanVersion` bump re-deriving history under
@@ -2076,6 +2155,36 @@ public final class ScanCoordinator {
 
     /// Give every account a Desktop session ran under a row, so the turns
     /// attributed to it have somewhere to show. Create-only (`Account.ensure`).
+    /// Which clients are on which account now (#245), for the views and the
+    /// HTTP API. Cheap: the trail is in memory, Desktop's records are listed
+    /// at most every 30 s, and a profile's newest write comes from the cursor
+    /// cache. Posts to the main actor only when something changed.
+    private func publishClients(trail: AccountTrail) {
+        desktopSessions?.refreshIfDue()
+        let installs = desktopSessions?.installs ?? []
+        let pinned = trail.openPinnedRoots
+        var profileActivity: [String: Date] = [:]
+        if !pinned.isEmpty, let cursors = cursorsCache {
+            let prefixes = pinned.keys.map {
+                ($0, URL(fileURLWithPath: $0).appendingPathComponent("projects").path + "/")
+            }
+            for (path, state) in cursors {
+                for (root, prefix) in prefixes where path.hasPrefix(prefix)
+                    && state.lastSeenMtime > (profileActivity[root] ?? .distantPast) {
+                    profileActivity[root] = state.lastSeenMtime
+                }
+            }
+        }
+        let login = trail.currentDefaultLogin
+        let clients = AccountClients.build(
+            cliAccount: login?.accountId, cliSince: login?.startedAt,
+            desktop: desktopSessions?.activity ?? [:],
+            installLabels: DesktopInstall.labels(for: installs),
+            profiles: pinned, profileActivity: profileActivity)
+        guard AccountClientsStore.publish(clients) else { return }
+        Task { @MainActor in AccountClientsMonitor.shared.update(clients) }
+    }
+
     private func ensureDesktopAccounts(_ accountIds: Set<String>) {
         for id in accountIds {
             let seed = Account.Seed(id: Account.key(forOrg: id), organizationId: id)

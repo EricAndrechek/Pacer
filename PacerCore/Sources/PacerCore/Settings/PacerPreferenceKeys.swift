@@ -119,6 +119,17 @@ public enum PacerPreferenceKeys {
     /// nudge with "Not now" — so it never reappears. The feature itself stays
     /// reachable in Settings → Authentication; this only silences the banner.
     public static let desktopOnboardingDismissed = "pacer.desktop.onboardingDismissed"
+    /// Claude Desktop data folders the user added in Settings (#295), for an
+    /// install Pacer cannot find on its own: one kept outside Application
+    /// Support that was not running when Pacer looked. `[String]` of paths.
+    public static let desktopExtraDataDirectories = "pacer.desktop.extraDataDirectories"
+    /// Claude Desktop installs Pacer has seen running with their own data
+    /// folder (`--user-data-dir`), so they are still counted while they are
+    /// not running. `[data folder path: config folder path or ""]`, the second
+    /// being the `CLAUDE_CONFIG_DIR` the install's Claude Code used, when that
+    /// was visible. Written only by discovery; a folder that is gone is
+    /// dropped on the next pass.
+    public static let desktopRememberedInstalls = "pacer.desktop.rememberedInstalls"
 
     // MARK: - Local API / metrics server
     //
@@ -234,6 +245,13 @@ public enum PacerPreferences {
     /// touches the Desktop keychain item without explicit consent.
     public static func desktopCredentialsEnabled(from store: UserDefaults = store) -> Bool {
         store.bool(forKey: PacerPreferenceKeys.desktopCredentialsEnabled)
+    }
+
+    /// Desktop data folders the user added, trimmed, blanks dropped.
+    public static func desktopExtraDataDirectories(from store: UserDefaults = store) -> [String] {
+        (store.stringArray(forKey: PacerPreferenceKeys.desktopExtraDataDirectories) ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     /// Whether to read an account switcher's saved logins. Defaults to `true`

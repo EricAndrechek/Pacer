@@ -42,11 +42,16 @@ public struct PacerAccountRow<Trailing: View>: View {
         public let fiveHourPercent: Double?
         public let sevenDayPercent: Double?
         public let isActive: Bool
+        /// Other clients active on this account (#245): a Desktop install, a
+        /// pinned profile. Shown beside the plan. Empty, the default, renders
+        /// exactly the row there was before, which is what a single-account
+        /// machine gets.
+        public let clients: [PacerClientChip]
 
         public init(
             name: String, plan: String? = nil, subtitle: String? = nil,
             fiveHourPercent: Double? = nil, sevenDayPercent: Double? = nil,
-            isActive: Bool = false
+            isActive: Bool = false, clients: [PacerClientChip] = []
         ) {
             self.name = name
             self.plan = plan
@@ -54,6 +59,7 @@ public struct PacerAccountRow<Trailing: View>: View {
             self.fiveHourPercent = fiveHourPercent
             self.sevenDayPercent = sevenDayPercent
             self.isActive = isActive
+            self.clients = clients
         }
     }
 
@@ -128,6 +134,14 @@ public struct PacerAccountRow<Trailing: View>: View {
                         Text(plan)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
+                    }
+                    if !model.clients.isEmpty {
+                        // A compact chip is 2 pt taller than the name's line.
+                        // Laid out at the line's height and drawn over the
+                        // edge, so a Desktop starting or timing out does not
+                        // move every row below it.
+                        PacerClientChips(model.clients)
+                            .padding(.vertical, -1)
                     }
                 }
                 if let subtitle = model.subtitle, !subtitle.isEmpty {

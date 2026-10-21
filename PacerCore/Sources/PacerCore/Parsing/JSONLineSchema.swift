@@ -56,7 +56,8 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
     /// answer on time alone.
     public let rootPath: String?
     /// Which client wrote the line: `"cli"`, `"claude-desktop"`, `"sdk-cli"`,
-    /// or nil on lines older than the field.
+    /// `"local-agent"` (Desktop's agent mode), or nil on lines older than the
+    /// field.
     ///
     /// Claude Desktop runs its own Claude Code and writes its transcripts into
     /// the same `~/.claude/projects` as the CLI, but bills its own login, which
@@ -139,9 +140,15 @@ public struct ParsedUsageEntry: Sendable, Equatable, Hashable {
 
     /// The `entrypoint` Claude Desktop's built-in Claude Code writes.
     public static let desktopEntrypoint = "claude-desktop"
+    /// The `entrypoint` Claude Desktop's agent mode (Cowork) writes (#250).
+    public static let desktopAgentEntrypoint = "local-agent"
 
-    /// Whether Claude Desktop wrote this line rather than the CLI.
-    public var isFromDesktop: Bool { entrypoint == Self.desktopEntrypoint }
+    /// Whether Claude Desktop wrote this line rather than the CLI: its Claude
+    /// Code, or its agent mode. Either way the CLI's trail is the wrong
+    /// answer for the turn's account.
+    public var isFromDesktop: Bool {
+        entrypoint == Self.desktopEntrypoint || entrypoint == Self.desktopAgentEntrypoint
+    }
 }
 
 /// The five billable token categories Anthropic prices independently:

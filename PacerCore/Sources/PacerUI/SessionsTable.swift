@@ -47,11 +47,10 @@ public struct SessionsTable: View {
         self.onSessionTap = onSessionTap
     }
 
-    /// Above this many rows the body switches to an inner scroll
-    /// view with a visible scrollbar. Below the threshold we render
-    /// inline so a small list doesn't get an awkward mini-scroller.
-    private static let inlineRowThreshold = 12
-    private static let scrollMaxHeight: CGFloat = 320
+    /// The tallest the rows get before they scroll. About twelve rows: a
+    /// short list hugs its rows, a long one stops here with a visible
+    /// scrollbar.
+    static let scrollMaxHeight: CGFloat = 320
 
     public var body: some View {
         // Sort once per body eval — `sortedRows` is read up to four times
@@ -67,24 +66,30 @@ public struct SessionsTable: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .padding(.vertical, 8)
-            } else if visibleRows.count <= Self.inlineRowThreshold {
-                ForEach(visibleRows, id: \.sessionId) { row in
-                    rowView(row)
-                }
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(visibleRows, id: \.sessionId) { row in
-                            rowView(row)
+                // One container for every length (#161). Short lists used to
+                // be an inline `ForEach` and long ones a `ScrollView`: two
+                // branches, so a session arriving that crossed the threshold
+                // while a detail was open rebuilt every row, losing each
+                // `HoverRow`'s state and the scroll position. Now the scroll
+                // view is always there and only its height changes: it hugs
+                // the rows up to `scrollMaxHeight`, then scrolls.
+                CappedHeight(maxHeight: Self.scrollMaxHeight) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(visibleRows, id: \.sessionId) { row in
+                                rowView(row)
+                            }
                         }
                     }
+                    // A list that fits does not bounce or offer to scroll.
+                    .scrollBounceBehavior(.basedOnSize)
+                    // Visible scrollbar so the user can see there's more
+                    // content + how far they've scrolled. User flagged
+                    // that hidden indicators on a long list felt like
+                    // missing affordance.
+                    .scrollIndicators(.visible)
                 }
-                .frame(maxHeight: Self.scrollMaxHeight)
-                // Visible scrollbar so the user can see there's more
-                // content + how far they've scrolled. User flagged
-                // that hidden indicators on a long list felt like
-                // missing affordance.
-                .scrollIndicators(.visible)
             }
         }
     }
@@ -227,4 +232,27 @@ public struct SessionsTable: View {
 public enum SessionsTableSort: String, CaseIterable, Identifiable {
     case id, model, project, tokens, cost, lastSeen
     public var id: String { rawValue }
+}
+
+/// Sizes its one child to the child's own height, but no taller than
+/// `maxHeight`: a scroll view that hugs short content and scrolls long
+/// content, as one view whose identity never changes with the length.
+///
+/// A scroll view's ideal height is its content's, so asking the child with
+/// no height proposed measures the rows; placing it at the capped height is
+/// what makes the rest scroll.
+struct CappedHeight: Layout {
+    var maxHeight: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        let ideal = child.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: proposal.width ?? ideal.width, height: min(ideal.height, maxHeight))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                       cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading,
+                              proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    }
 }

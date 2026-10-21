@@ -129,7 +129,7 @@ struct ArchiveImporter: BulkTranscriptImporter {
 
         var entries: [ParsedUsageEntry] = []
         entries.reserveCapacity(64 * 1024)
-        var rootByFile: [String: String?] = [:]
+        var rootByFile: [String: ClaudePathResolver.ResolvedRoot?] = [:]
 
         // Vectorized read. The row-at-a-time accessors are deprecated and
         // allocate per value; at ~150k rows × 17 columns that difference is
@@ -174,9 +174,9 @@ struct ArchiveImporter: BulkTranscriptImporter {
                 // `rootPath(forFile:among:)`), without which a pinned
                 // profile's turns are attributed by the default login's
                 // trail. One lookup per file, not per row.
-                let rootPath: String? = fileName.string(row).flatMap { file in
+                let root: ClaudePathResolver.ResolvedRoot? = fileName.string(row).flatMap { file in
                     if let known = rootByFile[file] { return known }
-                    let found = ClaudePathResolver.ResolvedRoot.rootPath(forFile: file, among: roots)
+                    let found = ClaudePathResolver.ResolvedRoot.root(forFile: file, among: roots)
                     rootByFile[file] = .some(found)
                     return found
                 }
@@ -193,11 +193,14 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     storedCostUSD: cost.double(row),
                     dedupKey: dedupKey,
                     sessionId: sessionId.string(row),
-                    projectPath: rawCwd.map {
-                        ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
+                    // Through the root, so a root with a fixed project (Claude
+                    // Desktop's agent mode) is counted as the line parser
+                    // counts it.
+                    projectPath: root.map { $0.projectPath(forCwd: rawCwd, aliases: aliases) }
+                        ?? rawCwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
                     originalProjectPath: rawCwd,
                     claudeCodeVersion: version.string(row),
-                    rootPath: rootPath,
+                    rootPath: root?.root.path,
                     entrypoint: entrypoint.string(row),
                     isApiErrorMessage: apiError.bool(row),
                     isComplete: complete.bool(row)))

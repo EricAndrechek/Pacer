@@ -5,8 +5,8 @@ import CommonCrypto
 /// because the failure modes differ — Desktop stores its token encrypted,
 /// so there's a decrypt step and a "no usable token in the cache" case.
 public enum DesktopOAuthError: Error, Sendable, Equatable {
-    /// No `~/Library/Application Support/Claude/config.json` — Claude
-    /// Desktop isn't installed / has never signed in on this machine.
+    /// No install has a `config.json` — Claude Desktop isn't installed / has
+    /// never signed in on this machine.
     case configNotFound
     /// Couldn't read the `Claude Safe Storage` AES key from the keychain
     /// (item absent / spawn failure / unexpected status).
@@ -77,7 +77,7 @@ public struct DesktopOAuth: Sendable {
         self.cacheReader = cacheReader
     }
 
-    /// Whether Claude Desktop is installed with a token cache worth reading —
+    /// Whether any Claude Desktop install has a token cache worth reading —
     /// a cheap file-only check (`config.json` present with an `oauth:tokenCache*`
     /// field). Does NOT touch the keychain, so it never triggers a prompt;
     /// used to decide whether to surface the enablement nudge.
@@ -96,11 +96,11 @@ public struct DesktopOAuth: Sendable {
     /// resolver fall through to the next-freshest if its first pick is
     /// rejected (the cache can hold several tokens at different expiries).
     public func readAll() -> Result<[OAuthCredential], DesktopOAuthError> {
-        switch decryptedCache() {
+        switch decryptedCaches() {
         case .failure(let e):
             return .failure(e)
-        case .success(let cache):
-            let creds = Self.profileCredentials(cache: cache)
+        case .success(let caches):
+            let creds = Self.profileCredentials(caches: caches)
             return creds.isEmpty ? .failure(.noProfileToken) : .success(creds)
         }
     }
@@ -124,23 +124,21 @@ public struct DesktopOAuth: Sendable {
     /// `user:profile` credentials, freshest first. Empty when the key
     /// can't decrypt them (⇒ the key rotated, e.g. a Desktop reinstall) or
     /// nothing carries a profile token. No keychain access, so no prompt.
+    ///
+    /// A blob the key cannot decrypt is skipped rather than failing the rest:
+    /// the blobs come from every install (#295), and an install keeping its
+    /// own key would otherwise hide the others' tokens.
     public func profileCredentials(fromBlobs blobs: [String], keyPassword: Data) -> [OAuthCredential] {
-        var merged: [String: Any] = [:]
-        var decryptedAny = false
-        for blob in blobs {
-            guard let plain = Self.decrypt(blobBase64: blob, keyPassword: keyPassword),
-                  let obj = try? JSONSerialization.jsonObject(with: plain) as? [String: Any]
-            else { continue }
-            decryptedAny = true
-            merged.merge(obj) { _, new in new }
+        let caches = blobs.compactMap { blob -> [String: Any]? in
+            guard let plain = Self.decrypt(blobBase64: blob, keyPassword: keyPassword) else { return nil }
+            return try? JSONSerialization.jsonObject(with: plain) as? [String: Any]
         }
-        guard decryptedAny else { return [] }
-        return Self.profileCredentials(cache: merged)
+        guard !caches.isEmpty else { return [] }
+        return Self.profileCredentials(caches: caches)
     }
 
-    /// Read + decrypt + merge every cache blob into one dict. Shared by
-    /// `read()` / `readAll()`.
-    private func decryptedCache() -> Result<[String: Any], DesktopOAuthError> {
+    /// Read + decrypt every cache blob. Shared by `read()` / `readAll()`.
+    private func decryptedCaches() -> Result<[[String: Any]], DesktopOAuthError> {
         guard let blobs = cacheReader() else { return .failure(.configNotFound) }
         if blobs.isEmpty { return .failure(.noProfileToken) }
 
@@ -150,19 +148,14 @@ public struct DesktopOAuth: Sendable {
         case .failure(let e): return .failure(e)
         }
 
-        var merged: [String: Any] = [:]
-        var decryptedAny = false
-        for blob in blobs {
-            guard let plain = Self.decrypt(blobBase64: blob, keyPassword: keyPassword),
-                  let obj = try? JSONSerialization.jsonObject(with: plain) as? [String: Any]
-            else { continue }
-            decryptedAny = true
-            merged.merge(obj) { _, new in new }
+        let caches = blobs.compactMap { blob -> [String: Any]? in
+            guard let plain = Self.decrypt(blobBase64: blob, keyPassword: keyPassword) else { return nil }
+            return try? JSONSerialization.jsonObject(with: plain) as? [String: Any]
         }
-        guard decryptedAny else {
+        guard !caches.isEmpty else {
             return .failure(.decryptFailed("no cache blob decrypted to JSON"))
         }
-        return .success(merged)
+        return .success(caches)
     }
 
     // MARK: - Selection (pure, unit-tested)
@@ -173,11 +166,23 @@ public struct DesktopOAuth: Sendable {
     /// expiry descending, ties broken by the (stable) cache key, so the same
     /// cache always yields the same order.
     static func profileCredentials(cache: [String: Any]) -> [OAuthCredential] {
+        profileCredentials(caches: [cache])
+    }
+
+    /// The same over several decrypted caches — each install's, and each
+    /// config's `tokenCache` and `…V2` — without merging them by key first.
+    /// The key names client, account, host and scopes, so two installs signed
+    /// into one account share one; merging would keep one install's token and
+    /// lose the other's, and each token is a separate budget. A token present
+    /// twice is listed once.
+    static func profileCredentials(caches: [[String: Any]]) -> [OAuthCredential] {
         var rows: [(key: String, expiry: Date, cred: OAuthCredential)] = []
-        for (key, value) in cache {
+        var seen = Set<String>()
+        for (key, value) in caches.flatMap({ $0 }) {
             guard key.contains("user:profile"),
                   let entry = value as? [String: Any],
-                  let token = entry["token"] as? String, !token.isEmpty
+                  let token = entry["token"] as? String, !token.isEmpty,
+                  seen.insert(token).inserted
             else { continue }
             let expiresAt = (entry["expiresAt"] as? NSNumber)
                 .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
@@ -191,7 +196,10 @@ public struct DesktopOAuth: Sendable {
             // A missing expiry sorts as "never expires" so it leads.
             rows.append((key, expiresAt ?? .distantFuture, cred))
         }
-        rows.sort { $0.expiry != $1.expiry ? $0.expiry > $1.expiry : $0.key < $1.key }
+        rows.sort {
+            $0.expiry != $1.expiry ? $0.expiry > $1.expiry
+                : $0.key != $1.key ? $0.key < $1.key : $0.cred.accessToken < $1.cred.accessToken
+        }
         return rows.map(\.cred)
     }
 
@@ -284,13 +292,26 @@ public struct DesktopOAuth: Sendable {
         }
     }
 
-    /// Reads `config.json` and returns its encrypted cache blobs. `nil`
-    /// when the file is absent/unreadable (Desktop not installed); an empty
-    /// array when present but carrying no `oauth:tokenCache*` field.
+    /// Reads every install's `config.json` (#295) and returns their encrypted
+    /// cache blobs. `nil` when no install has one (Desktop not installed); an
+    /// empty array when they exist but carry no `oauth:tokenCache*` field.
+    ///
+    /// One key decrypts them all when the installs share the `Claude Safe
+    /// Storage` item, which is the case for every multi-install tool seen:
+    /// they launch the same app, whose Electron names the item after itself.
+    /// So several installs still cost one keychain approval, not one each. An
+    /// install that kept a key of its own would not decrypt with it; its blobs
+    /// are skipped, never prompted for.
     public static let defaultCacheReader: CacheReader = {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Claude/config.json")
-        guard let data = try? Data(contentsOf: url),
+        let files = DesktopSessionDirectory.shared.installs.map(\.tokenCacheFile)
+        let found = files.compactMap { cacheBlobs(in: $0) }
+        return found.isEmpty ? nil : found.flatMap { $0 }
+    }
+
+    /// One `config.json`'s encrypted cache blobs; nil when the file is absent
+    /// or unreadable. File-only, so it never prompts.
+    public static func cacheBlobs(in file: URL) -> [String]? {
+        guard let data = try? Data(contentsOf: file),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return ["oauth:tokenCache", "oauth:tokenCacheV2"].compactMap { obj[$0] as? String }

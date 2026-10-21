@@ -75,6 +75,14 @@ public actor JSONLWatcher {
     /// Cached so `updateLiveCadence` can restart the stream with a new
     /// latency without re-resolving roots.
     private var liveRootPaths: [String] = []
+    /// Folders watched for *new* roots rather than as roots (Claude Desktop's
+    /// agent-mode folder, #250). Only a `.claude/projects` transcript under one
+    /// counts as a change: Cowork also writes an `audit.jsonl` per action
+    /// there, and waking a scan for each would be a cycle for nothing.
+    ///
+    /// Read from the FSEvents callback's hop, so it is actor state like the
+    /// rest; set once by `start`.
+    private var discoveryPaths: [String] = []
     /// Live coalesce window in nanoseconds. Used by `coalesceTrigger`
     /// for its `Task.sleep` budget. Tunable at runtime via
     /// `updateLiveCadence(latency:backstopInterval:)` so the
@@ -149,13 +157,50 @@ public actor JSONLWatcher {
     /// Begin watching. For `.live`, opens an FSEventStream over each
     /// root and starts the 60s backstop timer. For `.manual`, no-op
     /// (tests call `manualTrigger()` to push events).
-    public func start(roots: [ClaudePathResolver.ResolvedRoot]) {
+    ///
+    /// `extraPaths` are watched too, for transcripts of roots that do not exist
+    /// yet; see `discoveryPaths`.
+    public func start(roots: [ClaudePathResolver.ResolvedRoot], extraPaths: [String] = []) {
         switch mode {
         case .live(let latency, let backstop):
-            startLive(roots: roots, latency: latency, backstopInterval: backstop)
+            startLive(roots: roots, extraPaths: extraPaths,
+                      latency: latency, backstopInterval: backstop)
         case .manual:
             break
         }
+    }
+
+    /// Watch a new set of folders, for an install that appeared or went
+    /// (#295). Restarts the FSEvents stream only, keeping the trigger stream,
+    /// backstop and cadence; a no-op when nothing changed or in `.manual`.
+    public func updateWatchedPaths(roots: [ClaudePathResolver.ResolvedRoot], extraPaths: [String]) {
+        guard case .live = mode, fsEvents != nil else { return }
+        discoveryPaths = extraPaths.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        let paths = Self.watchPaths(roots: roots, discovery: discoveryPaths, extraPaths: extraPaths)
+        guard paths != liveRootPaths, !paths.isEmpty else { return }
+        liveRootPaths = paths
+        fsEvents?.stop()
+        fsEvents = nil
+        let watcher = FSEventStreamWrapper(handler: { [weak self] paths in
+            guard let self else { return }
+            Task { await self.recordChangedPathsAndCoalesce(paths) }
+        })
+        if watcher.start(paths: paths, latencySeconds: TimeInterval(liveCoalesceNanos) / 1_000_000_000) {
+            fsEvents = watcher
+        } else {
+            Log.write("JSONLWatcher", "FSEventStream failed to restart on new paths; relying on backstop only")
+        }
+    }
+
+    /// A root under a discovery folder is already covered by it: FSEvents
+    /// streams are recursive, and one watch per Cowork session would be
+    /// dozens of paths for one folder.
+    private static func watchPaths(
+        roots: [ClaudePathResolver.ResolvedRoot], discovery: [String], extraPaths: [String]
+    ) -> [String] {
+        roots.map { $0.projectsDirectory.path }
+            .filter { root in !discovery.contains { root.hasPrefix($0) } }
+            + extraPaths
     }
 
     public func stop() {
@@ -188,10 +233,12 @@ public actor JSONLWatcher {
 
     private func startLive(
         roots: [ClaudePathResolver.ResolvedRoot],
+        extraPaths: [String],
         latency: CFTimeInterval,
         backstopInterval: TimeInterval
     ) {
-        let pathStrings = roots.map { $0.projectsDirectory.path }
+        discoveryPaths = extraPaths.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        let pathStrings = Self.watchPaths(roots: roots, discovery: discoveryPaths, extraPaths: extraPaths)
         guard !pathStrings.isEmpty else { return }
         liveRootPaths = pathStrings
 
@@ -285,6 +332,8 @@ public actor JSONLWatcher {
         var foundJsonl = false
         pathsLock.lock()
         for path in paths where path.hasSuffix(".jsonl") {
+            if discoveryPaths.contains(where: { path.hasPrefix($0) }),
+               !path.contains("/.claude/projects/") { continue }
             changedPaths.insert(path)
             foundJsonl = true
         }

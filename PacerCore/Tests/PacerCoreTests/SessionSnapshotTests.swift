@@ -32,12 +32,13 @@ struct SessionSnapshotTests {
     static func desktopDirectory(session: String) throws -> (DesktopSessionDirectory, URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("pacer-desktop-\(UUID().uuidString)")
-        let folder = root.appendingPathComponent("55555555-5555-4555-8555-555555555555")
+        let folder = root.appendingPathComponent("claude-code-sessions")
+            .appendingPathComponent("55555555-5555-4555-8555-555555555555")
             .appendingPathComponent(desktopOrg)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["cliSessionId": session])
             .write(to: folder.appendingPathComponent("local_1.json"))
-        return (DesktopSessionDirectory(root: root), root)
+        return (DesktopSessionDirectory(dataDirectories: [root]), root)
     }
 
     /// The CLI was on `cliOld` until ten minutes ago and is on `cliNew` now. A

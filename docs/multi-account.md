@@ -2,7 +2,8 @@
 
 > Working state, invariants and traps live in
 > [`account-scope-handoff.md`](account-scope-handoff.md). This file is the
-> design.
+> design. Which *clients* are active on which account (CLI, each Desktop
+> install, pinned profiles) is [`multi-client-accounts.md`](multi-client-accounts.md).
 
 How Pacer knows which account a turn belongs to, why that needed a new
 mechanism, and what is still open.
@@ -160,8 +161,75 @@ A trail inferred from Desktop's tokens would not do this job. Desktop can hold
 tokens for more than one org, and its folder layout already shows a second
 org. A per-session record cannot be wrong about which session it describes.
 
-Desktop's agent mode (Cowork) keeps its transcripts inside Desktop's own
-folder, which Pacer does not scan yet. That is a separate gap: #250.
+### Desktop's agent mode: roots of their own (#250)
+
+Desktop's agent mode (Cowork) runs Claude Code in a sandbox, and keeps the
+transcripts inside Desktop's own folder rather than `~/.claude/projects`:
+
+```
+<data dir>/local-agent-mode-sessions/<user>/<org>/local_<id>/.claude/projects/…
+<data dir>/local-agent-mode-sessions/<user>/<org>/agent/local_<id>/.claude/projects/…
+```
+
+Each of those `.claude` folders is a scan root, and like a pinned profile it
+belongs to exactly one account: the `<org>` folder it sits in. The root decides
+a turn's account before the trail or the session records are asked, because a
+record can be missing for a transcript that exists (one real session had
+none). The transcript's file name is its session id, so those sessions join
+the recorded ones and are protected from trail corrections the same way.
+
+- **One project.** Every agent-mode turn counts under "Claude Desktop (agent)".
+  The `cwd` they record is a sandbox (`/sessions/<random-name>`, or an
+  `outputs` folder inside Desktop's own), different per session, and means
+  nothing to the user. The raw `cwd` is kept as the sub-path.
+- **New sessions while Pacer runs.** The watcher covers the agent-mode folder
+  itself, so a session that starts after launch is heard on its first write;
+  the cycle that hears it lists the folder again and walks every root once.
+  Only `.claude/projects` transcripts count as a change there: Cowork also
+  writes an `audit.jsonl` per action beside each sandbox.
+- **Live hints keep their root.** A transcript the watcher reported used to be
+  stamped with no root, which reads as the default login. That was wrong for
+  every live turn of a pinned profile too, not only agent mode; the scanner
+  now matches each hinted file to its root, as the bulk importer always did.
+- **Not held to ccusage.** ccusage does not scan these folders (#299).
+
+### Every Desktop install (#295)
+
+People run several Desktops at once, usually one per account. Every tool for it
+launches the same app with its own Chromium profile (`--user-data-dir`), so an
+install *is* its data folder: its own session records, its own agent-mode
+sessions, its own token cache. **Every install is equal**; the one at the
+standard location is only the one found without being told where to look.
+
+- **Discovery** (`DesktopInstallDiscovery`), from three places and never a
+  search of the home folder: `~/Library/Application Support/Claude*` folders
+  that hold session records or a token cache (`Claude-3p`, one config file,
+  is not one); the `--user-data-dir` of each running Desktop, read from its
+  arguments, with the `CLAUDE_CONFIG_DIR` in its environment when the system
+  shows it (nothing else is kept); and folders added in Settings. An install
+  seen running is remembered, so it still counts while it is not.
+- **One directory, keyed by (install, session).** `DesktopSessionDirectory`
+  reads every install. A session two installs record under one account is one
+  session; two naming different accounts for it is a conflict nobody can
+  settle, so it stays unattributed.
+- **Roots per install**: its agent-mode sessions, and its own
+  `CLAUDE_CONFIG_DIR/projects` when it has one. Turns there are attributed by
+  the install's records like any Desktop session, not by the root: one install
+  can hold logins for several accounts.
+- **Labels** come from the folder ("Desktop · Work" for `Claude-Work`); a
+  single install is just "Desktop". The folder is the only stable identity an
+  install has, for the same reason.
+- **Token caches.** Every install's `config.json` is read. They share one
+  `Claude Safe Storage` key whenever they run the same app, so several installs
+  cost one keychain approval. An install with a key of its own would not
+  decrypt with it and is skipped, never prompted for. Tokens are no longer
+  merged by cache key, which names client, account and scopes: two installs on
+  one account would have shared a key and lost one token's budget.
+- **Desktop chat has no local token record.** Its usage shows only as account
+  utilisation in the readings Pacer polls; Settings says so in one line.
+
+There is no second install on the maintainer's Mac, so all of this is verified
+with fixtures; nothing may launch or set one up there.
 
 ### The data model is always parallel; only the presentation adapts
 
@@ -485,7 +553,9 @@ data: }
 ```
 
 Only on a change — never on connect, never when the same login is re-asserted
-— and `since` is when Pacer made it active. The account may not have a reading
+— and `since` is when Pacer made it active. A Desktop install or a pinned
+profile becoming active on an account is a separate `clients` event (#245), so
+a client waiting on a CLI switch is never woken by Desktop. The account may not have a reading
 yet; its windows are then absent from the snapshot, not 0%. `PacerAccountChange`
 is the definition. A client that waits on a switch (#194's `pacer` CLI) can
 wake on this instead of polling.

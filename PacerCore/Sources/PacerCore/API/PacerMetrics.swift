@@ -238,6 +238,20 @@ public struct PacerMetrics: Sendable {
                                               ("tier", entry.account.rateLimitTier ?? "unknown"),
                                               ("active", entry.account.isActive ? "true" : "false")]))
             }
+            // Which clients are on each account (#245). Labelled by kind and
+            // a short hash of the client's folder rather than its label: the
+            // label is a folder name the user chose for something else, and
+            // this output tends to leave the machine.
+            let clientHelp = "1 while a client counts as active on this account: the CLI while it is the login, a Claude Desktop install or pinned profile for 30 minutes after its last activity."
+            for entry in todayAccounts {
+                for client in entry.account.clients {
+                    m.append(PacerMetric("pacer_account_client_active", client.active ? 1 : 0,
+                                         help: clientHelp,
+                                         labels: [("account", entry.account.id),
+                                                  ("client", client.kind),
+                                                  ("instance", Self.instanceTag(client))]))
+                }
+            }
             // How many ways each account's window is being split. The rate
             // limit is account-wide, so a burn rate already includes every one
             // of these — this is what says whether adding more will multiply it.
@@ -289,6 +303,16 @@ public struct PacerMetrics: Sendable {
     }
 
     // MARK: - Formatting
+
+    /// A stable, opaque tag for a client: "cli", else 8 hex digits of an
+    /// FNV-1a hash of its label, which tells two installs apart without
+    /// publishing the folder name.
+    static func instanceTag(_ client: PacerAccountList.Client) -> String {
+        guard client.kind != AccountClients.Kind.cli.rawValue else { return "cli" }
+        var hash: UInt32 = 2_166_136_261
+        for byte in client.label.utf8 { hash = (hash ^ UInt32(byte)) &* 16_777_619 }
+        return String(format: "%08x", hash)
+    }
 
     private static func renderLabels(_ labels: [(String, String)]) -> String {
         guard !labels.isEmpty else { return "" }

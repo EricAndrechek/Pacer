@@ -100,6 +100,11 @@ public struct PacerAccountList: Codable, Sendable {
         /// to fan out further actually turns on.
         public let activeSessions: Int
         public let recentSessions: Int
+        /// The clients seen on this account (#245): the CLI while it is the
+        /// login, each Claude Desktop install whose records name it, each
+        /// pinned profile bound to it. `isActive` above is the CLI's alone;
+        /// this is every client, each with whether it counts as active now.
+        public let clients: [Client]
 
         public init(id: String, label: String, displayName: String,
                     organizationName: String?, subscriptionType: String?,
@@ -107,7 +112,8 @@ public struct PacerAccountList: Codable, Sendable {
                     isActive: Bool, unattributed: Bool,
                     firstSeenAt: Date?, lastSeenAt: Date?,
                     usage: Usage?, limits: Limits?, configRoots: [String] = [],
-                    activeSessions: Int = 0, recentSessions: Int = 0) {
+                    activeSessions: Int = 0, recentSessions: Int = 0,
+                    clients: [Client] = []) {
             self.id = id
             self.label = label
             self.displayName = displayName
@@ -124,6 +130,29 @@ public struct PacerAccountList: Codable, Sendable {
             self.configRoots = configRoots
             self.activeSessions = activeSessions
             self.recentSessions = recentSessions
+            self.clients = clients
+        }
+    }
+
+    /// One (account, client) pair; see `AccountClients`.
+    public struct Client: Codable, Sendable, Equatable {
+        /// `cli`, `desktop` or `profile`.
+        public let kind: String
+        /// "CLI", "Desktop", "Desktop · Work", "Profile · 1-work".
+        public let label: String
+        /// Whether it counts as active now: the CLI while it is the login; a
+        /// Desktop install or a profile for 30 minutes after its last activity.
+        public let active: Bool
+        public let lastSeenAt: Date?
+        /// When it stops counting as active; absent for the CLI.
+        public let activeUntil: Date?
+
+        public init(_ entry: AccountClients.Entry, now: Date) {
+            kind = entry.kind.rawValue
+            label = entry.label
+            active = entry.isActive(at: now)
+            lastSeenAt = entry.lastSeenAt
+            activeUntil = entry.activeUntil
         }
     }
 
@@ -292,7 +321,8 @@ public enum PacerAccountsBuilder {
         list(context: ModelContext(container), now: now)
     }
 
-    nonisolated static func list(context: ModelContext, now: Date) -> PacerAccountList {
+    nonisolated static func list(context: ModelContext, now: Date,
+                                 clients: AccountClients = AccountClientsStore.current) -> PacerAccountList {
         let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
         let rollups = (try? context.fetch(FetchDescriptor<AccountDailyAggregate>())) ?? []
         let trail = AccountParallelism.trail(context: context)
@@ -361,7 +391,9 @@ public enum PacerAccountsBuilder {
                         polledAt: account.latestPolledAt),
                     configRoots: (rootsByAccount[account.id] ?? []).sorted(),
                     activeSessions: active[account.id] ?? 0,
-                    recentSessions: recent[account.id] ?? 0)
+                    recentSessions: recent[account.id] ?? 0,
+                    clients: clients.entries.filter { $0.accountId == account.id }
+                        .map { PacerAccountList.Client($0, now: now) })
             }
 
         // Only when there is something in it: an install that has never seen
