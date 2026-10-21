@@ -246,13 +246,16 @@ struct RealStoreUpgradeProbe {
             t.rows += 1
             t.tokens[0] += s.inputTokens; t.tokens[1] += s.outputTokens; t.tokens[2] += s.cacheReadTokens
             t.tokens[3] += s.cacheCreation5mTokens; t.tokens[4] += s.cacheCreation1hTokens
-            let line = [s.dedupKey ?? "-", String(s.sampledAt.timeIntervalSince1970.bitPattern, radix: 16),
-                        s.date, s.model, String(s.localHour), String(s.inputTokens), String(s.outputTokens),
-                        String(s.cacheReadTokens), String(s.cacheCreation5mTokens),
-                        String(s.cacheCreation1hTokens), s.sourceCostUSD.map { String($0.bitPattern, radix: 16) } ?? "-",
-                        s.sessionId ?? "-", s.projectPath ?? "-", s.originalProjectPath ?? "-",
-                        s.ccVersion ?? "-", s.accountId ?? "-", s.speed ?? "-", s.inferenceGeo ?? "-"]
-                .joined(separator: "\u{1F}")
+            // Built in typed steps: as one 18-element literal Xcode 16's
+            // type checker gives up on it (macOS 15 CI).
+            let stamp: String = String(s.sampledAt.timeIntervalSince1970.bitPattern, radix: 16)
+            let cost: String = s.sourceCostUSD.map { String($0.bitPattern, radix: 16) } ?? "-"
+            var parts: [String] = [s.dedupKey ?? "-", stamp, s.date, s.model, String(s.localHour)]
+            parts += [String(s.inputTokens), String(s.outputTokens), String(s.cacheReadTokens)]
+            parts += [String(s.cacheCreation5mTokens), String(s.cacheCreation1hTokens), cost]
+            parts += [s.sessionId ?? "-", s.projectPath ?? "-", s.originalProjectPath ?? "-"]
+            parts += [s.ccVersion ?? "-", s.accountId ?? "-", s.speed ?? "-", s.inferenceGeo ?? "-"]
+            let line: String = parts.joined(separator: "\u{1F}")
             let h = fnv1a(line)
             sum &+= h
             mix ^= h &* 0x9E37_79B9_7F4A_7C15
