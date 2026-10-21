@@ -648,7 +648,7 @@ import Testing
             await poller.stop()
             await stopped.set()
         }
-        let returned = await eventually(timeout: .seconds(30)) { await stopped.isSet }
+        let returned = await eventually(timeout: .seconds(120)) { await stopped.isSet }
         #expect(returned, "stop() is waiting out the idle nap the loop began after it")
         // Left behind on a failure, so the test fails rather than hangs.
         if returned { await stopping.value }

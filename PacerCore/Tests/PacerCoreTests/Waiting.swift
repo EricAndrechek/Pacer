@@ -13,9 +13,11 @@ import Foundation
 /// late still sees what has already happened.
 ///
 /// The timeout is generous because it costs nothing when the condition comes
-/// true, which is the only case a passing test waits for.
+/// true, which is the only case a passing test waits for. A minute was not
+/// enough: on CI a poller's reading has landed more than 60 s after the test
+/// began waiting for it, with the pool saturated throughout.
 func eventually(
-    timeout: Duration = .seconds(60),
+    timeout: Duration = .seconds(300),
     isolation: isolated (any Actor)? = #isolation,
     _ condition: () async throws -> Bool
 ) async rethrows -> Bool {
@@ -34,12 +36,13 @@ func eventually(
 /// The two waits that hung CI (#328's startup order): a `stop()` that waited
 /// out the poller's ten-minute nap, and a `runForever` that never returned
 /// after a `stop()` during its startup. Through here, a regression of either
-/// fails the test that stopped instead of hanging the run.
+/// fails the test that stopped instead of hanging the run. Five minutes, like
+/// `eventually`, against a hang that was ten.
 @ScanActor
 func stopAndAwait(
     _ coordinator: ScanCoordinator,
     running run: Task<Void, any Error>,
-    timeout: Duration = .seconds(60)
+    timeout: Duration = .seconds(300)
 ) async throws -> Bool {
     let finished = Finished()
     let stopping = Task { @ScanActor in

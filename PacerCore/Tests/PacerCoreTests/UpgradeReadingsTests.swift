@@ -120,7 +120,7 @@ import Testing
             try await early.runForever()
             earlyReturned.value = true
         }
-        let returned = await eventually(timeout: .seconds(30)) { earlyReturned.value }
+        let returned = await eventually(timeout: .seconds(120)) { earlyReturned.value }
         #expect(returned, "runForever after a stop() waited on a stream nothing would end")
         // Left behind on a failure, so the test fails rather than hangs.
         if returned { try await earlyRun.value }
@@ -130,9 +130,10 @@ import Testing
             let coordinator = try make()
             let run = Task { try await coordinator.runForever() }
             for _ in 0..<yields { await Task.yield() }
-            let stopped = try await stopAndAwait(coordinator, running: run, timeout: .seconds(30))
+            let stopped = try await stopAndAwait(coordinator, running: run, timeout: .seconds(120))
             #expect(stopped, "stop() or runForever didn't return after a stop \(yields) yield(s) in")
-            guard stopped else { continue }
+            // One failure is the answer; more passes would only add minutes.
+            guard stopped else { break }
             let poller = try #require(coordinator.oauthPollerForTesting)
             #expect(await !poller.isLoopRunningForTesting,
                     "the poller ran on after a stop \(yields) yield(s) in")
