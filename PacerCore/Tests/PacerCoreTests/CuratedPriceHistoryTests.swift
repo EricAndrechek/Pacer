@@ -92,8 +92,11 @@ struct CuratedPriceHistoryTests {
         #expect(abs(cost("claude-opus-4-6", "2026-02-10", TokenBreakdown(inputTokens: 100_000), speed: .fast).total - 3) < 1e-9)
         #expect(abs(cost("claude-opus-4-6", "2026-02-10", Self.mtokOut, speed: .fast).total - 150) < 1e-9)
         #expect(abs(cost("claude-opus-4-6", "2026-02-10", long, speed: .fast).total - 250_000 * 60e-6) < 1e-9)
-        #expect(abs(cost("claude-opus-4-6", "2026-02-10", TokenBreakdown(inputTokens: 100, outputTokens: 1_000_000, cacheReadTokens: 250_000), speed: .fast).total
-                    - (100 * 60e-6 + 225 + 250_000 * 6e-6)) < 1e-9)
+        // Typed separately: as one expression Xcode 16's type checker gives up (macOS 15 CI).
+        let mixed = TokenBreakdown(inputTokens: 100, outputTokens: 1_000_000, cacheReadTokens: 250_000)
+        let mixedExpected: Double = 100 * 60e-6 + 225 + 250_000 * 6e-6
+        let mixedTotal: Double = cost("claude-opus-4-6", "2026-02-10", mixed, speed: .fast).total
+        #expect(abs(mixedTotal - mixedExpected) < 1e-9)
         // Premium dropped: over 200k is $30 (not 6x the still-premium standard tier).
         #expect(abs(cost("claude-opus-4-6", "2026-03-01", long, speed: .fast).total - 250_000 * 30e-6) < 1e-9)
         #expect(abs(cost("claude-opus-4-6", "2026-03-01", long).total - 250_000 * 10e-6) < 1e-9)

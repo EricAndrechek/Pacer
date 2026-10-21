@@ -33,10 +33,14 @@ import Testing
     }
 
     private func describe(_ r: SampleSnapshot.Row) -> String {
-        [r.date, r.model, r.projectPath ?? "-", r.sessionId ?? "-",
-         String(r.sampledAt.timeIntervalSince1970), String(r.localHour), r.ccVersion ?? "-",
-         "\(r.breakdown)", r.sourceCostUSD.map { "\($0)" } ?? "-", r.accountId ?? "-",
-         r.speed ?? "-", r.inferenceGeo ?? "-"].joined(separator: "|")
+        // Built in typed steps: as one literal Xcode 16's type checker
+        // gives up on it (macOS 15 CI).
+        let cost: String = r.sourceCostUSD.map { "\($0)" } ?? "-"
+        var parts: [String] = [r.date, r.model, r.projectPath ?? "-", r.sessionId ?? "-"]
+        parts += [String(r.sampledAt.timeIntervalSince1970), String(r.localHour), r.ccVersion ?? "-"]
+        parts += ["\(r.breakdown)", cost, r.accountId ?? "-"]
+        parts += [r.speed ?? "-", r.inferenceGeo ?? "-"]
+        return parts.joined(separator: "|")
     }
 
     /// More rows than one batch, so the walk crosses batch boundaries; the
