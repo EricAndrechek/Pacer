@@ -230,7 +230,12 @@ public protocol ProjectDailyReadable {
     var inputTokens: Int64 { get }
     var outputTokens: Int64 { get }
     var cacheReadTokens: Int64 { get }
+    var cacheCreation5mTokens: Int64 { get }
+    var cacheCreation1hTokens: Int64 { get }
     var totalCostUSD: Double { get }
+    /// `totalCostUSD` split into its five priced parts (#296); both tables
+    /// get it from `RollupCostColumns`.
+    var costComponents: CostComponents { get }
     var sessionCount: Int { get }
     var modelCount: Int { get }
     var lastActive: Date { get }

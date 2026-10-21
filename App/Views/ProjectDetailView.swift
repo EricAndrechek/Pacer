@@ -80,6 +80,9 @@ struct ProjectDetailView: View {
     /// Cached totals. The summary tile-grid reads from this; the
     /// previous version walked every aggregate on every render.
     @State private var cachedTotals = Totals()
+    /// The project's cost by priced part over the range (#225), summed in
+    /// the same pass as the totals so it follows the same rows.
+    @State private var cachedBreakdown = CostBreakdown.zero
     /// Bucket sums keyed by `originalProjectPath`. Computed in one
     /// pass over the fetched samples, same shape as the other cached
     /// derivations. Empty / one-element when there's no drill-down
@@ -238,6 +241,7 @@ struct ProjectDetailView: View {
     /// the entire pass instead of allocating per row.
     private func refreshDerived() {
         var t = Totals()
+        var breakdown = CostBreakdown.zero
         var byModel: [String: (tokens: Int64, cost: Double)] = [:]
         var days: [DayPoint] = []
         days.reserveCapacity(aggregates.count)
@@ -247,6 +251,7 @@ struct ProjectDetailView: View {
             t.input += r.inputTokens
             t.output += r.outputTokens
             t.cacheRead += r.cacheReadTokens
+            breakdown += r.costBreakdown
             days.append(DayPoint(
                 date: r.date,
                 cost: r.totalCostUSD,
@@ -264,6 +269,7 @@ struct ProjectDetailView: View {
             }
         }
         cachedTotals = t
+        cachedBreakdown = breakdown
         // Sort by date explicitly rather than leaning on the `@Query(sort:)`
         // staying put — the band-date chart that plots this needs a
         // chronological x-domain (same invariant as the Models trend).
@@ -459,7 +465,7 @@ struct ProjectDetailView: View {
         // which is the shape of the modal bug #150 fixed. Subprojects most of
         // all: it fills in asynchronously, after the modal is on screen, and
         // the other three now change while it's open (#145). (#140)
-        let _ = (cachedTotals, cachedDailySeries, cachedModelSlices, cachedSubprojects)
+        let _ = (cachedTotals, cachedBreakdown, cachedDailySeries, cachedModelSlices, cachedSubprojects)
         // Presentation state, read here so setting it redraws this view and
         // what it presents opens at once. Passed only as a binding, nothing
         // read it: the collections sheet opened only after an unrelated
@@ -501,6 +507,7 @@ struct ProjectDetailView: View {
                 Spacer()
             }
             summaryCard
+            if PacerCostBreakdownView.hasContent(cachedBreakdown) { breakdownCard }
             budgetCard
             if !dailySeries.isEmpty { dailyChartCard }
             // Subprojects card lands between the daily chart and the
@@ -751,6 +758,15 @@ struct ProjectDetailView: View {
                 )
                 MetricTile(value: "\(aggregates.count)", label: "active days")
             }
+        }
+    }
+
+    /// Which of the five priced parts made up the project's cost over the
+    /// range (#225) — the shared `PacerCostBreakdownView`, the same one Day
+    /// detail and the Models tab use.
+    private var breakdownCard: some View {
+        PacerCard("Cost breakdown") {
+            PacerCostBreakdownView(cachedBreakdown)
         }
     }
 

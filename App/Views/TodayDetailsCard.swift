@@ -97,8 +97,8 @@ struct TodayDetailsCard: View {
         }
     }
 
-    /// Cache-utilization line. Headline is the standard cache hit rate
-    /// (reads as a fraction of total cache traffic — reads + writes),
+    /// Cache-utilization line. Headline is the shared cache hit rate
+    /// (`TokenBreakdown.cacheHitRatio`: reads over every prompt token),
     /// which actually moves session-to-session unlike the older
     /// `read/(read+input)` definition that pegged at ~100%. Sub-line
     /// shows absolute read / written counts, reuse factor (how many
@@ -107,7 +107,7 @@ struct TodayDetailsCard: View {
     @ViewBuilder
     private func cacheRatio(_ totals: Totals) -> some View {
         let r = totals.cacheHitRate
-        let pctText = String(format: "%.1f%%", r * 100)
+        let pctText = pacerCacheHitText(r)
         let savings = totals.cacheSavingsUSD(snapshot: SampleCostCache.current())
         let written = totals.cacheCreation5mTokens + totals.cacheCreation1hTokens
         let reuse = totals.cacheReuseFactor
@@ -203,17 +203,19 @@ private struct Totals {
 
     var isEmpty: Bool { inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 }
 
-    /// Standard cache hit rate: reads / (reads + writes). Replaces the
-    /// older `reads/(reads+input)` definition that always pegged at
-    /// ~100% because input is negligible next to cache_read for any
-    /// real Claude Code session. This formula moves meaningfully —
-    /// long agent runs that thrash the 1h cache window will visibly
+    /// The shared cache hit rate (`TokenBreakdown.cacheHitRatio`, #225):
+    /// reads over every prompt token, so Today and Day detail show the same
+    /// number for the same day. Unlike the old `reads/(reads+input)`, which
+    /// pegged at ~100% because input is negligible next to cache reads,
+    /// this moves: long agent runs that thrash the 1h cache window visibly
     /// drop into the 80–95% range.
     var cacheHitRate: Double {
-        let written = cacheCreation5mTokens + cacheCreation1hTokens
-        let denom = Double(cacheReadTokens + written)
-        guard denom > 0 else { return 0 }
-        return Double(cacheReadTokens) / denom
+        TokenBreakdown(
+            inputTokens: inputTokens, outputTokens: outputTokens,
+            cacheReadTokens: cacheReadTokens,
+            cacheCreation5mTokens: cacheCreation5mTokens,
+            cacheCreation1hTokens: cacheCreation1hTokens
+        ).cacheHitRatio ?? 0
     }
 
     /// How many times each cache-written token was read back. Tells

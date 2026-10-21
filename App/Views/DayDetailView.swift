@@ -124,9 +124,19 @@ struct DayDetailView: View {
 
     private struct Cached {
         var totals = Totals()
+        /// The whole day's cost by priced part (#225), and each model's,
+        /// largest model first.
+        var breakdown = CostBreakdown.zero
+        var modelBreakdowns: [ModelBreakdown] = []
         var projectRows: [ProjectRow] = []
         var sortedAggregates: [DailyRow] = []
         var sortedProjectRows: [ProjectRow] = []
+    }
+
+    private struct ModelBreakdown: Identifiable {
+        let model: String
+        let breakdown: CostBreakdown
+        var id: String { model }
     }
 
     private var totals: Totals { cached.totals }
@@ -178,6 +188,10 @@ struct DayDetailView: View {
         }
         sortedAggsByCost = sortedByCost
         aggCumulative = built
+        let breakdown = CostBreakdown.sum(aggregates, \.costBreakdown)
+        let modelBreakdowns = sortedByCost.map {
+            ModelBreakdown(model: $0.model, breakdown: $0.costBreakdown)
+        }
 
         // Pre-sort the models + projects tables. Used to be computed
         // properties (`sortedAggregates`, `sortedProjectRows`) read
@@ -186,6 +200,8 @@ struct DayDetailView: View {
         // when scan data or sort prefs change.
         cached = Cached(
             totals: t,
+            breakdown: breakdown,
+            modelBreakdowns: modelBreakdowns,
             projectRows: rows,
             sortedAggregates: applyModelsSort(to: aggregates),
             sortedProjectRows: applyProjectsSort(to: rows)
@@ -244,6 +260,7 @@ struct DayDetailView: View {
             minHeight: 480, idealHeight: 620
         ) {
             summaryCard
+            if PacerCostBreakdownView.hasContent(cached.breakdown) { breakdownCard }
             if !aggregates.isEmpty { modelsCard }
             if !projectRows.isEmpty { projectsCard }
             if !sessionRows.isEmpty { sessionsCard }
@@ -328,48 +345,42 @@ struct DayDetailView: View {
                         tooltip: pacerTokensExact(t.cacheCreation)
                     )
                 }
-                if t.cacheRead > 0 {
-                    cacheRatioRow
-                }
             }
         }
     }
 
-    /// Cache-utilization line for this day. Same shape as the
-    /// dashboard's TodayDetailsCard so the user sees the metric the
-    /// same way regardless of which surface they're inspecting. Lets
-    /// them click through expensive days from the heatmap and check
-    /// whether caching was the lever that made them expensive.
-    @ViewBuilder
-    private var cacheRatioRow: some View {
-        let t = totals
-        let denom = Double(t.cacheRead + t.input)
-        let r = denom > 0 ? Double(t.cacheRead) / denom : 0
-        let pctText = String(format: "%.1f%%", r * 100)
-        HStack(spacing: 8) {
-            Image(systemName: "bolt.horizontal.circle.fill")
-                .foregroundStyle(.tint)
-                .font(.system(size: 13))
-            Text("Cache hit rate")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(height: 6)
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.accentColor)
-                        .frame(width: geo.size.width * r, height: 6)
+    /// Which of the five priced parts made up the day (#225), and the cache
+    /// hit rate the Summary used to carry. The shared `PacerCostBreakdownView`
+    /// draws it, so a day reads the same parts, colours and hit-rate
+    /// definition as a project or the Models tab. A day with more than one
+    /// model also gets one bar per model; their costs are in the Models card,
+    /// so here a model's line is its mix and its own hit rate.
+    private var breakdownCard: some View {
+        PacerCard("Cost breakdown") {
+            VStack(alignment: .leading, spacing: 14) {
+                PacerCostBreakdownView(cached.breakdown)
+                if cached.modelBreakdowns.count > 1 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Eyebrow(text: "By model", color: .secondary)
+                            Spacer()
+                            Eyebrow(text: "Cache hits", color: .secondary)
+                        }
+                        ForEach(cached.modelBreakdowns) { m in
+                            PacerCostBreakdownRow(
+                                label: pacerModelDisplayName(m.model),
+                                breakdown: m.breakdown
+                            ) {
+                                Text(m.breakdown.cacheHitRatio.map(pacerCacheHitText) ?? "–")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                                    .frame(width: 56, alignment: .trailing)
+                            }
+                        }
+                    }
                 }
-                .frame(height: 6)
             }
-            .frame(maxWidth: 220)
-            Text(pctText)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 56, alignment: .trailing)
         }
     }
 
