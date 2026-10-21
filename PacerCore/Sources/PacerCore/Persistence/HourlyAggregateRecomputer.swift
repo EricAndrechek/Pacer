@@ -318,6 +318,16 @@ actor HourlyAggregateBulkWorker {
         let existingAll = try modelContext.fetch(FetchDescriptor<HourlyAggregate>())
         var existingByKey: [String: HourlyAggregate] = [:]
         for agg in existingAll { existingByKey[agg.dateHourModelKey] = agg }
+        // The per-account rows too, once, rather than a fetch per bucket: a
+        // full rebuild has thousands of hour buckets, and that fetch each was
+        // most of this phase on a real store (AGENTS.md, "a per-item fetch is
+        // a bulk-path bug"). Each bucket is visited once, so nothing inserted
+        // below can belong to a bucket still to come.
+        var accountRows: [DateHourModelTriple: [AccountHourlyAggregate]] = [:]
+        for row in try modelContext.fetch(FetchDescriptor<AccountHourlyAggregate>()) {
+            accountRows[DateHourModelTriple(date: row.date, hour: row.hour, model: row.model),
+                        default: []].append(row)
+        }
 
         var processed = 0
         for bucket in buckets {
@@ -334,14 +344,15 @@ actor HourlyAggregateBulkWorker {
                 }
                 try syncAccountHourlyRows(
                     context: modelContext, date: bucket.date, hour: bucket.hour,
-                    model: bucket.model, perAccount: [:])
+                    model: bucket.model, perAccount: [:], existing: accountRows[bucket] ?? [])
                 continue
             }
 
             let values = HourBucketValues(samples: samples, mode: mode, snapshot: pricing)
             try syncAccountHourlyRows(
                 context: modelContext, date: bucket.date, hour: bucket.hour,
-                model: bucket.model, perAccount: values.perAccount)
+                model: bucket.model, perAccount: values.perAccount,
+                existing: accountRows[bucket] ?? [])
             if let existing {
                 values.write(to: existing)
             } else {
@@ -368,14 +379,18 @@ actor HourlyAggregateBulkWorker {
 /// path and the bulk worker live on different actors with different contexts,
 /// and a rollup written by two copies of the same logic drifts depending on
 /// which one last touched a bucket.
+///
+/// `existing` is the bucket's current rows when the caller already has them
+/// (the bulk path reads them all at once); nil fetches them.
 func syncAccountHourlyRows(
     context: ModelContext,
     date: String,
     hour: Int,
     model: String,
-    perAccount: [String: AccountHourBucket]
+    perAccount: [String: AccountHourBucket],
+    existing prefetched: [AccountHourlyAggregate]? = nil
 ) throws {
-    let existing = try context.fetch(
+    let existing = try prefetched ?? context.fetch(
         FetchDescriptor<AccountHourlyAggregate>(
             predicate: #Predicate<AccountHourlyAggregate> {
                 $0.date == date && $0.hour == hour && $0.model == model

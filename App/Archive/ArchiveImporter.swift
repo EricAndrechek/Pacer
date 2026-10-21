@@ -210,10 +210,16 @@ struct ArchiveImporter: BulkTranscriptImporter {
             throw ImportError.queryFailed(message)
         }
         defer { duckdb_destroy_result(&result) }
+        let queried = Date()
 
         var entries: [ParsedUsageEntry] = []
         entries.reserveCapacity(64 * 1024)
         var rootByFile: [String: ClaudePathResolver.ResolvedRoot?] = [:]
+        // Each row's project, by root and cwd: canonicalizing is two regex
+        // searches, run per row on a few hundred distinct answers. The
+        // aliases are fixed for the import, so one answer per (root, cwd)
+        // is the same answer.
+        var projectByRootAndCwd: [String: [String: String?]] = [:]
 
         // Vectorized read. The row-at-a-time accessors are deprecated and
         // allocate per value; at ~150k rows × 17 columns that difference is
@@ -282,8 +288,14 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     // Through the root, so a root with a fixed project (Claude
                     // Desktop's agent mode) is counted as the line parser
                     // counts it.
-                    projectPath: root.map { $0.projectPath(forCwd: rawCwd, aliases: aliases) }
-                        ?? rawCwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
+                    projectPath: {
+                        let rootKey = root?.root.path ?? "", cwdKey = rawCwd ?? "\u{0}"
+                        if let known = projectByRootAndCwd[rootKey]?[cwdKey] { return known }
+                        let path = root.map { $0.projectPath(forCwd: rawCwd, aliases: aliases) }
+                            ?? rawCwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) }
+                        projectByRootAndCwd[rootKey, default: [:]][cwdKey] = .some(path)
+                        return path
+                    }(),
                     originalProjectPath: rawCwd,
                     claudeCodeVersion: version.string(row),
                     rootPath: root?.root.path,
@@ -302,6 +314,10 @@ struct ArchiveImporter: BulkTranscriptImporter {
         // ties on output size, but the rollups' pending-sample lists and the
         // session recomputer both assume ascending arrival.
         entries.sort { $0.timestamp < $1.timestamp }
+        Log.write("ArchiveImporter", String(
+            format: "query %.1f s · rows %.1f s (%d threads, %@ cap)",
+            queried.timeIntervalSince(started), Date().timeIntervalSince(queried),
+            Self.threads, Self.memoryLimit))
 
         return BulkImportResult(entries: entries,
                                 fileMarks: Self.fileMarks(roots: roots.map(\.projectsDirectory)),

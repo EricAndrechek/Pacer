@@ -374,6 +374,12 @@ actor AggregateBulkWorker {
         let existingAll = try modelContext.fetch(FetchDescriptor<DailyAggregate>())
         var existingByKey: [String: DailyAggregate] = [:]
         for agg in existingAll { existingByKey[agg.dateModelKey] = agg }
+        // Per-account rows once, not a fetch per bucket — see the hourly
+        // worker, where it was most of the phase.
+        var accountRows: [DateModelPair: [AccountDailyAggregate]] = [:]
+        for row in try modelContext.fetch(FetchDescriptor<AccountDailyAggregate>()) {
+            accountRows[DateModelPair(date: row.date, model: row.model), default: []].append(row)
+        }
 
         var processed = 0
         for pair in pairs {
@@ -389,14 +395,14 @@ actor AggregateBulkWorker {
                 }
                 try syncAccountRows(
                     context: modelContext, date: pair.date, model: pair.model,
-                    perAccount: [:])
+                    perAccount: [:], existing: accountRows[pair] ?? [])
                 continue
             }
 
             let bucket = DailyBucketValues(samples: samples, mode: mode, snapshot: pricing)
             try syncAccountRows(
                 context: modelContext, date: pair.date, model: pair.model,
-                perAccount: bucket.perAccount)
+                perAccount: bucket.perAccount, existing: accountRows[pair] ?? [])
             if let existing {
                 bucket.write(to: existing)
             } else {
@@ -430,13 +436,17 @@ actor AggregateBulkWorker {
 /// hypothetical: re-attributing history (`make assign-accounts`) moves samples
 /// between accounts, and a stale row would keep counting spend against an
 /// account that no longer owns it.
+///
+/// `existing` is the bucket's current rows when the caller already has them
+/// (the bulk path reads them all at once); nil fetches them.
 func syncAccountRows(
     context: ModelContext,
     date: String,
     model: String,
-    perAccount: [String: AccountBucket]
+    perAccount: [String: AccountBucket],
+    existing prefetched: [AccountDailyAggregate]? = nil
 ) throws {
-    let existing = try context.fetch(
+    let existing = try prefetched ?? context.fetch(
         FetchDescriptor<AccountDailyAggregate>(
             predicate: #Predicate<AccountDailyAggregate> {
                 $0.date == date && $0.model == model
