@@ -69,6 +69,34 @@ import Testing
         #expect(snapshot.rows.map(describe) == expected)
     }
 
+    /// The bulk workers group positions, not row copies (#337): only the
+    /// wanted keys, each bucket's rows in table order — the order costs are
+    /// summed in.
+    @Test func positionsKeepTableOrderForTheWantedKeysOnly() {
+        func row(_ i: Int, _ model: String) -> SampleSnapshot.Row {
+            SampleSnapshot.Row(
+                date: "2027-01-0\(i % 3)", model: model, projectPath: nil, sessionId: nil,
+                sampledAt: Date(timeIntervalSince1970: Double(i)), localHour: 0, ccVersion: nil,
+                breakdown: TokenBreakdown(inputTokens: Int64(i), outputTokens: 0, cacheReadTokens: 0,
+                                          cacheCreation5mTokens: 0, cacheCreation1hTokens: 0),
+                sourceCostUSD: nil)
+        }
+        let models: [String] = ["a", "b"]
+        let table = SampleSnapshot(rows: (0..<12).map { row($0, models[$0 % 2]) })
+        let wanted: Set<DateModelPair> = [DateModelPair(date: "2027-01-00", model: "a"),
+                                          DateModelPair(date: "2027-01-01", model: "b"),
+                                          DateModelPair(date: "2027-01-09", model: "a")]
+        let grouped = table.positions(of: wanted) { DateModelPair(date: $0.date, model: $0.model) }
+        #expect(grouped.count == 2)
+        let first: [Int64] = table.rows(at: grouped[DateModelPair(date: "2027-01-00", model: "a")])
+            .map(\.breakdown.inputTokens)
+        #expect(first == [0, 6])
+        let second: [Int64] = table.rows(at: grouped[DateModelPair(date: "2027-01-01", model: "b")])
+            .map(\.breakdown.inputTokens)
+        #expect(second == [1, 7])
+        #expect(table.rows(at: grouped[DateModelPair(date: "2027-01-09", model: "a")]).isEmpty)
+    }
+
     /// Above the bulk threshold the upgrades are applied by a batched walk of
     /// the table. Rows stored earlier and rows this same pass inserted (not
     /// on disk yet) must both be upgraded, each exactly once.

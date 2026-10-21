@@ -483,10 +483,10 @@ actor SessionInfoBulkWorker {
             sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
 
         // Shared with the daily/hourly/project workers — see SampleSnapshot.
-        var grouped: [String: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            guard let sid = s.sessionId, !sid.isEmpty else { continue }
-            grouped[sid, default: []].append(s)
+        let table = try snapshots.snapshot()
+        let grouped = table.positions(of: sessionIds) { row -> String? in
+            guard let sid = row.sessionId, !sid.isEmpty else { return nil }
+            return sid
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<SessionInfo>())
         var existingById: [String: SessionInfo] = [:]
@@ -495,12 +495,13 @@ actor SessionInfoBulkWorker {
         var processed = 0
         for sid in sessionIds {
             stats.sessionsRecomputed += 1
+            let samples = table.rows(at: grouped[sid])
             try syncAccountSessionRows(
-                context: modelContext, sessionId: sid, samples: grouped[sid] ?? [],
+                context: modelContext, sessionId: sid, samples: samples,
                 mode: mode, snapshot: snapshot)
             SessionInfoRecomputer.applySamples(
                 sessionId: sid,
-                samples: grouped[sid] ?? [],
+                samples: samples,
                 existing: existingById[sid],
                 mode: mode,
                 snapshot: snapshot,

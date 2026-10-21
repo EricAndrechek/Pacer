@@ -326,10 +326,10 @@ actor ProjectAggregateBulkWorker {
             pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
 
         // Shared with the daily and hourly workers — see SampleSnapshot.
-        var grouped: [ProjectDatePair: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            let path = s.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            grouped[ProjectDatePair(projectPath: path, date: s.date), default: []].append(s)
+        let table = try snapshots.snapshot()
+        let grouped = table.positions(of: pairs) {
+            ProjectDatePair(projectPath: $0.projectPath ?? ProjectDailyAggregate.unknownProjectPath,
+                            date: $0.date)
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<ProjectDailyAggregate>())
         var existingByKey: [String: ProjectDailyAggregate] = [:]
@@ -340,7 +340,7 @@ actor ProjectAggregateBulkWorker {
             stats.pairsRecomputed += 1
             let key = ProjectDailyAggregate.makeKey(projectPath: pair.projectPath, date: pair.date)
             let existing = existingByKey[key]
-            let samples = grouped[pair] ?? []
+            let samples = table.rows(at: grouped[pair])
             ProjectAggregateRecomputer.applySamples(
                 pair: pair,
                 samples: samples,

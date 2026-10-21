@@ -307,13 +307,11 @@ actor HourlyAggregateBulkWorker {
         // semantics the per-pair path and `SamplePersister.localHour`
         // use everywhere else.
         // Shared with the daily and project workers — see SampleSnapshot.
-        var grouped: [DateHourModelTriple: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            // The STORED hour, not a fresh derivation — re-deriving is what
-            // let historical buckets drift across a DST/timezone change.
-            let h = s.localHour
-            grouped[DateHourModelTriple(date: s.date, hour: h, model: s.model),
-                    default: []].append(s)
+        let table = try snapshots.snapshot()
+        // The STORED hour, not a fresh derivation — re-deriving is what let
+        // historical buckets drift across a DST/timezone change.
+        let grouped = table.positions(of: buckets) {
+            DateHourModelTriple(date: $0.date, hour: $0.localHour, model: $0.model)
         }
         let existingAll = try modelContext.fetch(FetchDescriptor<HourlyAggregate>())
         var existingByKey: [String: HourlyAggregate] = [:]
@@ -335,7 +333,7 @@ actor HourlyAggregateBulkWorker {
             let key = HourlyAggregate.makeKey(
                 date: bucket.date, hour: bucket.hour, model: bucket.model)
             let existing = existingByKey[key]
-            let samples = grouped[bucket] ?? []
+            let samples = table.rows(at: grouped[bucket])
 
             if samples.isEmpty {
                 if let existing {

@@ -2139,6 +2139,8 @@ public final class ScanCoordinator {
             upgrades: activePersister.pendingSessionUpgrades
         )
         phase.sessionRecomputeMs = tickMs()
+        // The last reader. On a rebuild it holds every sample (#337).
+        sampleSnapshots.release()
 
         var probeResult: StatsCacheProbe.ProbeResult?
         let probeNow = Date()

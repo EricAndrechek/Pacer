@@ -367,10 +367,8 @@ actor AggregateBulkWorker {
         // Samples come from the cycle's shared snapshot rather than a fetch of
         // our own: the hourly and project workers need the identical table and
         // would each re-materialize it in their own context otherwise.
-        var grouped: [DateModelPair: [SampleSnapshot.Row]] = [:]
-        for s in try snapshots.snapshot().rows {
-            grouped[DateModelPair(date: s.date, model: s.model), default: []].append(s)
-        }
+        let table = try snapshots.snapshot()
+        let grouped = table.positions(of: pairs) { DateModelPair(date: $0.date, model: $0.model) }
         let existingAll = try modelContext.fetch(FetchDescriptor<DailyAggregate>())
         var existingByKey: [String: DailyAggregate] = [:]
         for agg in existingAll { existingByKey[agg.dateModelKey] = agg }
@@ -386,7 +384,7 @@ actor AggregateBulkWorker {
             stats.pairsRecomputed += 1
             let key = DailyAggregate.makeKey(date: pair.date, model: pair.model)
             let existing = existingByKey[key]
-            let samples = grouped[pair] ?? []
+            let samples = table.rows(at: grouped[pair])
 
             if samples.isEmpty {
                 if let existing {
