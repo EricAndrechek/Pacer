@@ -25,8 +25,9 @@ _CACHE_FILE = __import__("pathlib").Path(__file__).resolve().parent / "cache" / 
 _PRE: dict | None = None
 
 
-def cache_key(size: str, account, t_cut: float) -> str:
-    return f"{size}|{account or ''}|{round(t_cut / 60)}"
+def cache_key(size: str, account, t_cut: float, window: str = "five_hour") -> str:
+    tag = "" if window == "five_hour" else f"{window}|"
+    return f"{size}|{tag}{account or ''}|{round(t_cut / 60)}"
 
 
 def _precomputed() -> dict:
@@ -72,11 +73,12 @@ def cumulative(history) -> tuple[list[float], list[float]]:
     return ats, cs
 
 
-def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: int, use_cache: bool = True):
+def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: int, use_cache: bool = True,
+             step: float = STEP):
     """(final, q10, q90) or None. Past cuts come from the precomputed cache
     (precompute_timestral.py) when it has them; the rest run the model."""
     if use_cache:
-        hit = _precomputed().get(cache_key(size, history.account, t_cut))
+        hit = _precomputed().get(cache_key(size, history.account, t_cut, history.window))
         if hit is not None:
             return tuple(hit)
     import numpy as np
@@ -85,7 +87,7 @@ def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: 
     if hi == 0:
         return None
     ats_a, cs_a = np.asarray(ats[:hi]), np.asarray(cs[:hi])
-    t = t_cut - STEP * np.arange(context_steps - 1, -1, -1)
+    t = t_cut - step * np.arange(context_steps - 1, -1, -1)
     idx = np.searchsorted(ats_a, t, side="right") - 1
     ok = idx >= 0
     ok[ok] &= (t[ok] - ats_a[idx[ok]]) <= STALE
@@ -93,7 +95,7 @@ def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: 
     ctx[ok] = cs_a[idx[ok]]
     if np.isnan(ctx[-1]):
         return None
-    steps = (resets_at - t_cut) / STEP
+    steps = (resets_at - t_cut) / step
     h = max(1, math.ceil(steps))
     fc = model(size)
     q = fc.forecast(ctx[None, :], prediction_length=h).quantiles.numpy()[0, 0]   # (H, Q)
@@ -111,5 +113,5 @@ def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: 
     # completed cycles the precompute never saw, and running four sizes over
     # them redone every refit overran the 1.2 s deadline each time.
     if use_cache:
-        _precomputed()[cache_key(size, history.account, t_cut)] = list(out)
+        _precomputed()[cache_key(size, history.account, t_cut, history.window)] = list(out)
     return out

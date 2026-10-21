@@ -24,11 +24,15 @@ from lab_store import Store  # noqa: E402
 PAIRS = {"lab-cost-decay-30m": "tokc-decay-30m", "lab-cost-rate-30m": "tokc-rate-30m-cal",
          "lab-cost-rate-1d": "tokc-rate-1d-cal",
          "lab-timestral-5m": "fm-timestral-5m-6h_3d", "lab-timestral-28m": "fm-timestral-28m-6h_3d",
-         "lab-timestral-123m": "fm-timestral-123m-6h_3d", "lab-timestral-209m": "fm-timestral-209m-1d_1w"}
+         "lab-timestral-123m": "fm-timestral-123m-6h_3d", "lab-timestral-209m": "fm-timestral-209m-1d_1w",
+         "lab-ensemble-7d": "l3-median12-7d"}
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(name, HERE / "predictors" / f"{name}.py")
+    path = HERE / "predictors" / f"{name}.py"
+    if not path.exists():
+        path = HERE / "staging" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
