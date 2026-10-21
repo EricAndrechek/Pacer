@@ -149,8 +149,10 @@ public final class ScanCoordinator {
     ///          total. Exact price matching (#216) changes which price a
     ///          model gets where the old substring search guessed a sibling:
     ///          on a real store, Sonnet 5.5's first week priced at Sonnet 5's
-    ///          cache-read rate. One bump for all of it, so the store is
-    ///          rebuilt once.
+    ///          cache-read rate. Tiers are priced per request on the whole
+    ///          prompt (#297): Haiku 5.5 over 100k, and the old Sonnet 4/4.5
+    ///          200k tier, which used to split each category at 200k. One
+    ///          bump for all of it, so the store is rebuilt once.
     public static let currentCostRecomputeVersion = "17"
 
     /// Generation of the duplicate-turn repair.

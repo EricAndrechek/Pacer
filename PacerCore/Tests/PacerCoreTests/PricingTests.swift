@@ -97,9 +97,10 @@ struct PricingTests {
     }
 
     @Test func tieredPricingAppliesAbove200k() {
-        // 250k input tokens: first 200k @ $5/1M = $1.00,
-        //                    next 50k @ $9/1M  = $0.45
-        //                    total              = $1.45
+        // A 250k-token prompt is over the 200k threshold, so the WHOLE
+        // request is priced at the upper tier (Anthropic's per-request rule,
+        // #297): 250k @ $9/1M = $2.25. The old per-category split (first
+        // 200k at $5, the rest at $9 = $1.45) under-priced long requests.
         let pricing = LiteLLMModelPricing(
             inputCostPerToken: 5e-06,
             outputCostPerToken: nil,
@@ -116,7 +117,7 @@ struct PricingTests {
         )
         let breakdown = TokenBreakdown(inputTokens: 250_000)
         let cost = CostCalculator.cost(breakdown: breakdown, pricing: pricing)
-        #expect(abs(cost - 1.45) < 1e-9)
+        #expect(abs(cost - 2.25) < 1e-9)
     }
 
     @Test func tieredPricingDoesNotApplyBelow200k() {

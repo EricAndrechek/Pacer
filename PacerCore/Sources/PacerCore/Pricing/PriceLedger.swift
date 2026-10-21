@@ -25,6 +25,23 @@ import Foundation
 ///    gap), the nearest record prices it and the result is flagged
 ///    `outsideWindow`: a flagged estimate rather than a silent one.
 /// 5. **No records at all**: unpriced. Cost zero, flagged `unpriced`.
+///
+/// ## Tiers and variants (#297)
+///
+/// - **Prompt-size tiers** are sibling records with a threshold. A request's
+///   prompt is all of its input — input, cache reads, and both cache writes,
+///   as Anthropic defines it — and the WHOLE request is priced at the tier
+///   its prompt falls in, cache hits included (Haiku 5.5 over 100k; the old
+///   Sonnet 4/4.5 1M-context rate over 200k).
+/// - **Fast mode** uses an explicit fast record when there is one, else the
+///   standard rates times the record's fast multiplier (every category: the
+///   cache multipliers stack on top). With neither, the request is "unpriced
+///   premium": zero and flagged, never guessed at the standard rate.
+/// - **Region and provider.** A Bedrock, Vertex or Foundry id, or a
+///   first-party request with US data residency, is priced by its own
+///   records when the catalogs list them, otherwise by the Claude API's
+///   global records times the regional multiplier (×1 for a global
+///   endpoint), flagged derived.
 public struct PriceLedger: Sendable {
 
     public let records: [PriceRecordValue]
@@ -199,8 +216,18 @@ public struct PriceLedger: Sendable {
                     return Plan(key: key, timeline: t, keyTokens: none, regional: false)
                 }
             }
+            return Plan(key: key, timeline: nil, keyTokens: none, regional: false)
         }
-        return Plan(key: key, timeline: nil, keyTokens: none, regional: false)
+        // A provider or region the catalogs don't list for this model: the
+        // Claude API's global price, with the regional premium when the
+        // endpoint isn't global.
+        let firstParty = plan(for: key.firstParty)
+        guard let timeline = firstParty.timeline else {
+            return Plan(key: key, timeline: nil, keyTokens: none + firstParty.keyTokens,
+                        regional: false)
+        }
+        return Plan(key: key, timeline: timeline, keyTokens: none + firstParty.keyTokens,
+                    regional: key.region != .global)
     }
 
     // MARK: - Resolution
@@ -250,41 +277,58 @@ public struct PriceLedger: Sendable {
 
     /// What one request costs at the price in effect at `t`.
     ///
-    /// A model with an upper tier keeps the rule the flat table used: each
-    /// category's tokens up to the threshold at the base rate, the rest at
-    /// the upper tier's rate. #297 replaces it with Anthropic's per-request
-    /// rule.
+    /// `geo` is the request's data-residency region when the transcript says
+    /// (`usage.inference_geo`); it overrides the region a plain id implies.
     public func cost(
-        model: String, at t: Date, speed: PriceSpeed = .standard, breakdown: TokenBreakdown
+        model: String, at t: Date, speed: PriceSpeed = .standard,
+        geo: CanonicalModelID.Region? = nil, breakdown b: TokenBreakdown
     ) -> SampleCost {
-        let plan = plan(for: model)
-        guard let segment = plan.timeline?.segment(at: t),
-              let base = segment.standard.last
-        else {
+        var plan = plan(for: model)
+        if let geo, geo != plan.key.region, plan.key.provider == .anthropic {
+            plan = self.plan(for: CanonicalModelID(model: plan.key.model, provider: .anthropic, region: geo))
+        }
+        guard let segment = plan.timeline?.segment(at: t), !segment.standard.isEmpty else {
             return SampleCost(components: .zero, pricedBy: plan.keyTokens, flags: .unpriced)
         }
-        var flags: PricingFlags = base.outside ? .outsideWindow : []
-        if !base.record.rates.derived.isEmpty { flags.insert(.derivedRate) }
-        let tokens = plan.keyTokens.isEmpty
-            ? segment.standardTokens : plan.keyTokens + segment.standardTokens
-        let components: CostComponents
-        if segment.standard.count > 1, let upper = segment.standard.first {
-            let th = upper.record.tierAbovePromptTokens
-            func split(_ tokens: Int64, _ base: Double, _ above: Double) -> Double {
-                guard tokens > th, above > 0 else { return Double(tokens) * base }
-                return Double(th) * base + Double(tokens - th) * above
-            }
-            let b = breakdown, lo = base.record.rates, hi = upper.record.rates
-            components = CostComponents(
-                input: split(b.inputTokens, lo.input, hi.input),
-                output: split(b.outputTokens, lo.output, hi.output),
-                cacheRead: split(b.cacheReadTokens, lo.cacheRead, hi.cacheRead),
-                cacheWrite5m: split(b.cacheCreation5mTokens, lo.cacheWrite5m, hi.cacheWrite5m),
-                cacheWrite1h: split(b.cacheCreation1hTokens, lo.cacheWrite1h, hi.cacheWrite1h))
-        } else {
-            components = CostComponents(breakdown: breakdown, rates: base.record.rates)
+
+        // Every tier and speed this request could have taken is a token: a
+        // change to any of them can change what it costs.
+        var tokens = plan.keyTokens.isEmpty ? segment.standardTokens
+            : plan.keyTokens + segment.standardTokens
+        if !segment.fastTokens.isEmpty { tokens += segment.fastTokens }
+
+        let prompt = b.inputTokens + b.cacheReadTokens + b.cacheCreation5mTokens + b.cacheCreation1hTokens
+        func tier(_ choices: [Choice]) -> Choice? {
+            choices.first { $0.record.tierAbovePromptTokens == 0 || prompt > $0.record.tierAbovePromptTokens }
+                ?? choices.last
         }
-        return SampleCost(components: components, pricedBy: tokens, flags: flags)
+
+        var flags: PricingFlags = []
+        var chosen: Choice
+        var rates: PriceRates
+        if speed == .fast, let explicit = tier(segment.fast) {
+            chosen = explicit
+            rates = explicit.record.rates
+        } else {
+            chosen = tier(segment.standard)!
+            rates = chosen.record.rates
+            if speed == .fast {
+                guard let m = chosen.record.fastMultiplier else {
+                    // No known fast rate: don't guess at the standard one.
+                    return SampleCost(components: .zero, pricedBy: tokens,
+                                      flags: chosen.outside ? [.unpricedPremium, .outsideWindow]
+                                        : .unpricedPremium)
+                }
+                rates = rates.scaled(by: m, marking: .fast)
+            }
+        }
+        if plan.regional {
+            rates = rates.scaled(by: chosen.record.regionalMultiplier ?? 1, marking: .region)
+        }
+        if chosen.outside { flags.insert(.outsideWindow) }
+        if !rates.derived.isEmpty { flags.insert(.derivedRate) }
+        return SampleCost(components: CostComponents(breakdown: b, rates: rates),
+                          pricedBy: tokens, flags: flags)
     }
 
     /// The base-tier standard rates for `model` at `t`, for display math
@@ -339,37 +383,59 @@ extension PriceLedger {
         return out.sorted { $0.id < $1.id }
     }
 
-    /// Base record plus the above-200k sibling, when the row carries one.
+    /// The base record plus one sibling per prompt-size tier the row
+    /// carries (above 100k, above 200k), with the row's fast and regional
+    /// multipliers on each.
     static func templates(
         for id: CanonicalModelID, pricing p: LiteLLMModelPricing, source: PriceSource
     ) -> [PriceRecordValue] {
         let placeholder = Date(timeIntervalSince1970: 0)
-        let w5m = p.cacheCreationInputTokenCost ?? 0
-        // An unpublished 1h rate reuses the 5m rate, as the flat table did.
-        // (#297 derives it as 2x input instead.)
-        let w1h = p.cacheCreationInputTokenCostAbove1hr ?? w5m
-        var derived: PriceRates.Derived = []
-        if p.cacheCreationInputTokenCostAbove1hr == nil { derived.insert(.cacheWrite1h) }
-        let base = PriceRates(
-            input: p.inputCostPerToken ?? 0, output: p.outputCostPerToken ?? 0,
-            cacheRead: p.cacheReadInputTokenCost ?? 0,
-            cacheWrite5m: w5m, cacheWrite1h: w1h, derived: derived)
-        var out = [PriceRecordValue(key: id, rates: base, effectiveFrom: placeholder, source: source)]
+        let fast = p.providerSpecificEntry?["fast"]
+        let regional = p.providerSpecificEntry?["us"]
 
-        let anyAbove = [p.inputCostPerTokenAbove200kTokens, p.outputCostPerTokenAbove200kTokens,
-                        p.cacheReadInputTokenCostAbove200kTokens,
-                        p.cacheCreationInputTokenCostAbove200kTokens].contains { ($0 ?? 0) > 0 }
-        if anyAbove {
-            let a5m = p.cacheCreationInputTokenCostAbove200kTokens ?? base.cacheWrite5m
-            let upper = PriceRates(
-                input: p.inputCostPerTokenAbove200kTokens ?? base.input,
-                output: p.outputCostPerTokenAbove200kTokens ?? base.output,
-                cacheRead: p.cacheReadInputTokenCostAbove200kTokens ?? base.cacheRead,
-                cacheWrite5m: a5m,
-                cacheWrite1h: p.cacheCreationInputTokenCostAbove1hrAbove200kTokens ?? a5m)
-            out.append(PriceRecordValue(
-                key: id, tierAbovePromptTokens: 200_000, rates: upper,
-                effectiveFrom: placeholder, source: source))
+        /// Five rates from whatever the row publishes. Anthropic's cache
+        /// writes are uniform multiples of input — 5m ×1.25, 1h ×2 — so an
+        /// unpublished write rate is derived from them and flagged. (It used
+        /// to reuse the 5m rate for 1h, under-pricing every 1h write on
+        /// models.dev- and catwalk-sourced rows, which publish no 1h rate.)
+        /// Cache reads are not uniform (×0.1, ×0.05 on Opus/Sonnet 5.5,
+        /// ×0.025 on Fable 5.1), so an unpublished read stays unpublished.
+        func rates(input: Double?, output: Double?, read: Double?, w5m: Double?, w1h: Double?) -> PriceRates {
+            let i = input ?? 0
+            var derived: PriceRates.Derived = []
+            if w5m == nil { derived.insert(.cacheWrite5m) }
+            if w1h == nil { derived.insert(.cacheWrite1h) }
+            return PriceRates(input: i, output: output ?? 0, cacheRead: read ?? 0,
+                              cacheWrite5m: w5m ?? i * 1.25, cacheWrite1h: w1h ?? i * 2,
+                              derived: derived)
+        }
+        func record(_ tier: Int64, _ r: PriceRates) -> PriceRecordValue {
+            PriceRecordValue(key: id, tierAbovePromptTokens: tier, rates: r,
+                             fastMultiplier: fast, regionalMultiplier: regional,
+                             effectiveFrom: placeholder, source: source)
+        }
+
+        var out = [record(0, rates(
+            input: p.inputCostPerToken, output: p.outputCostPerToken,
+            read: p.cacheReadInputTokenCost, w5m: p.cacheCreationInputTokenCost,
+            w1h: p.cacheCreationInputTokenCostAbove1hr))]
+
+        let tiers: [(Int64, Double?, Double?, Double?, Double?, Double?)] = [
+            (100_000, p.inputCostPerTokenAbove100kTokens, p.outputCostPerTokenAbove100kTokens,
+             p.cacheReadInputTokenCostAbove100kTokens, p.cacheCreationInputTokenCostAbove100kTokens, nil),
+            (200_000, p.inputCostPerTokenAbove200kTokens, p.outputCostPerTokenAbove200kTokens,
+             p.cacheReadInputTokenCostAbove200kTokens, p.cacheCreationInputTokenCostAbove200kTokens,
+             p.cacheCreationInputTokenCostAbove1hrAbove200kTokens),
+        ]
+        let base = out[0].rates
+        for (threshold, input, output, read, w5m, w1h) in tiers
+        where [input, output, read, w5m].contains(where: { ($0 ?? 0) > 0 }) {
+            // A tier row that omits a category keeps the base rate for it;
+            // an omitted write rate is derived from the tier's own input.
+            let tierInput = input ?? base.input
+            out.append(record(threshold, rates(
+                input: tierInput, output: output ?? base.output, read: read ?? base.cacheRead,
+                w5m: w5m, w1h: w1h)))
         }
         return out
     }

@@ -76,6 +76,7 @@ public struct CostCalculator: Sendable {
         model: String,
         sampledAt: Date,
         speed: PriceSpeed = .standard,
+        geo: CanonicalModelID.Region? = nil,
         breakdown: TokenBreakdown,
         mode: CostMode,
         ledger: PriceLedger
@@ -87,12 +88,12 @@ public struct CostCalculator: Sendable {
         case .auto:
             if let stored = storedCostUSD {
                 let weights = ledger.cost(
-                    model: model, at: sampledAt, speed: speed, breakdown: breakdown).components
+                    model: model, at: sampledAt, speed: speed, geo: geo, breakdown: breakdown).components
                 return SampleCost(components: .apportion(stored, like: weights, tokens: breakdown))
             }
-            return ledger.cost(model: model, at: sampledAt, speed: speed, breakdown: breakdown)
+            return ledger.cost(model: model, at: sampledAt, speed: speed, geo: geo, breakdown: breakdown)
         case .calculate:
-            return ledger.cost(model: model, at: sampledAt, speed: speed, breakdown: breakdown)
+            return ledger.cost(model: model, at: sampledAt, speed: speed, geo: geo, breakdown: breakdown)
         }
     }
 
