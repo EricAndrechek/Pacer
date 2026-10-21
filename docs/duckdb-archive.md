@@ -179,6 +179,61 @@ The branch adds `PACER_IMPORT_SPIKE=1` for the DuckDB side of the comparison.
 paths surfaced [the streaming-dedup bug](#the-bug-the-gate-found) — a 63%
 under-count that had been shipping for months.
 
+### Update 2026-10-21 — totals agreed, rows did not (#334)
+
+Equal totals turned out not to be enough. Upgrading the same pre-upgrade store
+copy from the same transcripts, the line parser reported upgrading rows the
+bulk importer left alone (17 at the time; 119 against a later tree). It was not
+the under-count rule 7 guards against. **Every one was a message written after
+the store was saved**, and both paths gave it the same tokens. The difference
+was the row:
+
+- **The line scanner emitted every improvement.** It emitted a message's first
+  mid-stream copy, then the finished copy when that superseded it. So the
+  persister inserted the partial copy and upgraded it in the same pass. The
+  row got the finished tokens on the *partial* copy's timestamp, about a
+  second earlier, and one of the 119 landed in a different hour. The importer
+  inserted the finished copy. The tokens matched; the timestamps and the
+  upgrade count did not.
+- **Ties were broken two ways.** 320k of 744k assistant lines tie their key's
+  best copy on finished-and-output. Subagent transcripts replay their parent's
+  messages, and one finished message can be logged several times, seconds
+  apart. The line scanner kept the first copy it read, in file-mtime order. The
+  importer kept the earliest, then the lowest path. On a store that already
+  held those keys nothing showed. On a first launch, or for any new message,
+  the row would differ by path, and by when a file was last touched.
+- **Smaller ones, found on the way:** the SQL ranked a multi-call response by
+  *line* where the line scanner ranks each call (#218). It compared
+  timestamps as text, where `…:00Z` sorts after `…:00.500Z`. And DuckDB's glob
+  reads hidden files and directories, which `FileManager` skips.
+
+The fix is one rule and one reducer. `ParsedUsageEntry.isKept` is
+`supersedes`, then the earliest instant, then the file path. `CopySelection`
+reduces a scan's copies to one per key by that rule, and both paths feed the
+persister through it. The line scanner emits each key once per scan.
+`ArchiveImporter`'s ORDER BY is the same rule in SQL, on the parsed instant.
+It passes a multi-call response's every line through for `CopySelection` to
+rank after the split, and it skips hidden paths. Ranking every tie in Swift
+instead was measured and rejected: rank-1 rows are 705k of 744k, so the result
+set would nearly double.
+
+On the same store copy and the real tree, the two paths afterwards left
+**750,395 byte-identical rows**: every field of every sample, and both 0
+upgrades, 378,671 skips, the same insert count. The only differences were 10
+rows for turns written between the two reads.
+
+The gate is now per row, not per total:
+
+- `make test-ingest-parity` runs `IngestParityTests`. Both paths go over one
+  fixture tree of every shape above, into a seeded store, and must leave
+  identical rows, counts and rollups. CI's app job runs it, because only that
+  job has DuckDB. The line parser's half runs in `make test` too.
+- `bin/dev-ingest-parity.sh <store copy> <claude dir> <out>` runs
+  `IngestParityProbe` on real data. Each path writes its own clone of the store,
+  and every row of both is dumped and diffed. Rows for turns written during the
+  run are reported apart, as drift, so it can read a live `~/.claude` without
+  copying it.
+
 ## The bug the gate found (this one DID ship)
 
 Claude Code appends the same assistant message to the transcript several times
