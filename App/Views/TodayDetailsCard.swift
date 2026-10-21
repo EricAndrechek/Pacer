@@ -239,13 +239,14 @@ private struct Totals {
     @MainActor
     func cacheSavingsUSD(snapshot: PricingTable.Snapshot) -> Double {
         var total: Double = 0
+        // Today's rows, so today's rates from the dated ledger.
+        let now = Date()
         for row in rows {
-            guard let p = snapshot.pricing(for: row.model) else { continue }
-            let inputRate = p.inputCostPerToken ?? 0
-            let cacheReadRate = p.cacheReadInputTokenCost ?? 0
-            let cache5mRate = p.cacheCreationInputTokenCost ?? 0
-            let cache1hRate = p.cacheCreationInputTokenCostAbove1hr
-                ?? p.cacheCreationInputTokenCost ?? 0
+            guard let p = snapshot.ledger.rates(for: row.model, at: now) else { continue }
+            let inputRate = p.input
+            let cacheReadRate = p.cacheRead
+            let cache5mRate = p.cacheWrite5m
+            let cache1hRate = p.cacheWrite1h
             let inputSide = row.inputTokens + row.cacheReadTokens
                 + row.cacheCreation5mTokens + row.cacheCreation1hTokens
             let hypothetical = Double(inputSide) * inputRate

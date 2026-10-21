@@ -278,6 +278,11 @@ public actor PricingTable {
             if let primaryKey {
                 if changedField { merged[primaryKey] = winner }
             } else {
+                // Provenance for the price ledger: the first secondary that
+                // carries the model. LiteLLM entries carry no annotation.
+                if let origin = secondaries.first(where: { $0.entries?[id] != nil }) {
+                    winner["pacer_source"] = origin.name
+                }
                 merged[id] = winner
                 added.append(id)
             }
@@ -366,25 +371,53 @@ public actor PricingTable {
     /// match algorithm exactly so callers can swap one for the other
     /// without behavior drift.
     public func snapshot() -> Snapshot {
-        Snapshot(pricingByModel: pricingByModel, index: index)
+        Snapshot(pricingByModel: pricingByModel, index: index,
+                 ledger: .provisional(catalog: pricingByModel, curated: []))
     }
 
+    /// The catalog plus the price ledger that prices samples.
+    ///
+    /// `pricingByModel` is the merged catalog as fetched — what a refresh
+    /// produced, and what `PriceLedgerStore` records changes from. Costs
+    /// never read it directly: they go through `ledger`, which knows *when*
+    /// each rate applied.
     public struct Snapshot: Sendable {
         public let pricingByModel: [String: LiteLLMModelPricing]
         let index: PricingCatalogIndex
+        public let ledger: PriceLedger
 
+        /// A snapshot priced by the catalog alone (current rates, open from
+        /// the beginning of time) plus the bundled curated history. Tests
+        /// and tools use this; the app prices with the store's ledger.
         public init(pricingByModel: [String: LiteLLMModelPricing]) {
-            self.init(pricingByModel: pricingByModel,
-                      index: PricingCatalogIndex(pricingByModel))
+            self.init(
+                pricingByModel: pricingByModel,
+                index: PricingCatalogIndex(pricingByModel),
+                ledger: .provisional(
+                    catalog: pricingByModel,
+                    curated: (try? CuratedPriceHistory.bundled().records) ?? []))
         }
 
-        init(pricingByModel: [String: LiteLLMModelPricing], index: PricingCatalogIndex) {
+        public init(pricingByModel: [String: LiteLLMModelPricing], ledger: PriceLedger) {
+            self.init(pricingByModel: pricingByModel,
+                      index: PricingCatalogIndex(pricingByModel), ledger: ledger)
+        }
+
+        init(pricingByModel: [String: LiteLLMModelPricing], index: PricingCatalogIndex,
+             ledger: PriceLedger) {
             self.pricingByModel = pricingByModel
             self.index = index
+            self.ledger = ledger
         }
 
-        /// Mirror of `PricingTable.pricing(for:)`. Same exact match, same
-        /// built-in Anthropic fallback. Sync.
+        /// The same catalog, priced by `ledger`.
+        public func with(ledger: PriceLedger) -> Snapshot {
+            Snapshot(pricingByModel: pricingByModel, index: index, ledger: ledger)
+        }
+
+        /// The catalog row a model matches today. Mirror of
+        /// `PricingTable.pricing(for:)`: same exact match, same built-in
+        /// fallback. Not for pricing history — use `ledger`.
         public func pricing(for model: String) -> LiteLLMModelPricing? {
             index.matchKey(model).flatMap { pricingByModel[$0] }
                 ?? AnthropicFallbackPricing.pricing(for: model)

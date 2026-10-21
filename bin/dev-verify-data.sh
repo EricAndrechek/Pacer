@@ -24,11 +24,14 @@
 #
 #   bin/dev-verify-data.sh        (or: make verify-data)
 #
+# PACER_VERIFY_STORE=<path> checks another store file instead — a frozen copy
+# rebuilt by a branch build, say — still read-only.
+#
 # Exits non-zero if anything is inconsistent, so it can gate a release.
 
 set -euo pipefail
 
-STORE="${HOME}/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/pacer.sqlite"
+STORE="${PACER_VERIFY_STORE:-${HOME}/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/pacer.sqlite}"
 [ -f "$STORE" ] || { echo "no store at $STORE"; exit 1; }
 
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; X=$'\033[0m'
@@ -125,6 +128,26 @@ check "hourly cost equals daily"  "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOS
 check "project cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZTOTALCOSTUSD),2) FROM ZPROJECTDAILYAGGREGATE")"
 check "session cost equals daily" "$daily_cost" "$(q "SELECT ROUND(SUM(ZCUMULATIVECOSTUSD),2) FROM ZSESSIONINFO")"
 
+# Every rollup row carries its cost split into five components (#296), and the
+# total is written as their sum. A row where they disagree was written by a
+# path that bypassed `RollupCostColumns.costComponents`.
+printf '\n%s==>%s Cost components — the five parts sum to the total on every row\n' "$B" "$X"
+if [ -z "$(q "SELECT 1 FROM pragma_table_info('ZDAILYAGGREGATE') WHERE name='ZCOSTINPUT'")" ]; then
+  printf '  - skipped: this store predates the component columns\n'
+else
+  for spec in ZDAILYAGGREGATE:ZTOTALCOSTUSD ZHOURLYAGGREGATE:ZTOTALCOSTUSD \
+              ZPROJECTDAILYAGGREGATE:ZTOTALCOSTUSD ZSESSIONINFO:ZCUMULATIVECOSTUSD \
+              ZACCOUNTDAILYAGGREGATE:ZTOTALCOSTUSD ZACCOUNTHOURLYAGGREGATE:ZTOTALCOSTUSD \
+              ZACCOUNTPROJECTDAILYAGGREGATE:ZTOTALCOSTUSD ZACCOUNTSESSIONINFO:ZCUMULATIVECOSTUSD; do
+    tbl="${spec%%:*}"; tot="${spec##*:}"
+    check "${tbl}: components sum to the total" 0 "$(q "
+      SELECT COUNT(*) FROM ${tbl} WHERE ABS(${tot} - (ZCOSTINPUT + ZCOSTOUTPUT + ZCOSTCACHEREAD
+                                                     + ZCOSTCACHEWRITE5M + ZCOSTCACHEWRITE1H)) > 1e-9")"
+  done
+  # The price ledger exists once a build with it has run a scan.
+  check "price ledger has records" 1 "$(q "SELECT COUNT(*) > 0 FROM ZPRICERECORD")"
+fi
+
 # The per-account rollup is a second view of the same samples, kept so the app
 # can show one account or all of them without recomputing. Two rollups over one
 # source can drift, so they are checked against each other: every account row
@@ -205,7 +228,7 @@ fi
 # it's why the app also verifies its own appends. Skipped loudly rather than
 # silently, because a check that quietly does nothing is worse than no check.
 printf '\n%s==>%s Raw archive vs store\n' "$B" "$X"
-ARCHIVE="${HOME}/Library/Group Containers/YZXWMJ5VBY.com.ericandrechek.pacer/raw-archive.duckdb"
+ARCHIVE="$(dirname "$STORE")/raw-archive.duckdb"
 if [ ! -f "$ARCHIVE" ]; then
   printf '  - no archive yet (nothing has been written)\n'
 elif ! command -v duckdb >/dev/null 2>&1; then

@@ -333,6 +333,9 @@ final class AppBackgroundService {
                 if stale {
                     let count = await PricingTable.shared.modelCount()
                     refreshed = await PricingTable.shared.refresh()
+                    // The curated price history rides the same cadence; it
+                    // is best-effort and never blocks the catalog refresh.
+                    await CuratedPriceHistory.refresh()
                     if refreshed {
                         await SampleCostCache.reload()
                         let after = await PricingTable.shared.modelCount()

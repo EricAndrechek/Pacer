@@ -25,6 +25,14 @@ public final class SessionInfo {
     public var projectPath: String
     public var ccVersion: String?
     public var cumulativeCostUSD: Double
+    /// `cumulativeCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
     public var cumulativeInputTokens: Int64
     public var cumulativeOutputTokens: Int64
     public var cumulativeCacheReadTokens: Int64

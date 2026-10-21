@@ -24,18 +24,15 @@ public final class AggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
-    private let pricingTable: PricingTable
 
     public init(
         container: ModelContainer,
         context: ModelContext,
-        mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared
+        mode: CostMode = .auto
     ) {
         self.container = container
         self.context = context
         self.mode = mode
-        self.pricingTable = pricingTable
     }
 
     public struct Stats: Sendable {
@@ -96,14 +93,11 @@ public final class AggregateRecomputer {
             // path mostly fires on the missing-pair recovery flow
             // where samples are already on disk.
             try context.save()
-            if mode == .calculate {
-                try? await pricingTable.ensureLoaded()
-            }
             let worker = AggregateBulkWorker(modelContainer: container)
             return try await worker.bulkRecompute(
                 pairs: pairs,
                 mode: mode,
-                pricingTable: pricingTable,
+                pricing: SampleCostCache.current(),
                 snapshots: snapshots ?? SampleSnapshotCache(container: container)
             )
         }
@@ -119,10 +113,10 @@ public final class AggregateRecomputer {
         // a pricing refresh completes; recomputer fast-path callers
         // are tolerant of a one-cycle stale snapshot.
         //
-        // `.display` mode never consults pricing — skip the read.
-        let pricingSnapshot: PricingTable.Snapshot = (mode == .display)
-            ? PricingTable.Snapshot(pricingByModel: [:])
-            : SampleCostCache.current()
+        // Every path — fast, full and bulk — prices through this one
+        // snapshot and `CostCalculator.sampleCost`, so a bucket's cost can't
+        // depend on which path last touched it.
+        let pricingSnapshot = SampleCostCache.current()
         for pair in pairs {
             stats.pairsRecomputed += 1
             let pendingForPair = pending[pair] ?? []
@@ -132,7 +126,7 @@ public final class AggregateRecomputer {
                                  snapshot: pricingSnapshot, stats: &stats) {
                 continue
             }
-            try await recomputeOne(pair: pair, stats: &stats)
+            try recomputeOne(pair: pair, snapshot: pricingSnapshot, stats: &stats)
         }
         // No save here — `ScanCoordinator.runScanCycle` does one
         // terminal save per cycle that commits this recomputer's
@@ -167,28 +161,17 @@ public final class AggregateRecomputer {
         ).first
         guard let existing else { return false }
 
-        var perAccount: [String: (sum: TokenBreakdown, cost: Double)] = [:]
+        var perAccount: [String: AccountBucket] = [:]
+        var components = existing.costComponents
         for sample in pending {
             existing.inputTokens += sample.inputTokens
             existing.outputTokens += sample.outputTokens
             existing.cacheReadTokens += sample.cacheReadTokens
             existing.cacheCreation5mTokens += sample.cacheCreation5mTokens
             existing.cacheCreation1hTokens += sample.cacheCreation1hTokens
-            let breakdown = TokenBreakdown(
-                inputTokens: sample.inputTokens,
-                outputTokens: sample.outputTokens,
-                cacheReadTokens: sample.cacheReadTokens,
-                cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                cacheCreation1hTokens: sample.cacheCreation1hTokens
-            )
-            let sampleCost = CostCalculator.cost(
-                storedCostUSD: sample.sourceCostUSD,
-                model: sample.model,
-                breakdown: breakdown,
-                mode: mode,
-                snapshot: snapshot
-            )
-            existing.totalCostUSD += sampleCost
+            let breakdown = sample.breakdown
+            let sampleCost = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+            components += sampleCost.components
 
             // The account row gets the same increment, from the same cost.
             // Missing this is what made the two rollups drift: this path adds
@@ -203,11 +186,12 @@ public final class AggregateRecomputer {
             // same cycle, at 36 ms to 1,300 ms. Pending-change churn is
             // charged to whoever fetches next.
             let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
-            var bucket = perAccount[accountKey] ?? (TokenBreakdown(), 0)
+            var bucket = perAccount[accountKey] ?? AccountBucket()
             bucket.sum.add(breakdown)
-            bucket.cost += sampleCost
+            bucket.cost += sampleCost.components
             perAccount[accountKey] = bucket
         }
+        existing.costComponents = components
 
         for (accountId, bucket) in perAccount {
             try applyToAccountRow(
@@ -223,7 +207,7 @@ public final class AggregateRecomputer {
     /// account has no usage in the bucket yet.
     private func applyToAccountRow(
         accountId: String, date: String, model: String,
-        breakdown: TokenBreakdown, cost: Double
+        breakdown: TokenBreakdown, cost: CostComponents
     ) throws {
         let key = AccountDailyAggregate.makeKey(
             accountId: accountId, date: date, model: model)
@@ -240,21 +224,25 @@ public final class AggregateRecomputer {
             existing.cacheReadTokens += breakdown.cacheReadTokens
             existing.cacheCreation5mTokens += breakdown.cacheCreation5mTokens
             existing.cacheCreation1hTokens += breakdown.cacheCreation1hTokens
-            existing.totalCostUSD += cost
+            existing.costComponents = existing.costComponents + cost
         } else {
-            context.insert(AccountDailyAggregate(
+            let row = AccountDailyAggregate(
                 accountId: accountId, date: date, model: model,
                 inputTokens: breakdown.inputTokens,
                 outputTokens: breakdown.outputTokens,
                 cacheReadTokens: breakdown.cacheReadTokens,
                 cacheCreation5mTokens: breakdown.cacheCreation5mTokens,
                 cacheCreation1hTokens: breakdown.cacheCreation1hTokens,
-                totalCostUSD: cost
-            ))
+                totalCostUSD: 0
+            )
+            row.costComponents = cost
+            context.insert(row)
         }
     }
 
-    private func recomputeOne(pair: DateModelPair, stats: inout Stats) async throws {
+    private func recomputeOne(
+        pair: DateModelPair, snapshot: PricingTable.Snapshot, stats: inout Stats
+    ) throws {
         let dateString = pair.date
         let modelString = pair.model
         let sampleDescriptor = FetchDescriptor<TokenSample>(
@@ -280,86 +268,64 @@ public final class AggregateRecomputer {
             return
         }
 
-        var sum = TokenBreakdown()
-        var totalCost: Double = 0
-        var pricing: LiteLLMModelPricing?
-        var pricingLoaded = false
-        // Per-account split, accumulated in the same pass. Splitting in a
-        // second pass would mean pricing each sample twice and give the two
-        // rollups a chance to disagree; here the account rows are the global
-        // row's own terms, so within a bucket they cannot drift.
-        var perAccount: [String: (sum: TokenBreakdown, cost: Double)] = [:]
-
-        for sample in samples {
-            let breakdown = TokenBreakdown(
-                inputTokens: sample.inputTokens,
-                outputTokens: sample.outputTokens,
-                cacheReadTokens: sample.cacheReadTokens,
-                cacheCreation5mTokens: sample.cacheCreation5mTokens,
-                cacheCreation1hTokens: sample.cacheCreation1hTokens
-            )
-            sum.add(breakdown)
-
-            let sampleCost: Double
-            switch mode {
-            case .display:
-                sampleCost = sample.sourceCostUSD ?? 0
-            case .auto:
-                if let stored = sample.sourceCostUSD {
-                    sampleCost = stored
-                } else {
-                    if !pricingLoaded {
-                        try? await pricingTable.ensureLoaded()
-                        pricing = await pricingTable.pricing(for: modelString)
-                        pricingLoaded = true
-                    }
-                    sampleCost = pricing.map {
-                        CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                    } ?? 0
-                }
-            case .calculate:
-                if !pricingLoaded {
-                    pricing = await pricingTable.pricing(for: modelString)
-                    pricingLoaded = true
-                }
-                sampleCost = pricing.map {
-                    CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                } ?? 0
-            }
-            totalCost += sampleCost
-
-            let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
-            var bucket = perAccount[key] ?? (TokenBreakdown(), 0)
-            bucket.sum.add(breakdown)
-            bucket.cost += sampleCost
-            perAccount[key] = bucket
-        }
-
+        let bucket = DailyBucketValues(samples: samples, mode: mode, snapshot: snapshot)
         try syncAccountRows(
-            context: context, date: dateString, model: modelString, perAccount: perAccount)
-
+            context: context, date: dateString, model: modelString, perAccount: bucket.perAccount)
         if let existing {
-            existing.inputTokens = sum.inputTokens
-            existing.outputTokens = sum.outputTokens
-            existing.cacheReadTokens = sum.cacheReadTokens
-            existing.cacheCreation5mTokens = sum.cacheCreation5mTokens
-            existing.cacheCreation1hTokens = sum.cacheCreation1hTokens
-            existing.totalCostUSD = totalCost
+            bucket.write(to: existing)
         } else {
-            context.insert(DailyAggregate(
-                date: dateString,
-                model: modelString,
-                inputTokens: sum.inputTokens,
-                outputTokens: sum.outputTokens,
-                cacheReadTokens: sum.cacheReadTokens,
-                cacheCreation5mTokens: sum.cacheCreation5mTokens,
-                cacheCreation1hTokens: sum.cacheCreation1hTokens,
-                totalCostUSD: totalCost
-            ))
+            let row = DailyAggregate(date: dateString, model: modelString)
+            bucket.write(to: row)
+            context.insert(row)
         }
         stats.aggregatesUpserted += 1
     }
 
+}
+
+/// One account's share of a bucket: its tokens and its cost.
+struct AccountBucket {
+    var sum = TokenBreakdown()
+    var cost = CostComponents.zero
+}
+
+/// A (date, model) bucket's totals, computed once from its samples.
+///
+/// Shared by the per-pair path and the bulk worker, which live on different
+/// actors: a rollup written by two copies of the same loop drifts depending
+/// on which one last touched a bucket. Per-account rows are this bucket's own
+/// terms, from the same pass, so within a bucket they cannot drift either.
+///
+/// Cost is per-sample, never sum-tokens-then-price: tiers apply per request,
+/// and `CostMode.auto` decides per entry whether Claude Code's stored cost
+/// wins (ccusage iterates entries the same way, `data-loader.ts:638-678`).
+struct DailyBucketValues {
+    var sum = TokenBreakdown()
+    var cost = CostComponents.zero
+    var perAccount: [String: AccountBucket] = [:]
+
+    init<S: AggregatableSample>(samples: [S], mode: CostMode, snapshot: PricingTable.Snapshot) {
+        for sample in samples {
+            let breakdown = sample.breakdown
+            sum.add(breakdown)
+            let c = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+            cost += c.components
+            let key = sample.accountId ?? AccountDailyAggregate.unattributedKey
+            var bucket = perAccount[key] ?? AccountBucket()
+            bucket.sum.add(breakdown)
+            bucket.cost += c.components
+            perAccount[key] = bucket
+        }
+    }
+
+    func write(to row: DailyAggregate) {
+        row.inputTokens = sum.inputTokens
+        row.outputTokens = sum.outputTokens
+        row.cacheReadTokens = sum.cacheReadTokens
+        row.cacheCreation5mTokens = sum.cacheCreation5mTokens
+        row.cacheCreation1hTokens = sum.cacheCreation1hTokens
+        row.costComponents = cost
+    }
 }
 
 /// Background recompute worker for the bulk path of
@@ -379,7 +345,7 @@ actor AggregateBulkWorker {
     func bulkRecompute(
         pairs: Set<DateModelPair>,
         mode: CostMode,
-        pricingTable: PricingTable,
+        pricing: PricingTable.Snapshot,
         snapshots: SampleSnapshotCache
     ) async throws -> AggregateRecomputer.Stats {
         var stats = AggregateRecomputer.Stats(
@@ -396,7 +362,6 @@ actor AggregateBulkWorker {
         var existingByKey: [String: DailyAggregate] = [:]
         for agg in existingAll { existingByKey[agg.dateModelKey] = agg }
 
-        var pricingCache: [String: LiteLLMModelPricing?] = [:]
         var processed = 0
         for pair in pairs {
             stats.pairsRecomputed += 1
@@ -415,65 +380,16 @@ actor AggregateBulkWorker {
                 continue
             }
 
-            var sum = TokenBreakdown()
-            var totalCost: Double = 0
-            // Same per-account split as the fast path, from the same loop —
-            // see `syncAccountRows`.
-            var perAccount: [String: (sum: TokenBreakdown, cost: Double)] = [:]
-            for sample in samples {
-                let breakdown = sample.breakdown
-                sum.add(breakdown)
-
-                let sampleCost: Double
-                switch mode {
-                case .display:
-                    sampleCost = sample.sourceCostUSD ?? 0
-                case .auto:
-                    if let stored = sample.sourceCostUSD {
-                        sampleCost = stored
-                    } else {
-                        let pricing = try await pricing(for: pair.model, cache: &pricingCache, pricingTable: pricingTable)
-                        sampleCost = pricing.map {
-                            CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                        } ?? 0
-                    }
-                case .calculate:
-                    let pricing = try await pricing(for: pair.model, cache: &pricingCache, pricingTable: pricingTable)
-                    sampleCost = pricing.map {
-                        CostCalculator.cost(breakdown: breakdown, pricing: $0)
-                    } ?? 0
-                }
-                totalCost += sampleCost
-
-                let accountKey = sample.accountId ?? AccountDailyAggregate.unattributedKey
-                var bucket = perAccount[accountKey] ?? (TokenBreakdown(), 0)
-                bucket.sum.add(breakdown)
-                bucket.cost += sampleCost
-                perAccount[accountKey] = bucket
-            }
-
+            let bucket = DailyBucketValues(samples: samples, mode: mode, snapshot: pricing)
             try syncAccountRows(
                 context: modelContext, date: pair.date, model: pair.model,
-                perAccount: perAccount)
-
+                perAccount: bucket.perAccount)
             if let existing {
-                existing.inputTokens = sum.inputTokens
-                existing.outputTokens = sum.outputTokens
-                existing.cacheReadTokens = sum.cacheReadTokens
-                existing.cacheCreation5mTokens = sum.cacheCreation5mTokens
-                existing.cacheCreation1hTokens = sum.cacheCreation1hTokens
-                existing.totalCostUSD = totalCost
+                bucket.write(to: existing)
             } else {
-                modelContext.insert(DailyAggregate(
-                    date: pair.date,
-                    model: pair.model,
-                    inputTokens: sum.inputTokens,
-                    outputTokens: sum.outputTokens,
-                    cacheReadTokens: sum.cacheReadTokens,
-                    cacheCreation5mTokens: sum.cacheCreation5mTokens,
-                    cacheCreation1hTokens: sum.cacheCreation1hTokens,
-                    totalCostUSD: totalCost
-                ))
+                let row = DailyAggregate(date: pair.date, model: pair.model)
+                bucket.write(to: row)
+                modelContext.insert(row)
             }
             stats.aggregatesUpserted += 1
             processed += 1
@@ -484,20 +400,6 @@ actor AggregateBulkWorker {
 
         try modelContext.save()
         return stats
-    }
-
-    /// Per-model pricing lookup with a small in-actor cache so we
-    /// only consult `PricingTable` once per model across all the
-    /// dirty pairs of one bulk run.
-    private func pricing(
-        for model: String,
-        cache: inout [String: LiteLLMModelPricing?],
-        pricingTable: PricingTable
-    ) async throws -> LiteLLMModelPricing? {
-        if let cached = cache[model] { return cached }
-        let resolved = await pricingTable.pricing(for: model)
-        cache[model] = resolved
-        return resolved
     }
 }
 
@@ -519,7 +421,7 @@ func syncAccountRows(
     context: ModelContext,
     date: String,
     model: String,
-    perAccount: [String: (sum: TokenBreakdown, cost: Double)]
+    perAccount: [String: AccountBucket]
 ) throws {
     let existing = try context.fetch(
         FetchDescriptor<AccountDailyAggregate>(
@@ -538,9 +440,9 @@ func syncAccountRows(
             row.cacheReadTokens = bucket.sum.cacheReadTokens
             row.cacheCreation5mTokens = bucket.sum.cacheCreation5mTokens
             row.cacheCreation1hTokens = bucket.sum.cacheCreation1hTokens
-            row.totalCostUSD = bucket.cost
+            row.costComponents = bucket.cost
         } else {
-            context.insert(AccountDailyAggregate(
+            let row = AccountDailyAggregate(
                 accountId: accountId,
                 date: date,
                 model: model,
@@ -549,8 +451,10 @@ func syncAccountRows(
                 cacheReadTokens: bucket.sum.cacheReadTokens,
                 cacheCreation5mTokens: bucket.sum.cacheCreation5mTokens,
                 cacheCreation1hTokens: bucket.sum.cacheCreation1hTokens,
-                totalCostUSD: bucket.cost
-            ))
+                totalCostUSD: 0
+            )
+            row.costComponents = bucket.cost
+            context.insert(row)
         }
     }
     // Whatever is left had no samples this time round.

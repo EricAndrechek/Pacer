@@ -14,6 +14,7 @@ let package = Package(
             name: "PacerCore",
             resources: [
                 .copy("Resources/litellm-pricing.json"),
+                .copy("Resources/price-history.json"),
             ]
         ),
         // Shared SwiftUI views + design primitives. Depends on

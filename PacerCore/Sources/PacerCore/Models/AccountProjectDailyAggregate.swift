@@ -26,6 +26,14 @@ public final class AccountProjectDailyAggregate {
     public var cacheCreation5mTokens: Int64
     public var cacheCreation1hTokens: Int64
     public var totalCostUSD: Double
+    /// `totalCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
     public var sessionCount: Int
     public var modelCount: Int
     public var lastActive: Date
@@ -87,7 +95,9 @@ public struct ProjectRollupValues: Sendable {
     public var cacheReadTokens: Int64 = 0
     public var cacheCreation5mTokens: Int64 = 0
     public var cacheCreation1hTokens: Int64 = 0
-    public var totalCostUSD: Double = 0
+    /// Cost by category; `totalCostUSD` is its sum.
+    public var cost = CostComponents.zero
+    public var totalCostUSD: Double { cost.total }
     public var sessionIds: Set<String> = []
     public var modelTokens: [String: Int64] = [:]
     public var modelCost: [String: Double] = [:]
@@ -115,18 +125,12 @@ public struct ProjectRollupValues: Sendable {
         cacheCreation5mTokens += sample.breakdown.cacheCreation5mTokens
         cacheCreation1hTokens += sample.breakdown.cacheCreation1hTokens
 
-        let cost = CostCalculator.cost(
-            storedCostUSD: sample.sourceCostUSD,
-            model: sample.model,
-            breakdown: sample.breakdown,
-            mode: mode,
-            snapshot: snapshot
-        )
-        totalCostUSD += cost
+        let priced = CostCalculator.sampleCost(sample, mode: mode, snapshot: snapshot)
+        cost += priced.components
         if let sid = sample.sessionId, !sid.isEmpty { sessionIds.insert(sid) }
         modelTokens[sample.model, default: 0] +=
             sample.breakdown.inputTokens + sample.breakdown.outputTokens
-        modelCost[sample.model, default: 0] += cost
+        modelCost[sample.model, default: 0] += priced.total
         if sample.sampledAt > lastActive { lastActive = sample.sampledAt }
     }
 }
@@ -137,7 +141,7 @@ public struct ProjectRollupValues: Sendable {
 /// Lets `ProjectRollupValues` hydrate from and write back to either one, so
 /// the decode-merge-encode the incremental path performs exists once rather
 /// than once per table. Adding a fourth rollup means conforming, not copying.
-public protocol ProjectRollupRow: AnyObject {
+public protocol ProjectRollupRow: RollupCostColumns {
     var inputTokens: Int64 { get set }
     var outputTokens: Int64 { get set }
     var cacheReadTokens: Int64 { get set }
@@ -170,7 +174,7 @@ public extension ProjectRollupValues {
         cacheReadTokens = row.cacheReadTokens
         cacheCreation5mTokens = row.cacheCreation5mTokens
         cacheCreation1hTokens = row.cacheCreation1hTokens
-        totalCostUSD = row.totalCostUSD
+        cost = row.costComponents
         lastActive = row.lastActive
         let decoder = JSONDecoder()
         if !row.sessionIdsJSON.isEmpty,
@@ -193,7 +197,7 @@ public extension ProjectRollupValues {
         row.cacheReadTokens = cacheReadTokens
         row.cacheCreation5mTokens = cacheCreation5mTokens
         row.cacheCreation1hTokens = cacheCreation1hTokens
-        row.totalCostUSD = totalCostUSD
+        row.costComponents = cost
         row.sessionCount = sessionCount
         row.modelCount = modelCount
         row.lastActive = lastActive

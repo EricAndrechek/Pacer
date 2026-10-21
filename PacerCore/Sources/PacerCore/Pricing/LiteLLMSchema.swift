@@ -33,6 +33,12 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
     public let maxInputTokens: Int?
     public let maxOutputTokens: Int?
 
+    /// Which catalog supplied this entry, when it wasn't LiteLLM. Written by
+    /// `PricingTable.reconcile` into the cached merged file (LiteLLM itself
+    /// never carries it), so the price ledger can record a model's source.
+    public var pacerSourceName: String? = nil
+    public var pacerSource: PriceSource? { pacerSourceName.flatMap(PriceSource.init(rawValue:)) }
+
     enum CodingKeys: String, CodingKey {
         case inputCostPerToken = "input_cost_per_token"
         case outputCostPerToken = "output_cost_per_token"
@@ -49,6 +55,7 @@ public struct LiteLLMModelPricing: Decodable, Sendable, Equatable {
 
         case maxInputTokens = "max_input_tokens"
         case maxOutputTokens = "max_output_tokens"
+        case pacerSourceName = "pacer_source"
     }
 
     /// True when this row has any pricing data we can use. LiteLLM

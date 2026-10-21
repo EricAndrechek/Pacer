@@ -62,7 +62,7 @@ public enum ClaudeCodeMetaKey {
     public static let duplicateRepairVersion = "duplicate_repair_version"
     /// JSON array of model names that had usage but no pricing at the last
     /// scan. When one of them gains a price, its history is rebuilt.
-    /// See `ScanCoordinator.reconcileUnpricedModels`.
+    /// See `ScanCoordinator.reconcilePriceLedger`.
     public static let unpricedModels = "unpriced_models"
 
     /// ISO-8601 timestamp of the last successful incremental scan.

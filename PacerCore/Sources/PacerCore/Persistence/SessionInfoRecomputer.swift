@@ -17,7 +17,6 @@ public final class SessionInfoRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
-    private let pricingTable: PricingTable
     private let cache: SessionRollupCache
 
     /// `cache` should outlive the recomputer — `ScanCoordinator` holds one for
@@ -27,13 +26,11 @@ public final class SessionInfoRecomputer {
         container: ModelContainer,
         context: ModelContext,
         mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared,
         cache: SessionRollupCache = SessionRollupCache()
     ) {
         self.container = container
         self.context = context
         self.mode = mode
-        self.pricingTable = pricingTable
         self.cache = cache
     }
 
@@ -74,13 +71,9 @@ public final class SessionInfoRecomputer {
     ) async throws -> Stats {
         var stats = Stats(sessionsRecomputed: 0, sessionsUpserted: 0, sessionsDeleted: 0)
         if sessionIds.isEmpty { return stats }
-        // Sync pricing snapshot via `SampleCostCache.current()` for the
-        // per-session path — matches the same change in
-        // `AggregateRecomputer.recompute`. The bulk path below still
-        // awaits because it runs off-MainActor (no contention).
-        let snapshot: PricingTable.Snapshot = (mode == .display)
-            ? PricingTable.Snapshot(pricingByModel: [:])
-            : SampleCostCache.current()
+        // One pricing snapshot for every path, per-session and bulk — see
+        // the same comment in `AggregateRecomputer.recompute`.
+        let snapshot = SampleCostCache.current()
         if sessionIds.count >= Self.bulkRecomputeThreshold {
             // The bulk worker writes these rows from another context and
             // does not seed the cache, so what the cache holds for them is
@@ -405,7 +398,7 @@ extension SessionRollupValues {
         row.lastSeenAt = lastSeenAt
         row.projectPath = projectPath ?? ""
         row.ccVersion = ccVersion
-        row.cumulativeCostUSD = totalCostUSD
+        row.costComponents = cost
         row.cumulativeInputTokens = inputTokens
         row.cumulativeOutputTokens = outputTokens
         row.cumulativeCacheReadTokens = cacheReadTokens
@@ -419,7 +412,7 @@ extension SessionRollupValues {
         row.lastSeenAt = lastSeenAt
         row.projectPath = projectPath ?? ""
         row.ccVersion = ccVersion
-        row.cumulativeCostUSD = totalCostUSD
+        row.costComponents = cost
         row.cumulativeInputTokens = inputTokens
         row.cumulativeOutputTokens = outputTokens
         row.cumulativeCacheReadTokens = cacheReadTokens
@@ -429,7 +422,7 @@ extension SessionRollupValues {
     }
 
     func makeSessionRow(sessionId: String) -> SessionInfo {
-        SessionInfo(
+        let row = SessionInfo(
             sessionId: sessionId,
             firstSeenAt: firstSeenAt,
             lastSeenAt: lastSeenAt,
@@ -442,10 +435,12 @@ extension SessionRollupValues {
             cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
             topModel: topModel)
+        row.costComponents = cost
+        return row
     }
 
     func makeAccountRow(accountId: String, sessionId: String) -> AccountSessionInfo {
-        AccountSessionInfo(
+        let row = AccountSessionInfo(
             accountId: accountId, sessionId: sessionId,
             firstSeenAt: firstSeenAt, lastSeenAt: lastSeenAt,
             projectPath: projectPath ?? "", ccVersion: ccVersion,
@@ -456,6 +451,8 @@ extension SessionRollupValues {
             cumulativeCacheCreation5mTokens: cacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cacheCreation1hTokens,
             topModel: topModel)
+        row.costComponents = cost
+        return row
     }
 }
 

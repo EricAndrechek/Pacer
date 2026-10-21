@@ -17,9 +17,9 @@ public enum CostMode: String, Sendable, CaseIterable {
     case display
 }
 
-/// Applies pricing to a parsed entry. Encapsulates the tiered-pricing
-/// logic for 1M-context Claude models (above 200k token threshold) and
-/// the cache-creation 5m/1h split.
+/// Applies pricing to usage. Every cost Pacer shows goes through
+/// `sampleCost`, which prices one request at the rate in effect when it was
+/// made (`PriceLedger`) and returns it split by category.
 public struct CostCalculator: Sendable {
 
     public let mode: CostMode
@@ -30,110 +30,86 @@ public struct CostCalculator: Sendable {
         self.table = table
     }
 
-    /// Cost for a single parsed entry. Always returns a non-negative
-    /// double; missing pricing yields 0 (matches ccusage behavior).
+    /// Cost for a single parsed entry, priced against `table`'s catalog plus
+    /// the bundled curated history. A convenience for tools and tests that
+    /// hold a `PricingTable` rather than the app's `SampleCostCache`.
     public func cost(for entry: ParsedUsageEntry) async -> Double {
-        switch mode {
-        case .display:
-            return entry.storedCostUSD ?? 0
-        case .auto:
-            if let stored = entry.storedCostUSD { return stored }
-            return await computeCost(model: entry.model, breakdown: entry.breakdown)
-        case .calculate:
-            return await computeCost(model: entry.model, breakdown: entry.breakdown)
-        }
-    }
-
-    /// Compute cost from tokens × pricing only. Exposed so callers
-    /// running in `.both`-style debug modes can compare stored vs
-    /// computed side by side.
-    public func computeCost(model: String, breakdown: TokenBreakdown) async -> Double {
+        if mode == .display { return entry.storedCostUSD ?? 0 }
         try? await table.ensureLoaded()
-        guard let pricing = await table.pricing(for: model) else { return 0 }
-        return Self.cost(breakdown: breakdown, pricing: pricing)
+        let snapshot = await table.snapshot()
+        let ledger = PriceLedger.provisional(
+            catalog: snapshot.pricingByModel,
+            curated: (try? CuratedPriceHistory.bundled().records) ?? [])
+        return Self.sampleCost(
+            storedCostUSD: entry.storedCostUSD, model: entry.model, sampledAt: entry.timestamp,
+            breakdown: entry.breakdown, mode: mode, ledger: ledger
+        ).total
     }
 
-    /// Pure pricing-application function — no async, no IO. Public for
-    /// unit testing. Applies tiered pricing at the 200k-token threshold
-    /// when the pricing row defines it; falls through to flat rates
-    /// otherwise.
+    /// One flat catalog row applied to a breakdown, with no dates involved.
+    /// Goes through the same ledger arithmetic as everything else, so a test
+    /// of this is a test of the real path.
     public static func cost(breakdown: TokenBreakdown, pricing: LiteLLMModelPricing) -> Double {
-        // Each category is priced independently. Within each category,
-        // we apply the 200k-tier split when the pricing row supports it.
-        // Note: the 200k tier is per-category, not a combined-token
-        // threshold — Anthropic prices the input/output/cache portions
-        // separately. ccusage's `calculateTieredCost` does the same.
-        let inputCost = tieredCost(
-            tokens: breakdown.inputTokens,
-            base: pricing.inputCostPerToken ?? 0,
-            above200k: pricing.inputCostPerTokenAbove200kTokens
-        )
-        let outputCost = tieredCost(
-            tokens: breakdown.outputTokens,
-            base: pricing.outputCostPerToken ?? 0,
-            above200k: pricing.outputCostPerTokenAbove200kTokens
-        )
-        let cacheReadCost = tieredCost(
-            tokens: breakdown.cacheReadTokens,
-            base: pricing.cacheReadInputTokenCost ?? 0,
-            above200k: pricing.cacheReadInputTokenCostAbove200kTokens
-        )
-        let cacheCreate5mCost = tieredCost(
-            tokens: breakdown.cacheCreation5mTokens,
-            base: pricing.cacheCreationInputTokenCost ?? 0,
-            above200k: pricing.cacheCreationInputTokenCostAbove200kTokens
-        )
-        // 1h cache creation has a separate base rate AND a separate
-        // above-200k tier. Both are honored when present.
-        let cacheCreate1hCost = tieredCost(
-            tokens: breakdown.cacheCreation1hTokens,
-            base: pricing.cacheCreationInputTokenCostAbove1hr
-                ?? pricing.cacheCreationInputTokenCost ?? 0,
-            above200k: pricing.cacheCreationInputTokenCostAbove1hrAbove200kTokens
-                ?? pricing.cacheCreationInputTokenCostAbove200kTokens
-        )
-
-        return inputCost + outputCost + cacheReadCost + cacheCreate5mCost + cacheCreate1hCost
+        let id = CanonicalModelID(model: "flat")
+        let records = PriceLedger.templates(for: id, pricing: pricing, source: .litellm)
+            .map { r -> PriceRecordValue in
+                var r = r
+                r.effectiveFrom = .distantPast
+                return r
+            }
+        return PriceLedger(records: records)
+            .cost(model: "flat", at: Date(), breakdown: breakdown).total
     }
 
-    /// Per-sample cost given a synchronous pricing snapshot. Mirrors
-    /// the `cost(for:)` actor-method logic but takes a Sendable snapshot
-    /// instead of the live actor — so views and recomputers walking
-    /// thousands of samples avoid an `await` per row.
+    /// What one sample costs under `mode`, split by category, and which
+    /// price records decided it.
     ///
-    /// Honors `mode`:
-    /// - `.display`  — `storedCostUSD ?? 0`
-    /// - `.auto`     — `storedCostUSD ?? compute-from-tokens`
-    /// - `.calculate`— always compute from tokens (storedCostUSD ignored)
-    public static func cost(
+    /// - `.display`  — Claude Code's stored `costUSD`, or zero.
+    /// - `.auto`     — the stored cost when there is one, else priced.
+    /// - `.calculate`— always priced; a stored cost is ignored.
+    ///
+    /// A stored cost has no category split, so it is apportioned like the
+    /// priced cost would have been (`CostComponents.apportion`): the five
+    /// columns still sum to the total the user sees.
+    public static func sampleCost(
         storedCostUSD: Double?,
         model: String,
+        sampledAt: Date,
+        speed: PriceSpeed = .standard,
         breakdown: TokenBreakdown,
         mode: CostMode,
-        snapshot: PricingTable.Snapshot
-    ) -> Double {
+        ledger: PriceLedger
+    ) -> SampleCost {
         switch mode {
         case .display:
-            return storedCostUSD ?? 0
+            guard let stored = storedCostUSD else { return .zero }
+            return SampleCost(components: .apportion(stored, like: .zero, tokens: breakdown))
         case .auto:
-            if let stored = storedCostUSD { return stored }
-            guard let pricing = snapshot.pricing(for: model) else { return 0 }
-            return cost(breakdown: breakdown, pricing: pricing)
+            if let stored = storedCostUSD {
+                let weights = ledger.cost(
+                    model: model, at: sampledAt, speed: speed, breakdown: breakdown).components
+                return SampleCost(components: .apportion(stored, like: weights, tokens: breakdown))
+            }
+            return ledger.cost(model: model, at: sampledAt, speed: speed, breakdown: breakdown)
         case .calculate:
-            guard let pricing = snapshot.pricing(for: model) else { return 0 }
-            return cost(breakdown: breakdown, pricing: pricing)
+            return ledger.cost(model: model, at: sampledAt, speed: speed, breakdown: breakdown)
         }
     }
 
-    private static let tier1Threshold: Int64 = 200_000
+    /// `sampleCost` for anything a rollup aggregates.
+    public static func sampleCost<S: AggregatableSample>(
+        _ sample: S, mode: CostMode, snapshot: PricingTable.Snapshot
+    ) -> SampleCost {
+        sampleCost(
+            storedCostUSD: sample.sourceCostUSD, model: sample.model,
+            sampledAt: sample.sampledAt, breakdown: sample.breakdown,
+            mode: mode, ledger: snapshot.ledger)
+    }
 
-    private static func tieredCost(tokens: Int64, base: Double, above200k: Double?) -> Double {
-        guard tokens > 0 else { return 0 }
-        guard let above200k, above200k > 0, tokens > tier1Threshold else {
-            return Double(tokens) * base
-        }
-        let underTier = Double(tier1Threshold) * base
-        let overTier = Double(tokens - tier1Threshold) * above200k
-        return underTier + overTier
+    /// The total of `sampleCost`.
+    public static func cost<S: AggregatableSample>(
+        _ sample: S, mode: CostMode, snapshot: PricingTable.Snapshot
+    ) -> Double {
+        sampleCost(sample, mode: mode, snapshot: snapshot).total
     }
 }

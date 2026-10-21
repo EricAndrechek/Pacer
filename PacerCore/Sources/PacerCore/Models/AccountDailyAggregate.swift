@@ -41,6 +41,14 @@ public final class AccountDailyAggregate {
     public var cacheCreation5mTokens: Int64
     public var cacheCreation1hTokens: Int64
     public var totalCostUSD: Double
+    /// `totalCostUSD` split by category (#296). The total is always written
+    /// as the sum of these five, so they agree by construction; see
+    /// `RollupCostColumns`.
+    public var costInput: Double = 0
+    public var costOutput: Double = 0
+    public var costCacheRead: Double = 0
+    public var costCacheWrite5m: Double = 0
+    public var costCacheWrite1h: Double = 0
 
     #Index<AccountDailyAggregate>(
         [\.accountDateModelKey],

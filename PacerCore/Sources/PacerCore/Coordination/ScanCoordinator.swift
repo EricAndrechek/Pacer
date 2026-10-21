@@ -141,7 +141,17 @@ public final class ScanCoordinator {
     ///          aborted on an unrelated assertion, so the rebuild produced
     ///          1,936 account rows with real tokens and a zero count. The
     ///          check in `make verify-data` is what caught it, one bump late.
-    public static let currentCostRecomputeVersion = "16"
+    /// - "17" — pricing epic, part 1 (#279). Every bucket is re-priced at the
+    ///          rate in effect when each request was made (the dated
+    ///          `PriceRecord` ledger, #296) instead of at the one current rate
+    ///          per model, and gains its cost split into five component
+    ///          columns (`costInput` … `costCacheWrite1h`), which sum to its
+    ///          total. Exact price matching (#216) changes which price a
+    ///          model gets where the old substring search guessed a sibling:
+    ///          on a real store, Sonnet 5.5's first week priced at Sonnet 5's
+    ///          cache-read rate. One bump for all of it, so the store is
+    ///          rebuilt once.
+    public static let currentCostRecomputeVersion = "17"
 
     /// Generation of the duplicate-turn repair.
     ///
@@ -1797,7 +1807,7 @@ public final class ScanCoordinator {
             await SampleCostCache.reload()
         }
         if configuration.costMode != .display {
-            try reconcileUnpricedModels(persister: activePersister)
+            try await reconcilePriceLedger(persister: activePersister)
         }
         try saveCursors(result.updatedCursors)
         // After the cycle's rows are in, so the index never claims coverage
@@ -2268,32 +2278,54 @@ public final class ScanCoordinator {
     /// nothing while a walk per launch costs 9-16 s every time.
     private static let integrityWalkInterval: TimeInterval = 24 * 60 * 60
 
-    /// Rebuild history when a model that had no price gains one.
+    /// The `SampleCostCache.catalogGeneration` the ledger was last synced
+    /// from, in this process. nil until the first sync, which therefore runs
+    /// on the first cycle after launch.
+    private var ledgerSyncedAtCatalogGeneration: UInt64?
+
+    /// Keep the dated price ledger (`PriceRecord`) in step with the catalogs
+    /// and the curated file, and install it for pricing (#296).
+    ///
+    /// Runs before anything is recomputed, every cycle, but only does work
+    /// when its inputs moved: on the first cycle after launch, and after a
+    /// catalog refresh or a curated-file refresh. A sync that finds nothing
+    /// new writes nothing.
     ///
     /// A model Pacer sees before any pricing source lists it aggregates at
-    /// $0 — `CostCalculator` has nothing to multiply by, and $0 is a legal
-    /// total, so the rollup never revisits it. This has happened at every
-    /// model launch: `costRecomputeVersion` "3" was Fable 5 and Mythos 5,
-    /// "4" was Mythos Preview. Each needed a human to notice and ship a
-    /// version bump, and until then those users' costs read low.
-    ///
-    /// Pricing already self-heals (LiteLLM plus a models.dev gap-fill). The
-    /// rollups didn't. Now the set of models with usage but no price is
-    /// carried across cycles, and anything that leaves that set takes its
-    /// history with it — no bump, no release.
-    ///
-    /// Deliberately not scoped to the model's own buckets: the project and
-    /// session rollups aren't model-keyed, so a mixed bucket has to be
-    /// rebuilt whole anyway. This fires only when a price appears, which is
-    /// a handful of times a year.
-    private func reconcileUnpricedModels(persister: SamplePersister) throws {
-        let snapshot = SampleCostCache.current()
+    /// $0 — there is nothing to multiply by, and $0 is a legal total, so the
+    /// rollup never revisits it. That happened at every model launch
+    /// (`costRecomputeVersion` "3" was Fable 5 and Mythos 5, "4" was Mythos
+    /// Preview). So the set of models with usage but no price is carried
+    /// across cycles, and a model that leaves it takes its history with it.
+    private func reconcilePriceLedger(persister: SamplePersister) async throws {
         var models = FetchDescriptor<DailyAggregate>()
         models.propertiesToFetch = [\.model]
         let used = Set(try context.fetch(models).map(\.model))
-        guard !used.isEmpty else { return }
 
-        let unpriced = used.filter { snapshot.pricing(for: $0) == nil }
+        let generation = SampleCostCache.catalogGeneration
+        if ledgerSyncedAtCatalogGeneration != generation || !SampleCostCache.hasLedgerFromStore {
+            do {
+                let result = try PriceLedgerStore.sync(
+                    context: context,
+                    catalog: SampleCostCache.current().pricingByModel,
+                    curated: SampleCostCache.curated(),
+                    usedModels: used)
+                await SampleCostCache.installLedger(result.ledger)
+                ledgerSyncedAtCatalogGeneration = generation
+                if result.changed {
+                    log("pricing: ledger \(result.ledger.records.count) record(s) — "
+                        + "\(result.opened.count) opened, \(result.closed.count) closed, "
+                        + "\(result.curatedChanged) curated change(s)")
+                }
+            } catch {
+                // Keep pricing with what is installed; the next cycle retries.
+                log("pricing: ledger sync failed (\(error)) — keeping the current ledger")
+            }
+        }
+
+        guard !used.isEmpty else { return }
+        let ledger = SampleCostCache.current().ledger
+        let unpriced = used.filter { !ledger.isPriced($0) }
         let previously: Set<String> = (try fetchMeta(ClaudeCodeMetaKey.unpricedModels))
             .flatMap { Data($0.utf8) }
             .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
@@ -2351,6 +2383,9 @@ public final class ScanCoordinator {
     /// Called right before each session recompute, so the recompute's own
     /// `SampleCostCache.current()` read is as close to it as it can be.
     private func forgetSessionRollupsIfPricingChanged() {
+        // Display mode never prices anything, so a price change can't make a
+        // cached session total stale.
+        guard configuration.costMode != .display else { return }
         if sessionRollupCache.forgetAllIfPricingChanged(generation: SampleCostCache.generation) {
             log("pricing: prices changed — session rollups take the full path on next touch")
         }

@@ -395,6 +395,8 @@ struct ProjectDetailView: View {
             \.cacheCreation1hTokens,
             \.sourceCostUSD,
             \.sessionId,
+            // Priced at the rate in effect when each turn was made.
+            \.sampledAt,
         ]
         let samples = (try? context.fetch(sampleDesc)) ?? []
         // What `TokenSample.effectiveCostUSD(mode:)` computes, which is
@@ -410,17 +412,7 @@ struct ProjectDetailView: View {
             let key = s.originalProjectPath ?? projectPath
             var a = byPath[key] ?? Acc()
             a.tokens += s.inputTokens + s.outputTokens
-            a.cost += CostCalculator.cost(
-                storedCostUSD: s.sourceCostUSD,
-                model: s.model,
-                breakdown: TokenBreakdown(
-                    inputTokens: s.inputTokens,
-                    outputTokens: s.outputTokens,
-                    cacheReadTokens: s.cacheReadTokens,
-                    cacheCreation5mTokens: s.cacheCreation5mTokens,
-                    cacheCreation1hTokens: s.cacheCreation1hTokens),
-                mode: mode,
-                snapshot: pricing)
+            a.cost += CostCalculator.cost(s, mode: mode, snapshot: pricing)
             if let sid = s.sessionId, !sid.isEmpty { a.sessions.insert(sid) }
             byPath[key] = a
         }

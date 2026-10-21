@@ -16,18 +16,15 @@ public final class ProjectAggregateRecomputer {
     private let container: ModelContainer
     private let context: ModelContext
     private let mode: CostMode
-    private let pricingTable: PricingTable
 
     public init(
         container: ModelContainer,
         context: ModelContext,
-        mode: CostMode = .auto,
-        pricingTable: PricingTable = .shared
+        mode: CostMode = .auto
     ) {
         self.container = container
         self.context = context
         self.mode = mode
-        self.pricingTable = pricingTable
     }
 
     public struct Stats: Sendable {
@@ -60,17 +57,9 @@ public final class ProjectAggregateRecomputer {
     ) async throws -> Stats {
         var stats = Stats(pairsRecomputed: 0, aggregatesUpserted: 0, aggregatesDeleted: 0)
         if pairs.isEmpty { return stats }
-        // Sync pricing snapshot via `SampleCostCache.current()` for the
-        // per-pair path (covers both the legacy full recompute and the
-        // new fast path). Swapping out the awaited `pricingTable`
-        // lookup here removes ~150 ms of MainActor-contended actor
-        // hop from every cycle — see same comment in
-        // `AggregateRecomputer.recompute`. The bulk path below still
-        // awaits because the bulk worker runs off-MainActor and the
-        // cost is amortized across thousands of pairs.
-        let snapshot: PricingTable.Snapshot = (mode == .display)
-            ? PricingTable.Snapshot(pricingByModel: [:])
-            : SampleCostCache.current()
+        // One pricing snapshot for every path, per-pair and bulk — see the
+        // same comment in `AggregateRecomputer.recompute`.
+        let snapshot = SampleCostCache.current()
         if pairs.count >= Self.bulkRecomputeThreshold {
             // See AggregateRecomputer — commit any pending main-context
             // inserts so the background worker's separate context can
@@ -242,35 +231,17 @@ public final class ProjectAggregateRecomputer {
         for sample in samples { values.add(sample, mode: mode, snapshot: snapshot) }
 
         if let existing {
-            existing.inputTokens = values.inputTokens
-            existing.outputTokens = values.outputTokens
-            existing.cacheReadTokens = values.cacheReadTokens
-            existing.cacheCreation5mTokens = values.cacheCreation5mTokens
-            existing.cacheCreation1hTokens = values.cacheCreation1hTokens
-            existing.totalCostUSD = values.totalCostUSD
-            existing.sessionCount = values.sessionCount
-            existing.modelCount = values.modelCount
-            existing.lastActive = values.lastActive
-            existing.sessionIdsJSON = values.sessionIdsJSON
-            existing.modelTokensJSON = values.modelTokensJSON
-            existing.modelCostJSON = values.modelCostJSON
+            values.write(to: existing)
         } else {
-            insert(ProjectDailyAggregate(
-                projectPath: path,
-                date: dateString,
-                inputTokens: values.inputTokens,
-                outputTokens: values.outputTokens,
-                cacheReadTokens: values.cacheReadTokens,
-                cacheCreation5mTokens: values.cacheCreation5mTokens,
-                cacheCreation1hTokens: values.cacheCreation1hTokens,
-                totalCostUSD: values.totalCostUSD,
-                sessionCount: values.sessionCount,
-                modelCount: values.modelCount,
-                lastActive: values.lastActive,
-                sessionIdsJSON: values.sessionIdsJSON,
-                modelTokensJSON: values.modelTokensJSON,
-                modelCostJSON: values.modelCostJSON
-            ))
+            let row = ProjectDailyAggregate(
+                projectPath: path, date: dateString,
+                inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+                totalCostUSD: 0, sessionCount: 0, modelCount: 0,
+                lastActive: .distantPast, sessionIdsJSON: Data(),
+                modelTokensJSON: Data(), modelCostJSON: Data())
+            values.write(to: row)
+            insert(row)
         }
         stats.aggregatesUpserted += 1
     }
@@ -313,34 +284,17 @@ func syncAccountProjectRows<S: AggregatableSample>(
 
     for (accountId, values) in byAccount {
         if let row = rows.removeValue(forKey: accountId) {
-            row.inputTokens = values.inputTokens
-            row.outputTokens = values.outputTokens
-            row.cacheReadTokens = values.cacheReadTokens
-            row.cacheCreation5mTokens = values.cacheCreation5mTokens
-            row.cacheCreation1hTokens = values.cacheCreation1hTokens
-            row.totalCostUSD = values.totalCostUSD
-            row.sessionCount = values.sessionCount
-            row.modelCount = values.modelCount
-            row.lastActive = values.lastActive
-            row.sessionIdsJSON = values.sessionIdsJSON
-            row.modelTokensJSON = values.modelTokensJSON
-            row.modelCostJSON = values.modelCostJSON
+            values.write(to: row)
         } else {
-            context.insert(AccountProjectDailyAggregate(
+            let row = AccountProjectDailyAggregate(
                 accountId: accountId, projectPath: projectPath, date: date,
-                inputTokens: values.inputTokens,
-                outputTokens: values.outputTokens,
-                cacheReadTokens: values.cacheReadTokens,
-                cacheCreation5mTokens: values.cacheCreation5mTokens,
-                cacheCreation1hTokens: values.cacheCreation1hTokens,
-                totalCostUSD: values.totalCostUSD,
-                sessionCount: values.sessionCount,
-                modelCount: values.modelCount,
-                lastActive: values.lastActive,
-                sessionIdsJSON: values.sessionIdsJSON,
-                modelTokensJSON: values.modelTokensJSON,
-                modelCostJSON: values.modelCostJSON
-            ))
+                inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+                cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+                totalCostUSD: 0, sessionCount: 0, modelCount: 0,
+                lastActive: .distantPast, sessionIdsJSON: Data(),
+                modelTokensJSON: Data(), modelCostJSON: Data())
+            values.write(to: row)
+            context.insert(row)
         }
     }
     for orphan in rows.values { context.delete(orphan) }

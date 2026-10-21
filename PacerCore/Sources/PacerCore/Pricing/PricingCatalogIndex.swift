@@ -59,6 +59,12 @@ final class PricingCatalogIndex: @unchecked Sendable {
         prefixCandidates = candidates
     }
 
+    /// Every identity and the catalog key that represents it, in a stable
+    /// order.
+    var entries: [(CanonicalModelID, String)] {
+        keyByID.map { ($0.key, $0.value) }.sorted { $0.1 < $1.1 }
+    }
+
     /// The catalog key `model` resolves to, or nil.
     func matchKey(_ model: String) -> String? {
         lock.lock()
