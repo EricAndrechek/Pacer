@@ -9,7 +9,7 @@ import statistics
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "harness"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "harness"))
 import pacer_replay as pr  # noqa: E402
 
 from lab_costcore import decay, rate  # noqa: E402
