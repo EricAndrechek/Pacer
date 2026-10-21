@@ -238,6 +238,37 @@ def serve(host: str, port: int, helper: Helper) -> ThreadingHTTPServer:
     return server
 
 
+def warm(helper) -> None:
+    """Preload the store, then ask every predictor once about each account's
+    live window, off the request path. Predictors build their own caches on
+    first use (the token ledger loads every turn; the fade scores every past
+    cycle), and a cold first request from the app ran past its 1.5 s budget
+    while Python's GIL starved the other request threads."""
+    helper.store.preload()
+    started = time.monotonic()
+    now = time.time()
+    with helper.store._lock:
+        keys = list(helper.store._series)
+    for window, account in keys:
+        duration = {"five_hour": 5 * 3600.0, "seven_day": 7 * 86400.0}.get(window)
+        if duration is None or not account:
+            continue
+        s = helper.store.series(window, account)
+        readings = s.until(now)
+        if not readings or readings[-1].resets_at <= now:
+            continue
+        reset = readings[-1].resets_at
+        history = History(window=window, account=account, t_cut=now, cycle_start=reset - duration,
+                          resets_at=reset, duration=duration, readings=readings)
+        for p in helper.predictors:
+            if p.serves(window):
+                try:
+                    p.predict(window, account, now, reset - duration, reset, history)
+                except Exception:  # noqa: BLE001 — warming is best effort
+                    log.exception("warming %s on %s/%s failed", p.id, window, account[-4:])
+    log.info("warmed %d series in %.1f s", len(keys), time.monotonic() - started)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1", help="bind address (loopback by default; keep it that way)")
@@ -253,7 +284,7 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     helper = Helper(Store(args.store), args.predictors)
     server = serve(args.host, args.port, helper)
-    threading.Thread(target=helper.store.preload, daemon=True).start()
+    threading.Thread(target=warm, args=(helper,), daemon=True).start()
     if args.pidfile:
         args.pidfile.write_text(f"{os.getpid()}\n")
 
