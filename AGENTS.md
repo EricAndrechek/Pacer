@@ -964,6 +964,17 @@ these wastes effort and risks regressing user-visible cost — search the
 git log for "Views/Widgets: scope @Query" or "HourlyAggregate" or
 "PacerStore + widgets" for the commits that established them.
 
+### Never walk a whole table with `enumerate`; page it with `ModelWalk`
+
+`ModelContext.enumerate(_:batchSize:)` looks like streaming but keeps the
+walk's memory until it ends: on a 746k-row `TokenSample` table it held about
+3.3 GB, and the freed heap stayed dirty afterwards (#337). Pacer then paged
+itself out under system memory pressure and stalled its main thread for
+minutes. Walk a whole table with `ModelWalk.forEach`: fresh-context pages of
+25,000 rows, about 45 MB. Writing walks need the same treatment (#338). A new
+large transient allocation also needs a `MemoryHygiene.relieve` afterwards.
+The hourly `[Memory]` log line is how a regression shows up.
+
 ### Default to scoped fetches; nothing should fetch then filter
 
 - **Always predicate-scope `@Query` and `FetchDescriptor`** to the rows
