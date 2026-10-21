@@ -78,7 +78,13 @@ Concretely, never write, run, or leave behind anything that:
   an `NSApp.run()` harness that dispatches mouse-moved events is exactly the
   thing this rule exists to stop;
 - activates, raises, resizes, moves, closes or Spaces-switches any window,
-  including Pacer's own;
+  including Pacer's own. That includes `open` against a Pacer that is already
+  running: it is a reopen event, and Pacer answers it by bringing the dashboard
+  back. Check `pgrep -xq Pacer` first;
+- launches the app binary, or a copy of the bundle, outside `make render-live`
+  and the documented diagnostic modes (`PACER_COLD_START_PROBE` and the archive
+  modes). A second process of the bundle opens the dashboard window unless it is
+  one of those modes;
 - records the screen or captures another app's windows — with one sanctioned
   exception, below.
 
@@ -242,7 +248,15 @@ Three things it does so you do not have to remember them, all in
   treats it as an activatable instance — launching it pulled the real window
   onto the active Space and left it out of place. `.prohibited` cannot activate
   at all.
-- **The real app is re-opened on the way out**, on success, failure or Ctrl-C.
+- **No window at all.** In these modes the dashboard scene has
+  `.defaultLaunchBehavior(.suppressed)` and `.restorationBehavior(.disabled)`
+  (`PacerApp.diagnosticRunWithoutWindow`). Without that, SwiftUI opened the
+  second process's dashboard at the autosaved frame, right over the owner's,
+  until `suppressWindowsWhileDiagnosticRuns` closed it a moment later: a flash
+  on every run.
+- **The real app is re-opened on the way out** if it isn't running, on success,
+  failure or Ctrl-C. Never when it is: `open` on a running Pacer is a reopen
+  event, and that brings the dashboard up.
 
 The view scope is set *ephemerally* while walking scopes — `UsageScope.select`
 persists to App Group defaults, which the running app reads, so walking scopes
