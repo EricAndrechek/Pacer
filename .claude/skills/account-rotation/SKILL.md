@@ -24,6 +24,19 @@ it running, watch what it does, and handle the people and sessions around it.
 - `analysis/` only: `uv` (it runs with `uv run --with duckdb --with pyarrow`)
   and the `duckdb` CLI for the queries.
 
+## Install
+
+Run the controller and watcher from a copy outside git, so a branch switch or a
+pruned worktree never pulls a script out from under a running process:
+
+```sh
+mkdir -p ~/.local/state/pacer-account-rotation/bin
+cp rotate.sh watch.sh stuck.py burn.py ~/.local/state/pacer-account-rotation/bin/
+cp -n rotate.conf.example ~/.local/state/pacer-account-rotation/rotate.conf
+```
+
+Re-copy after changing the tracked scripts, then `stop` and `start`.
+
 ## Commands
 
 ```sh
