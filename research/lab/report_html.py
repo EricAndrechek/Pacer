@@ -1,4 +1,4 @@
-"""Build reports/benchmark.html from reports/data.json (report_data.py): a
+"""Build reports/benchmark-details.html from reports/data.json (report_data.py): the full results, a
 benchmark page in the style of a model leaderboard. Every number is an absolute
 miss, so 0 is perfect; the layers of the chain are shown in order.
 
@@ -10,7 +10,7 @@ import json
 
 import lab
 
-OUT = lab.HERE / "reports" / "benchmark.html"
+OUT = lab.HERE / "reports" / "benchmark-details.html"
 
 
 def main() -> None:
@@ -124,7 +124,7 @@ svg{display:block;width:100%;height:auto;overflow:visible}
 max-width:360px;display:none;line-height:1.4;box-shadow:0 4px 18px rgba(0,0,0,.18)}
 #tip table{font-size:12px;margin-top:4px;width:auto}#tip td{padding:1px 10px 1px 0;border:0;color:var(--page)}
 </style></head><body>
-<header class="top"><div class="top-in"><span class="brand">Pacer forecasting benchmark</span>
+<header class="top"><div class="top-in"><span class="brand"><a href="benchmark.html" style="color:inherit;text-decoration:none">← Summary</a> · Full results</span>
 <nav><a href="#steps">Summary</a><a href="#leaderboard">Leaderboard</a><a href="#chain">The chain</a><a href="#example">A real window</a>
 <a href="#fit">Learning</a><a href="#all">Every candidate</a></nav>
 <div class="seg" id="wseg" role="group" aria-label="Window"><button data-w="five_hour">5-hour</button><button data-w="seven_day">7-day</button></div>
@@ -279,7 +279,7 @@ function board(el,groups,k,{ref=null,whisk=false}={}){
 function renderTask(){
  $("#tcases").textContent=`${D.cases.five_hour.toLocaleString()} checkpoints from 5-hour windows and ${D.cases.seven_day} from weekly windows: every completed window in your history, at 20%, 30% … 90% of the way through.`;
  $("#tscore").textContent=W==="five_hour"?"The headline is the typical (median) miss.":"On weekly windows the headline is the average miss, since most weeks end at the cap and the median miss is near 0 for everyone.";
- $("#built").textContent=`Built ${D.built} from the frozen lab snapshot. research/lab/reports/benchmark.html`}
+ $("#built").textContent=`Built ${D.built} from the frozen lab snapshot. research/lab/reports/benchmark-details.html`}
 
 function renderSteps(){
  const L=n=>bestOf(D.candidates.filter(c=>c.layer===n));
