@@ -379,7 +379,13 @@ public actor JSONLScanner {
         }
         var pending: [UInt8] = []
         let chunkSize = 64 * 1024
-        while let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty {
+        // A pool per chunk. Each read comes back autoreleased, and a scan is
+        // one long task that nothing drains: on a full re-read through this
+        // path — the bulk importer's fallback — every chunk of a 13 GB
+        // transcript tree stayed alive until the scan ended, and the process
+        // footprint climbed past 17 GB.
+        while try autoreleasepool(invoking: { () throws -> Bool in
+            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else { return false }
             for byte in chunk {
                 if byte == 0x0A {
                     if !pending.isEmpty {
@@ -391,7 +397,8 @@ public actor JSONLScanner {
                     pending.append(byte)
                 }
             }
-        }
+            return true
+        }) {}
         // Trailing partial line (no terminator) is intentionally left
         // unconsumed.
     }
