@@ -201,6 +201,15 @@ struct ArchiveImporter: BulkTranscriptImporter {
         guard duckdb_connect(db, &con) == DuckDBSuccess else { throw ImportError.openFailed }
         defer { duckdb_disconnect(&con) }
 
+        // Marked BEFORE the read. Taken after it, as they were, a turn a live
+        // session appended between DuckDB reading its file and the mark was
+        // inside the mark but not the import, and the next incremental scan
+        // fast-skipped it: lost until the next full scan. Marked first, the
+        // live scanner resumes at or before everything the import may have
+        // missed, and re-reads cost nothing (the persister rejects them by key).
+        let marks = Self.fileMarks(roots: roots.map(\.projectsDirectory))
+        let marked = Date()
+
         let globs = roots.map { $0.projectsDirectory.appendingPathComponent("**/*.jsonl").path }
         var result = duckdb_result()
         let sql = Self.extractionSQL(globs: globs)
@@ -315,19 +324,24 @@ struct ArchiveImporter: BulkTranscriptImporter {
         // session recomputer both assume ascending arrival.
         entries.sort { $0.timestamp < $1.timestamp }
         Log.write("ArchiveImporter", String(
-            format: "query %.1f s · rows %.1f s (%d threads, %@ cap)",
-            queried.timeIntervalSince(started), Date().timeIntervalSince(queried),
-            Self.threads, Self.memoryLimit))
+            format: "marks %.1f s · query %.1f s · rows %.1f s (%d threads, %@ cap)",
+            marked.timeIntervalSince(started), queried.timeIntervalSince(marked),
+            Date().timeIntervalSince(queried), Self.threads, Self.memoryLimit))
 
         return BulkImportResult(entries: entries,
-                                fileMarks: Self.fileMarks(roots: roots.map(\.projectsDirectory)),
+                                fileMarks: marks,
                                 seconds: Date().timeIntervalSince(started))
     }
 
-    /// Size + mtime for every transcript we just read, so the caller can seed
-    /// the live scanner's cursors. Without this the next scan re-reads all
-    /// 1.8 GB and the import saves nothing.
-    private static func fileMarks(roots: [URL]) -> [String: BulkImportResult.FileMark] {
+    /// Where the live scanner should resume each transcript, so the caller
+    /// can seed its cursors. Without this the next scan re-reads all 1.8 GB
+    /// and the import saves nothing.
+    ///
+    /// The offset is the end of the last complete line, not the size: the
+    /// scanner's own cursors only ever advance by whole lines, and a mark in
+    /// the middle of a line still being written would have it resume
+    /// mid-line and drop the rest of that line as garbage.
+    static func fileMarks(roots: [URL]) -> [String: BulkImportResult.FileMark] {
         var marks: [String: BulkImportResult.FileMark] = [:]
         let fm = FileManager.default
         for root in roots {
@@ -339,10 +353,33 @@ struct ArchiveImporter: BulkTranscriptImporter {
                     forKeys: [.fileSizeKey, .contentModificationDateKey]),
                       let size = values.fileSize,
                       let mtime = values.contentModificationDate else { continue }
-                marks[url.path] = BulkImportResult.FileMark(size: Int64(size), mtime: mtime)
+                marks[url.path] = BulkImportResult.FileMark(
+                    size: endOfLastLine(url, size: Int64(size)), mtime: mtime)
             }
         }
         return marks
+    }
+
+    /// The offset just past the last `\n` in the first `size` bytes of the
+    /// file, or `size` if it can't be read. One small read per file: almost
+    /// every transcript ends in a newline.
+    static func endOfLastLine(_ url: URL, size: Int64) -> Int64 {
+        guard size > 0, let handle = try? FileHandle(forReadingFrom: url) else { return size }
+        defer { try? handle.close() }
+        var end = size
+        var step: Int64 = 4 * 1024   // almost always enough; widens for a long line
+        while end > 0 {
+            let start = max(0, end - step)
+            step = 64 * 1024
+            guard (try? handle.seek(toOffset: UInt64(start))) != nil,
+                  let chunk = try? handle.read(upToCount: Int(end - start)),
+                  chunk.count == Int(end - start) else { return size }
+            if let newline = chunk.lastIndex(of: 0x0A) {
+                return start + Int64(chunk.distance(from: chunk.startIndex, to: newline)) + 1
+            }
+            end = start
+        }
+        return 0
     }
 
     /// One column of a DuckDB result chunk, with the validity mask applied.
