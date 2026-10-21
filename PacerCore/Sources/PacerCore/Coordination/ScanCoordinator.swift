@@ -54,7 +54,15 @@ public final class ScanCoordinator {
     ///         US-residency turns their marker, so the v17 cost rebuild can
     ///         price them at their premium, and splits multi-call responses
     ///         into one row per call (`SamplePersister.backfillsPricingDetail`).
-    public static let currentScanVersion = "4"
+    /// - "5" — the bulk importer recorded each file's cursor *after* reading
+    ///         it, at the file's size then, so lines a live session appended
+    ///         during the import were skipped for good. The fix takes the
+    ///         cursor first, at the last whole line. Re-reading every
+    ///         transcript recovers the turns an earlier import skipped (the
+    ///         persister's dedup makes the rest no-ops). A store coming from
+    ///         "3" re-reads once either way; this only adds a pass for stores
+    ///         already at "4".
+    public static let currentScanVersion = "5"
 
     /// The priority the app runs the scan loop at (`AppBackgroundService`),
     /// and everything it hangs off the loop's results.
