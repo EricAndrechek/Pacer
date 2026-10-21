@@ -582,7 +582,7 @@ public final class SamplePersister {
     private func applyPendingUpgrades() throws {
         guard !pendingUpgrades.isEmpty else { return }
         let wanted = pendingUpgrades
-        var applied = 0
+        var applied: Set<String> = []
 
         // Two strategies, because the two call shapes are wildly different —
         // the same lesson `saveCursors` taught. A live cycle upgrades a
@@ -594,77 +594,93 @@ public final class SamplePersister {
         // an upgrade pending. Fetching per key unconditionally was the
         // previous bug in the other direction: 98% CPU and >2 GB resident
         // during a repair.
-        let rows: [TokenSample]
         if wanted.count < Self.bulkUpgradeThreshold {
-            var found: [TokenSample] = []
             for key in wanted.keys {
                 let k = key
                 var d = FetchDescriptor<TokenSample>(
                     predicate: #Predicate<TokenSample> { $0.dedupKey == k })
                 d.fetchLimit = 1
-                if let row = try context.fetch(d).first { found.append(row) }
-            }
-            rows = found
-        } else {
-            rows = try context.fetch(FetchDescriptor<TokenSample>())
-        }
-
-        for sample in rows {
-            guard let key = sample.dedupKey, let entry = wanted[key] else { continue }
-            // What the partial copy contributed, before it is overwritten.
-            let old = SampleSnapshot.Row(
-                date: sample.date, model: sample.model, projectPath: sample.projectPath,
-                sessionId: sample.sessionId, sampledAt: sample.sampledAt,
-                localHour: sample.localHour, ccVersion: sample.ccVersion,
-                breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
-                accountId: sample.accountId, speed: sample.speed,
-                inferenceGeo: sample.inferenceGeo)
-            sample.inputTokens = entry.breakdown.inputTokens
-            sample.outputTokens = entry.breakdown.outputTokens
-            sample.cacheReadTokens = entry.breakdown.cacheReadTokens
-            sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
-            sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
-            sample.sourceCostUSD = entry.storedCostUSD
-            sample.speed = entry.speed
-            sample.inferenceGeo = entry.inferenceGeo
-
-            let pair = DateModelPair(date: sample.date, model: sample.model)
-            dirtyPairs.insert(pair)
-            pollutedDailyPairs.insert(pair)
-            pendingPairSamples[pair] = nil
-
-            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
-            dirtyProjectDates.insert(projectPair)
-            pollutedProjectPairs.insert(projectPair)
-            pendingProjectSamples[projectPair] = nil
-
-            let hourBucket = DateHourModelTriple(
-                date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
-            dirtyHourBuckets.insert(hourBucket)
-            pollutedHourBuckets.insert(hourBucket)
-            pendingHourSamples[hourBucket] = nil
-
-            // The session takes the upgrade as a delta. The day, hour and
-            // project buckets above are still rebuilt: one turn's bucket is
-            // tens of milliseconds, where a long session is most of a second.
-            if let sid = sample.sessionId, !sid.isEmpty {
-                dirtySessionIds.insert(sid)
-                if pollutedSessionIds.contains(sid) {
-                    // Rebuilt from its samples anyway.
-                } else if pendingSessionSamples[sid]?.contains(where: { $0 === sample }) == true {
-                    // Inserted this pass: the pending add already reads the
-                    // finished counts off the same object, so a delta too
-                    // would count the upgrade twice.
-                } else {
-                    pendingSessionUpgrades[sid, default: []]
-                        .append(SessionUpgrade(old: old, new: sample))
+                if let row = try context.fetch(d).first, let entry = wanted[k] {
+                    apply(entry, to: row)
+                    applied.insert(k)
                 }
             }
-            applied += 1
-            if applied == wanted.count { break }   // nothing left to find
+        } else {
+            // The scan, in batches (#327). One `fetch` of the whole table held
+            // every TokenSample at once, in the scan context — the one that
+            // lives as long as the app — to rewrite a fraction of them; on a
+            // real-store upgrade the footprint rose ~3 GB during that pass and
+            // stayed. Rows inserted this pass aren't on disk yet, so they come
+            // from the context first, and `applied` keeps the walk from
+            // rewriting any row twice.
+            for case let sample as TokenSample in context.insertedModelsArray {
+                guard let key = sample.dedupKey, let entry = wanted[key],
+                      applied.insert(key).inserted else { continue }
+                apply(entry, to: sample)
+            }
+            try context.enumerate(FetchDescriptor<TokenSample>(), batchSize: 5_000,
+                                  allowEscapingMutations: true) { sample in
+                guard let key = sample.dedupKey, let entry = wanted[key],
+                      applied.insert(key).inserted else { return }
+                apply(entry, to: sample)
+            }
         }
         pendingUpgrades.removeAll(keepingCapacity: false)
+    }
+
+    /// Overwrite a stored row with the copy that supersedes it, and invalidate
+    /// every bucket its old numbers fed. See `applyPendingUpgrades`.
+    private func apply(_ entry: ParsedUsageEntry, to sample: TokenSample) {
+        // What the partial copy contributed, before it is overwritten.
+        let old = SampleSnapshot.Row(
+            date: sample.date, model: sample.model, projectPath: sample.projectPath,
+            sessionId: sample.sessionId, sampledAt: sample.sampledAt,
+            localHour: sample.localHour, ccVersion: sample.ccVersion,
+            breakdown: sample.breakdown, sourceCostUSD: sample.sourceCostUSD,
+            accountId: sample.accountId, speed: sample.speed,
+            inferenceGeo: sample.inferenceGeo)
+        sample.inputTokens = entry.breakdown.inputTokens
+        sample.outputTokens = entry.breakdown.outputTokens
+        sample.cacheReadTokens = entry.breakdown.cacheReadTokens
+        sample.cacheCreation5mTokens = entry.breakdown.cacheCreation5mTokens
+        sample.cacheCreation1hTokens = entry.breakdown.cacheCreation1hTokens
+        sample.sourceCostUSD = entry.storedCostUSD
+        sample.speed = entry.speed
+        sample.inferenceGeo = entry.inferenceGeo
+
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        pollutedDailyPairs.insert(pair)
+        pendingPairSamples[pair] = nil
+
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        pendingProjectSamples[projectPair] = nil
+
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: Self.localHour(of: sample), model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        pendingHourSamples[hourBucket] = nil
+
+        // The session takes the upgrade as a delta. The day, hour and
+        // project buckets above are still rebuilt: one turn's bucket is
+        // tens of milliseconds, where a long session is most of a second.
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            if pollutedSessionIds.contains(sid) {
+                // Rebuilt from its samples anyway.
+            } else if pendingSessionSamples[sid]?.contains(where: { $0 === sample }) == true {
+                // Inserted this pass: the pending add already reads the
+                // finished counts off the same object, so a delta too
+                // would count the upgrade twice.
+            } else {
+                pendingSessionUpgrades[sid, default: []]
+                    .append(SessionUpgrade(old: old, new: sample))
+            }
+        }
     }
 
     /// Hourly rows with no samples behind them, drained once. The caller

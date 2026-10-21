@@ -66,10 +66,31 @@ public struct SampleSnapshot: Sendable {
 
     /// Project every stored sample. The caller decides *when* — see
     /// `SampleSnapshotCache`, which makes sure that's at most once a cycle.
+    ///
+    /// Batched (#327): `enumerate` keeps one batch of managed objects alive at
+    /// a time where one `fetch` held every `TokenSample` until the last row
+    /// was copied, a cost that grows with history. Measured on a real
+    /// 744k-sample store the two peak alike (~1.6 GB footprint with the rows
+    /// held, in about the same time): what dominates is a floor any full walk
+    /// of the table reaches, not the objects. So this bounds the part that
+    /// grows, and doesn't pretend to remove the floor.
     public static func fetch(from context: ModelContext) throws -> SampleSnapshot {
-        let samples = try context.fetch(FetchDescriptor<TokenSample>())
-        return SampleSnapshot(rows: samples.map { sample in
-            Row(date: sample.date,
+        var rows: [Row] = []
+        // A SQL COUNT, and it saves ~20 regrowth copies of a 750k-row array.
+        rows.reserveCapacity(try context.fetchCount(FetchDescriptor<TokenSample>()))
+        var descriptor = FetchDescriptor<TokenSample>()
+        // Every column `Row` reads, and nothing else — `dedupKey` and
+        // `originalProjectPath` are the widest strings on the row and no
+        // rollup reads them. SwiftData may ignore this (AGENTS.md); it can't
+        // hurt, because nothing below touches a column left out.
+        descriptor.propertiesToFetch = [
+            \.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour, \.ccVersion,
+            \.inputTokens, \.outputTokens, \.cacheReadTokens, \.cacheCreation5mTokens,
+            \.cacheCreation1hTokens, \.sourceCostUSD, \.accountId, \.speed, \.inferenceGeo,
+        ]
+        try context.enumerate(descriptor, batchSize: 5_000) { sample in
+            rows.append(Row(
+                date: sample.date,
                 model: sample.model,
                 projectPath: sample.projectPath,
                 sessionId: sample.sessionId,
@@ -87,8 +108,9 @@ public struct SampleSnapshot: Sendable {
                 sourceCostUSD: sample.sourceCostUSD,
                 accountId: sample.accountId,
                 speed: sample.speed,
-                inferenceGeo: sample.inferenceGeo)
-        })
+                inferenceGeo: sample.inferenceGeo))
+        }
+        return SampleSnapshot(rows: rows)
     }
 }
 
