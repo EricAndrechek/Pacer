@@ -1193,12 +1193,9 @@ struct PaceChartCard: View {
                 // question about every account on screen, and answering it only
                 // for the bad case leaves the good case ambiguous — silence
                 // reads as "no information" rather than "fine".
-                Text("read \(pacerRelative(at))")
-                    .font(.system(size: 10))
-                    .foregroundStyle(stale ? .orange : .secondary)
-                    .help(stale
-                          ? "This account is not being polled right now."
-                          : "When Pacer last read this account's limits.")
+                AccountReadingAge(
+                    accountId: group.id, readingAt: at, stale: stale,
+                    lastTurnAt: accountTotals.totals.first { $0.accountId == group.id }?.lastTurnAt)
             }
             Spacer(minLength: 0)
         }
@@ -1262,6 +1259,36 @@ struct PaceChartCard: View {
 /// pace% line, status + burn chips, the shared `PaceChartView`, and the outlook
 /// caption. The view itself is in PacerUI so the widget extension renders the
 /// same chart pixel-for-pixel.
+/// "read 3m ago", or "auth paused" when the account's token expired while it
+/// was idle (#198). Its own view so its own body reads the token pool and the
+/// minute: a pause begins with nothing written to the store.
+private struct AccountReadingAge: View {
+    let accountId: String
+    let readingAt: Date
+    let stale: Bool
+    let lastTurnAt: Date?
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            if TokenPoolStatus.shared.isAuthPaused(
+                account: accountId, lastReadingAt: readingAt,
+                lastActivityAt: lastTurnAt, now: context.date) {
+                Text(AuthPause.label)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .help(AuthPause.reason)
+            } else {
+                Text("read \(pacerRelative(readingAt))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(stale ? .orange : .secondary)
+                    .help(stale
+                          ? "This account is not being polled right now."
+                          : "When Pacer last read this account's limits.")
+            }
+        }
+    }
+}
+
 /// The other clients active on one account (#245), in the account's header.
 /// Its own view so its own body reads `AccountClientsMonitor`: a Desktop
 /// starting a session, or its 30 minutes running out, redraws this and not

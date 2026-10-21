@@ -581,7 +581,22 @@ struct ToolbarFreshness: View {
                     predicate: #Predicate<ClaudeCodeMeta> { $0.key == key })))?.first?.value
             }.value
         }
-        display = Display(state: freshness, label: label, tooltip: tooltip)
+        display = currentDisplay
+    }
+
+    /// What the pill shows now. "auth paused" in place of an ever-older
+    /// "33m ago" when the limits' account has no unexpired token left and
+    /// nothing has used it since its last reading (#198); the reason is the
+    /// tooltip.
+    private var currentDisplay: Display {
+        let lastUse = [tokens.first?.sampledAt, sessionRows.first?.lastSeenAt].compactMap { $0 }.max()
+        if sessionActivity != .active,
+           TokenPoolStatus.shared.isAuthPaused(
+            account: UsageScope.shared.limitAccountId,
+            lastReadingAt: rateLimits.first?.sampledAt, lastActivityAt: lastUse) {
+            return Display(state: .stale, label: AuthPause.label, tooltip: AuthPause.reason)
+        }
+        return Display(state: freshness, label: label, tooltip: tooltip)
     }
 
     /// The account-predicated probes, re-read on the write signal rather than
@@ -610,7 +625,7 @@ struct ToolbarFreshness: View {
         } else {
             sessionRows = ((try? modelContext.fetch(Self.sessionProbe)) ?? []).map(\.sessionRow)
         }
-        display = Display(state: freshness, label: label, tooltip: tooltip)
+        display = currentDisplay
     }
 
     private static func tokenProbe(account: String?) -> FetchDescriptor<TokenSample> {
