@@ -60,11 +60,13 @@ t() {
   local name=$1 want=$2 act=$3 accts=$4 conf=${5:-} last=${6:-} also=${7:-}
   local d out line ok=1
   n=$(( n + 1 )); d=$T/c$n; mkdir -p "$d/state"
-  printf '%s\n' "$conf" >"$d/conf"
+  # The cap tests below assert a 90% ceiling; AUTO=1 leaves WEEK_MAX at its
+  # default (auto) for the weekly-burn tests.
+  { [ -n "${AUTO:-}" ] || echo 'WEEK_MAX=90'; printf '%s\n' "$conf"; } >"$d/conf"
   [ -n "$last" ] && printf '%s\n' "$last" >"$d/state/last_switch"
   out=$(PATH="$T/bin:$PATH" FAKE_DIR=$T FAKE_ACT=$act FAKE_ACCTS=$accts \
         ROTATE_CONF=$d/conf ROTATE_STATE=$d/state PACER_API=${API:-http://127.0.0.1:1} \
-        BURN_OVERRIDE=${BURN:-} "$ROT" dry 2>&1)
+        BURN_OVERRIDE=${BURN:-} BURN7_OVERRIDE=${BURN7:-} "$ROT" dry 2>&1)
   line=$(printf '%s\n' "$out" | grep -E '^[0-9:]{8} (WOULD SWITCH|HOLD|no switch:|WARN)' | tail -1)
   printf '%s\n' "$line" | grep -qE -- "$want" || ok=0
   if [ -n "$also" ]; then printf '%s\n' "$out" | grep -qE -- "$also" || ok=0; fi
@@ -176,6 +178,31 @@ t "10k near the limit, no target: early HOLD" '^[0-9:]{8} HOLD 1 at 91% \(switch
 t "10l nothing to do: no switch" '^[0-9:]{8} no switch: 1 at 50% < switch point 93%.*best target 3 at 20%' \
   1 "1:50:200:30:ok 3:20:250:40:ok $SPENT"
 
+# --- the weekly limit from the weekly burn (WEEK_MAX=auto, the default) ----------
+# Burn 5 %/h: safe7 = 100 - 1 = 99, limit 97; a target needs ceil(5*20/60) = 2.
+AUTO=1 BURN7=5 t "W1 auto 5%/h: limit 97 in the status line" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:88:ok 3:20:250:40:ok $SPENT" "" "" '1: 5h 50% .* 7d 88% \(lim 97\)'
+AUTO=1 BURN7=5 t "W2 auto 5%/h: target at 96 blocked (96 >= 97-2)" '^[0-9:]{8} HOLD 1 .*3: 0% room 93, idle, 7d 96% \[7d room 1 <= 2 \(20 min at 5%/h\)\]' \
+  1 "1:95:26:63:ok 3:0:-:96:ok $SPENT"
+AUTO=1 BURN7=5 t "W2b auto 5%/h: target at 94 allowed" 'WOULD SWITCH → 3 .*\[limit:' \
+  1 "1:95:26:63:ok 3:0:-:94:ok $SPENT"
+AUTO=1 BURN7=5 t "W3 auto: active at its limit moves (7-day rule)" 'WOULD SWITCH → 2 .*\[7-day: 1 at 97% on its 7d' \
+  1 "1:30:200:97:ok 2:50:120:10:ok 4:0:-:100:ok"
+AUTO=1 t "W4 auto, no Pacer: limit 99 - EARLY = 97" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:90:ok 3:20:250:40:ok $SPENT" "" "" '1: 5h 50% .* 7d 90% \(lim 97\)'
+AUTO=1 t "W4b auto, no Pacer: target at 95 (need 1) allowed" 'WOULD SWITCH → 3 .*\[limit:' \
+  1 "1:95:26:63:ok 3:0:-:95:ok $SPENT"
+AUTO=1 t "W4c auto, no Pacer: target at 96 (96 >= 97-1) blocked" '^[0-9:]{8} HOLD 1 .*7d room 1 <= 1' \
+  1 "1:95:26:63:ok 3:0:-:96:ok $SPENT"
+# WEEK_MAX_1=90 with a 7d burn: need7 = ceil(9*20/60) = 3 blocks slot 1 at 88
+# (90-88 = 2 <= 3); at 1 %/h need7 = 1 and it passes.
+AUTO=1 BURN7=9 t "W5 WEEK_MAX_1=90, 9%/h: slot 1 at 88 blocked" '^[0-9:]{8} HOLD 3 .*1: 0% room 93, idle, 7d 88% \[7d room 2 <= 3 \(20 min at 9%/h\)\]' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
+AUTO=1 BURN7=1 t "W5b WEEK_MAX_1=90, 1%/h: slot 1 at 88 allowed" 'WOULD SWITCH → 1 .*\[limit:' \
+  3 "1:0:-:88:ok 3:95:100:50:ok $SPENT" 'WEEK_MAX_1=90'
+AUTO=1 t "W6 numeric WEEK_MAX in the conf is a fixed cap" '^[0-9:]{8} HOLD 1 .*\[7d cap 80%' \
+  1 "1:95:26:63:ok 3:0:-:85:ok $SPENT" 'WEEK_MAX=80'
+
 # --- the post-switch reading gap: WARN only after GAP_WARN_SECS (unit check of the helper;
 # a dry pass holds no state, so the loop itself cannot be driven twice)
 gw=$(bash -c 'DRY=0; '"$(sed -n '/^GAP_WARN_SECS=/p;/^gap_warn_due()/,/^}/p' "$ROT")"'
@@ -204,6 +231,9 @@ mkdir -p "$T/www"
 cat >"$T/www/metrics" <<'EOF'
 pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="five_hour"} 45.2
 pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="five_hour"} 0
+pacer_rate_limit_burn_percent_per_hour{account="acc1acc0-0000",window="seven_day"} 3.5
+pacer_rate_limit_recent_burn_percent_per_hour{account="acc1acc0-0000",window="seven_day"} 9.0
+pacer_rate_limit_sample_age_seconds{account="acc1acc0-0000",window="seven_day"} 0
 EOF
 port=$(( 20000 + RANDOM % 20000 ))
 python3 -I -m http.server "$port" --bind 127.0.0.1 --directory "$T/www" >/dev/null 2>&1 &
@@ -214,6 +244,10 @@ API=http://127.0.0.1:$port t "M1 Pacer burn 45: room 13 < 15 HOLD" '^[0-9:]{8} H
   1 "1:94:26:63:ok 3:80:180:77:ok $SPENT" "" "" 'burn 45%/h \(pacer\): a target needs 15 points'
 API=http://127.0.0.1:$port t "M2 Pacer burn 45: room 15 bridges" 'WOULD SWITCH → 3 .*\[bridge:.*\(room 15 ≥ 15 for 20 min at 45%/h' \
   1 "1:94:26:63:ok 3:78:180:77:ok $SPENT"
+# The 7d burn is read from the same file (recent preferred): 9 %/h, reading 0 s
+# old: safe7 = 99, limit 97, need7 = 3.
+AUTO=1 API=http://127.0.0.1:$port t "M3 Pacer 7d burn 9: limit 97, need 3" '^[0-9:]{8} no switch:' \
+  1 "1:50:200:88:ok 3:20:250:40:ok $SPENT" "" "" '7d 88% \(lim 97\).*7d burn 9\.000%/h \(pacer\): a target needs 3 points of 7d room'
 kill "$srv" 2>/dev/null
 
 if [ -e "$T/switched" ]; then

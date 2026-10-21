@@ -92,9 +92,9 @@ API=${PACER_API:-http://127.0.0.1:7223}
 # active account's current burn below its own switch point, and never less
 # than BRIDGE_MIN_PTS; the expiring rule's bar is the same with EXPIRE_MIN_PTS.
 load_conf() {
-  EARLY=2; WEEK_MAX=90; STAGGER=9000; MIN_SWITCH_GAP=300
+  EARLY=2; WEEK_MAX=auto; STAGGER=9000; MIN_SWITCH_GAP=300
   BRIDGE_MIN_PTS=6; BRIDGE_MIN_MINUTES=20; BURN_UNKNOWN=40
-  EXPIRE_WINDOW=2700; EXPIRE_MIN_PTS=8; WEEK_ROOM_MIN=3
+  EXPIRE_WINDOW=2700; EXPIRE_MIN_PTS=8; WEEK_ROOM_MIN=1
   EXCLUDE=""; RESERVE_SLOT=""; RESERVE_WEEK_MAX=97
   # A WEEK_MAX_<slot> deleted from the conf must stop applying, not linger
   # from an earlier read.
@@ -102,7 +102,21 @@ load_conf() {
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
 }
-wkmax() { local v="WEEK_MAX_$1"; echo "${!v:-$WEEK_MAX}"; }
+# The 7d limit for a slot: its own WEEK_MAX_<slot> if set, else a numeric
+# WEEK_MAX, else (auto, the default) the weekly safe limit minus EARLY, from the
+# weekly burn like the 5h switch point. No fixed ceiling is right for everyone.
+wkmax() {
+  local v="WEEK_MAX_$1"
+  if [ -n "${!v:-}" ]; then echo "${!v}"
+  elif [[ ${WEEK_MAX:-auto} =~ ^[0-9]+$ ]]; then echo "$WEEK_MAX"
+  else echo $(( $(safe7 "${ID[$1]:-}") - EARLY )); fi
+}
+# Weekly room a target needs: BRIDGE_MIN_MINUTES at the active's 7d burn,
+# rounded up, at least WEEK_ROOM_MIN.
+need7() {
+  awk -v b="${burn7:-0}" -v m="$BRIDGE_MIN_MINUTES" -v lo="$WEEK_ROOM_MIN" 'BEGIN {
+    if (b < 0) b = 0; n = b * m / 60; n = (n == int(n)) ? n : int(n) + 1; if (n < lo) n = lo; print n }'
+}
 # Points of room needed: BRIDGE_MIN_MINUTES at burn $2 %/h, rounded up, at
 # least $1.
 bar() { local n=$(( ($2 * BRIDGE_MIN_MINUTES + 59) / 60 )); [ "$n" -lt "$1" ] && n=$1; echo "$n"; }
@@ -111,14 +125,14 @@ excluded() { case " $EXCLUDE " in *" $1 "*) return 0;; esac; return 1; }
 ts() { date -u +%H:%M:%S; }
 say() { if [ "$DRY" = 1 ]; then echo "$(ts) $*"; else echo "$(ts) $*" >>"$LOG"; fi; }
 
-declare -A U5=() R5=() U7=() R7=() RESET_AT=() RESET7_AT=() B5=() A5=() ID=() STAT=() AGE=() LEXP=()
+declare -A U5=() R5=() U7=() R7=() RESET_AT=() RESET7_AT=() B5=() A5=() B7=() A7=() ID=() STAT=() AGE=() LEXP=()
 declare -A CU5=() CR5=() CU7=() CR7=()
 SLOTS=(); CACT=""
 read_metrics() {
   local body
   body=$(curl -s -m 8 "$API/metrics") || return 1
   [ -n "$body" ] || return 1
-  U5=(); R5=(); U7=(); B5=(); A5=()
+  U5=(); R5=(); U7=(); B5=(); A5=(); B7=(); A7=()
   while read -r kind acct win val; do
     case "$kind:$win" in
       used:five_hour)  U5[$acct]=$val;;
@@ -127,6 +141,9 @@ read_metrics() {
       recent:five_hour) B5[$acct]=$val;;
       model:five_hour) [ -n "${B5[$acct]:-}" ] || B5[$acct]=$val;;
       age:five_hour)   A5[$acct]=$val;;
+      recent:seven_day) B7[$acct]=$val;;
+      model:seven_day) [ -n "${B7[$acct]:-}" ] || B7[$acct]=$val;;
+      age:seven_day)   A7[$acct]=$val;;
     esac
   done < <(printf '%s\n' "$body" | awk -F'"' '
     /^pacer_rate_limit_used_ratio\{account="[^"]+",window="(five_hour|seven_day)"\}/ {
@@ -138,6 +155,12 @@ read_metrics() {
     /^pacer_rate_limit_burn_percent_per_hour\{account="[^"]+",window="five_hour"\}/ {
       split($0, v, " "); printf "model %s %s %d\n", substr($2,1,8), $4, v[2] }
     /^pacer_rate_limit_sample_age_seconds\{account="[^"]+",window="five_hour"\}/ {
+      split($0, v, " "); printf "age %s %s %d\n", substr($2,1,8), $4, v[2] }
+    /^pacer_rate_limit_recent_burn_percent_per_hour\{account="[^"]+",window="seven_day"\}/ {
+      split($0, v, " "); printf "recent %s %s %.3f\n", substr($2,1,8), $4, v[2] }
+    /^pacer_rate_limit_burn_percent_per_hour\{account="[^"]+",window="seven_day"\}/ {
+      split($0, v, " "); printf "model %s %s %.3f\n", substr($2,1,8), $4, v[2] }
+    /^pacer_rate_limit_sample_age_seconds\{account="[^"]+",window="seven_day"\}/ {
       split($0, v, " "); printf "age %s %s %d\n", substr($2,1,8), $4, v[2] }')
 }
 # Every account's 5h/7d from cswap's own cache, kept fresh by its menu bar app.
@@ -185,6 +208,15 @@ safe5() {
   local b=${B5[$1]:-} age=${A5[$1]:-300}
   [ -n "$b" ] || { echo 95; return; }
   awk -v b="$b" -v age="$age" 'BEGIN { if (b < 0) b = 0; m = b * (age + 300) / 3600
+    if (m < 1) m = 1; m = (m == int(m)) ? m : int(m) + 1; print 100 - m }'
+}
+# The same for the 7-day window, from the 7d burn of the ACTIVE account
+# ($burn7: the workload follows the login, so a target is judged by the burn it
+# would carry). No burn known: 99.
+safe7() {
+  local age=${A7[$1]:-300}
+  [ -n "${burn7:-}" ] || { echo 99; return; }
+  awk -v b="$burn7" -v age="$age" 'BEGIN { if (b < 0) b = 0; m = b * (age + 300) / 3600
     if (m < 1) m = 1; m = (m == int(m)) ? m : int(m) + 1; print 100 - m }'
 }
 switch_at() { echo $(( $(safe5 "$1") - EARLY )); }
@@ -267,7 +299,7 @@ switch_to() {
 load_conf
 if [ "$DRY" = 0 ]; then
   echo $$ >"$PIDFILE"
-  say "start${WHY:+ ($WHY)}: switch at the safe limit - ${EARLY}; a target needs ${BRIDGE_MIN_MINUTES} min of the active burn (at least ${BRIDGE_MIN_PTS} points) below its own switch point; expiring room first (EXPIRE_WINDOW=${EXPIRE_WINDOW}s, at least ${EXPIRE_MIN_PTS} points); WEEK_MAX=$WEEK_MAX STAGGER=${STAGGER}s, accounts from cswap, exclude [${EXCLUDE}], reserve [${RESERVE_SLOT:-none}]"
+  say "start${WHY:+ ($WHY)}: switch at the safe limit - ${EARLY}; a target needs ${BRIDGE_MIN_MINUTES} min of the active burn (at least ${BRIDGE_MIN_PTS} points) below its own switch point; expiring room first (EXPIRE_WINDOW=${EXPIRE_WINDOW}s, at least ${EXPIRE_MIN_PTS} points); 7d limit ${WEEK_MAX} (auto: the 7d safe limit - ${EARLY} from the active 7d burn; a target needs ${BRIDGE_MIN_MINUTES} min of it, at least ${WEEK_ROOM_MIN} points) STAGGER=${STAGGER}s, accounts from cswap, exclude [${EXCLUDE}], reserve [${RESERVE_SLOT:-none}]"
 fi
 # A missing reading for the active account is normal for a loop or two after a
 # switch (cswap reads the new login); only a gap of GAP_WARN_SECS is worth a WARN.
@@ -382,15 +414,19 @@ while :; do
   [ -n "$burn" ] || { burn=$BURN_UNKNOWN; burn_src=assumed; }
   if [ "$DRY" = 1 ] && [ -n "${BURN_OVERRIDE:-}" ]; then burn=${BURN_OVERRIDE%%.*}; burn_src=override; fi
   if [ "$hold_said" = 1 ] && [ "$hold_burn" -gt "$burn" ]; then burn=$hold_burn; burn_src="since the hold began"; fi
+  burn7=${B7[$actid]:-}; burn7_src=pacer
+  if [ "$DRY" = 1 ] && [ -n "${BURN7_OVERRIDE:-}" ]; then burn7=$BURN7_OVERRIDE; burn7_src=override; fi
+  [ -n "$burn7" ] || burn7_src=unknown
+  n7=$(need7)
   need=$(bar "$BRIDGE_MIN_PTS" "$burn"); xneed=$(bar "$EXPIRE_MIN_PTS" "$burn")
 
   if [ "$DRY" = 1 ] || [ $(( now - last_status )) -ge 600 ]; then
     line="status: on $act"
     for s in "${SLOTS[@]}"; do
       sid=${ID[$s]}
-      line+=" | $s: 5h $(eff5 "$sid")% (sw $(switch_at "$sid")) left $(fmt_left "$(left5 "$sid")") 7d $(eff7 "$sid")% left $(fmt_left "$(left7 "$sid")") [${STAT[$sid]} $(( ${AGE[$sid]:-0} / 60 ))m]"
+      line+=" | $s: 5h $(eff5 "$sid")% (sw $(switch_at "$sid")) left $(fmt_left "$(left5 "$sid")") 7d $(eff7 "$sid")% (lim $(wkmax "$s")) left $(fmt_left "$(left7 "$sid")") [${STAT[$sid]} $(( ${AGE[$sid]:-0} / 60 ))m]"
     done
-    line+=" | burn ${burn}%/h ($burn_src): a target needs ${need} points, expiring ${xneed}"
+    line+=" | burn ${burn}%/h ($burn_src): a target needs ${need} points, expiring ${xneed}; 7d burn ${burn7:-?}%/h ($burn7_src): a target needs ${n7} points of 7d room"
     say "$line"
     last_status=$now
   fi
@@ -421,7 +457,7 @@ while :; do
       elif [ "$w" -ge "$(wkmax "$s")" ]; then why="7d cap $(wkmax "$s")%, 7d resets in $(fmt_left "$(left7 "$sid")")"
       # A point or two of weekly room is minutes of work, then a second switch
       # off it (2026-10-21 10:40Z: stagger chose an account at 7d 89% of 90).
-      elif [ "$w" -gt $(( $(wkmax "$s") - WEEK_ROOM_MIN )) ]; then why="7d within ${WEEK_ROOM_MIN} of its cap"
+      elif [ $(( $(wkmax "$s") - w )) -le "$n7" ]; then why="7d room $(( $(wkmax "$s") - w )) <= ${n7} (${BRIDGE_MIN_MINUTES} min at ${burn7:-?}%/h)"
       elif [ "$room" -lt "$need" ]; then why="room < $need"
       elif just_left "$s"; then why="just left"
       fi
