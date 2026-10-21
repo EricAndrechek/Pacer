@@ -6,12 +6,15 @@ import Foundation
 /// raw URL, gap-filled from models.dev for Anthropic models LiteLLM
 /// hasn't priced yet (see `refresh()`).
 ///
-/// Lookup is fuzzy because Claude Code emits names like
-/// `claude-opus-4-7` while LiteLLM also keys entries under
-/// `anthropic.claude-opus-4-7`, `vertex_ai/claude-opus-4-7`,
-/// `claude-opus-4-7-20260416`, etc. We try the literal name first,
-/// then a list of provider prefixes, then bidirectional substring as a
-/// last resort. ccusage uses the same algorithm.
+/// Lookup is EXACT on a `CanonicalModelID` (model, provider, region), not
+/// fuzzy. Claude Code emits `claude-opus-4-7` while LiteLLM also keys the
+/// same model as `anthropic.claude-opus-4-7`, `vertex_ai/claude-opus-4-7`,
+/// `claude-opus-4-7-20260416`, and so on; every one of those spellings parses
+/// to one identity, so a dictionary hit finds it. The bidirectional substring
+/// search this replaced (inherited from ccusage) priced `claude-sonnet-5-5` as
+/// `claude-sonnet-5` for a week and picked its winner in `Dictionary` order,
+/// which changes per launch (#216). An id with no exact or version-complete
+/// match is unpriced — never priced as a sibling.
 public actor PricingTable {
 
     public static let shared = PricingTable()
@@ -24,20 +27,8 @@ public actor PricingTable {
         string: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     )!
 
-    /// Provider-prefix candidates we try when the literal model name
-    /// isn't found. Order matters — most-likely first. Sourced from
-    /// ccusage's `CLAUDE_PROVIDER_PREFIXES` (apps/ccusage/src/_pricing-fetcher.ts:6-12).
-    /// Internal (not private) so `Snapshot` below can reuse the same
-    /// list without duplication.
-    static let providerPrefixes: [String] = [
-        "anthropic/",
-        "claude-3-5-",
-        "claude-3-",
-        "claude-",
-        "openrouter/openai/",
-    ]
-
     private var pricingByModel: [String: LiteLLMModelPricing] = [:]
+    private var index = PricingCatalogIndex([String: LiteLLMModelPricing]())
     private var loadedAt: Date?
     /// `true` when the active in-memory snapshot came from the refreshed
     /// cache file (or a direct refresh in this process); `false` when
@@ -156,7 +147,7 @@ public actor PricingTable {
 
     /// Add every Anthropic entry from a fetched models.dev payload
     /// that the LiteLLM table doesn't already cover (per the same
-    /// fuzzy match lookups use, so an `anthropic.claude-x` LiteLLM
+    /// exact canonical match lookups use, so a `claude-x-20260416` LiteLLM
     /// key suppresses a models.dev `claude-x` insert). Synchronous on
     /// purpose: an async signature would send the non-Sendable JSON
     /// dictionaries across an isolation boundary. Best-effort: nil or
@@ -210,12 +201,15 @@ public actor PricingTable {
         var ids = Set<String>()
         for source in secondaries { ids.formUnion(source.entries?.keys ?? [:].keys) }
 
+        let coveredIndex = PricingCatalogIndex(covered)
         for id in ids.sorted() {
             // Which key in the primary table this id corresponds to, if any.
-            // Lookups are fuzzy (`anthropic/claude-x`, `claude-x-20260416`),
-            // so the vote has to be cast against the entry a lookup would
-            // actually find, not the bare id.
-            let primaryKey = liteLLMMatchKey(id, in: covered)
+            // The primary keys a model under other spellings
+            // (`anthropic/claude-x`, `claude-x-20260416`), so the vote has to
+            // be cast against the entry a lookup would actually find, not the
+            // bare id. Exact on the canonical id: a fuzzy match here once let
+            // a `claude-sonnet-5-5` vote land on `claude-sonnet-5`.
+            let primaryKey = coveredIndex.matchKey(id)
             let primaryEntry = primaryKey.flatMap { merged[$0] as? [String: Any] }
 
             var winner: [String: Any] = primaryEntry ?? [:]
@@ -328,71 +322,37 @@ public actor PricingTable {
         return Date().timeIntervalSince(mtime)
     }
 
-    /// The fuzzy lookup against a decoded table, WITHOUT the built-in
-    /// Anthropic fallback layer: literal key, then provider prefixes,
-    /// then bidirectional substring (ccusage tries this both ways:
-    /// model contains key, or key contains model — useful when Claude
-    /// Code emits a versioned name like `claude-haiku-4-5-20251001`
-    /// that's ALSO a literal LiteLLM key, and when it emits a base
-    /// name like `claude-opus-4-7` that matches several keys).
+    /// The *key* a lookup for `model` resolves to in `table`, WITHOUT the
+    /// built-in Anthropic fallback layer. Consensus needs the key, not the
+    /// value: a vote has to be written back to the entry a lookup will
+    /// actually find, and the primary table keys entries under names Claude
+    /// Code never emits (`anthropic/claude-x`, `claude-x-20260416`).
     ///
     /// Shared by the actor lookup, the `Snapshot` mirror, and the
-    /// `refresh()` gap-fill (which must know what the fetched table
-    /// covers BY ITSELF — including the fallback layer there would
-    /// wrongly suppress gap-fill for any model the static table
-    /// carries).
-    /// The *key* a lookup for `model` would resolve to, using exactly the
-    /// order `liteLLMMatch` uses. Consensus needs the key, not the value:
-    /// a vote has to be written back to the entry a lookup will actually
-    /// find, and the primary table keys entries under names Claude Code
-    /// never emits (`anthropic/claude-x`, `claude-x-20260416`).
+    /// `refresh()` gap-fill (which must know what the fetched table covers BY
+    /// ITSELF — including the fallback layer there would wrongly suppress
+    /// gap-fill for any model the static table carries).
     static func liteLLMMatchKey(
         _ model: String,
         in table: [String: LiteLLMModelPricing]
     ) -> String? {
-        if table[model] != nil { return model }
-        for prefix in providerPrefixes where table[prefix + model] != nil {
-            return prefix + model
-        }
-        let modelLower = model.lowercased()
-        for key in table.keys {
-            let keyLower = key.lowercased()
-            if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
-                return key
-            }
-        }
-        return nil
+        PricingCatalogIndex(table).matchKey(model)
     }
 
     static func liteLLMMatch(
         _ model: String,
         in table: [String: LiteLLMModelPricing]
     ) -> LiteLLMModelPricing? {
-        if let direct = table[model] {
-            return direct
-        }
-        for prefix in providerPrefixes {
-            if let hit = table[prefix + model] {
-                return hit
-            }
-        }
-        let modelLower = model.lowercased()
-        for (key, value) in table {
-            let keyLower = key.lowercased()
-            if keyLower.contains(modelLower) || modelLower.contains(keyLower) {
-                return value
-            }
-        }
-        return nil
+        liteLLMMatchKey(model, in: table).flatMap { table[$0] }
     }
 
-    /// Look up a model. Returns nil only if no candidate match exists
-    /// even via substring fallback or the built-in Anthropic fallback
-    /// table.
+    /// Look up a model. Returns nil when neither the fetched table nor the
+    /// built-in Anthropic fallback table has an exact or version-complete
+    /// match — the caller treats that as unpriced.
     public func pricing(for model: String) -> LiteLLMModelPricing? {
         // Built-in Anthropic rates last, so the fetched tables win as
         // soon as they ship a real entry.
-        Self.liteLLMMatch(model, in: pricingByModel)
+        index.matchKey(model).flatMap { pricingByModel[$0] }
             ?? AnthropicFallbackPricing.pricing(for: model)
     }
 
@@ -402,24 +362,31 @@ public actor PricingTable {
     /// Sendable, sync-lookup snapshot of the current pricing dictionary.
     /// Used by recomputers and live views that walk thousands of
     /// samples and would otherwise need to `await` the actor for each
-    /// per-row pricing lookup. Snapshot reproduces the actor's fuzzy-
+    /// per-row pricing lookup. Snapshot reproduces the actor's exact-
     /// match algorithm exactly so callers can swap one for the other
     /// without behavior drift.
     public func snapshot() -> Snapshot {
-        Snapshot(pricingByModel: pricingByModel)
+        Snapshot(pricingByModel: pricingByModel, index: index)
     }
 
     public struct Snapshot: Sendable {
         public let pricingByModel: [String: LiteLLMModelPricing]
+        let index: PricingCatalogIndex
 
         public init(pricingByModel: [String: LiteLLMModelPricing]) {
-            self.pricingByModel = pricingByModel
+            self.init(pricingByModel: pricingByModel,
+                      index: PricingCatalogIndex(pricingByModel))
         }
 
-        /// Mirror of `PricingTable.pricing(for:)`. Same fuzzy match,
-        /// same built-in Anthropic fallback. Sync.
+        init(pricingByModel: [String: LiteLLMModelPricing], index: PricingCatalogIndex) {
+            self.pricingByModel = pricingByModel
+            self.index = index
+        }
+
+        /// Mirror of `PricingTable.pricing(for:)`. Same exact match, same
+        /// built-in Anthropic fallback. Sync.
         public func pricing(for model: String) -> LiteLLMModelPricing? {
-            PricingTable.liteLLMMatch(model, in: pricingByModel)
+            index.matchKey(model).flatMap { pricingByModel[$0] }
                 ?? AnthropicFallbackPricing.pricing(for: model)
         }
     }
@@ -453,6 +420,7 @@ public actor PricingTable {
 
     private func replace(with decoded: [String: LiteLLMModelPricing], fromCache: Bool) {
         pricingByModel = decoded
+        index = PricingCatalogIndex(decoded)
         loadedAt = Date()
         loadedFromCache = fromCache
     }
