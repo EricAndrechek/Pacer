@@ -60,6 +60,8 @@ public actor JSONLScanner {
         /// running at once, the profile directory a turn was written to is
         /// the only thing that separates them.
         let rootPath: String?
+        /// The root's fixed project, if it has one (`ResolvedRoot`).
+        let fixedProjectPath: String?
     }
 
     public init() {}
@@ -129,7 +131,7 @@ public actor JSONLScanner {
         let candidates: [Candidate]
         if let hintedPaths, !hintedPaths.isEmpty {
             candidates = collectHintedCandidates(
-                hintedPaths: hintedPaths, cursors: cursors)
+                hintedPaths: hintedPaths, roots: roots, cursors: cursors)
         } else {
             candidates = collectCandidates(roots: roots, cursors: cursors)
         }
@@ -179,7 +181,8 @@ public actor JSONLScanner {
                     startingAt: startOffset
                 ) { lineData in
                     guard let entry = JSONLLineParser.parse(
-                        line: lineData, aliases: aliases, rootPath: c.rootPath
+                        line: lineData, aliases: aliases, rootPath: c.rootPath,
+                        fixedProjectPath: c.fixedProjectPath
                     ) else { return }
                     entriesParsed += 1
                     if let key = entry.dedupKey {
@@ -239,10 +242,26 @@ public actor JSONLScanner {
     /// be deleted between FSEvent and scan) or aren't regular `.jsonl`
     /// files. Per-file stat is the same `URL.resourceValues` call the
     /// walk variant uses, so cursor semantics stay identical.
+    ///
+    /// Each hinted file is matched back to the root it sits under, the same
+    /// join the bulk importer makes (`ResolvedRoot.root(forFile:among:)`).
+    /// It used to be stamped with no root at all, which reads as the default
+    /// login: right for `~/.claude`, and wrong for every live turn of a pinned
+    /// profile or an agent-mode session, whose root is what names its
+    /// account. A file no root claims keeps that old nil, so a `~/.claude`
+    /// that is a symlink (FSEvents reports the resolved path) still scans.
     nonisolated private func collectHintedCandidates(
         hintedPaths: Set<String>,
+        roots: [ClaudePathResolver.ResolvedRoot],
         cursors: [String: CursorState]
     ) -> [Candidate] {
+        // The same roots by their resolved paths, for a hint that arrived in
+        // that form. Built once per call; there are a handful of roots.
+        let resolvedRoots = roots.map {
+            ClaudePathResolver.ResolvedRoot(
+                root: $0.root, projectsDirectory: $0.projectsDirectory.resolvingSymlinksInPath(),
+                fixedProjectPath: $0.fixedProjectPath)
+        }
         var out: [Candidate] = []
         out.reserveCapacity(hintedPaths.count)
         let resourceKeys: Set<URLResourceKey> = [
@@ -262,16 +281,16 @@ public actor JSONLScanner {
                   let size = values.fileSize
             else { continue }
             let path = url.path
+            let root = ClaudePathResolver.ResolvedRoot.root(forFile: path, among: roots)
+                ?? ClaudePathResolver.ResolvedRoot.root(forFile: path, among: resolvedRoots)
             out.append(Candidate(
                 url: url,
                 path: path,
                 size: Int64(size),
                 mtime: mtime,
                 cursor: cursors[path],
-                // An explicit file list carries no root context. nil reads
-                // as the default login, which is what a hand-pointed file
-                // almost always is.
-                rootPath: nil
+                rootPath: root?.root.path,
+                fixedProjectPath: root?.fixedProjectPath
             ))
         }
         return out
@@ -322,7 +341,8 @@ public actor JSONLScanner {
                     // to nil: `AccountTrail` falls back to the default-login
                     // spans for any root no activation has claimed, so the
                     // ordinary case needs no branch here.
-                    rootPath: root.root.path
+                    rootPath: root.root.path,
+                    fixedProjectPath: root.fixedProjectPath
                 ))
             }
         }

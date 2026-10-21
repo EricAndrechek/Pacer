@@ -723,7 +723,67 @@ public final class ScanCoordinator {
         if !sessionProfileRoots.isEmpty {
             log("roots: +\(sessionProfileRoots.count) session profile(s)")
         }
-        return primary + sessionProfileRoots
+        desktopAgentRoots = desktopSessions?.agentRoots ?? []
+        if !desktopAgentRoots.isEmpty {
+            log("roots: +\(desktopAgentRoots.count) Claude Desktop agent-mode session(s)")
+        }
+        lastDesktopRootRefresh = Date()
+        return primary + sessionProfileRoots + desktopAgentRoots
+    }
+
+    /// Claude Desktop's agent-mode roots (#250), one per Cowork session. Kept
+    /// apart from `sessionProfileRoots` because the trail does not bind them:
+    /// each belongs to the org folder it sits in, which
+    /// `DesktopSessionDirectory` answers directly.
+    private var desktopAgentRoots: [ClaudePathResolver.ResolvedRoot] = []
+    private var lastDesktopRootRefresh: Date?
+    /// How often a full-walk cycle lists Desktop's agent-mode folders again
+    /// for sessions started since. A new session's first write also asks
+    /// (see `refreshDesktopRootsIfNeeded`), so this is only the backstop.
+    private static let desktopRootRefreshInterval: TimeInterval = 60
+
+    /// The folders the watcher covers besides the scan roots: Desktop's
+    /// agent-mode folders, so a Cowork session that starts after launch is
+    /// heard on its first write rather than at the next restart.
+    private var extraWatchPaths: [String] {
+        (desktopSessions?.agentSessionDirectories ?? []).map(\.path)
+    }
+
+    /// Pick up agent-mode sessions started since the roots were resolved.
+    ///
+    /// Asked on every cycle, and cheap when there is nothing to do: a hinted
+    /// transcript under an agent-mode folder that no root claims is a new
+    /// session, and a full walk (`hinted == nil`) re-lists once a minute.
+    /// Returns the hint with any path no root can claim dropped, plus whether
+    /// the roots changed, in which case this cycle walks every root so the
+    /// new session is read from its first line.
+    private func refreshDesktopRootsIfNeeded(
+        hinted: Set<String>?
+    ) -> (hinted: Set<String>?, rootsChanged: Bool) {
+        guard let desktopSessions else { return (hinted, false) }
+        let unclaimed = (hinted ?? []).filter {
+            desktopSessions.isUnderAgentSessions($0)
+                && ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: resolvedRoots) == nil
+        }
+        let due = hinted == nil && (lastDesktopRootRefresh.map {
+            Date().timeIntervalSince($0) >= Self.desktopRootRefreshInterval } ?? true)
+        guard !unclaimed.isEmpty || due else { return (hinted, false) }
+        lastDesktopRootRefresh = Date()
+        desktopSessions.refresh()
+        let fresh = desktopSessions.agentRoots
+        // An agent-mode file outside every root (Cowork's own `audit.jsonl`)
+        // is not a transcript; it must not reach the scanner, which would
+        // read it as the default login's.
+        let cleaned = hinted.map { paths in
+            paths.subtracting(unclaimed.filter {
+                ClaudePathResolver.ResolvedRoot.root(forFile: $0, among: fresh) == nil
+            })
+        }
+        guard fresh != desktopAgentRoots else { return (cleaned, false) }
+        log("roots: Claude Desktop agent-mode sessions \(desktopAgentRoots.count) → \(fresh.count)")
+        resolvedRoots = resolvedRoots.filter { !desktopAgentRoots.contains($0) } + fresh
+        desktopAgentRoots = fresh
+        return (nil, true)
     }
 
     /// Runs the initial scan, then blocks watching for change events.
@@ -759,7 +819,7 @@ public final class ScanCoordinator {
             log("startup scan failed: \(error)")
             sessionRollupCache.forgetAll()
         }
-        await watcher.start(roots: resolvedRoots)
+        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
         // Apply whatever visibility state we already have at startup —
         // a login-at-launch invocation has no window, so this widens
         // the watcher's FSEvent latency immediately and saves wakeups
@@ -1652,7 +1712,7 @@ public final class ScanCoordinator {
         // help if we actually visit every file, and a hint from one
         // recent write would otherwise leave the other 700+ files
         // unscanned until their next individual FSEvent.
-        let hintedPaths: Set<String>?
+        var hintedPaths: Set<String>?
         if isFullScan {
             _ = watcher.consumeChangedPaths()  // drain anyway
             hintedPaths = nil
@@ -1660,6 +1720,11 @@ public final class ScanCoordinator {
             let paths = watcher.consumeChangedPaths()
             hintedPaths = paths.isEmpty ? nil : paths
         }
+        // Claude Desktop's agent-mode sessions come and go while Pacer runs.
+        // A new one's first write arrives as a hint no root claims.
+        let desktopRoots = refreshDesktopRootsIfNeeded(hinted: hintedPaths)
+        hintedPaths = desktopRoots.hinted
+        if hintedPaths?.isEmpty == true { hintedPaths = nil }
         let consumeMs = tickMs()
         // A full scan means "read every transcript from byte zero" — a first
         // launch, or a `currentScanVersion` bump re-deriving history under

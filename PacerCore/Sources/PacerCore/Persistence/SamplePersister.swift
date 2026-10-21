@@ -962,8 +962,14 @@ public final class SamplePersister {
     /// is exactly the wrong one, and an unattributed row is visibly incomplete
     /// where a misattributed one is invisibly false. If the record turns up
     /// later, the coordinator re-stamps the session.
+    ///
+    /// A turn read from one of Desktop's agent-mode roots belongs to the org
+    /// that root sits under (#250), before anything else is asked: the root is
+    /// as decisive as a pinned profile's, and unlike a session record it
+    /// cannot be missing for a transcript that exists.
     private func attributedAccount(for entry: ParsedUsageEntry, at instant: Date) -> String? {
         if let desktopSessions {
+            if let org = desktopSessions.account(forAgentRoot: entry.rootPath) { return org }
             if entry.isFromDesktop {
                 return desktopSessions.accountForDesktopSession(entry.sessionId)
             }

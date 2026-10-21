@@ -34,6 +34,17 @@ public struct ClaudePathResolver: @unchecked Sendable {
     public struct ResolvedRoot: Sendable, Equatable, Hashable {
         public let root: URL
         public let projectsDirectory: URL
+        /// The project every turn under this root is counted as, in place of
+        /// its `cwd`; nil (every ordinary root) keeps the `cwd`. Claude
+        /// Desktop's agent-mode roots set it, because what they record as
+        /// `cwd` is a sandbox name. See `DesktopSessionDirectory`.
+        public let fixedProjectPath: String?
+
+        public init(root: URL, projectsDirectory: URL, fixedProjectPath: String? = nil) {
+            self.root = root
+            self.projectsDirectory = projectsDirectory
+            self.fixedProjectPath = fixedProjectPath
+        }
 
         /// The `rootPath` `JSONLScanner` stamps on a turn read from `file`: the
         /// config root (not the `projects/` directory) of the root the file
@@ -47,16 +58,32 @@ public struct ClaudePathResolver: @unchecked Sendable {
         /// not under `projects`), and the longest matching `projects/` wins
         /// when roots nest. nil when no root contains the file.
         public static func rootPath(forFile file: String, among roots: [ResolvedRoot]) -> String? {
+            root(forFile: file, among: roots)?.root.path
+        }
+
+        /// The root `rootPath(forFile:among:)` names, whole, for a caller that
+        /// also needs its `fixedProjectPath`.
+        public static func root(forFile file: String, among roots: [ResolvedRoot]) -> ResolvedRoot? {
             let filePath = URL(fileURLWithPath: file).canonicalPathURL.path
-            var best: (length: Int, root: String)?
+            var best: (length: Int, root: ResolvedRoot)?
             for candidate in roots {
                 let directory = candidate.projectsDirectory.canonicalPathURL.path
                 let prefix = directory.hasSuffix("/") ? directory : directory + "/"
                 guard filePath.hasPrefix(prefix),
                       best == nil || prefix.count > best!.length else { continue }
-                best = (prefix.count, candidate.root.path)
+                best = (prefix.count, candidate)
             }
             return best?.root
+        }
+
+        /// The project a turn read from this root is counted as: the fixed one
+        /// when the root has one, else its `cwd` canonicalized. One rule for
+        /// the line parser and the bulk importer, so the two cannot disagree.
+        public func projectPath(forCwd cwd: String?, aliases: [String: String]) -> String? {
+            if let fixedProjectPath {
+                return ProjectPathCanonicalizer.canonicalize(fixedProjectPath, aliases: aliases)
+            }
+            return cwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) }
         }
     }
 

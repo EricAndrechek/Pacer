@@ -49,32 +49,40 @@ public enum JSONLLineParser {
     /// `ProjectPathCanonicalizer.canonicalize(_:aliases:)` after the
     /// worktree-stripping pass. Pass `[:]` (the default) for "no user
     /// aliases" — the worktree-strip behaviour is still applied.
+    /// `fixedProjectPath`, when set, is the project the turn is counted as
+    /// instead of its `cwd` (`ResolvedRoot.fixedProjectPath`); the raw `cwd`
+    /// is still kept as `originalProjectPath`.
     public static func parse(
         line: Data,
         aliases: [String: String] = [:],
-        rootPath: String? = nil
+        rootPath: String? = nil,
+        fixedProjectPath: String? = nil
     ) -> ParsedUsageEntry? {
         guard !line.isEmpty,
               let raw = try? decoder.decode(RawJSONLine.self, from: line)
         else {
             return nil
         }
-        return entry(from: raw, aliases: aliases, rootPath: rootPath)
+        return entry(from: raw, aliases: aliases, rootPath: rootPath,
+                     fixedProjectPath: fixedProjectPath)
     }
 
     public static func parse(
         line: String,
         aliases: [String: String] = [:],
-        rootPath: String? = nil
+        rootPath: String? = nil,
+        fixedProjectPath: String? = nil
     ) -> ParsedUsageEntry? {
         guard let data = line.data(using: .utf8) else { return nil }
-        return parse(line: data, aliases: aliases, rootPath: rootPath)
+        return parse(line: data, aliases: aliases, rootPath: rootPath,
+                     fixedProjectPath: fixedProjectPath)
     }
 
     static func entry(
         from raw: RawJSONLine,
         aliases: [String: String] = [:],
-        rootPath: String? = nil
+        rootPath: String? = nil,
+        fixedProjectPath: String? = nil
     ) -> ParsedUsageEntry? {
         guard raw.type == "assistant" else { return nil }
         guard let model = raw.message?.model, !model.isEmpty else { return nil }
@@ -105,7 +113,8 @@ public enum JSONLLineParser {
             storedCostUSD: raw.costUSD,
             dedupKey: dedupKey,
             sessionId: raw.sessionId,
-            projectPath: raw.cwd.map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
+            projectPath: (fixedProjectPath ?? raw.cwd)
+                .map { ProjectPathCanonicalizer.canonicalize($0, aliases: aliases) },
             // Preserve the raw `cwd` for the sub-path drill-down. Even
             // if the canonical path collapses many subdirs into one
             // git-repo root, the original is still the source of truth

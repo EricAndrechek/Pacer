@@ -160,8 +160,37 @@ A trail inferred from Desktop's tokens would not do this job. Desktop can hold
 tokens for more than one org, and its folder layout already shows a second
 org. A per-session record cannot be wrong about which session it describes.
 
-Desktop's agent mode (Cowork) keeps its transcripts inside Desktop's own
-folder, which Pacer does not scan yet. That is a separate gap: #250.
+### Desktop's agent mode: roots of their own (#250)
+
+Desktop's agent mode (Cowork) runs Claude Code in a sandbox, and keeps the
+transcripts inside Desktop's own folder rather than `~/.claude/projects`:
+
+```
+<data dir>/local-agent-mode-sessions/<user>/<org>/local_<id>/.claude/projects/…
+<data dir>/local-agent-mode-sessions/<user>/<org>/agent/local_<id>/.claude/projects/…
+```
+
+Each of those `.claude` folders is a scan root, and like a pinned profile it
+belongs to exactly one account: the `<org>` folder it sits in. The root decides
+a turn's account before the trail or the session records are asked, because a
+record can be missing for a transcript that exists (one real session had
+none). The transcript's file name is its session id, so those sessions join
+the recorded ones and are protected from trail corrections the same way.
+
+- **One project.** Every agent-mode turn counts under "Claude Desktop (agent)".
+  The `cwd` they record is a sandbox (`/sessions/<random-name>`, or an
+  `outputs` folder inside Desktop's own), different per session, and means
+  nothing to the user. The raw `cwd` is kept as the sub-path.
+- **New sessions while Pacer runs.** The watcher covers the agent-mode folder
+  itself, so a session that starts after launch is heard on its first write;
+  the cycle that hears it lists the folder again and walks every root once.
+  Only `.claude/projects` transcripts count as a change there: Cowork also
+  writes an `audit.jsonl` per action beside each sandbox.
+- **Live hints keep their root.** A transcript the watcher reported used to be
+  stamped with no root, which reads as the default login. That was wrong for
+  every live turn of a pinned profile too, not only agent mode; the scanner
+  now matches each hinted file to its root, as the bulk importer always did.
+- **Not held to ccusage.** ccusage does not scan these folders (#299).
 
 ### The data model is always parallel; only the presentation adapts
 

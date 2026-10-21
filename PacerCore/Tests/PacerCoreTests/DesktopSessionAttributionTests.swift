@@ -27,7 +27,8 @@ private func writeRecord(
     in sessionsRoot: URL, org: String, cliSessionId: String?,
     user: String = desktopUser, name: String = "local_\(UUID().uuidString).json"
 ) throws -> URL {
-    let folder = sessionsRoot.appendingPathComponent(user).appendingPathComponent(org)
+    let folder = sessionsRoot.appendingPathComponent("claude-code-sessions")
+        .appendingPathComponent(user).appendingPathComponent(org)
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     var record: [String: Any] = ["sessionId": "local_x", "title": "A session", "cwd": "/tmp/acme"]
     if let cliSessionId { record["cliSessionId"] = cliSessionId }
@@ -95,7 +96,7 @@ struct DesktopSessionDirectoryTests {
         // Not an org id: some other kind of folder, which says nothing.
         try writeRecord(in: root, org: "skills-plugin", cliSessionId: "session-c")
 
-        let directory = DesktopSessionDirectory(root: root)
+        let directory = DesktopSessionDirectory(dataDirectories: [root])
 
         #expect(directory.recordedAccount(forSession: "session-a") == desktopOrg)
         #expect(directory.recordedAccount(forSession: "session-b") == otherDesktopOrg)
@@ -108,7 +109,7 @@ struct DesktopSessionDirectoryTests {
     func missRereadsThrottled() throws {
         let root = try tempDirectory("desktop-sessions")
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = DesktopSessionDirectory(root: root)
+        let directory = DesktopSessionDirectory(dataDirectories: [root])
         let t0 = Date(timeIntervalSince1970: 1_790_000_000)
 
         #expect(directory.accountForDesktopSession("late", now: t0) == nil)
@@ -125,7 +126,7 @@ struct DesktopSessionDirectoryTests {
         let root = try tempDirectory("desktop-sessions")
         defer { try? FileManager.default.removeItem(at: root) }
         let url = try writeRecord(in: root, org: desktopOrg, cliSessionId: nil, name: "local_1.json")
-        let directory = DesktopSessionDirectory(root: root)
+        let directory = DesktopSessionDirectory(dataDirectories: [root])
         #expect(directory.drainDiscovered().isEmpty)
 
         try writeRecord(in: root, org: desktopOrg, cliSessionId: "filled", name: url.lastPathComponent)
@@ -137,7 +138,8 @@ struct DesktopSessionDirectoryTests {
     func readsTheHeadThenFallsBack() throws {
         let root = try tempDirectory("desktop-sessions")
         defer { try? FileManager.default.removeItem(at: root) }
-        let folder = root.appendingPathComponent(desktopUser).appendingPathComponent(desktopOrg)
+        let folder = root.appendingPathComponent("claude-code-sessions")
+            .appendingPathComponent(desktopUser).appendingPathComponent(desktopOrg)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let id = { UUID().uuidString.lowercased() }
         let (compact, late, pretty) = (id(), id(), id())
@@ -151,16 +153,16 @@ struct DesktopSessionDirectoryTests {
         try "{\n  \"cliSessionId\" : \"\(pretty)\"\n}"
             .write(to: folder.appendingPathComponent("local_3.json"), atomically: true, encoding: .utf8)
 
-        let directory = DesktopSessionDirectory(root: root)
+        let directory = DesktopSessionDirectory(dataDirectories: [root])
         #expect(directory.drainDiscovered() == [compact: desktopOrg, late: desktopOrg, pretty: desktopOrg])
     }
 
     @Test("no folder, or no root at all, is simply no records")
     func absentFolder() throws {
         let missing = DesktopSessionDirectory(
-            root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
+            dataDirectories: [URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)")])
         #expect(missing.recordedAccount(forSession: "x") == nil)
-        let none = DesktopSessionDirectory(root: nil)
+        let none = DesktopSessionDirectory(dataDirectories: [])
         #expect(none.accountForDesktopSession("x") == nil)
         #expect(none.drainDiscovered().isEmpty)
     }
@@ -267,7 +269,7 @@ struct DesktopScanAttributionTests {
         let coordinator = ScanCoordinator(
             container: container,
             configuration: .init(costMode: .display, watcherMode: .manual, probeStatsCache: false,
-                                 desktopSessions: DesktopSessionDirectory(root: sessionsRoot)),
+                                 desktopSessions: DesktopSessionDirectory(dataDirectories: [sessionsRoot])),
             resolver: ClaudePathResolver(environment: ["CLAUDE_CONFIG_DIR": configRoot.path]),
             homeDirectory: configRoot)
         return Rig(configRoot: configRoot, sessionsRoot: sessionsRoot,
