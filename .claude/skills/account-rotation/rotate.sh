@@ -128,8 +128,8 @@ wkmax() {
 }
 # Weekly room a target needs: BRIDGE_MIN_MINUTES at the active's 7d burn,
 # rounded up, at least WEEK_ROOM_MIN.
-need7() {
-  awk -v b="${burn7:-0}" -v m="$BRIDGE_MIN_MINUTES" -v lo="$WEEK_ROOM_MIN" 'BEGIN {
+need7() {  # [minutes, default BRIDGE_MIN_MINUTES]
+  awk -v b="${burn7:-0}" -v m="${1:-$BRIDGE_MIN_MINUTES}" -v lo="$WEEK_ROOM_MIN" 'BEGIN {
     if (b < 0) b = 0; n = b * m / 60; n = (n == int(n)) ? n : int(n) + 1; if (n < lo) n = lo; print n }'
 }
 # Points of room needed: BRIDGE_MIN_MINUTES at burn $2 %/h, rounded up, at
@@ -433,6 +433,12 @@ while :; do
   if [ "$DRY" = 1 ] && [ -n "${BURN7_OVERRIDE:-}" ]; then burn7=$BURN7_OVERRIDE; burn7_src=override; fi
   [ -n "$burn7" ] || burn7_src=unknown
   n7=$(need7)
+  # An idle account is started to carry the next window (the stagger rule, and
+  # the churn guard's preference for an idle target), so it needs weekly room
+  # for STAGGER at the weekly burn, not a bridge's 20 minutes. 2026-10-21
+  # 19:10Z: stagger chose an account 2 points under its weekly cap, good for
+  # well under an hour and then a second switch, two cache rewrites for nothing.
+  n7s=$(need7 $(( STAGGER / 60 )))
   need=$(bar "$BRIDGE_MIN_PTS" "$burn"); xneed=$(bar "$EXPIRE_MIN_PTS" "$burn")
 
   if [ "$DRY" = 1 ] || [ $(( now - last_status )) -ge 600 ]; then
@@ -476,11 +482,15 @@ while :; do
       elif [ "$room" -lt "$need" ]; then why="room < $need"
       elif just_left "$s"; then why="just left"
       fi
-      others+="$s: ${v}% room ${room}, $(win_desc "$sid"), 7d ${w}%${why:+ [$why]} | "
+      thin=""
+      if [ -z "$why" ] && [ "$v" = 0 ] && [ "$l5" = - ] && [ $(( $(wkmax "$s") - w )) -le "$n7s" ]; then
+        thin="no stagger: 7d room $(( $(wkmax "$s") - w )) <= ${n7s} ($(( STAGGER / 60 )) min at ${burn7:-?}%/h)"
+      fi
+      others+="$s: ${v}% room ${room}, $(win_desc "$sid"), 7d ${w}%${why:+ [$why]}${thin:+ [$thin]} | "
       [ -n "$why" ] && continue
       k=$(rank_key "$sid" "$room")
       if [ -z "$best" ] || [ "$k" -lt "$bestkey" ]; then best=$s; bestkey=$k; bestv=$v; bestroom=$room; fi
-      if [ "$v" = 0 ] && [ "$l5" = - ]; then
+      if [ "$v" = 0 ] && [ "$l5" = - ] && [ -z "$thin" ]; then
         k2=$(idle_key "$sid" "$room")
         if [ -z "$idle" ] || [ "$k2" -lt "$idlekey" ]; then idle=$s; idlekey=$k2; fi
       fi

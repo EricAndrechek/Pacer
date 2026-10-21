@@ -139,6 +139,12 @@ t "9b stagger skips 3 at 7d 89 (1 point of weekly room): picks 2" 'WOULD SWITCH 
   1 "1:40:100:30:ok 2:0:-:0:ok:8640 3:0:-:89:ok:4320 4:0:-:100:ok"
 t "9c 7-day avoids a target stagger would leave: picks idle 2" 'WOULD SWITCH → 2 .*\[7-day: 3 at 90%' \
   3 "1:12:144:87:ok:7200 2:0:-:0:ok:8640 3:4:297:90:ok:4320 4:0:-:100:ok"
+# An idle account under its weekly cap by less than STAGGER of weekly burn is
+# not started by a stagger: 2.3 %/h x 150 min = 6 points > 2 of room.
+AUTO=1 BURN7=2.3 t "9e stagger skips idle 1 with 2 weekly points (bar 6)" '^[0-9:]{8} no switch: 2 at 40%' \
+  2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
+AUTO=1 BURN7=0.3 t "9f stagger takes idle 1 when 2 points last 150 min" 'WOULD SWITCH → 1 .*\[stagger: 1 is idle' \
+  2 "1:0:-:88:ok:6600 2:40:149:36:ok:9300 3:13:100:97:ok:3900 4:0:-:100:ok" 'WEEK_MAX_1=90'
 t "9d limit keeps a target expiring within 45m (stagger yields there)" 'WOULD SWITCH → 3 .*\[limit: 1 at 95%' \
   1 "1:95:200:30:ok 2:0:-:10:ok:8640 3:50:30:20:ok:600 4:0:-:100:ok"
 t "10a missing 5h reading is not room" '^[0-9:]{8} HOLD 1 .*2: -% room -, reset unknown, 7d 10% \[no reading\]' \
