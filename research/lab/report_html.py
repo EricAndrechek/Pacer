@@ -22,13 +22,15 @@ PINNED = {
                   "ml-linqr-delta-pooled-acct-stacked-tok-cal", "ml-lgbm-delta-pooled-acct-stacked-tok-cal",
                   "l2-sel-acct-half-all", "l2-meta-5pct-all", "l2-route-gbm-all", "l2-stack-gbm-all",
                   "l2-stack-nnls-pooled-all-all", "l2-comb-invw5-pooled-all-all", "l2-comb-med-all-all",
-                  "l3-median6-5h", "afm-router", "afm-forecast"],
+                  "l3-median6-5h", "p2-ewinvw5-30-pooled", "p3-pooled-last25-m5", "p3-hedge-pick-e1-pooled",
+                  "afm-router", "afm-forecast"],
     "seven_day": ["rule-old", "rule-current", "engine-recent-rate", "engine-diurnal-rate", "engine-saturating",
                   "tok-rate-1d", "tok-rate-1d-cal", "tokc-rate-1d-cal", "fm-timestral-5m-1w_4w",
                   "fm-timestral-28m-1w_4w", "fm-timestral-209m-1w_4w", "fm-chronos2-1w_4w",
                   "ml-linqr-frac-pooled-acct-stacked-cal", "ml-lgbm-frac-pooled-tok-cal",
                   "l2-sel-acct-half-all", "l2-meta-5pct-all", "l2-route-gbm-all", "l2-stack-gbm-all",
-                  "l2-comb-invw5-hier-half-engtok", "l2-comb-med-all-all", "l3-median12-7d", "afm-router",
+                  "l2-comb-invw5-hier-half-engtok", "l2-comb-med-all-all", "l3-median12-7d", "p2-medbias-acct",
+                  "p3-pooled-hl30-m0", "p3-hedge-pick-e1-pooled", "afm-router",
                   "afm-forecast"],
 }
 LABELS = {
@@ -57,6 +59,18 @@ LABELS = {
     "l2-comb-med-all-all": "Median of all candidates", "l3-median6-5h": "Median of the 6 lab models (live)",
     "l3-median12-7d": "Median of 12 (live)", "afm-router": "Apple FM as router (300-case sample)",
     "afm-forecast": "Apple FM as forecaster (sample)",
+    "p2-median": "Median of 20 curated models", "p2-ewinvw5-30-pooled": "Top 5, recency-weighted",
+    "p2-medbias-acct": "Median + learned bias (per account)",
+    "p3-pooled-last25-m5": "Picker of pickers, by last 25 windows",
+    "p3-pooled-hl30-m0": "Picker of pickers, recency-weighted",
+    "p3-hedge-pick-e1-pooled": "Picker of pickers (Hedge)",
+    "p3-fs10-pick-e1-acct": "Picker of pickers (Fixed-Share)",
+}
+STRATEGY_LABELS = {
+    "median": "Median of all", "trim2": "Trimmed mean", "medbias-hier": "Median + learned bias",
+    "ewinvw5-30-hier": "Top 5, recency-weighted", "ewsel-30-hier": "Best one, recency-weighted",
+    "shrink50-pooled": "Learned blend, shrunk", "rule-current": "Shipping rule",
+    "tokc-decay-30m": "Best single model", "tokc-rate-1d-cal": "Best single model",
 }
 
 
@@ -80,6 +94,17 @@ def main() -> None:
     for w, names in PINNED.items():
         featured[w] = [dict(by[(n, w)], label=LABELS.get(n, n)) for n in names if (n, w) in by]
     d["featured"] = featured
+    # What the picker of pickers chose, per quarter of history.
+    pk = json.loads((lab.HERE / "reports" / "picks.json").read_text())
+    d["picks"] = {}
+    for w, v in pk.items():
+        strategies = v["strategies"]
+        d["picks"][w] = {"strategies": [STRATEGY_LABELS.get(x, x) for x in strategies], "variants": {}}
+        for variant in ("hedge-pick-e1-pooled", "fs10-pick-e1-acct"):
+            ch, fold = v["choices"][variant], v["fold"]
+            d["picks"][w]["variants"][variant] = [
+                [sum(1 for c, f in zip(ch, fold) if f == q and c == x) / max(1, sum(1 for f in fold if f == q))
+                 for x in strategies] for q in range(4)]
     d["labels"] = LABELS
     html = TEMPLATE.replace("/*DATA*/", json.dumps(d, default=lambda o: None))
     OUT.write_text(html)
@@ -91,10 +116,10 @@ TEMPLATE = r"""<!doctype html>
 <title>Pacer Prediction Lab</title>
 <style>
 :root{--surface:#fcfcfb;--page:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--grid:#e1e0d9;--axis:#c3c2b7;
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--ref:#52514e;--good:#006300;--bad:#d03b3b;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;--ref:#52514e;--good:#006300;--bad:#d03b3b;
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;color-scheme:light}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--surface:#1a1a19;--page:#0d0d0d;--ink:#f0efec;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--ref:#c3c2b7;--good:#0ca30c;color-scheme:dark}}
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--ref:#c3c2b7;--good:#0ca30c;color-scheme:dark}}
 body{margin:0;background:var(--page);color:var(--ink)}
 main{max-width:1100px;margin:0 auto;padding:32px max(16px,env(safe-area-inset-left)) 80px}
 h1{font-size:28px;margin:0 0 4px;letter-spacing:-.01em}h2{font-size:20px;margin:44px 0 8px}h3{font-size:15px;margin:20px 0 6px}
@@ -128,7 +153,7 @@ ul{padding-left:20px}li{margin:4px 0;max-width:75ch}code{font-size:12px}
 </ul></div>
 
 <h2>Leaderboard</h2>
-<p>Named contenders from every family, against the shipping rule (the vertical line). Hover a bar for details; the full table of every candidate is at the bottom.</p>
+<p>Named contenders from every family. Each dot is a model's typical miss on the same cases, best at the top, and the dashed line is the shipping rule. "4/4" means it beat the rule in all four quarters of your history. Hover a row for details; the full table of every candidate is at the bottom.</p>
 <div class="tabs" id="lbtabs"></div><div class="legend" id="lblegend"></div><div class="card"><div id="lb"></div></div>
 
 <h2>Learning less held up better</h2>
@@ -136,7 +161,7 @@ ul{padding-left:20px}li{margin:4px 0;max-width:75ch}code{font-size:12px}
 <div class="tabs" id="fstabs"></div><div class="card"><div id="fs"></div></div>
 
 <h2>Do they get better with more history?</h2>
-<p>Five-hour typical miss by how many of the account's windows had already completed (the record a learner could use). The learned layers start poor and improve (the router goes from 4.7 to 3.0), but none overtakes the median, which needs no history. Timestral is strongest when history is thin, since it was pretrained elsewhere. Buckets mix accounts and periods, so read the shapes, not single points; the 7-day version is too noisy to show.</p>
+<p>Five-hour typical miss by how many of the account's windows had already completed (the record a learner could use). The learned layers start poor and improve (the router goes from 4.7 to 3.0), but none overtakes the median, which needs no history. The picker of pickers improves until it is effectively the median. Timestral is strongest when history is thin, since it was pretrained elsewhere. Buckets mix accounts and periods, so read the shapes, not single points; the 7-day version is too noisy to show.</p>
 <div class="legend" id="lclegend"></div><div class="card"><div id="lc"></div></div>
 
 <h2>Timestral: size barely matters, context does</h2>
@@ -146,6 +171,14 @@ ul{padding-left:20px}li{margin:4px 0;max-width:75ch}code{font-size:12px}
 <h2>Routers, pickers and blends: the second layer</h2>
 <p>Ways to decide which model to trust, or to combine them, all retrained walk-forward as history grew.</p>
 <div class="card tablewrap" id="l2"></div>
+
+<h2>A picker of pickers</h2>
+<p>One more layer: an online learner choosing, for each account and half of the window, among eight second-layer strategies (the median, a trimmed mean, the median with a learned bias, recency-weighted top 5 and best one, a shrunk learned blend, the shipping rule, and the best single model). It retrains after every completed window, so it changes as your usage does. Hedge provably approaches the best strategy in hindsight; Fixed-Share is built to follow a best strategy that changes over time. The hindsight rows are ceilings: what a perfect picker could reach.</p>
+<div class="card tablewrap" id="l3"></div>
+<p>On 5-hour windows, the best strategy for each account in hindsight is the median itself (2.77), so a picker of pickers can at most tie it, and Hedge gets within 0.04. On 7-day windows the per-account ceiling (6.94–6.99) sits about 0.3–0.4 pp below the median, but no online picker reaches it yet. The best gets 7.49, still worse than the plain median. The per-case ceiling is out of reach for any picker: which model lands closest in a given window is effectively random.</p>
+<h3>What the picker of pickers chose</h3>
+<p>Share of cases given to each strategy, per quarter of your history (Hedge, records pooled across accounts). On 5-hour windows it settles on the median by itself. On 7-day windows it never settles, because ~34 weeks is too little record.</p>
+<div class="legend" id="pklegend"></div><div class="card" id="pk"></div>
 
 <h2>What moves the meter</h2>
 <div class="card"><ul>
@@ -167,7 +200,7 @@ ul{padding-left:20px}li{margin:4px 0;max-width:75ch}code{font-size:12px}
 <div class="card"><ul>
 <li>The activity prior (your usual usage by hour) is built from the whole store, so "Your daily rhythm" and the ML features saw a little of the future. That mildly flatters them.</li>
 <li>Weekly results rest on 276 cases from ~34 completed weeks. Treat any single weekly winner as provisional.</li>
-<li>With ~460 candidates, the best of a family is optimistically biased. That's why the periods-won column matters more than a small gap.</li>
+<li>With ~650 candidates, the best of a family is optimistically biased. That's why the periods-won column matters more than a small gap.</li>
 <li>The live helper's fading models can't borrow from other accounts on a thin record, so the live 7-day median scores 7.41 against 7.20 in the lab.</li>
 </ul></div>
 
@@ -177,8 +210,8 @@ ul{padding-left:20px}li{margin:4px 0;max-width:75ch}code{font-size:12px}
 </main><div id="tip"></div>
 <script>
 const D=/*DATA*/;
-const FAMS=["Built-in models","Token / cost models","Timestral (Mistral)","Other foundation models","Machine learning","Second layer","Apple Foundation Models"];
-const col=f=>`var(--s${FAMS.indexOf(f)+1})`;const W={five_hour:"5-hour",seven_day:"7-day"};
+const FAMS=["Built-in models","Token / cost models","Timestral (Mistral)","Other foundation models","Machine learning","Second layer","Apple Foundation Models","Picker of pickers"];
+const col=f=>FAMS.includes(f)?`var(--s${FAMS.indexOf(f)+1})`:"var(--ref)";const W={five_hour:"5-hour",seven_day:"7-day"};
 const rule=w=>D.rows.find(r=>r.name==="rule-current"&&r.window===w);
 const tip=document.getElementById("tip");
 function showTip(e,html){tip.innerHTML=html;tip.style.display="block";const x=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8);tip.style.left=x+"px";tip.style.top=(e.clientY+14)+"px"}
@@ -186,7 +219,7 @@ function hideTip(){tip.style.display="none"}
 const wins=(r)=>{const b=rule(r.window);return r.folds&&b?r.folds.filter((x,i)=>x<b.folds[i]).length:0};
 const pct=(r)=>{const b=rule(r.window).headline;return((1-r.headline/b)*100)};
 const fmt=x=>x==null?"–":x.toFixed(2);
-const sgn=x=>(x>0?"−":"+")+Math.abs(x).toFixed(1)+"%";
+const sgn=x=>x>=0?`${x.toFixed(1)}% better`:`${(-x).toFixed(1)}% worse`;
 function tipHtml(r,label){return `<b>${label||r.name}</b><br>${r.family}<br>typical miss ${fmt(r.headline)} pp (${sgn(pct(r))} vs rule)<br>periods won ${wins(r)}/4 · cases ${r.cases}${r.coverage!=null?`<br>80% range covered ${(r.coverage*100).toFixed(0)}%`:""}`}
 function legend(id,items){document.getElementById(id).innerHTML=items.map(([l,c])=>`<span><i style="background:${c}"></i>${l}</span>`).join("")}
 function tabs(id,cb){const el=document.getElementById(id);el.innerHTML=Object.entries(W).map(([k,v])=>`<button data-w="${k}" aria-pressed="${k==="five_hour"}">${v}</button>`).join("");
@@ -196,23 +229,34 @@ function tabs(id,cb){const el=document.getElementById(id);el.innerHTML=Object.en
 const t=[["5-hour · median of 6 (live)",f5.headline.toFixed(2)+" pp",`vs ${rule("five_hour").headline.toFixed(2)} shipping rule · ${sgn(pct(f5))} · ${wins(f5)}/4 periods`],
 ["7-day · median of 12",f7.headline.toFixed(2)+" pp",`vs ${rule("seven_day").headline.toFixed(2)} shipping rule · ${sgn(pct(f7))} · ${wins(f7)}/4 periods · live helper 7.41`],
 ["Token spend → meter","R² 0.96","hour by hour, out of sample"],
-["Candidates scored",new Set(D.rows.map(r=>r.name)).size,"7 families, both windows"]];
+["Candidates scored",new Set(D.rows.filter(r=>r.tier!=null).map(r=>r.name)).size,"8 families, both windows"]];
 document.getElementById("tiles").innerHTML=t.map(([k,v,s])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
 document.getElementById("ncases").textContent=`${D.cases.five_hour.toLocaleString()} five-hour and ${D.cases.seven_day} weekly cases.`})();
 legend("lblegend",FAMS.map(f=>[f,col(f)]).concat([["Shipping rule","var(--ref)"]]));
-// Leaderboard (horizontal bars, sorted)
-tabs("lbtabs",w=>{const rows=[...D.featured[w]].sort((a,b)=>a.headline-b.headline);const rh=26,L=300,R=150,Wd=900,H=rows.length*rh+30;
- const max=Math.max(...rows.map(r=>r.headline))*1.05,x=v=>L+(Wd-L-R)*v/max,ref=rule(w).headline;
+// Leaderboard: one dot per contender on an absolute, zoomed scale; the
+// shipping rule is the dashed line, anything past 1.5x it is listed below.
+tabs("lbtabs",w=>{const ref=rule(w).headline,cap=ref*1.5;const all=[...D.featured[w]].sort((a,b)=>a.headline-b.headline);
+ // A score on a sample is not on the same cases as the rest, so it is listed, not plotted.
+ const sampled=all.filter(r=>r.share<0.9),full=all.filter(r=>r.share>=0.9);
+ const rows=full.filter(r=>r.headline<=cap),off=full.filter(r=>r.headline>cap);
+ const rh=26,L=320,R=200,Wd=1000,H=rows.length*rh+40,lo=Math.max(0,Math.floor(Math.min(...rows.map(r=>r.headline))-0.5)),hi=Math.ceil(cap);
+ const x=v=>L+(Wd-L-R)*(v-lo)/(hi-lo);const step=hi-lo>6?2:(hi-lo>3?1:0.5);
  let s=`<svg viewBox="0 0 ${Wd} ${H}" role="img" aria-label="Leaderboard ${W[w]}">`;
- for(let v=0;v<=max;v+=(max>12?4:1))s+=`<line x1="${x(v)}" x2="${x(v)}" y1="0" y2="${H-24}" stroke="var(--grid)"/><text class="muted" x="${x(v)}" y="${H-8}" text-anchor="middle">${v}</text>`;
- rows.forEach((r,i)=>{const y=i*rh+4,isRule=r.name.startsWith("rule-");
-  s+=`<g data-i="${i}"><rect x="0" y="${y-2}" width="${Wd}" height="${rh}" fill="transparent"/><text x="${L-10}" y="${y+14}" text-anchor="end" style="fill:var(--ink)">${r.label}</text>
-  <rect x="${L}" y="${y+3}" width="${Math.max(2,x(r.headline)-L)}" height="${rh-10}" rx="4" fill="${isRule?"var(--ref)":col(r.family)}" opacity="${isRule?0.55:1}"/>
-  <text x="${x(r.headline)+6}" y="${y+14}">${r.headline.toFixed(2)}  ${isRule?"":sgn(pct(r))+" · "+wins(r)+"/4"}</text></g>`});
- s+=`<line x1="${x(ref)}" x2="${x(ref)}" y1="0" y2="${H-24}" stroke="var(--ref)" stroke-width="2" stroke-dasharray="4 3"/></svg>`;
+ for(let v=lo;v<=hi+1e-9;v+=step)s+=`<line x1="${x(v)}" x2="${x(v)}" y1="0" y2="${H-34}" stroke="var(--grid)"/><text class="muted" x="${x(v)}" y="${H-18}" text-anchor="middle">${+v.toFixed(1)}</text>`;
+ s+=`<text class="muted" x="${(L+Wd-R)/2}" y="${H-2}" text-anchor="middle">typical miss at reset, percentage points (lower is better)</text>`;
+ s+=`<line x1="${x(ref)}" x2="${x(ref)}" y1="0" y2="${H-34}" stroke="var(--ref)" stroke-width="2" stroke-dasharray="4 3"/>`;
+ rows.forEach((r,i)=>{const y=i*rh+14,isRule=r.name==="rule-current";const p=pct(r);
+  s+=`<g data-i="${i}"><rect x="0" y="${y-12}" width="${Wd}" height="${rh}" fill="transparent"/>
+  <line x1="${L}" x2="${Wd-R}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-dasharray="1 4"/>
+  <text x="${L-12}" y="${y+4}" text-anchor="end" style="fill:var(--ink)${isRule?";font-weight:600":""}">${r.label}</text>
+  <circle cx="${x(r.headline)}" cy="${y}" r="7" fill="${r.name.startsWith("rule-")?"var(--ref)":col(r.family)}" stroke="var(--surface)" stroke-width="2"/>
+  <text x="${Wd-R+12}" y="${y+4}" style="fill:var(--ink)">${r.headline.toFixed(2)}</text>
+  <text x="${Wd-R+56}" y="${y+4}" style="fill:${isRule?"var(--muted)":(p>=0?"var(--good)":"var(--bad)")}">${isRule?"reference":sgn(p)+" · "+wins(r)+"/4"}</text></g>`});
+ s+=`</svg>`+(off.length?`<p class="meta">Off the scale (more than 1.5× the shipping rule): ${off.map(r=>`${r.label} ${r.headline.toFixed(1)}`).join(" · ")}</p>`:"")
+ +(sampled.length?`<p class="meta">Scored on a ${sampled[0].cases}-case sample, so not comparable here: ${sampled.map(r=>`${r.label} ${r.headline.toFixed(1)}`).join(" · ")}. As a router, Apple's model only tied the best model it was choosing from on the same sample.</p>`:"");
  const el=document.getElementById("lb");el.innerHTML=s;el.querySelectorAll("g[data-i]").forEach(g=>{const r=rows[+g.dataset.i];g.onmousemove=e=>showTip(e,tipHtml(r,r.label));g.onmouseleave=hideTip})});
 // Fit spectrum (strip chart)
-tabs("fstabs",w=>{const rows=D.rows.filter(r=>r.window===w&&r.share>0.9&&r.headline!=null);const Wd=900,H=380,T=4,pad=60,top=10,bot=60;
+tabs("fstabs",w=>{const rows=D.rows.filter(r=>r.window===w&&r.share>0.9&&r.headline!=null&&r.tier!=null);const Wd=900,H=380,T=4,pad=60,top=10,bot=60;
  const vals=rows.map(r=>r.headline).sort((a,b)=>a-b),hi=vals[Math.floor(vals.length*0.97)]*1.05,lo=Math.max(0,vals[0]*0.9);
  const y=v=>top+(H-top-bot)*(1-(Math.min(v,hi)-lo)/(hi-lo)),cw=(Wd-pad)/T,ref=rule(w).headline;
  let s=`<svg viewBox="0 0 ${Wd} ${H}" role="img" aria-label="Fit spectrum ${W[w]}">`;
@@ -223,8 +267,8 @@ tabs("fstabs",w=>{const rows=D.rows.filter(r=>r.window===w&&r.share>0.9&&r.headl
  s+=`<line x1="${pad}" x2="${Wd}" y1="${y(ref)}" y2="${y(ref)}" stroke="var(--ref)" stroke-width="2" stroke-dasharray="4 3"/><text x="${Wd}" y="${y(ref)-6}" text-anchor="end">shipping rule ${ref.toFixed(2)}</text></svg>`;
  const el=document.getElementById("fs");el.innerHTML=s;el.querySelectorAll("circle").forEach(c=>{const r=rows[+c.dataset.k];c.onmousemove=e=>showTip(e,tipHtml(r,D.labels[r.name]));c.onmouseleave=hideTip})});
 // Learning curves (5h)
-(()=>{const C=D.curves.five_hour,keys=[["rule-current","Shipping rule"],["engine-recent-rate","Latest pace, held"],["fm-timestral-28m-6h_3d","Timestral 28M"],["tokc-decay-30m","Cost burn, fading"],["l2-comb-med-all-all","Median of all"],["l2-route-gbm-all","Learned router"],["l2-stack-gbm-all","Learned stacker"]];
- const cols=["var(--ref)","var(--s1)","var(--s3)","var(--s2)","var(--s6)","var(--s5)","var(--s7)"];legend("lclegend",keys.map((k,i)=>[k[1],cols[i]]));
+(()=>{const C=D.curves.five_hour,keys=[["rule-current","Shipping rule"],["engine-recent-rate","Latest pace, held"],["fm-timestral-28m-6h_3d","Timestral 28M"],["tokc-decay-30m","Cost burn, fading"],["l2-comb-med-all-all","Median of all"],["l2-route-gbm-all","Learned router"],["p3-hedge-pick-e1-pooled","Picker of pickers (Hedge)"]];
+ const cols=["var(--ref)","var(--s1)","var(--s3)","var(--s2)","var(--s6)","var(--s5)","var(--s8)"];legend("lclegend",keys.map((k,i)=>[k[1],cols[i]]));
  const Wd=900,H=320,L=50,R=20,T=10,B=50,n=C.buckets.length,xs=i=>L+(Wd-L-R)*i/(n-1);const all=keys.flatMap(k=>C.series[k[0]]||[]).filter(v=>v!=null);const mx=Math.max(...all)*1.08,mn=Math.min(...all)*0.9;const y=v=>T+(H-T-B)*(1-(v-mn)/(mx-mn));
  let s=`<svg viewBox="0 0 ${Wd} ${H}" role="img" aria-label="Learning curves">`;for(let i=0;i<5;i++){const v=mn+(mx-mn)*i/4;s+=`<line x1="${L}" x2="${Wd-R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text class="muted" x="${L-8}" y="${y(v)+4}" text-anchor="end">${v.toFixed(1)}</text>`}
  C.buckets.forEach((b,i)=>s+=`<text class="muted" x="${xs(i)}" y="${H-28}" text-anchor="middle">${b}</text><text class="muted" x="${xs(i)}" y="${H-12}" text-anchor="middle" style="font-size:10px">${C.counts[i]} cases</text>`);
@@ -247,6 +291,23 @@ tabs("fstabs",w=>{const rows=D.rows.filter(r=>r.window===w&&r.share>0.9&&r.headl
  let h=`<table><thead><tr><th>Strategy</th><th>Learns</th><th class="n">5-hour</th><th class="n">vs rule</th><th class="n">periods</th><th class="n">7-day</th><th class="n">vs rule</th><th class="n">periods</th></tr></thead><tbody>`;
  items.forEach(([n,l,k])=>{h+=`<tr><td>${l}</td><td>${k}</td>`;["five_hour","seven_day"].forEach(w=>{const r=D.rows.find(x=>x.name===n&&x.window===w);h+=r?`<td class="n">${r.headline.toFixed(2)}</td><td class="n">${sgn(pct(r))}</td><td class="n">${wins(r)}/4</td>`:`<td class="n">–</td><td></td><td></td>`});h+="</tr>"});
  document.getElementById("l2").innerHTML=h+`</tbody></table>`})();
+// Picker of pickers: results table and what it chose per quarter.
+(()=>{const items=[["p2-median","Plain median of the curated models","nothing"],["p2-ewinvw5-30-pooled","Top 5 by recency-weighted record","a few numbers"],
+["p2-medbias-acct","Median + its typical bias at this point of the window","a few numbers"],["p2-hedge-avg-e0.3-hier","Hedge over every base model","a few numbers"],
+["p3-pooled-last25-m5","Picker of pickers by its last 25 windows (switch at 5% better)","a few numbers"],["p3-hedge-pick-e1-pooled","Picker of pickers (Hedge)","a few numbers"],
+["p3-fs10-pick-e1-acct","Picker of pickers (Fixed-Share, per account)","a few numbers"],
+["p3-fs10-avg-e0.3-acct","Picker of pickers, weighted blend (Fixed-Share, per account)","a few numbers"],
+["p3-hindsight-acct","Ceiling: best strategy per account, in hindsight","hindsight"],["p3-hindsight-acct-half","Ceiling: best per account and half, in hindsight","hindsight"],
+["p3-hindsight-case","Ceiling: best strategy for every single case, in hindsight","hindsight"]];
+ let h=`<table><thead><tr><th>Strategy</th><th>Learns</th><th class="n">5-hour</th><th class="n">vs rule</th><th class="n">periods</th><th class="n">7-day</th><th class="n">vs rule</th><th class="n">periods</th></tr></thead><tbody>`;
+ items.forEach(([n,l,k])=>{const ceil=k==="hindsight";h+=`<tr${ceil?' style="color:var(--muted)"':""}><td>${l}</td><td>${k}</td>`;["five_hour","seven_day"].forEach(w=>{const r=D.rows.find(x=>x.name===n&&x.window===w);h+=r?`<td class="n">${r.headline.toFixed(2)}</td><td class="n">${sgn(pct(r))}</td><td class="n">${wins(r)}/4</td>`:`<td class="n">–</td><td></td><td></td>`});h+="</tr>"});
+ document.getElementById("l3").innerHTML=h+`</tbody></table>`;
+ const S=D.picks.five_hour.strategies,pc=S.map((_,i)=>`var(--s${i+1})`);legend("pklegend",S.map((s,i)=>[s,pc[i]]));
+ const Wd=900,L=110,R=60,bh=22,gap=10,panel=(w)=>{const v=D.picks[w].variants["hedge-pick-e1-pooled"],H=4*(bh+gap)+28;let s=`<svg viewBox="0 0 ${Wd} ${H}" role="img" aria-label="Picker choices ${W[w]}"><text x="0" y="14" style="fill:var(--ink);font-weight:600">${W[w]}</text>`;
+  v.forEach((shares,q)=>{const y=24+q*(bh+gap);let x=L;s+=`<text x="${L-10}" y="${y+15}" text-anchor="end">quarter ${q+1}</text>`;
+   shares.forEach((f,i)=>{if(f<=0)return;const wdt=(Wd-L-R)*f;s+=`<rect x="${x}" y="${y}" width="${Math.max(0,wdt-2)}" height="${bh}" rx="3" fill="${pc[i]}"><title>${S[i]}: ${(f*100).toFixed(0)}% of quarter ${q+1}</title></rect>`;if(f>=0.12)s+=`<text x="${x+6}" y="${y+15}" style="fill:#fff;font-size:11px">${(f*100).toFixed(0)}%</text>`;x+=wdt});});
+  return s+`</svg>`};
+ document.getElementById("pk").innerHTML=panel("five_hour")+panel("seven_day")})();
 // Points per dollar (weekly, hardcoded from factor_over_time.py)
 (()=>{const wk=["May 4","May 11","May 18","May 25","Jun 1","Jun 8","Jun 15","Jun 22","Jun 29","Jul 6","Jul 13","Jul 20","Jul 27","Aug 3","Aug 10","Aug 17","Aug 24","Aug 31","Sep 7","Sep 14","Sep 21","Sep 28","Oct 5","Oct 12","Oct 19"];
  const v=[.184,.180,.202,.230,.186,.212,.193,.227,.253,.192,.145,.165,.182,.122,.113,.137,.123,.170,.153,.161,.201,.155,.170,.186,.167];
@@ -258,10 +319,10 @@ tabs("fstabs",w=>{const rows=D.rows.filter(r=>r.window===w&&r.share>0.9&&r.headl
 // Full table
 (()=>{const names=[...new Set(D.rows.map(r=>r.name))];const get=(n,w)=>D.rows.find(r=>r.name===n&&r.window===w);
  const rows=names.map(n=>{const a=get(n,"five_hour"),b=get(n,"seven_day"),any=a||b;return{n,label:D.labels[n]||"",fam:any.family,tier:any.tier,h5:a?a.headline:null,w5:a?wins(a):null,h7:b?b.headline:null,w7:b?wins(b):null,cov:a&&a.coverage!=null?a.coverage:null,share:a?a.share:(b?b.share:null)}});
- const cols=[["n","Candidate"],["fam","Family"],["tier","Learns"],["h5","5-hour"],["w5","periods"],["h7","7-day"],["w7","periods"],["cov","5h range cover"]];const tierN=["nothing","this window","a few numbers","many"];
+ const cols=[["n","Candidate"],["fam","Family"],["tier","Learns"],["h5","5-hour"],["w5","periods"],["h7","7-day"],["w7","periods"],["cov","5h range cover"]];const tierN=["nothing","this window","a few numbers","many"];const tierName=t=>t==null?"hindsight":tierN[t];
  let key="h5",asc=true;const th=document.querySelector("#all thead");th.innerHTML="<tr>"+cols.map(([k,l])=>`<th class="${["h5","w5","h7","w7","cov"].includes(k)?"n":""}" data-k="${k}">${l}</th>`).join("")+"</tr>";
  function draw(){const q=document.getElementById("q").value.toLowerCase();const f=rows.filter(r=>(r.n+r.label+r.fam).toLowerCase().includes(q)).sort((a,b)=>{const x=a[key],y=b[key];return(x==null)-(y==null)||(x<y?-1:x>y?1:0)*(asc?1:-1)});
-  document.getElementById("qn").textContent=f.length+" candidates";document.querySelector("#all tbody").innerHTML=f.map(r=>`<tr><td>${r.label?r.label+"<br><span class='meta'>"+r.n+"</span>":r.n}${r.share!=null&&r.share<.9?" <span class='meta'>(sample)</span>":""}</td><td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${col(r.fam)};margin-right:6px"></i>${r.fam}</td><td>${tierN[r.tier]}</td><td class="n">${fmt(r.h5)}</td><td class="n">${r.w5==null?"":r.w5+"/4"}</td><td class="n">${fmt(r.h7)}</td><td class="n">${r.w7==null?"":r.w7+"/4"}</td><td class="n">${r.cov==null?"":(r.cov*100).toFixed(0)+"%"}</td></tr>`).join("")}
+  document.getElementById("qn").textContent=f.length+" candidates";document.querySelector("#all tbody").innerHTML=f.map(r=>`<tr><td>${r.label?r.label+"<br><span class='meta'>"+r.n+"</span>":r.n}${r.share!=null&&r.share<.9?" <span class='meta'>(sample)</span>":""}</td><td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${col(r.fam)};margin-right:6px"></i>${r.fam}</td><td>${tierName(r.tier)}</td><td class="n">${fmt(r.h5)}</td><td class="n">${r.w5==null?"":r.w5+"/4"}</td><td class="n">${fmt(r.h7)}</td><td class="n">${r.w7==null?"":r.w7+"/4"}</td><td class="n">${r.cov==null?"":(r.cov*100).toFixed(0)+"%"}</td></tr>`).join("")}
  th.onclick=e=>{const k=e.target.dataset.k;if(!k)return;asc=key===k?!asc:true;key=k;draw()};document.getElementById("q").oninput=draw;draw()})();
 </script></body></html>
 """

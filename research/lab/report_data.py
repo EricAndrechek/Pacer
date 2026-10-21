@@ -15,6 +15,11 @@ import numpy as np
 import lab
 
 FAMILY = [  # (prefix regex, family, fit tier)
+    (r"hindsight|oracle", "Hindsight ceiling", None),
+    (r"^p3-", "Picker of pickers", 2),
+    (r"^p2-median$|^p2-trim", "Second layer", 0),
+    (r"^p2-shrink", "Second layer", 3),
+    (r"^p2-", "Second layer", 2),
     (r"^rule-", "Shipping selection", 2),
     (r"^engine-(recent-rate|linear-recent)$", "Built-in models", 0),
     (r"^engine-diurnal-rate$", "Built-in models", 2),
@@ -40,12 +45,6 @@ def classify(name: str):
     return "Other", 1
 
 
-def strategy(name: str) -> str:
-    """Plain-language description of a second-layer name."""
-    m = re.match(r"l2-(sel|comb-med\d|comb-invw\d|comb-med|stack-nnls|stack-gbm|route-gbm|meta-\d+pct)-?(acct|pooled|hier)?-?(all|half|cut)?", name)
-    return m.group(0) if m else name
-
-
 def main() -> None:
     c = lab.cases()
     names = sorted(p.stem for p in lab.PREDS.glob("*.parquet") if not p.stem.endswith(".choices"))
@@ -63,6 +62,7 @@ def main() -> None:
     curves = {}
     key = ["rule-current", "rule-old", "engine-recent-rate", "tokc-decay-30m", "fm-timestral-28m-6h_3d",
            "l2-comb-med-all-all", "l2-comb-invw5-pooled-all-all", "l2-route-gbm-all", "l2-stack-gbm-all",
+           "p2-median", "p3-hedge-pick-e1-pooled", "p3-pooled-last25-m5",
            "l2-sel-acct-half-all", "ml-linqr-delta-pooled-acct-stacked-tok-cal", "tokc-rate-1d-cal",
            "l2-comb-invw5-hier-half-engtok", "ml-linqr-frac-pooled-acct-stacked-cal", "l3-median12-7d"]
     edges = {"five_hour": [0, 10, 25, 50, 100, 200, 10_000], "seven_day": [0, 3, 6, 10, 15, 100]}
