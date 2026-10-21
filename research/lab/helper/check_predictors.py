@@ -22,7 +22,9 @@ from lab_history import History  # noqa: E402
 from lab_store import Store  # noqa: E402
 
 PAIRS = {"lab-cost-decay-30m": "tokc-decay-30m", "lab-cost-rate-30m": "tokc-rate-30m-cal",
-         "lab-cost-rate-1d": "tokc-rate-1d-cal"}
+         "lab-cost-rate-1d": "tokc-rate-1d-cal",
+         "lab-timestral-5m": "fm-timestral-5m-6h_3d", "lab-timestral-28m": "fm-timestral-28m-6h_3d",
+         "lab-timestral-123m": "fm-timestral-123m-6h_3d", "lab-timestral-209m": "fm-timestral-209m-1d_1w"}
 
 
 def load(name):
@@ -35,10 +37,11 @@ def load(name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=400)
+    ap.add_argument("--only", default="")
     a = ap.parse_args()
     store = Store()
     c = lab.cases()
-    mods = {pid: load(pid.replace("-", "_")) for pid in PAIRS}
+    mods = {pid: load(pid.replace("-", "_")) for pid in PAIRS if a.only in pid}
     for pid, m in mods.items():
         window = m.WINDOWS[0]
         g = c[c["window"] == window].sort_values("t_cut")

@@ -32,7 +32,7 @@ start() {
         return 1
     fi
     mkdir -p "$LOG_DIR"
-    (cd "$HELPER_DIR" && nohup uv run server.py --port "$PORT" --pidfile "$PIDFILE" >>"$LOG" 2>&1 &)
+    (cd "$HELPER_DIR" && nohup ${LAB_HELPER_PYTHON:+env} ${LAB_HELPER_PYTHON:-uv run} server.py --port "$PORT" --pidfile "$PIDFILE" >>"$LOG" 2>&1 &)
     for _ in $(seq 1 50); do
         if healthy; then
             echo "lab helper up on http://127.0.0.1:$PORT (pid $(cat "$PIDFILE" 2>/dev/null || echo '?')), log $LOG"
