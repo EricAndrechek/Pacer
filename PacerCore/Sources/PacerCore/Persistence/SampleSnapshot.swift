@@ -67,17 +67,14 @@ public struct SampleSnapshot: Sendable {
     /// Project every stored sample. The caller decides *when* — see
     /// `SampleSnapshotCache`, which makes sure that's at most once a cycle.
     ///
-    /// Batched (#327): `enumerate` keeps one batch of managed objects alive at
-    /// a time where one `fetch` held every `TokenSample` until the last row
-    /// was copied, a cost that grows with history. Measured on a real
-    /// 744k-sample store the two peak alike (~1.6 GB footprint with the rows
-    /// held, in about the same time): what dominates is a floor any full walk
-    /// of the table reaches, not the objects. So this bounds the part that
-    /// grows, and doesn't pretend to remove the floor.
-    public static func fetch(from context: ModelContext) throws -> SampleSnapshot {
+    /// Paged (#337), not `enumerate`d: the "floor any full walk reaches" that
+    /// #327 measured at ~1.6 GB was `enumerate` itself, which peaked at 3.3 GB
+    /// on a 746k-row store; a whole rebuild through `ModelWalk` peaked at
+    /// 317 MB.
+    public static func fetch(from container: ModelContainer) throws -> SampleSnapshot {
         var rows: [Row] = []
         // A SQL COUNT, and it saves ~20 regrowth copies of a 750k-row array.
-        rows.reserveCapacity(try context.fetchCount(FetchDescriptor<TokenSample>()))
+        rows.reserveCapacity(try ModelContext(container).fetchCount(FetchDescriptor<TokenSample>()))
         var descriptor = FetchDescriptor<TokenSample>()
         // Every column `Row` reads, and nothing else — `dedupKey` and
         // `originalProjectPath` are the widest strings on the row and no
@@ -88,7 +85,7 @@ public struct SampleSnapshot: Sendable {
             \.inputTokens, \.outputTokens, \.cacheReadTokens, \.cacheCreation5mTokens,
             \.cacheCreation1hTokens, \.sourceCostUSD, \.accountId, \.speed, \.inferenceGeo,
         ]
-        try context.enumerate(descriptor, batchSize: 5_000) { sample in
+        try ModelWalk.forEach(descriptor, in: container) { sample in
             rows.append(Row(
                 date: sample.date,
                 model: sample.model,
@@ -134,13 +131,14 @@ public final class SampleSnapshotCache: @unchecked Sendable {
         self.container = container
     }
 
-    /// The cycle's snapshot, fetched on first call. Uses its own context: the
-    /// callers are separate actors, and a `ModelContext` is not `Sendable`.
+    /// The cycle's snapshot, fetched on first call. Through contexts of its
+    /// own: the callers are separate actors, and a `ModelContext` is not
+    /// `Sendable`.
     public func snapshot() throws -> SampleSnapshot {
         lock.lock()
         defer { lock.unlock() }
         if let cached { return cached }
-        let fresh = try SampleSnapshot.fetch(from: ModelContext(container))
+        let fresh = try SampleSnapshot.fetch(from: container)
         cached = fresh
         return fresh
     }

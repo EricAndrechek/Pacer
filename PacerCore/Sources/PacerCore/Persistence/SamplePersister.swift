@@ -919,10 +919,14 @@ public final class SamplePersister {
         var duplicated: Set<String> = []
         var keyOnly = FetchDescriptor<TokenSample>()
         keyOnly.propertiesToFetch = [\.dedupKey]
-        try context.enumerate(keyOnly, batchSize: 5_000) { sample in
+        // Read-only, so paged through throwaway contexts (#337); the turns
+        // this cycle hasn't saved yet are in the context, not the store.
+        func note(_ sample: TokenSample) {
             guard let key = sample.dedupKey, !key.isEmpty else { return }
             if !seen.insert(key).inserted { duplicated.insert(key) }
         }
+        try ModelWalk.forEach(keyOnly, in: context.container, note)
+        for case let sample as TokenSample in context.insertedModelsArray { note(sample) }
         guard !duplicated.isEmpty else { return 0 }
 
         // Pass 2: gather only the offending rows, keep the best of each.
@@ -1056,37 +1060,46 @@ public final class SamplePersister {
         // a cost-recompute version bump and every HourlyAggregate
         // would silently keep its pre-bump cost numbers.
         descriptor.propertiesToFetch = [\.date, \.model, \.projectPath, \.sessionId, \.sampledAt, \.localHour]
-        // Batched for the same reason the preload is: this walks the whole
-        // table, and materializing it all at once is the cost (see
-        // `preloadFromStore`).
-        try context.enumerate(descriptor, batchSize: 5_000) { sample in
-            // Backfill the stored hour while we're walking every row anyway.
-            // Rows written before the field existed carry -1 and would keep
-            // deriving — and drifting — otherwise.
-            if sample.localHour < 0 {
-                sample.localHour = Self.localHour(of: sample.sampledAt)
-            }
-            let pair = DateModelPair(date: sample.date, model: sample.model)
-            dirtyPairs.insert(pair)
-            // Pollute so any concurrent insert(_:) in the same cycle
-            // doesn't trip the recomputer's fast path. The whole reason
-            // this method runs is that the existing aggregate rows
-            // have wrong cost — incrementally ADDING to them would
-            // compound the error. Full recompute is mandatory.
-            pollutedDailyPairs.insert(pair)
-            let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
-            let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
-            dirtyProjectDates.insert(projectPair)
-            pollutedProjectPairs.insert(projectPair)
-            let hour = Self.localHour(of: sample)
-            let hourBucket = DateHourModelTriple(
-                date: sample.date, hour: hour, model: sample.model)
-            dirtyHourBuckets.insert(hourBucket)
-            pollutedHourBuckets.insert(hourBucket)
-            if let sid = sample.sessionId, !sid.isEmpty {
-                dirtySessionIds.insert(sid)
-                polluteSession(sid, .all)
-            }
+        // Paged through throwaway contexts, for the same reason the preload
+        // is (#337): marking only reads. The turns this cycle hasn't saved
+        // yet aren't in the store, so they are marked from the context.
+        try ModelWalk.forEach(descriptor, in: context.container) { markForRebuild($0) }
+        for case let sample as TokenSample in context.insertedModelsArray { markForRebuild(sample) }
+
+        // Backfill the stored hour on rows written before the field existed:
+        // they carry -1 and would keep deriving — and drifting — otherwise.
+        // A write, so through the persister's own context; on a store that
+        // has been through this once there is nothing left to match.
+        var unstamped = FetchDescriptor<TokenSample>(predicate: #Predicate { $0.localHour < 0 })
+        unstamped.propertiesToFetch = [\.sampledAt, \.localHour]
+        try context.enumerate(unstamped, batchSize: 5_000) { sample in
+            sample.localHour = Self.localHour(of: sample.sampledAt)
+        }
+    }
+
+    /// Mark every bucket `sample` feeds dirty AND polluted — see
+    /// `markEverySampleDirty`.
+    private func markForRebuild(_ sample: TokenSample) {
+        let pair = DateModelPair(date: sample.date, model: sample.model)
+        dirtyPairs.insert(pair)
+        // Pollute so any concurrent insert(_:) in the same cycle
+        // doesn't trip the recomputer's fast path. The whole reason
+        // this method runs is that the existing aggregate rows
+        // have wrong cost — incrementally ADDING to them would
+        // compound the error. Full recompute is mandatory.
+        pollutedDailyPairs.insert(pair)
+        let path = sample.projectPath ?? ProjectDailyAggregate.unknownProjectPath
+        let projectPair = ProjectDatePair(projectPath: path, date: sample.date)
+        dirtyProjectDates.insert(projectPair)
+        pollutedProjectPairs.insert(projectPair)
+        let hour = Self.localHour(of: sample)
+        let hourBucket = DateHourModelTriple(
+            date: sample.date, hour: hour, model: sample.model)
+        dirtyHourBuckets.insert(hourBucket)
+        pollutedHourBuckets.insert(hourBucket)
+        if let sid = sample.sessionId, !sid.isEmpty {
+            dirtySessionIds.insert(sid)
+            polluteSession(sid, .all)
         }
     }
 
@@ -1270,8 +1283,10 @@ public final class SamplePersister {
         // profiled on a real 189k-row store that was ~500 MB resident at
         // idle, for objects nothing ever reads again.
         //
-        // A scratch context frees the lot when it goes out of scope.
-        let scratchContext = ModelContext(context.container)
+        // A scratch context frees the lot when it goes out of scope — and
+        // `ModelWalk` takes a fresh one per page, because a single context
+        // `enumerate`d over the table still peaked at 3.3 GB on a 746k-row
+        // store; paged, a whole rebuild peaked at 317 MB (#337).
         var samplePairs: Set<DateModelPair> = []
         var sampleProjectPairs: Set<ProjectDatePair> = []
         var sampleHourBuckets: Set<DateHourModelTriple> = []
@@ -1281,12 +1296,12 @@ public final class SamplePersister {
         // becomes the index watermark.
         var maxSampledAt = Date(timeIntervalSince1970: 0)
         let tWalk = Date()
-        // `enumerate`, not `fetch`. Instrumented on a real 189k-row store, the
+        // Paged, not one `fetch`. Instrumented on a real 189k-row store, the
         // eager fetch was **11,564 ms of a 12,545 ms startup** — pure
         // materialization; the loop below is only 853 ms of it and the
-        // aggregate-gap queries 128 ms. Batching drains each chunk before
-        // pulling the next, so the whole table never exists as objects at once.
-        try scratchContext.enumerate(sampleDescriptor, batchSize: 5_000) { sample in
+        // aggregate-gap queries 128 ms. Each page is released before the next
+        // is pulled, so the whole table never exists as objects at once.
+        try ModelWalk.forEach(sampleDescriptor, in: context.container) { sample in
             rowCount += 1
             if sample.sampledAt > maxSampledAt { maxSampledAt = sample.sampledAt }
             if let key = sample.dedupKey {

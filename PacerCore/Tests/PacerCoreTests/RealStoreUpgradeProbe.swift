@@ -82,9 +82,10 @@ struct RealStoreUpgradeProbe {
 
         let opened = Date()
         let container = try PacerStore.makeModelContainer(at: storeURL)
-        // Token sums only, through a slim fetch: whatever this walk leaves
-        // resident would otherwise count against the cycle measured below.
-        let before = try Self.tokenSums(ModelContext(container))
+        // Token sums only, through a slim paged fetch: whatever this walk
+        // leaves resident would otherwise count against the cycle measured
+        // below (an `enumerate` here left gigabytes, #337).
+        let before = try Self.tokenSums(container)
         log(String(format: "opened copy (migration applied) in %.1f s", Date().timeIntervalSince(opened)))
         log("before  rows=\(before.rows) tokens=\(before.tokens)")
         if env["PACER_UPGRADE_PROBE_FORCE_REBUILD"] != nil {
@@ -326,16 +327,28 @@ struct RealStoreUpgradeProbe {
     }
 
     @ScanActor
-    static func tokenSums(_ context: ModelContext) throws -> (rows: Int, tokens: [Int64]) {
+    static func tokenSums(_ container: ModelContainer) throws -> (rows: Int, tokens: [Int64]) {
         var rows = 0
         var tokens = [Int64](repeating: 0, count: 5)
         var d = FetchDescriptor<TokenSample>()
         d.propertiesToFetch = [\.inputTokens, \.outputTokens, \.cacheReadTokens,
                                \.cacheCreation5mTokens, \.cacheCreation1hTokens]
-        try context.enumerate(d, batchSize: 10_000) { s in
-            rows += 1
-            tokens[0] += s.inputTokens; tokens[1] += s.outputTokens; tokens[2] += s.cacheReadTokens
-            tokens[3] += s.cacheCreation5mTokens; tokens[4] += s.cacheCreation1hTokens
+        // Pages through throwaway contexts, written out here rather than
+        // through `ModelWalk` so this file builds against older trees too.
+        d.fetchLimit = 10_000
+        var offset = 0
+        while true {
+            d.fetchOffset = offset
+            let page = try autoreleasepool { try ModelContext(container).fetch(d).map {
+                [$0.inputTokens, $0.outputTokens, $0.cacheReadTokens,
+                 $0.cacheCreation5mTokens, $0.cacheCreation1hTokens]
+            } }
+            for t in page {
+                rows += 1
+                for i in 0..<5 { tokens[i] += t[i] }
+            }
+            offset += page.count
+            if page.count < 10_000 { break }
         }
         return (rows, tokens)
     }

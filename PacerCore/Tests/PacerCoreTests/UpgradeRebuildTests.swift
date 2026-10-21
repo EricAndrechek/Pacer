@@ -55,7 +55,7 @@ import Testing
         try persister.flush()
         try context.save()
 
-        let snapshot = try SampleSnapshot.fetch(from: ModelContext(c))
+        let snapshot = try SampleSnapshot.fetch(from: c)
         let whole = try ModelContext(c).fetch(FetchDescriptor<TokenSample>())
         #expect(snapshot.rows.count == 12_345)
         #expect(snapshot.rows.count == whole.count)
