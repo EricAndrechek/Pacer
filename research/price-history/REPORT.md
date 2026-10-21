@@ -6,6 +6,18 @@ Sources: LiteLLM `159b5b2f72`, models.dev `a5f177c78b`. Generated 2026-10-21T14:
 
 Models marked *(range start)* were already present in the oldest commit examined (2025-01-01 for LiteLLM; the first commit touching the models.dev directory), so their true first-seen date is earlier or unknown.
 
+## Audit corrections to the curated file
+
+An independent audit against Anthropic's release notes and pricing-page snapshots corrected `build_curated.py` where the catalogs below were wrong or silent. The catalog periods further down are unchanged; where they disagree with this list, this list wins.
+
+- **Sonnet 5.5 cache reads were $0.20 (0.1x) from launch, 2026-09-28, until 2026-10-07, then $0.10 (0.05x).** Release notes, Oct 7: "lowered the price of prompt cache reads on Claude Sonnet 5.5 from $0.20 USD to $0.10 USD". Wayback snapshots of the pricing page show $0.20 on 2026-09-28, 09-30, 10-02 and 10-06 and $0.10 on 10-08. Both catalogs were right; an earlier version of the curated file ("0.05x throughout") was wrong. Every other Sonnet 5.5 rate is unchanged.
+- **Opus 4.7 fast mode** (6x) ran 2026-05-12 to 2026-07-24 (release notes: supported May 12, deprecated Jun 25, removed Jul 24), not the catalogs' 2026-04-16 to 2026-08-26.
+- **Opus 4.6 fast mode** (6x) ran 2026-02-07 to 2026-06-29. At launch a fast request over 200k prompt tokens was $60/$225; that premium was dropped between 2026-02-18 and 2026-02-24 (2026-02-21 is used; the exact day is uncertain). Claude Code's fast-mode doc advertised a 50% plan discount until 2026-02-16; the API pricing pages never showed it, so it is recorded in a note and not applied.
+- **Long-context tiers**: the Sonnet 4.5 and Sonnet 4 1M beta, and so the over-200k tier, was retired 2026-04-30. Sonnet 4's tier starts 2025-08-12, when its beta began.
+- **Mythos Preview** is $25/$125 from 2026-04-07 (https://www.anthropic.com/glasswing), with cache rates derived by the standard multipliers. It supersedes LiteLLM's $10/$50 row below.
+- **1h cache write** only exists from 2025-05-22; the 1h rate on 3.5 Haiku, 3.5 Sonnet and 3.7 Sonnet is unreachable before then.
+- **Retirements**: 3.5 Sonnet 2025-10-28; 3.7 Sonnet and 3.5 Haiku (API) 2026-02-19; Opus 4 and Sonnet 4 2026-06-15; Opus 4.1 2026-08-05.
+
 ## claude-2
 
 - LiteLLM first seen: 2025-01-03 *(range start)* (keys: claude-2)

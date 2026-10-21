@@ -53,12 +53,89 @@ struct CuratedPriceHistoryTests {
         #expect(cost("claude-sonnet-5", "2026-07-01", Self.mtok).flags.isEmpty)
     }
 
-    @Test func sonnet55ReadsAtFivePercentOfInputFromLaunch() {
-        for date in ["2026-09-28", "2026-09-30", "2026-10-06", "2026-10-21"] {
-            let read = cost("claude-sonnet-5-5", date, Self.mtokRead).total
-            let input = cost("claude-sonnet-5-5", date, Self.mtok).total
-            #expect(abs(read - 0.05 * input) < 1e-12, "\(date)")
-            #expect(abs(read - 0.10) < 1e-9, "\(date)")
+    /// The release notes (Oct 7): "lowered the price of prompt cache reads on
+    /// Claude Sonnet 5.5 from $0.20 to $0.10". An earlier curated file had 0.05x
+    /// throughout and was wrong for the first nine days.
+    @Test func sonnet55CacheReadWas20CentsUntilOct7ThenTen() {
+        for date in ["2026-09-28", "2026-10-01", "2026-10-06"] {
+            #expect(abs(cost("claude-sonnet-5-5", date, Self.mtokRead).total - 0.20) < 1e-9, "\(date)")
+        }
+        for date in ["2026-10-07", "2026-10-10", "2026-10-21"] {
+            #expect(abs(cost("claude-sonnet-5-5", date, Self.mtokRead).total - 0.10) < 1e-9, "\(date)")
+        }
+        // Nothing else moved: $2 in, $10 out, $2.50 / $4 writes, before and after.
+        for date in ["2026-10-01", "2026-10-10"] {
+            #expect(abs(cost("claude-sonnet-5-5", date, Self.mtok).total - 2) < 1e-9)
+            #expect(abs(cost("claude-sonnet-5-5", date, Self.mtokOut).total - 10) < 1e-9)
+            #expect(abs(cost("claude-sonnet-5-5", date, TokenBreakdown(cacheCreation5mTokens: 1_000_000)).total - 2.5) < 1e-9)
+            #expect(abs(cost("claude-sonnet-5-5", date, TokenBreakdown(cacheCreation1hTokens: 1_000_000)).total - 4) < 1e-9)
+        }
+    }
+
+    @Test func opus47FastModeRanMay12ToJul24() {
+        #expect(abs(cost("claude-opus-4-7", "2026-06-01", Self.mtok, speed: .fast).total - 30) < 1e-9)
+        #expect(abs(cost("claude-opus-4-7", "2026-05-12", Self.mtokOut, speed: .fast).total - 150) < 1e-9)
+        for date in ["2026-04-20", "2026-05-11", "2026-07-24", "2026-08-01"] {
+            #expect(cost("claude-opus-4-7", date, Self.mtok, speed: .fast).flags.contains(.unpricedPremium), "\(date)")
+        }
+        #expect(abs(cost("claude-opus-4-7", "2026-08-01", Self.mtok).total - 5) < 1e-9)
+    }
+
+    @Test func opus46FastModeRanFeb7ToJun29WithAnOver200kPremiumAtLaunch() {
+        let long = TokenBreakdown(inputTokens: 250_000)
+        // Not yet available / removed.
+        #expect(cost("claude-opus-4-6", "2026-02-06", Self.mtok, speed: .fast).flags.contains(.unpricedPremium))
+        #expect(cost("claude-opus-4-6", "2026-06-29", Self.mtok, speed: .fast).flags.contains(.unpricedPremium))
+        #expect(!cost("claude-opus-4-6", "2026-06-28", Self.mtok, speed: .fast).flags.contains(.unpricedPremium))
+        #expect(abs(cost("claude-opus-4-6", "2026-06-29", Self.mtok).total - 5) < 1e-9)
+        // Launch: $30/$150, and $60/$225 over 200k.
+        #expect(abs(cost("claude-opus-4-6", "2026-02-10", TokenBreakdown(inputTokens: 100_000), speed: .fast).total - 3) < 1e-9)
+        #expect(abs(cost("claude-opus-4-6", "2026-02-10", Self.mtokOut, speed: .fast).total - 150) < 1e-9)
+        #expect(abs(cost("claude-opus-4-6", "2026-02-10", long, speed: .fast).total - 250_000 * 60e-6) < 1e-9)
+        #expect(abs(cost("claude-opus-4-6", "2026-02-10", TokenBreakdown(inputTokens: 100, outputTokens: 1_000_000, cacheReadTokens: 250_000), speed: .fast).total
+                    - (100 * 60e-6 + 225 + 250_000 * 6e-6)) < 1e-9)
+        // Premium dropped: over 200k is $30 (not 6x the still-premium standard tier).
+        #expect(abs(cost("claude-opus-4-6", "2026-03-01", long, speed: .fast).total - 250_000 * 30e-6) < 1e-9)
+        #expect(abs(cost("claude-opus-4-6", "2026-03-01", long).total - 250_000 * 10e-6) < 1e-9)
+        // Small prompts are not caught by the upper-tier fast record.
+        #expect(abs(cost("claude-opus-4-6", "2026-02-10", TokenBreakdown(inputTokens: 1000), speed: .fast).total - 1000 * 30e-6) < 1e-9)
+        // After the premium window: plain 6x.
+        #expect(abs(cost("claude-opus-4-6", "2026-05-01", long, speed: .fast).total - 250_000 * 30e-6) < 1e-9)
+    }
+
+    @Test func sonnet4LongContextTierRanItsBetaOnly() {
+        let long = TokenBreakdown(inputTokens: 250_000)
+        // Sonnet 4: 1M beta from 2025-08-12 to 2026-04-30.
+        #expect(abs(cost("claude-sonnet-4", "2025-07-01", long).total - 250_000 * 3e-6) < 1e-9)
+        #expect(abs(cost("claude-sonnet-4", "2025-08-12", long).total - 250_000 * 6e-6) < 1e-9)
+        #expect(abs(cost("claude-sonnet-4", "2026-04-29", long).total - 250_000 * 6e-6) < 1e-9)
+        #expect(abs(cost("claude-sonnet-4", "2026-05-01", long).total - 250_000 * 3e-6) < 1e-9)
+        // Sonnet 4.5: premium ended 2026-04-30 too.
+        #expect(abs(cost("claude-sonnet-4-5", "2026-04-29", long).total - 250_000 * 6e-6) < 1e-9)
+        #expect(abs(cost("claude-sonnet-4-5", "2026-05-01", long).total - 250_000 * 3e-6) < 1e-9)
+    }
+
+    @Test func mythosPreviewIs25And125WithDerivedCacheRates() {
+        #expect(abs(cost("claude-mythos-preview", "2026-04-07", Self.mtok).total - 25) < 1e-9)
+        #expect(abs(cost("claude-mythos-preview", "2026-05-01", Self.mtokOut).total - 125) < 1e-9)
+        #expect(abs(cost("claude-mythos-preview", "2026-05-01", TokenBreakdown(cacheCreation5mTokens: 1_000_000)).total - 31.25) < 1e-9)
+        #expect(abs(cost("claude-mythos-preview", "2026-05-01", TokenBreakdown(cacheCreation1hTokens: 1_000_000)).total - 50) < 1e-9)
+        #expect(abs(cost("claude-mythos-preview", "2026-05-01", Self.mtokRead).total - 2.5) < 1e-9)
+        let r = Self.curated.records.first { $0.key.model == "claude-mythos-preview" }!
+        #expect(r.note?.contains("DERIVED") == true)
+        #expect(r.sourceURL == "https://www.anthropic.com/glasswing")
+    }
+
+    @Test func retirementsAndOneHourWritesAreRecorded() {
+        func rec(_ m: String) -> PriceRecordValue { Self.curated.records.first { $0.key.model == m && $0.tierAbovePromptTokens == 0 }! }
+        #expect(rec("claude-3-5-sonnet").effectiveTo == Self.day("2025-10-28"))
+        #expect(rec("claude-3-7-sonnet").effectiveTo == Self.day("2026-02-19"))
+        #expect(rec("claude-3-5-haiku").note?.contains("2026-02-19") == true)
+        #expect(rec("claude-opus-4").note?.contains("2026-06-15") == true)
+        #expect(rec("claude-sonnet-4").note?.contains("2026-06-15") == true)
+        #expect(rec("claude-opus-4-1").note?.contains("2026-08-05") == true)
+        for m in ["claude-3-5-haiku", "claude-3-5-sonnet", "claude-3-7-sonnet"] {
+            #expect(rec(m).note?.contains("2025-05-22") == true, "\(m)")
         }
     }
 
