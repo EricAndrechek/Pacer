@@ -269,6 +269,14 @@ if [ "$DRY" = 0 ]; then
   echo $$ >"$PIDFILE"
   say "start${WHY:+ ($WHY)}: switch at the safe limit - ${EARLY}; a target needs ${BRIDGE_MIN_MINUTES} min of the active burn (at least ${BRIDGE_MIN_PTS} points) below its own switch point; expiring room first (EXPIRE_WINDOW=${EXPIRE_WINDOW}s, at least ${EXPIRE_MIN_PTS} points); WEEK_MAX=$WEEK_MAX STAGGER=${STAGGER}s, accounts from cswap, exclude [${EXCLUDE}], reserve [${RESERVE_SLOT:-none}]"
 fi
+# A missing reading for the active account is normal for a loop or two after a
+# switch (cswap reads the new login); only a gap of GAP_WARN_SECS is worth a WARN.
+GAP_WARN_SECS=300; missing_since=0
+# gap_warn_due NOW: track the first-missing time; true once it has lasted long enough.
+gap_warn_due() {
+  [ "$missing_since" = 0 ] && missing_since=$1
+  [ "$DRY" = 1 ] || [ $(( $1 - missing_since )) -ge "$GAP_WARN_SECS" ]
+}
 last_status=0; hold_since=0; hold_said=0; hold_burn=0; rsv_err=0
 declare -A PREV_STAT=() LEXP_SAID=() BAD_SINCE=() BAD_SAID=()
 while :; do
@@ -389,8 +397,9 @@ while :; do
 
   mine=$(eff5 "$actid"); mywk=$(eff7 "$actid"); myleft=$(left5 "$actid"); at=$(switch_at "$actid")
   if [ "$mine" = - ] || [ "$mywk" = - ]; then
-    say "WARN no reading for the active account $act; holding"; [ "$DRY" = 1 ] && exit 1; sleep 60; continue
+    gap_warn_due "$now" && say "WARN no reading for the active account $act; holding"; [ "$DRY" = 1 ] && exit 1; sleep 60; continue
   fi
+  missing_since=0
   # The active's own room is about to be lost at its reset: spending it beats
   # moving away (blocks the expiring and stagger rules, not the limit ones).
   myexp=0
@@ -424,6 +433,7 @@ while :; do
       # Use it or lose it: a running window resetting soon, with room worth a
       # switch, resetting before the active's own.
       if [ "$l5" != - ] && [ "$l5" -le "$EXPIRE_WINDOW" ] && [ "$room" -ge "$xneed" ] \
+         && [ $(( burn * l5 )) -ge $(( EXPIRE_MIN_PTS * 3600 )) ] \
          && { [ "$myleft" = - ] || [ "$l5" -lt "$myleft" ]; }; then
         if [ -z "$exp" ] || [ "$k" -lt "$expkey" ]; then exp=$s; expkey=$k; expv=$v; exproom=$room; expleft=$l5; fi
       fi

@@ -103,6 +103,10 @@ t "4 expiring: 1 at 70 resets 25m" 'WOULD SWITCH → 1 .*\[expiring: 1 has 23 po
   3 "1:70:25:40:ok 3:30:240:77:ok $SPENT"
 t "5 expiring, 1 at 88 (room 5): no" '^[0-9:]{8} no switch: 3 at 30%' \
   3 "1:88:25:40:ok 3:30:240:77:ok $SPENT"
+BURN=2 t "5e expiring, 42 pts in 44m at 2%/h: unspendable, no" '^[0-9:]{8} no switch: 3 at 30%.*best target 1 at 51%' \
+  3 "1:51:44:40:ok 3:30:240:77:ok $SPENT"
+BURN=30 t "5f expiring, 42 pts in 44m at 30%/h: go" 'WOULD SWITCH → 1 .*\[expiring: 1 has 42 points' \
+  3 "1:51:44:40:ok 3:30:240:77:ok $SPENT"
 BURN=12 t "5b expiring floor: room 7 < 8 pts: no" '^[0-9:]{8} no switch: 3 at 30%.*best target 1 at 86% \(room 7' \
   3 "1:86:25:40:ok 3:30:240:77:ok $SPENT"
 BURN=60 t "5c expiring burn bar: room 18 < 20: no" '^[0-9:]{8} no switch: 3 at 30%.*best target none' \
@@ -165,6 +169,14 @@ t "10k near the limit, no target: early HOLD" '^[0-9:]{8} HOLD 1 at 91% \(switch
   1 "1:91:26:63:ok 3:89:180:77:ok $SPENT"
 t "10l nothing to do: no switch" '^[0-9:]{8} no switch: 1 at 50% < switch point 93%.*best target 3 at 20%' \
   1 "1:50:200:30:ok 3:20:250:40:ok $SPENT"
+
+# --- the post-switch reading gap: WARN only after GAP_WARN_SECS (unit check of the helper;
+# a dry pass holds no state, so the loop itself cannot be driven twice)
+gw=$(bash -c 'DRY=0; '"$(sed -n '/^GAP_WARN_SECS=/p;/^gap_warn_due()/,/^}/p' "$ROT")"'
+  r=""; gap_warn_due 1000 && r+=A; gap_warn_due 1200 && r+=B; gap_warn_due 1300 && r+=C
+  missing_since=0; gap_warn_due 2000 && r+=D; echo "[$r]"')
+if [ "$gw" = "[C]" ]; then pass=$(( pass + 1 )); printf 'PASS  %-42s\n' "G1 WARN only after 300 s missing"
+else fail=$(( fail + 1 )); printf 'FAIL  %-42s got %s\n' "G1 WARN only after 300 s missing" "$gw"; fi
 
 # --- ping-pong guard (state from the last switch) ----------------------------
 PP="1:95:26:63:ok 3:50:120:50:ok $SPENT"

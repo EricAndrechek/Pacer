@@ -62,7 +62,7 @@ the controller would bridge onto a sliver again. With no burn from Pacer,
 |---|---|---|
 | limit | active 5h at its switch point and some target meets the bar | the best-ranked target. There is no "GAP below the active" test: any target with the bar's room beats pausing every session, a nearly full one bridges, and this rule or stagger brings the login back later |
 | 7-day | active 7d >= its WEEK_MAX | the best-ranked target |
-| expiring | another account's running 5h window resets within `EXPIRE_WINDOW`, before the active's own, and has room for the bar (at least `EXPIRE_MIN_PTS`) | that account: use it or lose it. Blocked while the active's own room is about to expire first |
+| expiring | another account's running 5h window resets within `EXPIRE_WINDOW`, before the active's own, and has room for the bar (at least `EXPIRE_MIN_PTS`), **and the room is spendable**: burn x minutes to its reset / 60 >= `EXPIRE_MIN_PTS` | that account: use it or lose it. Blocked while the active's own room is about to expire first |
 | stagger | active window has <= `STAGGER` left and another account is idle (5h at 0%) | that idle account, soonest 7d reset first |
 | reserve | **off** unless `RESERVE_SLOT` is set: active at its limit and nothing else qualifies | the reserve, up to `RESERVE_WEEK_MAX`; past that, one `ERROR` line and the owner decides |
 | hold | near/at a limit (within 3 points of the switch point) and **nothing qualifies** | stays; one `HOLD` line per episode, a quiet `holding:` every 30 min, `hold over` when it ends |
@@ -111,7 +111,7 @@ still start it as `watch.sh 150 room` by hand.
 | `EXTERNAL: active A → B` | someone else switched | nothing; the controller adopted it |
 | `stuck:` lines | a main session stopped on a usage limit | if there is room now, nudge it; else wait for `hold over` |
 | `ERROR …` | a switch failed, or the reserve hit its cap | `cswap status`; retry by hand only onto real room; reserve cap -> the owner |
-| `WARN …` | readings failed | `cswap list` by hand, then `rotate.sh status` |
+| `WARN …` | readings failed (for the active account: only after 300 s of no reading; shorter gaps right after a switch are normal and just hold) | `cswap list` by hand, then `rotate.sh status` |
 | `controller NOT running` | it died | `rotate.sh start "restart after …"`, read `state/rotate.out` |
 | `feedback:` lines | an agent ran `pacer feedback` (a Pacer bug or missing flag) | reproduce, fix in a Pacer branch, reply to the reporter if it's a live session |
 | `heartbeat` | nothing happened for the heartbeat | `burn.py 60`; message any new heavy waste pattern; relaunch |
