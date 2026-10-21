@@ -2753,16 +2753,19 @@ public final class ScanCoordinator {
         aliases: [String: String],
         sink: InsertSink
     ) throws -> JSONLScanner.ScanResult {
-        let imported = try importer.importAll(roots: roots, aliases: aliases)
-        for entry in imported.entries { sink.consume(entry) }
+        var imported = try importer.importAll(roots: roots, aliases: aliases)
+        let entryCount = imported.entries.count
+        // Handed over whole: copied entry by entry, the sink held a second
+        // array of every turn in history next to the importer's (#337).
+        sink.adopt(&imported.entries)
         log(String(format: "bulk import: %d entries from %d files in %.1fs",
-                   imported.entries.count, imported.fileMarks.count, imported.seconds))
+                   entryCount, imported.fileMarks.count, imported.seconds))
         return JSONLScanner.ScanResult(
             progress: JSONLScanner.ScanProgress(
                 filesScanned: imported.fileMarks.count,
                 filesSkipped: 0,
-                entriesParsed: imported.entries.count,
-                entriesAccepted: imported.entries.count,
+                entriesParsed: entryCount,
+                entriesAccepted: entryCount,
                 // The importer deduplicates in SQL, so whatever it dropped is
                 // already gone before we see it — reporting a number here
                 // would be inventing one.
@@ -3180,17 +3183,36 @@ private final class InsertSink: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Take a whole batch — the bulk importer's, every turn in history —
+    /// without copying it; `entries` is left empty.
+    func adopt(_ entries: inout [ParsedUsageEntry]) {
+        lock.lock()
+        if collected.isEmpty {
+            swap(&collected, &entries)
+        } else {
+            collected.append(contentsOf: entries)
+            entries = []
+        }
+        lock.unlock()
+    }
+
     /// MainActor pass that inserts every collected entry into the
     /// persister and surfaces the first error. Called by ScanCoordinator
     /// once after `scanner.scan` returns. One MainActor pass instead of
     /// one-hop-per-entry is the entire point of this design.
+    ///
+    /// Each entry is released once it is in (#337): after a bulk import that
+    /// is hundreds of MB of parsed turns, and holding them all to the end
+    /// kept them resident while the inserts allocated alongside them.
+    /// Reversed first so `popLast` still inserts in arrival order.
     @ScanActor
     func flush() throws {
         lock.lock()
-        let toInsert = collected
-        collected.removeAll(keepingCapacity: true)
+        var toInsert: [ParsedUsageEntry] = []
+        swap(&toInsert, &collected)
         lock.unlock()
-        for entry in toInsert {
+        toInsert.reverse()
+        while let entry = toInsert.popLast() {
             do {
                 _ = try persister.insert(entry)
             } catch {

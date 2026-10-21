@@ -433,9 +433,14 @@ public final class SamplePersister {
     /// duplicate of a stored turn that carries pricing detail the stored
     /// row predates is applied to it, through the same rewrite an upgrade
     /// uses. Off for live cycles, where the first copy already carried it.
-    public var backfillsPricingDetail = false
-    /// Keys patched this lifetime, so a turn is patched at most once.
-    private var patchedKeys: Set<String> = []
+    public var backfillsPricingDetail = false {
+        // Only a full re-read patches, so its keys are spent when it ends.
+        didSet { if !backfillsPricingDetail { patchedKeys = [] } }
+    }
+    /// Keys patched during this re-read, so a turn is patched at most once.
+    /// Hashed, like `bestOutputByKey`: a `String` each kept the importer's
+    /// copy of every patched turn's key alive for the life of the app (#337).
+    private var patchedKeys: Set<DedupIndex.Key> = []
 
     /// Returns true if the entry was inserted, false if it was a
     /// duplicate. Marks `(date, model)` and `(projectPath, date)` dirty
@@ -456,7 +461,7 @@ public final class SamplePersister {
                     // partial one) carrying detail an old row lacks.
                     if backfillsPricingDetail, entry.carriesPricingDetail,
                        entry.breakdown.outputTokens == bestSoFar,
-                       pendingUpgrades[key] == nil, patchedKeys.insert(key).inserted {
+                       pendingUpgrades[key] == nil, patchedKeys.insert(hashed).inserted {
                         pendingUpgrades[key] = entry
                         stats.patchedPricingDetail += 1
                     }
