@@ -106,4 +106,10 @@ def forecast(size: str, history, t_cut: float, resets_at: float, context_steps: 
     burn = np.maximum(np.maximum.accumulate(qh - c_last), 0.0)
     cyc = history.cycle()
     used = cyc[-1].pct if cyc else 0.0
-    return used + float(burn[i50]), used + float(burn[i10]), used + float(burn[i90])
+    out = (used + float(burn[i50]), used + float(burn[i10]), used + float(burn[i90]))
+    # Kept for the next request: a live request also asks about recently
+    # completed cycles the precompute never saw, and running four sizes over
+    # them redone every refit overran the 1.2 s deadline each time.
+    if use_cache:
+        _precomputed()[cache_key(size, history.account, t_cut)] = list(out)
+    return out
