@@ -229,6 +229,15 @@ public actor JSONLWatcher {
         continuation?.yield(Date())
     }
 
+    /// Test hook: record changed paths as FSEvents would, without a
+    /// trigger. `.manual` mode only.
+    func noteChangedPathsForTesting(_ paths: [String]) {
+        guard case .manual = mode else { return }
+        pathsLock.lock()
+        changedPaths.formUnion(paths)
+        pathsLock.unlock()
+    }
+
     // MARK: - Live mode
 
     private func startLive(

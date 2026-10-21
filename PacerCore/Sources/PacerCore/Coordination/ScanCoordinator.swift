@@ -451,6 +451,15 @@ public final class ScanCoordinator {
     private var loginPassKeychainMoved = false
     private var loginPassSeenAt: Date?
     private var scanInFlight = false
+    /// Set for the startup cycle, which must walk every file — it is what
+    /// catches up on whatever changed while Pacer wasn't running — even
+    /// though the watcher is already running and may have heard a write.
+    private var walkEveryFileNextCycle = false
+    /// Increments on every `HistoryRebuildStatus` publish, so the main actor
+    /// applies them in order.
+    private var rebuildStatusGeneration: UInt64 = 0
+    /// This coordinator's key in `HistoryRebuildStatus`.
+    nonisolated let rebuildStatusSource = UUID()
     /// Long-lived persister so its in-memory dedup Set is built once.
     /// Lazily constructed on the first scan cycle so tests that never
     /// scan don't pay the preload cost.
@@ -853,25 +862,14 @@ public final class ScanCoordinator {
         } catch {
             log("startup: stale-cursor prune failed: \(error)")
         }
-        // Initial scan first, BEFORE we install the watcher. That way
-        // the first FSEvent doesn't race the historical scan and we
-        // can't double-process the same files.
-        do {
-            let report = try await runScanCycle()
-            log("startup: \(formatReport(report))")
-        } catch {
-            log("startup scan failed: \(error)")
-            sessionRollupCache.forgetAll()
-        }
-        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
-        // Apply whatever visibility state we already have at startup —
-        // a login-at-launch invocation has no window, so this widens
-        // the watcher's FSEvent latency immediately and saves wakeups
-        // until the user actually opens the dashboard.
-        let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
-        applyVisibilityCadence(visible: initialVisible)
-        installVisibilityObserver()
-
+        // The poller and the watcher start BEFORE the first cycle (#328).
+        // Neither needs it: the poller owns its own context and cadence, and
+        // the watcher only records which transcripts changed. Started after
+        // it, an upgrade's minutes-long first cycle stopped rate-limit
+        // sampling for its whole length — a gap in every pace chart, and no
+        // alert could fire. The poller goes first of all, ahead of the main
+        // thread hop below, which waits on a busy main thread at launch.
+        //
         // OAuth poller runs independently from the JSONL watcher loop.
         // Each subsystem owns its own cadence; if the network is down
         // the JSONL pipeline keeps working, and if the user has no
@@ -881,6 +879,20 @@ public final class ScanCoordinator {
             await oauthPoller.start()
             log("oauth poller started")
         }
+        // What the watcher hears during the first cycle can't double-count:
+        // that cycle walks every file whatever was heard
+        // (`walkEveryFileNextCycle`), its trigger waits in the one-deep
+        // buffer, and the cycle after resumes from the cursors this one
+        // saved — the persister rejects anything read twice by its key.
+        walkEveryFileNextCycle = true
+        await watcher.start(roots: resolvedRoots, extraPaths: extraWatchPaths)
+        // Apply whatever visibility state we already have at startup —
+        // a login-at-launch invocation has no window, so this widens
+        // the watcher's FSEvent latency immediately and saves wakeups
+        // until the user actually opens the dashboard.
+        let initialVisible = await MainActor.run { PacerWindowVisibility.shared.isMainWindowVisible }
+        applyVisibilityCadence(visible: initialVisible)
+        installVisibilityObserver()
         // A login switch is accepted by the next cycle, and the next cycle
         // waited for a transcript to change: ~40 s on a busy machine when it
         // was measured, up to the 5-minute backstop on a quiet one (#184).
@@ -888,8 +900,17 @@ public final class ScanCoordinator {
         signedInCredential.setOnAccountChange {
             Task { await watcher.requestScan() }
         }
-        // And the login itself, pushed rather than found (#192).
+        // And the login itself, pushed rather than found (#192). A change
+        // seen during the first cycle queues behind it (`followLoginChange`).
         startLoginWatcher()
+
+        do {
+            let report = try await runScanCycle()
+            log("startup: \(formatReport(report))")
+        } catch {
+            log("startup scan failed: \(error)")
+            sessionRollupCache.forgetAll()
+        }
 
         for await _ in stream {
             // Skip if a scan is already underway. The watcher fires
@@ -937,6 +958,8 @@ public final class ScanCoordinator {
     /// resolver says names the default login (`loginConfigRoot`).
     /// Test seam: the poller this coordinator owns.
     var oauthPollerForTesting: OAuthPoller? { oauthPoller }
+    /// Test seam: the watcher this coordinator owns.
+    var watcherForTesting: JSONLWatcher { watcher }
 
     private func trailRecorder() -> AccountTrailRecorder {
         if let accountTrailRecorder { return accountTrailRecorder }
@@ -1461,6 +1484,21 @@ public final class ScanCoordinator {
 
         let lastVersion = try fetchMeta(ClaudeCodeMetaKey.scanVersion)
         let isFullScan = (lastVersion != Self.currentScanVersion)
+        // A full re-read or a full rollup rebuild is minutes on a large
+        // history; say so while it runs (#328). Cleared however the cycle
+        // ends, so a failed one doesn't leave the pill saying it forever.
+        var rebuilding = false
+        func rebuildStep(_ step: HistoryRebuildStatus.Step?) {
+            guard rebuilding else { return }
+            rebuildStatusGeneration &+= 1
+            HistoryRebuildStatus.publish(step, source: rebuildStatusSource,
+                                         generation: rebuildStatusGeneration)
+        }
+        defer { rebuildStep(nil) }
+        if isFullScan {
+            rebuilding = true
+            rebuildStep(.preparing)
+        }
 
         // On a full re-scan we wipe all cursors so every JSONL is
         // read from offset 0. The hoisted persister still rejects
@@ -1643,6 +1681,10 @@ public final class ScanCoordinator {
             != Self.currentCostRecomputeVersion
         )
         if needsCostRebuild {
+            if !rebuilding {
+                rebuilding = true
+                rebuildStep(.preparing)
+            }
             try activePersister.markEverySampleDirty()
             log("integrity: cost recompute version bumped to \(Self.currentCostRecomputeVersion) — rebuilding every aggregate")
         }
@@ -1760,9 +1802,10 @@ public final class ScanCoordinator {
         // recent write would otherwise leave the other 700+ files
         // unscanned until their next individual FSEvent.
         var hintedPaths: Set<String>?
-        if isFullScan {
+        if isFullScan || walkEveryFileNextCycle {
             _ = watcher.consumeChangedPaths()  // drain anyway
             hintedPaths = nil
+            walkEveryFileNextCycle = false
         } else {
             let paths = watcher.consumeChangedPaths()
             hintedPaths = paths.isEmpty ? nil : paths
@@ -1782,6 +1825,7 @@ public final class ScanCoordinator {
         //
         // Incremental cycles never come here: they resume from byte offsets
         // and touch only what changed, which no bulk reader can match.
+        if isFullScan { rebuildStep(.readingTranscripts) }
         var bulkResult: JSONLScanner.ScanResult?
         if isFullScan, let importer = configuration.bulkImporter {
             do {
@@ -1830,6 +1874,7 @@ public final class ScanCoordinator {
             await SampleCostCache.reload()
         }
         if configuration.costMode != .display {
+            rebuildStep(.updatingPrices)
             try await reconcilePriceLedger(persister: activePersister)
         }
         try saveCursors(result.updatedCursors)
@@ -1918,6 +1963,7 @@ public final class ScanCoordinator {
         // rows the previous worker had just read. Built lazily, so a normal
         // incremental cycle — every worker on its fast path — never touches it.
         let sampleSnapshots = SampleSnapshotCache(container: container)
+        rebuildStep(.rebuildingDaily)
         let recomputeStats = try await recomputer.recompute(
             pairs: activePersister.dirtyPairs,
             pending: activePersister.pendingPairSamples,
@@ -1938,6 +1984,7 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
+        rebuildStep(.rebuildingHourly)
         let hourlyRecomputeStats = try await hourlyRecomputer.recompute(
             buckets: activePersister.dirtyHourBuckets,
             pending: activePersister.pendingHourSamples,
@@ -1964,6 +2011,7 @@ public final class ScanCoordinator {
             context: context,
             mode: configuration.costMode
         )
+        rebuildStep(.rebuildingProjects)
         let projectRecomputeStats = try await projectRecomputer.recompute(
             pairs: activePersister.dirtyProjectDates,
             pending: activePersister.pendingProjectSamples,
@@ -2007,6 +2055,7 @@ public final class ScanCoordinator {
             mode: configuration.costMode,
             cache: sessionRollupCache
         )
+        rebuildStep(.rebuildingSessions)
         let sessionRecomputeStats = try await sessionRecomputer.recompute(
             sessionIds: activePersister.dirtySessionIds,
             snapshots: sampleSnapshots,
