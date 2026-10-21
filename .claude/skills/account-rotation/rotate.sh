@@ -460,19 +460,31 @@ while :; do
     else
       rsv_err=0
     fi
+    # Don't pick a target the stagger rule would leave at once. A running window
+    # with more than EXPIRE_WINDOW but at most STAGGER left, while an idle
+    # account qualifies, means two switches (and two cache rewrites in every busy
+    # session) for one move (2026-10-21: 10:45Z to it, 10:51Z off it). Inside
+    # EXPIRE_WINDOW the stagger rule yields to its expiring room, so keep it.
+    pick=$best; pickv=${bestv:-}; pickroom=${bestroom:-}
+    if [ -n "$best" ] && [ -n "$idle" ] && [ "$idle" != "$best" ]; then
+      bl=$(left5 "${ID[$best]}")
+      if [ "$bl" != - ] && [ "$bl" -gt "$EXPIRE_WINDOW" ] && [ "$bl" -le "$STAGGER" ]; then
+        pick=$idle; pickv=$(eff5 "${ID[$idle]}"); pickroom=$(( $(switch_at "${ID[$idle]}") - pickv ))
+      fi
+    fi
     held=0
     # Limit: no "GAP below the active" test any more. Any target with room
     # for BRIDGE_MIN_MINUTES of burn beats pausing every session; a nearly full
     # one bridges, and this rule (or stagger) brings the login back later.
     if [ "$mine" -ge "$at" ] && [ -n "$best" ]; then
-      kind=limit; [ "$bestroom" -lt 20 ] && kind=bridge
-      switch_to "$best" "$kind: $act at ${mine}% (switch point ${at}%, 7d ${mywk}%, 5h resets in $(fmt_left "$myleft")), $best at ${bestv}% (room ${bestroom} ≥ ${need} for ${BRIDGE_MIN_MINUTES} min at ${burn}%/h, $(win_desc "${ID[$best]}"))"
+      kind=limit; [ "$pickroom" -lt 20 ] && kind=bridge
+      switch_to "$pick" "$kind: $act at ${mine}% (switch point ${at}%, 7d ${mywk}%, 5h resets in $(fmt_left "$myleft")), $pick at ${pickv}% (room ${pickroom} ≥ ${need} for ${BRIDGE_MIN_MINUTES} min at ${burn}%/h, $(win_desc "${ID[$pick]}"))"
     elif [ "$mine" -ge "$at" ] && [ -n "$rsv" ]; then
       switch_to "$rsv" "reserve: $act at ${mine}% and nothing else has room; $rsv at $(eff5 "${ID[$rsv]}")% (7d $(eff7 "${ID[$rsv]}")% of ${RESERVE_WEEK_MAX})"
     # The 7-day gets its own test: sharing the 5h rule's "GAP points lower"
     # blocked it whenever the active 5h was low, so a 7d could run out unseen.
     elif [ "$mywk" -ge "$(wkmax "$act")" ] && [ -n "$best" ]; then
-      switch_to "$best" "7-day: $act at ${mywk}% on its 7d, $best at ${bestv}% (room ${bestroom}, $(win_desc "${ID[$best]}"))"
+      switch_to "$pick" "7-day: $act at ${mywk}% on its 7d, $pick at ${pickv}% (room ${pickroom}, $(win_desc "${ID[$pick]}"))"
     elif [ -n "$exp" ] && [ "$myexp" = 0 ]; then
       switch_to "$exp" "expiring: $exp has ${exproom} points of room (at ${expv}%) that reset in $(fmt_left "$expleft"); $act at ${mine}% resets in $(fmt_left "$myleft")"
     elif [ -n "$idle" ] && [ "$myleft" != - ] && [ "$myleft" -le "$STAGGER" ] && [ "$myexp" = 0 ]; then

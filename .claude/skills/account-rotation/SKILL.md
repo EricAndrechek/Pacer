@@ -72,6 +72,12 @@ soonest is spent first: a running window ranks by its reset time, an idle
 account (whose room does not expire; using it starts a fresh 5 h window) ranks
 as now + 5 h. Ties go to the sooner 7d reset, then to the most 5h room.
 
+**No target the stagger rule would leave at once.** If the limit or 7-day rule's
+pick has a running window with more than `EXPIRE_WINDOW` but at most `STAGGER`
+left while an idle account qualifies, the idle account is taken instead: one
+switch, not two (two cache rewrites in every busy session). Inside
+`EXPIRE_WINDOW` the pick stays, because stagger yields to its expiring room.
+
 **Ping-pong guard.** Never go back to the slot just left within
 `MIN_SWITCH_GAP`, unless its 5h window has reset since or its use has fallen.
 The last switch is kept on disk, so a stop/start does not forget it.
