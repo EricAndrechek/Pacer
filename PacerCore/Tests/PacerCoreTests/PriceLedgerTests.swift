@@ -334,3 +334,42 @@ struct RollupCostComponentTests {
         #expect(try context.fetchCount(FetchDescriptor<PriceRecord>()) > 0)
     }
 }
+
+/// Splitting Claude Code's stored `costUSD` into the five parts (#340).
+@Suite("Stored cost split")
+struct StoredCostSplitTests {
+    static let t0 = Date(timeIntervalSince1970: 1_780_000_000)
+    static let tokens = TokenBreakdown(
+        inputTokens: 1_000, outputTokens: 10_000, cacheReadTokens: 1_000_000,
+        cacheCreation5mTokens: 20_000, cacheCreation1hTokens: 0)
+
+    @Test("display mode splits a stored cost by what each part costs, not by tokens")
+    func displayModeSplitsByPrice() {
+        let rates = PriceRates(input: 2e-6, output: 10e-6, cacheRead: 0.2e-6,
+                               cacheWrite5m: 2.5e-6, cacheWrite1h: 4e-6)
+        let ledger = PriceLedger(records: [PriceRecordValue(
+            key: CanonicalModelID(model: "claude-x"), rates: rates,
+            effectiveFrom: .distantPast, source: .curated)])
+        let cost = CostCalculator.sampleCost(
+            storedCostUSD: 1.0, model: "claude-x", sampledAt: Self.t0,
+            breakdown: Self.tokens, mode: .display, ledger: ledger)
+        // Ledger cost: input 0.002, output 0.1, reads 0.2, 5m 0.05 = 0.352.
+        let reads: Double = cost.components.cacheRead
+        let output: Double = cost.components.output
+        #expect(abs(cost.total - 1.0) < 1e-9)
+        #expect(abs(reads - 0.2 / 0.352) < 1e-9)
+        #expect(abs(output - 0.1 / 0.352) < 1e-9)
+    }
+
+    @Test("an unpriced model's stored cost is split at list-price ratios")
+    func unpricedFallsBackToListRatios() {
+        let parts = CostComponents.apportion(1.0, like: .zero, tokens: Self.tokens)
+        // Weights: input 1,000×1 + output 10,000×5 + reads 1,000,000×0.1
+        //          + 5m 20,000×1.25 = 176,000.
+        let reads: Double = parts.cacheRead
+        let output: Double = parts.output
+        #expect(abs(reads - 100_000.0 / 176_000.0) < 1e-9)
+        #expect(abs(output - 50_000.0 / 176_000.0) < 1e-9)
+        #expect(abs(parts.total - 1.0) < 1e-9)
+    }
+}

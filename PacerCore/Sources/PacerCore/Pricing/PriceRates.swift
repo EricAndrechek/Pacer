@@ -129,19 +129,22 @@ public struct CostComponents: Sendable, Hashable, Codable {
     /// across the categories, so the components still sum to it.
     ///
     /// Proportional to `weights` (the cost the ledger would have computed)
-    /// when those are non-zero; otherwise proportional to the token counts,
-    /// which is the only other information there is. A stored cost on a line
-    /// with no tokens at all lands on output, so it is never lost.
+    /// when those are non-zero. Otherwise (a model with no price) proportional
+    /// to the tokens at Anthropic's list-price ratios: input 1, output 5,
+    /// cache read 0.1, 5-minute write 1.25, 1-hour write 2. Raw token counts
+    /// would put nearly all of it on cache reads, the cheapest tokens. A
+    /// stored cost on a line with no tokens at all lands on output, so it is
+    /// never lost.
     public static func apportion(
         _ total: Double, like weights: CostComponents, tokens b: TokenBreakdown
     ) -> CostComponents {
         var basis = weights
         if basis.total <= 0 {
             basis = CostComponents(
-                input: Double(b.inputTokens), output: Double(b.outputTokens),
-                cacheRead: Double(b.cacheReadTokens),
-                cacheWrite5m: Double(b.cacheCreation5mTokens),
-                cacheWrite1h: Double(b.cacheCreation1hTokens))
+                input: Double(b.inputTokens), output: Double(b.outputTokens) * 5,
+                cacheRead: Double(b.cacheReadTokens) * 0.1,
+                cacheWrite5m: Double(b.cacheCreation5mTokens) * 1.25,
+                cacheWrite1h: Double(b.cacheCreation1hTokens) * 2)
         }
         let sum = basis.total
         guard sum > 0 else { return CostComponents(output: total) }

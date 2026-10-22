@@ -181,7 +181,12 @@ public final class ScanCoordinator {
     ///          rebuild also fills the global rollups' `pricedByRecordIds`
     ///          (#217), from which later price changes rebuild only what they
     ///          touch. One bump for all of it, so the store is rebuilt once.
-    public static let currentCostRecomputeVersion = "17"
+    /// - "18" — PR #340: a stored cost (Claude Code's `costUSD`) is split
+    ///          into the five parts by the ledger's own weights in `.display`
+    ///          mode too, as `.auto` already did, and an unpriced model's
+    ///          split uses list-price ratios rather than token counts. Only
+    ///          the per-part columns move; every total is unchanged.
+    public static let currentCostRecomputeVersion = "18"
 
     /// Generation of the duplicate-turn repair.
     ///
