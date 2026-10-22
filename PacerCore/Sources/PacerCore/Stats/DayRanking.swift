@@ -1,10 +1,24 @@
 import Foundation
 
 /// What History → Top days ranks by. The raw values are persisted by the
-/// card's sort preference, so they stay as they are.
+/// card's sort preference, so they stay as they are: `date`, `tokens` and
+/// `cost` were the first three, and every other case is the `UsageColumn`
+/// raw value of the column it sorts, so the card's table can sort by any of
+/// its columns and the choice is stored the same way.
 public enum TopDaysSort: String, CaseIterable, Identifiable, Sendable {
     case date, tokens, cost
+    case input, output, cacheRead, cacheWrite, cacheWrite5m, cacheWrite1h
     public var id: String { rawValue }
+
+    /// The table column this sort is. `date` is the label column.
+    public var column: UsageColumn {
+        self == .date ? .name : UsageColumn(rawValue: rawValue) ?? .cost
+    }
+
+    /// The sort for a table column: the label column is the date.
+    public init(column: UsageColumn) {
+        self = column == .name ? .date : TopDaysSort(rawValue: column.rawValue) ?? .cost
+    }
 }
 
 /// One day summed across every model.
@@ -27,6 +41,11 @@ public struct DayTotal: Sendable, Equatable, Identifiable {
 /// and on a store where cache reads and writes were ~98% of every token that
 /// put months-old days of heavy uncached input above the recent days that
 /// cost the most: the ranking left out almost everything it claimed to count.
+///
+/// The card shows the top 10 (or 100) of this ranking in the shared usage
+/// table, which sorts what it is given by the same column. The two orders
+/// have to agree, ties included, or the table would reshuffle the days this
+/// picked; `UsageTableTests` checks every column in both directions.
 public enum DayRanking {
 
     /// The rows folded to one total per date, in no particular order.
@@ -47,16 +66,24 @@ public enum DayRanking {
     public static func ranked(
         _ rows: [DailyRow], by sort: TopDaysSort, descending: Bool
     ) -> [DayTotal] {
-        let ascending = totals(rows).sorted { lhs, rhs in
-            switch sort {
-            case .date:
+        ranked(totals(rows), by: sort, descending: descending)
+    }
+
+    /// `ranked(_:by:descending:)` over days already folded.
+    public static func ranked(
+        _ days: [DayTotal], by sort: TopDaysSort, descending: Bool
+    ) -> [DayTotal] {
+        let column = sort.column
+        let ascending = days.sorted { lhs, rhs in
+            switch column {
+            case .name:
                 break
-            case .tokens:
-                let l: Int64 = lhs.tokens.all
-                let r: Int64 = rhs.tokens.all
-                if l != r { return l < r }
             case .cost:
                 if lhs.cost != rhs.cost { return lhs.cost < rhs.cost }
+            default:
+                let l: Int64 = column.tokenCount(of: lhs.tokens) ?? 0
+                let r: Int64 = column.tokenCount(of: rhs.tokens) ?? 0
+                if l != r { return l < r }
             }
             return lhs.date < rhs.date
         }

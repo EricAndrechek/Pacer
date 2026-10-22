@@ -42,8 +42,11 @@ struct ProjectsView: View {
     @AppStorage("pacer.projects.range", store: PacerSettings.store)
     private var rangeRaw: String = TimeRange.ninetyDays.rawValue
 
+    /// The table's sort column: a `UsageColumn` raw value, or "sessions" /
+    /// "lastActive". The shared table's column ids reuse the raw values the
+    /// old `ProjectSort` stored, so a stored sort carries over.
     @AppStorage(PacerSettings.Key.projectsSort, store: PacerSettings.store)
-    private var sortRaw: String = ProjectSort.cost.rawValue
+    private var sortRaw: String = UsageColumn.cost.rawValue
 
     @AppStorage("pacer.projects.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
@@ -88,8 +91,8 @@ struct ProjectsView: View {
     private var range: TimeRange {
         TimeRange(rawValue: rangeRaw) ?? .ninetyDays
     }
-    private var sort: ProjectSort {
-        ProjectSort(rawValue: sortRaw) ?? .cost
+    private var sort: PacerUsageSort {
+        PacerUsageSort(column: sortRaw, descending: sortDescending)
     }
     private var overviewMetric: ProjectMetric {
         ProjectMetric(rawValue: overviewMetricRaw) ?? .cost
@@ -108,7 +111,7 @@ struct ProjectsView: View {
         // bug #150 fixed, where a click only showed after something unrelated
         // redrew the page (#140; AGENTS.md, "SwiftUI state and data flow").
         let range = self.range, sort = self.sort, overviewMetric = self.overviewMetric
-        let descending = sortDescending, scopeAccountId = scope.accountId
+        let scopeAccountId = scope.accountId
         let searchText = page.searchText, collectionFilter = page.collectionFilter
         PageScaffold(
             "Projects",
@@ -119,13 +122,11 @@ struct ProjectsView: View {
                 range: range,
                 scopeAccountId: scopeAccountId,
                 sort: sort,
-                descending: descending,
+                onSort: { sortRaw = $0.column; sortDescending = $0.descending },
                 overviewMetric: overviewMetric,
                 searchText: searchText,
                 collectionFilter: collectionFilter,
                 rangeBinding: rangeBinding,
-                sortFieldBinding: sortFieldBinding,
-                sortDescendingBinding: $sortDescending,
                 overviewMetricBinding: overviewMetricBinding,
                 collectionFilterBinding: $page.collectionFilter,
                 onSelectProject: { path, displayName, since in
@@ -197,34 +198,8 @@ struct ProjectsView: View {
     private var rangeBinding: Binding<TimeRange> {
         Binding(get: { range }, set: { rangeRaw = $0.rawValue })
     }
-    private var sortFieldBinding: Binding<ProjectSort> {
-        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
-    }
     private var overviewMetricBinding: Binding<ProjectMetric> {
         Binding(get: { overviewMetric }, set: { overviewMetricRaw = $0.rawValue })
-    }
-}
-
-/// What column the Projects table sorts by. The direction is held in
-/// a separate `Bool` so users can sort ascending OR descending on any
-/// column — both bits are persisted independently.
-enum ProjectSort: String, CaseIterable, Identifiable {
-    case cost
-    case tokens
-    case sessions
-    case lastActive
-    case name
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .cost:       return "Cost"
-        case .tokens:     return "Tokens"
-        case .sessions:   return "Sessions"
-        case .lastActive: return "Last active"
-        case .name:       return "Project"
-        }
     }
 }
 
@@ -299,6 +274,9 @@ private struct ProjectsContent: View {
     /// bucket+sort pass. Debounced from search text to avoid recomputing
     /// on every individual character.
     @State private var cachedFilteredRows: [ProjectRow]?
+    /// `cachedFilteredRows` as the shared table's rows, built with it so a
+    /// body pass (a donut hover) does not rebuild them or their colours.
+    @State private var cachedTableRows: [PacerUsageRow<ProjectRow>]?
     @State private var debouncedSearch: String = ""
     @State private var searchDebounceTask: Task<Void, Never>?
     /// Candidate canonical paths for the "Merge into…" submenu. Used
@@ -316,15 +294,15 @@ private struct ProjectsContent: View {
 
     let rangeSince: Date?
     let searchText: String
-    let sort: ProjectSort
-    let descending: Bool
+    /// The table's sort. The table sorts the cached rows itself, so this is
+    /// not an input to the cache.
+    let sort: PacerUsageSort
+    let onSort: (PacerUsageSort) -> Void
     let overviewMetric: ProjectMetric
     /// Active collection scope — `""` = All projects.
     let collectionFilter: String
 
     let rangeBinding: Binding<TimeRange>
-    let sortFieldBinding: Binding<ProjectSort>
-    let sortDescendingBinding: Binding<Bool>
     let overviewMetricBinding: Binding<ProjectMetric>
     let collectionFilterBinding: Binding<String>
     /// Callback into the page-level modal navigator. Receives the
@@ -338,14 +316,12 @@ private struct ProjectsContent: View {
     init(
         range: TimeRange,
         scopeAccountId: String? = nil,
-        sort: ProjectSort,
-        descending: Bool,
+        sort: PacerUsageSort,
+        onSort: @escaping (PacerUsageSort) -> Void,
         overviewMetric: ProjectMetric,
         searchText: String,
         collectionFilter: String,
         rangeBinding: Binding<TimeRange>,
-        sortFieldBinding: Binding<ProjectSort>,
-        sortDescendingBinding: Binding<Bool>,
         overviewMetricBinding: Binding<ProjectMetric>,
         collectionFilterBinding: Binding<String>,
         onSelectProject: @escaping (_ path: String, _ displayName: String, _ since: Date?) -> Void,
@@ -371,12 +347,10 @@ private struct ProjectsContent: View {
         // field showing "pacer" over an unfiltered list.
         _debouncedSearch = State(initialValue: searchText)
         self.sort = sort
-        self.descending = descending
+        self.onSort = onSort
         self.overviewMetric = overviewMetric
         self.collectionFilter = collectionFilter
         self.rangeBinding = rangeBinding
-        self.sortFieldBinding = sortFieldBinding
-        self.sortDescendingBinding = sortDescendingBinding
         self.overviewMetricBinding = overviewMetricBinding
         self.collectionFilterBinding = collectionFilterBinding
         self.onSelectProject = onSelectProject
@@ -401,13 +375,19 @@ private struct ProjectsContent: View {
         }
     }
 
-    private struct ProjectRow: Identifiable {
+    /// One project. It is also the table row's `extra`, so the row menu and
+    /// the Sessions / Last active columns read it directly.
+    fileprivate struct ProjectRow: Identifiable, PacerUsageExtra {
+        static let sessionsColumn = "sessions"
+        static let lastActiveColumn = "lastActive"
+
         let path: String
         let displayName: String
         let cost: Double
-        /// `TokenBreakdown.all` (#215), from `ProjectUsageTotals` — the fold
-        /// Project detail and Day detail use, so all three agree.
-        let totalTokens: Int64
+        /// From `ProjectUsageTotals` — the fold Project detail and Day detail
+        /// use, so all three agree (#215).
+        let tokens: TokenBreakdown
+        var totalTokens: Int64 { tokens.all }
         let sessionCount: Int
         let lastActive: Date
         let modelCount: Int
@@ -420,6 +400,14 @@ private struct ProjectsContent: View {
         let colorSeed: String?
         let colorHex: String?
         var id: String { path }
+
+        func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+            switch id {
+            case Self.sessionsColumn:   return .number(Double(sessionCount))
+            case Self.lastActiveColumn: return .date(lastActive)
+            default:                    return nil
+            }
+        }
     }
 
     /// A pending source→canonical pair waiting on the user's confirm
@@ -526,11 +514,11 @@ private struct ProjectsContent: View {
         return rows.filter { members.contains($0.path) }
     }
 
-    /// Pure computation over `aggregates` + `probes` + `sort` +
-    /// `descending`. Used both by `refreshAllRows()` (writes to
-    /// `@State`) and by the `allRows` fallback when the cache hasn't
-    /// landed yet — that's the first render after a `.id(range)`
-    /// re-init, before `.onAppear` fires.
+    /// Pure computation over `aggregates` + `probes`. Used both by
+    /// `refreshAllRows()` (writes to `@State`) and by the `allRows` fallback
+    /// when the cache hasn't landed yet — that's the first render after a
+    /// `.id(range)` re-init, before `.onAppear` fires. The table's sort is
+    /// not an input: the table sorts these rows itself.
     private func computeAllRowsSync() -> [ProjectRow] {
         struct Acc {
             var totals = ProjectUsageTotals.zero
@@ -566,7 +554,7 @@ private struct ProjectsContent: View {
                 path: key,
                 displayName: names[key] ?? pacerShortPath(key),
                 cost: a.totals.cost,
-                totalTokens: a.totals.tokens.all,
+                tokens: a.totals.tokens,
                 sessionCount: a.totals.sessionCount,
                 lastActive: a.totals.lastActive,
                 modelCount: a.modelCount,
@@ -575,7 +563,11 @@ private struct ProjectsContent: View {
                 colorHex: metaByPath[key]?.colorHex
             )
         }
-        return apply(sort: sort, descending: descending, to: unsorted)
+        // Cost, largest first, path breaking ties: a stable base order for
+        // the merge submenu. The table re-sorts by the user's column.
+        return unsorted.sorted { lhs, rhs in
+            lhs.cost != rhs.cost ? lhs.cost > rhs.cost : lhs.path < rhs.path
+        }
     }
 
     /// Filter the cached snapshot by the (debounced) search needle.
@@ -583,7 +575,24 @@ private struct ProjectsContent: View {
     /// caching too so view body never does string lowercasing.
     private func refreshFilteredRows() {
         let source = applyScope(cachedAllRows ?? computeAllRowsSync())
-        cachedFilteredRows = filter(rows: source, by: debouncedSearch)
+        let filtered = filter(rows: source, by: debouncedSearch)
+        cachedFilteredRows = filtered
+        cachedTableRows = Self.tableRows(filtered)
+    }
+
+    /// The table's plain-value rows: the project's name over its path, in
+    /// its identity colour (the one the Top projects donut draws it in).
+    private static func tableRows(_ rows: [ProjectRow]) -> [PacerUsageRow<ProjectRow>] {
+        rows.map { row in
+            PacerUsageRow(
+                id: row.path,
+                label: row.displayName,
+                subtitle: row.path,
+                color: pacerProjectColor(path: row.path, seed: row.colorSeed, hex: row.colorHex),
+                tokens: row.tokens,
+                cost: row.cost,
+                extra: row)
+        }
     }
 
     private func filter(rows: [ProjectRow], by needle: String) -> [ProjectRow] {
@@ -594,35 +603,6 @@ private struct ProjectsContent: View {
             $0.path.lowercased().contains(lower) ||
             $0.displayName.lowercased().contains(lower)
         }
-    }
-
-    private func apply(sort: ProjectSort, descending: Bool, to rows: [ProjectRow]) -> [ProjectRow] {
-        // Closures take an `(lhs, rhs)` and return ascending order. We
-        // chain a deterministic tiebreaker (path) into every primary
-        // comparison so rows with equal primary values don't shuffle
-        // when SwiftData refreshes — concretely, before the
-        // tiebreaker, all-$0 day-detail / 0-token projects swapped
-        // positions on every scan tick.
-        let primary: (ProjectRow, ProjectRow) -> Bool
-        switch sort {
-        case .cost:
-            primary = { $0.cost < $1.cost }
-        case .tokens:
-            primary = { $0.totalTokens < $1.totalTokens }
-        case .sessions:
-            primary = { $0.sessionCount < $1.sessionCount }
-        case .lastActive:
-            primary = { $0.lastActive < $1.lastActive }
-        case .name:
-            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        }
-        let sorted = rows.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            // Deterministic tiebreaker: path (always unique per row).
-            return lhs.path < rhs.path
-        }
-        return descending ? sorted.reversed() : sorted
     }
 
     /// What the body actually renders. Falls back to a synchronous
@@ -751,8 +731,6 @@ private struct ProjectsContent: View {
             // range changes, and the cutoff is recomputed from `Date()` on
             // every init, so as a trigger it re-ran the whole refresh on any
             // redraw of the page — each search keystroke, each project click.
-            .onChange(of: sort) { _, _ in refreshAllRows() }
-            .onChange(of: descending) { _, _ in refreshAllRows() }
             .onChange(of: collectionFilter) { _, _ in refreshFilteredRows() }
             // Every field the rollups read, not the count: editing a
             // collection renames, recolours and re-members it in place.
@@ -1014,67 +992,64 @@ private struct ProjectsContent: View {
         }
     }
 
-    /// Big project list with sortable column headers. The time-range
-    /// picker and the alias-manager entry point used to live in this
-    /// card header; both moved to the page header (`headerControls`) once
-    /// the range was understood to scope the whole tab (donut + list),
-    /// not just this card. Bulk merge is now reached from the alias
-    /// manager's "Merge multiple…" button; per-row merges stay on the
-    /// row context menu below.
+    /// The project list, in the shared usage table: every token part, the
+    /// total and the cost, plus Sessions and Last active. Click a row for
+    /// Project detail; right-click for collections, merges and copying.
+    /// The time-range picker and the alias-manager entry point live in the
+    /// page header (`headerControls`), since the range scopes the whole tab.
     ///
     /// The text filter lives in the window toolbar via `.searchable` on
     /// the parent view — the native macOS search field (system clear
     /// button, accessibility label, placement consistency with Mail /
     /// Finder / Notes).
     private var projectListCard: some View {
-        PacerCard("All projects") {
-            // `LazyVStack` around the row `ForEach` so that on a project
-            // list of any size the cards below the card-bottom (and
-            // below the viewport) aren't realized. Each row carries a
-            // `HoverRow` (`.onHover` listener) and a `.contextMenu`
-            // whose body is built at row-construction time — for a
-            // user with 50+ projects, every scroll-induced re-eval was
-            // building 50+ context menus eagerly. With this lazy
-            // boundary, only the rows the user can actually see are
-            // built and laid out.
+        let tableRows = cachedTableRows ?? Self.tableRows(rows)
+        return PacerCard("All projects") {
             VStack(alignment: .leading, spacing: 0) {
-                tableHeader
-                Divider().padding(.vertical, 4)
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(rows) { row in
-                        HoverRow(action: {
-                            onSelectProject(row.path, row.displayName, rangeSince)
-                        }) {
-                            projectRow(row)
+                // A native table only realizes the rows in view, which is
+                // what the `LazyVStack` here used to buy: a long project
+                // list does not build every row's context menu up front.
+                PacerUsageTable(
+                    rows: tableRows,
+                    tableId: "projects",
+                    labelTitle: "Project",
+                    sort: sort,
+                    onSort: onSort,
+                    onOpen: { row in
+                        onSelectProject(row.extra.path, row.extra.displayName, rangeSince)
+                    },
+                    extraColumns: {
+                        PacerUsageColumns.extra(ProjectRow.sessionsColumn, title: "Sessions",
+                                                of: ProjectRow.self,
+                                                minWidth: 44, idealWidth: 60) { row in
+                            Text("\(row.extra.sessionCount)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
-                        .contextMenu {
-                            Button("Open project") {
-                                onSelectProject(row.path, row.displayName, rangeSince)
-                            }
-                            if row.path != ProjectDailyAggregate.unknownProjectPath {
-                                Button("Reveal in Finder") {
-                                    NSWorkspace.shared.activateFileViewerSelecting(
-                                        [URL(fileURLWithPath: row.path)]
-                                    )
-                                }
-                            }
-                            Divider()
-                            if !collections.isEmpty {
-                                addToCollectionMenu(for: row)
-                            }
-                            mergeIntoMenu(for: row)
-                            Divider()
-                            Button("Copy path") {
-                                pacerCopyToPasteboard(row.path)
-                            }
-                            Button("Copy display name") {
-                                pacerCopyToPasteboard(row.displayName)
+                        PacerUsageColumns.extra(ProjectRow.lastActiveColumn, title: "Last active",
+                                                of: ProjectRow.self,
+                                                minWidth: 60, idealWidth: 76) { row in
+                            // Judged against the clock, so it needs one: on an
+                            // idle machine nothing else redraws the list, and
+                            // "2 min ago" stayed put.
+                            TimelineView(.everyMinute) { _ in
+                                Text(pacerRelative(row.extra.lastActive))
+                                    .help(pacerRelativeExact(row.extra.lastActive))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                    }
-                }
+                    },
+                    labelAccessory: { row in
+                        ProjectStatusBadge(state: row.extra.status)
+                        membershipDots(for: row.extra.path)
+                    },
+                    rowMenu: { row in
+                        projectMenu(for: row.extra)
+                    })
                 HStack {
-                    Text("\(rows.count) project\(rows.count == 1 ? "" : "s")")
+                    Text("\(tableRows.count) project\(tableRows.count == 1 ? "" : "s")")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -1084,55 +1059,30 @@ private struct ProjectsContent: View {
         }
     }
 
-    /// Column headers double as sort controls. Click an inactive column
-    /// to make it the sort field; click the active column to flip
-    /// direction. Visual: tracked uppercase label + a small chevron on
-    /// the active column.
-    private var tableHeader: some View {
-        HStack(alignment: .firstTextBaseline) {
-            SortableColumnHeader(
-                "Project",
-                field: ProjectSort.name,
-                alignment: .leading,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding,
-                defaultDescending: false
-            )
-            .padding(.leading, 8)
-
-            Spacer()
-
-            SortableColumnHeader(
-                "Tokens",
-                field: ProjectSort.tokens,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 100)
-            SortableColumnHeader(
-                "Sessions",
-                field: ProjectSort.sessions,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 70)
-            SortableColumnHeader(
-                "Last",
-                field: ProjectSort.lastActive,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 90)
-            SortableColumnHeader(
-                "Cost",
-                field: ProjectSort.cost,
-                alignment: .trailing,
-                active: sortFieldBinding,
-                descending: sortDescendingBinding
-            ).frame(width: 84)
+    @ViewBuilder
+    private func projectMenu(for row: ProjectRow) -> some View {
+        Button("Open project") {
+            onSelectProject(row.path, row.displayName, rangeSince)
         }
-        .padding(.trailing, 8)
-        .padding(.bottom, 4)
+        if row.path != ProjectDailyAggregate.unknownProjectPath {
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [URL(fileURLWithPath: row.path)]
+                )
+            }
+        }
+        Divider()
+        if !collections.isEmpty {
+            addToCollectionMenu(for: row)
+        }
+        mergeIntoMenu(for: row)
+        Divider()
+        Button("Copy path") {
+            pacerCopyToPasteboard(row.path)
+        }
+        Button("Copy display name") {
+            pacerCopyToPasteboard(row.displayName)
+        }
     }
 
     // MARK: - Collections (inline in the Projects tab)
@@ -1389,49 +1339,6 @@ private struct ProjectsContent: View {
         try? modelContext.save()
         refreshAllRows()
         NotificationCenter.default.post(name: .pacerRequestImmediateScan, object: nil)
-    }
-
-    @ViewBuilder
-    private func projectRow(_ row: ProjectRow) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(row.displayName)
-                        .font(.system(size: 13, weight: .medium))
-                        .lineLimit(1)
-                    ProjectStatusBadge(state: row.status)
-                    membershipDots(for: row.path)
-                }
-                Text(row.path)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 8)
-            Text(pacerTokens(row.totalTokens)).help(pacerTokensExact(row.totalTokens))
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 100, alignment: .trailing)
-            Text("\(row.sessionCount)")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
-            // Judged against the clock, so it needs one: on an idle machine
-            // nothing else redraws the list, and "2 min ago" stayed put.
-            TimelineView(.everyMinute) { _ in
-                Text(pacerRelative(row.lastActive)).help(pacerRelativeExact(row.lastActive))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-            .frame(width: 90, alignment: .trailing)
-            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 84, alignment: .trailing)
-        }
     }
 
 }

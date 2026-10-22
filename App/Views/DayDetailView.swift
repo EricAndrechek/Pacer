@@ -115,9 +115,9 @@ struct DayDetailView: View {
         let path: String
         let displayName: String
         let cost: Double
-        /// `TokenBreakdown.all`, from the same `ProjectUsageTotals` fold the
-        /// Projects list and Project detail use, so the three agree (#215).
-        let tokens: Int64
+        /// From the same `ProjectUsageTotals` fold the Projects list and
+        /// Project detail use, so the three agree (#215).
+        let tokens: TokenBreakdown
         var id: String { path }
     }
 
@@ -128,8 +128,10 @@ struct DayDetailView: View {
         var breakdown = CostBreakdown.zero
         var modelBreakdowns: [ModelBreakdown] = []
         var projectRows: [ProjectRow] = []
-        var sortedAggregates: [DailyRow] = []
-        var sortedProjectRows: [ProjectRow] = []
+        /// The Models and Projects cards' rows for the shared usage table,
+        /// which sorts them itself.
+        var modelTableRows: [PacerUsageRow<DayModelShare>] = []
+        var projectTableRows: [PacerUsageRow<PacerUsageNoExtra>] = []
     }
 
     private struct ModelBreakdown: Identifiable {
@@ -140,8 +142,6 @@ struct DayDetailView: View {
 
     private var totals: Totals { cached.totals }
     private var projectRows: [ProjectRow] { cached.projectRows }
-    private var sortedAggregates: [DailyRow] { cached.sortedAggregates }
-    private var sortedProjectRows: [ProjectRow] { cached.sortedProjectRows }
 
     @MainActor
     private func refreshCache() {
@@ -161,7 +161,7 @@ struct DayDetailView: View {
                 path: path,
                 displayName: pacerShortPath(path),
                 cost: totals.cost,
-                tokens: totals.tokens.all
+                tokens: totals.tokens
             )
         }.sorted { lhs, rhs in
             // Stable sort: by cost desc, with displayName as a
@@ -171,81 +171,48 @@ struct DayDetailView: View {
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
         }
 
-        // Refresh the donut hover index. Pre-sorts by cost desc and
-        // builds the cumulative-angle table in one pass so hover
-        // ticks are O(rows) over an already-built array.
         let sortedByCost = aggregates.sorted { $0.totalCostUSD > $1.totalCostUSD }
-        var running = 0.0
-        var built: [(agg: DailyRow, max: Double)] = []
-        built.reserveCapacity(sortedByCost.count)
-        for agg in sortedByCost {
-            running += agg.totalCostUSD
-            built.append((agg, running))
-        }
-        sortedAggsByCost = sortedByCost
-        aggCumulative = built
         let breakdown = CostBreakdown.sum(aggregates, \.costBreakdown)
         let modelBreakdowns = sortedByCost.map {
             ModelBreakdown(model: $0.model, breakdown: $0.costBreakdown)
         }
 
-        // Pre-sort the models + projects tables. Used to be computed
-        // properties (`sortedAggregates`, `sortedProjectRows`) read
-        // from `body` — re-sorted on every chart hover and every
-        // unrelated state change. Cached now and recomputed only
-        // when scan data or sort prefs change.
+        // The two tables' rows, built once per refresh. The table sorts
+        // them by the user's column, so a sort change re-sorts these rows
+        // and does not refresh the cache.
+        let dayCost = t.cost
+        let modelTableRows = aggregates.map { agg in
+            PacerUsageRow(
+                id: agg.model,
+                label: pacerModelDisplayName(agg.model),
+                color: pacerModelColor(agg.model),
+                tokens: agg.tokens,
+                cost: agg.totalCostUSD,
+                extra: DayModelShare(share: dayCost > 0 ? agg.totalCostUSD / dayCost : 0))
+        }
+        let projectTableRows = rows.map { row in
+            PacerUsageRow(id: row.path, label: row.displayName, subtitle: row.path,
+                          tokens: row.tokens, cost: row.cost)
+        }
         cached = Cached(
             totals: t,
             breakdown: breakdown,
             modelBreakdowns: modelBreakdowns,
             projectRows: rows,
-            sortedAggregates: applyModelsSort(to: aggregates),
-            sortedProjectRows: applyProjectsSort(to: rows)
+            modelTableRows: modelTableRows,
+            projectTableRows: projectTableRows
         )
-    }
-
-    private func applyModelsSort(to source: [DailyRow]) -> [DailyRow] {
-        let primary: (DailyRow, DailyRow) -> Bool
-        switch modelsSort {
-        case .name:
-            primary = { $0.model < $1.model }
-        case .tokens:
-            primary = { $0.tokens.all < $1.tokens.all }
-        case .cost:
-            primary = { $0.totalCostUSD < $1.totalCostUSD }
-        }
-        let sorted = source.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.model < rhs.model
-        }
-        return modelsSortDescending ? sorted.reversed() : sorted
-    }
-
-    private func applyProjectsSort(to source: [ProjectRow]) -> [ProjectRow] {
-        let primary: (ProjectRow, ProjectRow) -> Bool
-        switch projectsSort {
-        case .name:
-            primary = { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-        case .tokens:
-            primary = { $0.tokens < $1.tokens }
-        case .cost:
-            primary = { $0.cost < $1.cost }
-        }
-        let sorted = source.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            return lhs.path < rhs.path
-        }
-        return projectsSortDescending ? sorted.reversed() : sorted
     }
 
     var body: some View {
         // Read here as well as inside `PacerModalContent`'s stored closure,
         // so a refresh redraws this view (#140; AGENTS.md, "SwiftUI state and
         // data flow"). The Sessions sort reaches its table only as bindings.
-        let _ = (cached, sortedAggsByCost, hoveredAggAngle)
+        let _ = cached
         let _ = (sessionsSortRaw, sessionsSortDescending)
+        // The Models and Projects sorts are read inside the cards, which run
+        // in that stored closure too; read here so a header click redraws.
+        let _ = (modelsSortRaw, modelsSortDescending, projectsSortRaw, projectsSortDescending)
         PacerModalContent(
             title: prettyDate,
             subtitle: date,
@@ -264,14 +231,6 @@ struct DayDetailView: View {
         // with a day open left Summary, Models and Projects on the old
         // account while the live Sessions list moved to the new one (#141).
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
-        // Sort-pref changes need a re-sort but not a re-fetch — the
-        // cache's `sortedAggregates`/`sortedProjectRows` are the only
-        // affected slices. Reusing `refreshCache()` is fine; it's
-        // bounded by the modal's small aggregate count.
-        .onChange(of: modelsSortRaw) { _, _ in refreshCache() }
-        .onChange(of: modelsSortDescending) { _, _ in refreshCache() }
-        .onChange(of: projectsSortRaw) { _, _ in refreshCache() }
-        .onChange(of: projectsSortDescending) { _, _ in refreshCache() }
     }
 
     /// Static formatters used by `prettyDate`. The previous version
@@ -377,245 +336,88 @@ struct DayDetailView: View {
         }
     }
 
+    /// The Models and Projects tables' sorts: a `UsageColumn` raw value and
+    /// a direction, under the keys the old per-card sorts used ("name",
+    /// "tokens" and "cost" are column ids too, so a stored sort carries over).
     @AppStorage("pacer.dayDetail.modelsSort", store: PacerSettings.store)
-    private var modelsSortRaw: String = DayModelsSort.cost.rawValue
+    private var modelsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.modelsSortDescending", store: PacerSettings.store)
     private var modelsSortDescending: Bool = true
 
     @AppStorage("pacer.dayDetail.projectsSort", store: PacerSettings.store)
-    private var projectsSortRaw: String = DayProjectsSort.cost.rawValue
+    private var projectsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.projectsSortDescending", store: PacerSettings.store)
     private var projectsSortDescending: Bool = true
-
-    private var modelsSort: DayModelsSort {
-        DayModelsSort(rawValue: modelsSortRaw) ?? .cost
-    }
-    private var projectsSort: DayProjectsSort {
-        DayProjectsSort(rawValue: projectsSortRaw) ?? .cost
-    }
-    private var modelsSortBinding: Binding<DayModelsSort> {
-        Binding(get: { modelsSort }, set: { modelsSortRaw = $0.rawValue })
-    }
-    private var projectsSortBinding: Binding<DayProjectsSort> {
-        Binding(get: { projectsSort }, set: { projectsSortRaw = $0.rawValue })
-    }
-
-    // `sortedAggregates` lives in `cached.sortedAggregates`; the
-    // build is in `applyModelsSort(to:)`.
 
     /// Tap handler on a day-detail project row: push the project's
     /// detail view onto the parent modal's NavigationStack so the
     /// native back button returns to this day modal. Skip the
     /// synthetic "(unknown)" path — there's no project to open.
-    private func openProject(_ row: ProjectRow) {
-        guard row.path != ProjectDailyAggregate.unknownProjectPath else { return }
+    private func openProject(path: String, displayName: String) {
+        guard path != ProjectDailyAggregate.unknownProjectPath else { return }
         // day detail has no time-range scope, so push with since: nil
         // → opens the project's all-time detail
-        push(.project(path: row.path, displayName: row.displayName, since: nil))
+        push(.project(path: path, displayName: displayName, since: nil))
     }
 
-    // `sortedProjectRows` lives in `cached.sortedProjectRows`; the
-    // build is in `applyProjectsSort(to:)`.
-
-    @State private var hoveredAggAngle: Double?
-
-    /// Pre-sorted aggregates + cumulative-angle table for the donut.
-    /// Recomputed in `refreshCache()`; hover lookups walk the table
-    /// without re-sorting. Without this every hover tick was an
-    /// N·log(N) sort + a fresh `cumulative += ...` loop.
-    @State private var sortedAggsByCost: [DailyRow] = []
-    @State private var aggCumulative: [(agg: DailyRow, max: Double)] = []
-
-    /// VoiceOver summary of the per-model donut for this day.
-    private var modelsAccessibilitySummary: String {
-        let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-        guard total > 0 else { return "no data" }
-        return sortedAggsByCost.prefix(5).map { agg in
-            let pct = Int(agg.totalCostUSD / total * 100)
-            return "\(pacerModelDisplayName(agg.model)) \(pct) percent"
-        }.joined(separator: ", ")
-    }
-
-    private var hoveredAgg: DailyRow? {
-        guard let angle = hoveredAggAngle, !aggCumulative.isEmpty else { return nil }
-        for entry in aggCumulative where angle <= entry.max {
-            return entry.agg
-        }
-        return aggCumulative.last?.agg
-    }
-
+    /// Every model the day used, in the shared usage table, with each
+    /// model's share of the day's cost. The donut that sat beside the list
+    /// drew that same share; beside seven columns it left the table too
+    /// narrow for a modal, so the share is a column now, and the Cost
+    /// breakdown card above draws each model's mix.
     private var modelsCard: some View {
-        PacerCard("Models", trailing: {
-            if let agg = hoveredAgg {
-                let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                let pct = total > 0 ? Int(agg.totalCostUSD / total * 100) : 0
-                HStack(spacing: 6) {
-                    Text(pacerModelDisplayName(agg.model))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(pacerCost(agg.totalCostUSD)).help(pacerCostExact(agg.totalCostUSD))
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("(\(pct)%)")
+        let sort = PacerUsageSort(column: modelsSortRaw, descending: modelsSortDescending)
+        return PacerCard("Models") {
+            PacerUsageTable(
+                rows: cached.modelTableRows,
+                tableId: "dayDetail.models",
+                labelTitle: "Model",
+                sort: sort,
+                onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending }
+            ) {
+                PacerUsageColumns.extra(DayModelShare.column, title: "Share",
+                                        of: DayModelShare.self,
+                                        minWidth: 40, idealWidth: 48) { row in
+                    Text("\(Int((row.extra.share * 100).rounded()))%")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
-                }
-            }
-        }) {
-            HStack(alignment: .top, spacing: 24) {
-                // Use pre-sorted aggregates from the cache so we don't
-                // re-sort the array on every body render (which fired
-                // on every hover tick before).
-                PacerDonut(
-                    slices: sortedAggsByCost.map {
-                        PacerDonutSlice(id: pacerShortModel($0.model), value: $0.totalCostUSD,
-                                        color: pacerModelColor($0.model))
-                    },
-                    hoveredID: hoveredAgg.map { pacerShortModel($0.model) },
-                    hoveredAngle: $hoveredAggAngle,
-                    accessibilityLabel: "Models used on \(prettyDate)",
-                    accessibilityValue: modelsAccessibilitySummary
-                )
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        SortableColumnHeader(
-                            "Model",
-                            field: DayModelsSort.name,
-                            alignment: .leading,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending,
-                            defaultDescending: false
-                        )
-                        Spacer()
-                        SortableColumnHeader(
-                            "Tokens",
-                            field: DayModelsSort.tokens,
-                            alignment: .trailing,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending
-                        ).frame(width: 70)
-                        SortableColumnHeader(
-                            "Cost",
-                            field: DayModelsSort.cost,
-                            alignment: .trailing,
-                            active: modelsSortBinding,
-                            descending: $modelsSortDescending
-                        ).frame(width: 70)
-                    }
-                    Divider().padding(.vertical, 2)
-                    let total = aggregates.reduce(0) { $0 + $1.totalCostUSD }
-                    ForEach(sortedAggregates) { agg in
-                        HStack(alignment: .firstTextBaseline) {
-                            Circle()
-                                .fill(pacerModelColor(agg.model))
-                                .frame(width: 8, height: 8)
-                            Text(pacerModelDisplayName(agg.model))
-                                .font(.system(size: 12, weight: .medium))
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            Text(pacerTokens(agg.tokens.all)).help(pacerTokensExact(agg.tokens.all))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            Text(pacerCost(agg.totalCostUSD)).help(pacerCostExact(agg.totalCostUSD))
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            if total > 0 {
-                                Text("\(Int(agg.totalCostUSD / total * 100))%")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                                    .frame(width: 36, alignment: .trailing)
-                            }
-                        }
-                    }
+                        .monospacedDigit()
+                        .help("Share of the day's cost")
                 }
             }
         }
     }
 
     private var projectsCard: some View {
-        PacerCard("Projects", trailing: {
+        let sort = PacerUsageSort(column: projectsSortRaw, descending: projectsSortDescending)
+        return PacerCard("Projects", trailing: {
             Text("\(projectRows.count) project\(projectRows.count == 1 ? "" : "s")")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    SortableColumnHeader(
-                        "Project",
-                        field: DayProjectsSort.name,
-                        alignment: .leading,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending,
-                        defaultDescending: false
-                    )
-                    Spacer()
-                    SortableColumnHeader(
-                        "Tokens",
-                        field: DayProjectsSort.tokens,
-                        alignment: .trailing,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending
-                    ).frame(width: 90)
-                    SortableColumnHeader(
-                        "Cost",
-                        field: DayProjectsSort.cost,
-                        alignment: .trailing,
-                        active: projectsSortBinding,
-                        descending: $projectsSortDescending
-                    ).frame(width: 70)
-                }
-                Divider().padding(.vertical, 2)
-                ForEach(sortedProjectRows) { row in
-                    HoverRow(action: { openProject(row) }) {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(row.displayName)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
-                                Text(row.path)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer(minLength: 8)
-                            Text(pacerTokens(row.tokens)).help(pacerTokensExact(row.tokens))
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                                .frame(width: 90, alignment: .trailing)
-                            Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(width: 70, alignment: .trailing)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 16, alignment: .trailing)
+            PacerUsageTable(
+                rows: cached.projectTableRows,
+                tableId: "dayDetail.projects",
+                labelTitle: "Project",
+                sort: sort,
+                onSort: { projectsSortRaw = $0.column; projectsSortDescending = $0.descending },
+                onOpen: { row in openProject(path: row.id, displayName: row.label) },
+                rowMenu: { row in
+                    if row.id != ProjectDailyAggregate.unknownProjectPath {
+                        Button("Open project") { openProject(path: row.id, displayName: row.label) }
+                        Button("Reveal in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting(
+                                [URL(fileURLWithPath: row.id)]
+                            )
                         }
+                        Divider()
                     }
-                    .contextMenu {
-                        if row.path != ProjectDailyAggregate.unknownProjectPath {
-                            Button("Open project") { openProject(row) }
-                            Button("Reveal in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting(
-                                    [URL(fileURLWithPath: row.path)]
-                                )
-                            }
-                            Divider()
-                        }
-                        Button("Copy path") { pacerCopyToPasteboard(row.path) }
-                        // Copy the exact dollars-and-cents; the visible
-                        // label is compact but the clipboard should be
-                        // precise so a paste into a spreadsheet works.
-                        Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
-                    }
-                }
-            }
+                    Button("Copy path") { pacerCopyToPasteboard(row.id) }
+                    // Copy the exact dollars-and-cents; the visible
+                    // label is compact but the clipboard should be
+                    // precise so a paste into a spreadsheet works.
+                    Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+                })
         }
     }
 
@@ -658,13 +460,13 @@ struct DayDetailView: View {
     }
 }
 
-/// Sort fields for the Day detail's Models / Projects mini-tables.
-enum DayModelsSort: String, CaseIterable, Identifiable {
-    case name, tokens, cost
-    var id: String { rawValue }
-}
+/// A model's share of the day's cost, the Day detail Models table's own
+/// column.
+struct DayModelShare: PacerUsageExtra {
+    static let column = "share"
+    let share: Double
 
-enum DayProjectsSort: String, CaseIterable, Identifiable {
-    case name, tokens, cost
-    var id: String { rawValue }
+    func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+        id == Self.column ? .number(share) : nil
+    }
 }

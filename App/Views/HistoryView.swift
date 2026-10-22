@@ -351,6 +351,8 @@ private struct MonthlyChartCard: View {
 
 // `TopDaysSort` and the ranking itself live in PacerCore (`DayRanking`), so
 // the order "Tokens" produces is tested rather than re-derived here (#215).
+// The days it picks are shown in the shared usage table, which sorts by the
+// same column; `TopDaysSort` raw values are what the sort is stored as.
 
 private struct TopDaysCard: View {
     @State private var scope = UsageScope.shared
@@ -363,9 +365,6 @@ private struct TopDaysCard: View {
     private var descending: Bool = true
 
     private var sort: TopDaysSort { TopDaysSort(rawValue: sortRaw) ?? .cost }
-    private var sortBinding: Binding<TopDaysSort> {
-        Binding(get: { sort }, set: { sortRaw = $0.rawValue })
-    }
 
     var body: some View {
         // The `.id()` value is prefixed per-card so it can't collide
@@ -377,8 +376,10 @@ private struct TopDaysCard: View {
             sort: sort,
             descending: descending,
             onDayTap: onDayTap,
-            sortBinding: sortBinding,
-            descendingBinding: $descending
+            onSort: { new in
+                sortRaw = TopDaysSort(column: UsageColumn(rawValue: new.column) ?? .cost).rawValue
+                descending = new.descending
+            }
         )
         .id("top-days-\(range.rawValue)-\(scope.accountId ?? "all")")
     }
@@ -389,8 +390,7 @@ private struct TopDaysContent: View {
     let sort: TopDaysSort
     let descending: Bool
     let onDayTap: (String) -> Void
-    let sortBinding: Binding<TopDaysSort>
-    let descendingBinding: Binding<Bool>
+    let onSort: (PacerUsageSort) -> Void
 
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
@@ -410,15 +410,13 @@ private struct TopDaysContent: View {
         sort: TopDaysSort,
         descending: Bool,
         onDayTap: @escaping (String) -> Void,
-        sortBinding: Binding<TopDaysSort>,
-        descendingBinding: Binding<Bool>
+        onSort: @escaping (PacerUsageSort) -> Void
     ) {
         self.range = range
         self.sort = sort
         self.descending = descending
         self.onDayTap = onDayTap
-        self.sortBinding = sortBinding
-        self.descendingBinding = descendingBinding
+        self.onSort = onSort
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
@@ -465,9 +463,15 @@ private struct TopDaysContent: View {
 
     private var title: String {
         switch sort {
-        case .cost:    return "Most expensive days"
-        case .tokens:  return "Heaviest token days"
-        case .date:    return descending ? "Most recent days" : "Earliest days"
+        case .cost:         return "Most expensive days"
+        case .tokens:       return "Heaviest token days"
+        case .date:         return descending ? "Most recent days" : "Earliest days"
+        case .input:        return "Heaviest input days"
+        case .output:       return "Heaviest output days"
+        case .cacheRead:    return "Heaviest cache-read days"
+        case .cacheWrite:   return "Heaviest cache-write days"
+        case .cacheWrite5m: return "Heaviest 5m-write days"
+        case .cacheWrite1h: return "Heaviest 1h-write days"
         }
     }
 
@@ -476,6 +480,14 @@ private struct TopDaysContent: View {
         let visible: [DayRow] = showAll
             ? Array(all.prefix(min(all.count, 100)))
             : Array(all.prefix(10))
+        // Ranked here, over every day, and only then cut to 10 (or 100): the
+        // table sorts what it is given by the same column, ties included
+        // (`DayRanking`), so it shows these days in this order.
+        let tableRows: [PacerUsageRow<PacerUsageNoExtra>] = visible.map { day in
+            PacerUsageRow(id: day.date, label: prettyDate(day.date), sortLabel: day.date,
+                          tokens: day.tokens, cost: day.cost)
+        }
+        let tableSort = PacerUsageSort(sort.column, descending: descending)
         return PacerCard(title, trailing: {
             if !all.isEmpty {
                 Text("showing \(visible.count) of \(all.count)")
@@ -488,57 +500,25 @@ private struct TopDaysContent: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                // The bar encodes whatever the list is ranked BY. It was
-                // hard-wired to cost while the sort switched between cost,
-                // tokens and date — so under "Heaviest token days" the rows
-                // read 13.2M, 10.5M, 9.8M downwards while the bars beside them
-                // went 58%, 68%, 63%: the length was the day's cost. A bar
-                // that disagrees with the number next to it is worse than no
-                // bar. Date-sorted there is no ranking magnitude, so it keeps
-                // cost — the bolder of the two numbers on the row.
-                let barMetric: DayBarMetric = sort == .tokens ? .tokens : .cost
-                let maxValue = visible.map { barMetric.value(of: $0) }.max() ?? 1
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 12) {
-                        // Empty rank column header
-                        Spacer().frame(width: 28)
-                        SortableColumnHeader(
-                            "Date",
-                            field: TopDaysSort.date,
-                            alignment: .leading,
-                            active: sortBinding,
-                            descending: descendingBinding,
-                            defaultDescending: false
-                        ).frame(width: 140, alignment: .leading)
-                        Spacer()
-                        SortableColumnHeader(
-                            "Tokens",
-                            field: TopDaysSort.tokens,
-                            alignment: .trailing,
-                            active: sortBinding,
-                            descending: descendingBinding
-                        ).frame(width: 80)
-                        SortableColumnHeader(
-                            "Cost",
-                            field: TopDaysSort.cost,
-                            alignment: .trailing,
-                            active: sortBinding,
-                            descending: descendingBinding
-                        ).frame(width: 80)
-                        // Reserve space for the row's chevron column.
-                        Spacer().frame(width: 16)
-                    }
-                    Divider().padding(.vertical, 2)
-                    // Lazy inner stack so the "Show top 100" expansion
-                    // doesn't realize all 100 `HoverRow`s + context
-                    // menus at once. Same pattern applied to
-                    // `ProjectsView`'s row list — defers off-screen
-                    // rows until scrolled into view.
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(visible.enumerated()), id: \.element.id) { idx, row in
-                            topRow(idx: idx, row: row, maxValue: maxValue, metric: barMetric)
-                        }
-                    }
+                    // The rank number and the bar that used to lead each row
+                    // are gone: the table's order is the rank, and the bar
+                    // drew the number printed beside it a second time.
+                    PacerUsageTable(
+                        rows: tableRows,
+                        tableId: "topDays",
+                        labelTitle: "Date",
+                        sort: tableSort,
+                        onSort: onSort,
+                        onOpen: { row in onDayTap(row.id) },
+                        rowMenu: { row in
+                            Button("Open day") { onDayTap(row.id) }
+                            Divider()
+                            Button("Copy date") { pacerCopyToPasteboard(row.id) }
+                            // Copy the exact dollars-and-cents — the row shows
+                            // "$10.8k" but a copy-to-paste should be the precise value.
+                            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
+                        })
                     if all.count > 10 {
                         HStack {
                             Spacer()
@@ -565,75 +545,11 @@ private struct TopDaysContent: View {
         }
     }
 
-    /// Which of the row's two numbers the bar draws.
-    private enum DayBarMetric {
-        case cost, tokens
-        func value(of row: DayRow) -> Double {
-            switch self {
-            case .cost:   return row.cost
-            case .tokens: return Double(row.tokens.all)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func topRow(
-        idx: Int, row: DayRow, maxValue: Double, metric: DayBarMetric
-    ) -> some View {
-        HoverRow(action: { onDayTap(row.date) }) {
-            HStack(alignment: .center, spacing: 12) {
-                Text("#\(idx + 1)")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 28, alignment: .leading)
-                Text(prettyDate(row.date))
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 140, alignment: .leading)
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(height: 6)
-                    GeometryReader { geo in
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.accentColor.opacity(0.85))
-                            .frame(
-                                width: geo.size.width
-                                    * CGFloat(metric.value(of: row) / max(maxValue, 0.0001)),
-                                height: 6
-                            )
-                    }
-                    .frame(height: 6)
-                }
-                Text(pacerTokens(row.tokens.all)).help(pacerTokensExact(row.tokens.all))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Text(pacerCost(row.cost)).help(pacerCostExact(row.cost))
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16, alignment: .trailing)
-            }
-        }
-        .contextMenu {
-            Button("Open day") { onDayTap(row.date) }
-            Divider()
-            Button("Copy date") { pacerCopyToPasteboard(row.date) }
-            // Copy the exact dollars-and-cents — the row shows
-            // "$10.8k" but a copy-to-paste should be the precise value.
-            Button("Copy cost") { pacerCopyToPasteboard(pacerCostExact(row.cost)) }
-        }
-    }
-
     /// `2026-04-30` → `Thu Apr 30`. Compact + day-of-week so the user
     /// can spot patterns ("oh I always burn on Wednesdays"). The two
     /// `DateFormatter` instances are now static — previously this
-    /// function allocated both per call, and `topRow` calls it for
-    /// every row on every render. With up to 100 visible rows under
+    /// function allocated both per call, and the body calls it for
+    /// every visible row on every render. With up to 100 visible rows under
     /// "Show top 100" plus context-menu re-evaluations, that was
     /// thousands of allocations per scroll.
     private static let prettyDateInFmt: DateFormatter = {
