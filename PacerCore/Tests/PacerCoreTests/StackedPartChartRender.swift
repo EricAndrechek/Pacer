@@ -30,7 +30,7 @@ struct StackedPartChartRender {
 
     /// A bucket shaped like a real store's: cache reads most of the bill,
     /// then output, the two write tiers, and a sliver of fresh input.
-    private static func bucket(_ id: String, total: Double) -> PacerChartBucket {
+    private static func bucket(_ id: String, total: Double, modelTokens: Bool = true) -> PacerChartBucket {
         let cost = CostComponents(
             input: total * 0.012, output: total * 0.21, cacheRead: total * 0.58,
             cacheWrite5m: total * 0.118, cacheWrite1h: total * 0.08)
@@ -44,9 +44,17 @@ struct StackedPartChartRender {
             "claude-sonnet-4-5-20250929": total * 0.15,
             "claude-haiku-4-5-20251001": total * 0.04,
         ]
+        let all: Double = Double(tokens.all)
+        let perModel: [String: Int64] = [
+            "claude-opus-4-7": Int64(all * 0.62),
+            "claude-sonnet-4-5-20250929": Int64(all * 0.30),
+            "claude-haiku-4-5-20251001": Int64(all * 0.08),
+        ]
+        let breakdown = CostBreakdown(cost: cost, tokens: tokens)
         return PacerChartBucket(
-            id: id, breakdown: CostBreakdown(cost: cost, tokens: tokens),
-            topModels: PacerChartBucket.topModels(models))
+            id: id, breakdown: breakdown,
+            topModels: PacerChartBucket.topModels(
+                models, tokens: modelTokens ? perModel : nil, of: breakdown.total))
     }
 
     private static func days(_ n: Int, endingDay: Int = 21) -> [PacerChartBucket] {
@@ -154,6 +162,49 @@ struct StackedPartChartRender {
         try render(card("Daily activity", chart), width: 600, name: "days-90-narrow-hover")
     }
 
+    /// Roughly the dashboard's merged card (`DailyCostChartCard`): the
+    /// 30-day chart, then the month section — to see the two read as one card.
+    @Test func thirtyDaysAndThisMonth() throws {
+        let buckets: [PacerChartBucket] = Self.days(30)
+        let month: [PacerChartBucket] = Array(buckets.suffix(21))
+        let breakdown: CostBreakdown = month.reduce(CostBreakdown.zero) { $0 + $1.breakdown }
+        let total: Double = buckets.reduce(0) { $0 + $1.total }
+        let avg: Double = breakdown.total / Double(month.count)
+        let merged = PacerCard("Last 30 days", trailing: {
+            Text("total \(pacerCost(total))")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+        }) {
+            VStack(alignment: .leading, spacing: 16) {
+                PacerStackedPartChart(buckets, kind: .day)
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("This month").font(.headline)
+                        Spacer(minLength: 8)
+                        Text("October · 10 days left")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 18) {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                                count: 4),
+                            alignment: .leading, spacing: 12
+                        ) {
+                            MetricTile(value: pacerCost(breakdown.total), label: "cost")
+                            MetricTile(value: pacerTokens(breakdown.tokens.all), label: "tokens")
+                            MetricTile(value: "\(month.count)", label: "active days",
+                                       hint: "avg \(pacerCost(avg)) each")
+                            MetricTile(value: "≈$1.6k", label: "by month end")
+                        }
+                        PacerCostBreakdownView(breakdown)
+                    }
+                }
+            }
+        }
+        try render(merged, width: 860, name: "dashboard-30-days-and-month")
+    }
+
     @Test func hoverCardAlone() throws {
         let b: PacerChartBucket = Self.bucket("2026-10-21", total: 42.37)
         let axis = PacerChartXAxis(kind: .day, ids: [b.id])
@@ -161,5 +212,13 @@ struct StackedPartChartRender {
         try render(card, width: PacerCostHoverCard.idealWidth, name: "hover-card")
         let bare = PacerCostHoverCard(title: "2 PM", breakdown: b.breakdown)
         try render(bare, width: PacerCostHoverCard.idealWidth, name: "hover-card-no-models")
+        // Project detail's chart: per-model costs, no per-model tokens.
+        let p: PacerChartBucket = Self.bucket("2026-10-21", total: 42.37, modelTokens: false)
+        let project = PacerCostHoverCard(title: axis.title(p.id), breakdown: p.breakdown, topModels: p.topModels)
+        try render(project, width: PacerCostHoverCard.idealWidth, name: "hover-card-project")
+        // A big month: the widest numbers each column has to hold.
+        let big: PacerChartBucket = Self.bucket("2026-09", total: 12_604)
+        let month = PacerCostHoverCard(title: "September 2026", breakdown: big.breakdown, topModels: big.topModels)
+        try render(month, width: PacerCostHoverCard.idealWidth, name: "hover-card-month")
     }
 }

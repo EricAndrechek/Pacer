@@ -86,7 +86,8 @@ struct CostBreakdownTokensTests {
         _ = (regular, compact, slotted)
         #expect(PacerCostBreakdownView.hasContent(b))
         #expect(!PacerCostBreakdownView.hasContent(.zero))
-        let row: PacerCacheHitRow<EmptyView> = PacerCacheHitRow(ratio: 0.5)
-        _ = row
+        let line: PacerCacheHitLine<EmptyView> = PacerCacheHitLine(ratio: 0.5)
+        let slottedLine = PacerCacheHitLine(ratio: 0.5) { Text("saved") }
+        _ = (line, slottedLine)
     }
 }

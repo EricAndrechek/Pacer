@@ -21,6 +21,16 @@ struct StackedPartChartTests {
         return CostBreakdown(cost: cost, tokens: t)
     }
 
+    /// A row with tokens in every part, so a model's total is `all`, not
+    /// one column.
+    private func spread(_ usd: Double, input: Int64, output: Int64, read: Int64) -> CostBreakdown {
+        let cost = CostComponents(cacheRead: usd)
+        let t = TokenBreakdown(
+            inputTokens: input, outputTokens: output, cacheReadTokens: read,
+            cacheCreation5mTokens: 7, cacheCreation1hTokens: 3)
+        return CostBreakdown(cost: cost, tokens: t)
+    }
+
     // MARK: Stack order
 
     @Test func segmentsStackInComponentOrderAndSkipZeroParts() {
@@ -70,6 +80,52 @@ struct StackedPartChartTests {
         #expect(PacerChartBucket.topModels([:]).isEmpty)
     }
 
+    // MARK: Model shares
+
+    @Test func topModelSharesAreOfTheWholeBucket() {
+        let costs: [String: Double] = ["a": 6, "b": 3, "c": 0.5, "d": 0.5]
+        let top: [PacerChartModelCost] = PacerChartBucket.topModels(costs, of: 10)
+        let shares: [Double] = top.map(\.share)
+        #expect(abs(shares[0] - 0.6) < 1e-9)
+        #expect(abs(shares[1] - 0.3) < 1e-9)
+        // Three of four models: their shares sum to what they were, not 1.
+        let sum: Double = shares.reduce(0, +)
+        #expect(abs(sum - 0.95) < 1e-9)
+    }
+
+    @Test func topModelSharesDefaultToTheModelsSum() {
+        let costs: [String: Double] = ["a": 3, "b": 1]
+        let top: [PacerChartModelCost] = PacerChartBucket.topModels(costs)
+        #expect(abs(top[0].share - 0.75) < 1e-9)
+        #expect(top[0].percentLabel == "75%")
+        #expect(top[1].percentLabel == "25%")
+    }
+
+    @Test func aFreeBucketHasNoShares() {
+        let costs: [String: Double] = ["unpriced": 0]
+        let top: [PacerChartModelCost] = PacerChartBucket.topModels(costs, of: 0)
+        #expect(top[0].share == 0)
+        #expect(top[0].percentLabel == "0%")
+    }
+
+    @Test func aSliverOfTheCostReadsLessThanOnePercent() {
+        let sliver = PacerChartModelCost(model: "haiku", usd: 0.01, share: 0.001)
+        #expect(sliver.percentLabel == "<1%")
+        let none = PacerChartModelCost(model: "free", usd: 0, share: 0)
+        #expect(none.percentLabel == "0%")
+    }
+
+    @Test func topModelsCarryTheirTokensWhenGiven() {
+        let costs: [String: Double] = ["a": 2, "b": 1]
+        let tokens: [String: Int64] = ["a": 900, "b": 100]
+        let top: [PacerChartModelCost] = PacerChartBucket.topModels(costs, tokens: tokens)
+        let counts: [Int64] = top.compactMap(\.tokens)
+        let expected: [Int64] = [900, 100]
+        #expect(counts == expected)
+        let bare: [PacerChartModelCost] = PacerChartBucket.topModels(costs)
+        #expect(bare.allSatisfy { $0.tokens == nil })
+    }
+
     // MARK: Bucketing
 
     @Test func builderSumsRowsPerKeyAndPerModel() {
@@ -85,6 +141,59 @@ struct StackedPartChartTests {
         #expect(models == ["m1", "m2"])
         let m1: Double = day.topModels[0].usd
         #expect(abs(m1 - 5) < 1e-9)
+    }
+
+    @Test func builderSumsEachModelsTokensAcrossItsRows() throws {
+        var builder = PacerChartBucketBuilder()
+        builder.add("2026-10-01", spread(3, input: 10, output: 20, read: 1_000), model: "opus")
+        builder.add("2026-10-01", spread(1, input: 5, output: 5, read: 90), model: "haiku")
+        builder.add("2026-10-01", spread(2, input: 10, output: 20, read: 1_000), model: "opus")
+        let top: [PacerChartModelCost] = builder.buckets()[0].topModels
+        #expect(top.map(\.model) == ["opus", "haiku"])
+        // Every part: input + output + reads + both write tiers (7 + 3).
+        let opus: Int64 = try #require(top[0].tokens)
+        let opusExpected: Int64 = 2 * (10 + 20 + 1_000 + 10)
+        #expect(opus == opusExpected)
+        let haiku: Int64 = try #require(top[1].tokens)
+        let haikuExpected: Int64 = 5 + 5 + 90 + 10
+        #expect(haiku == haikuExpected)
+    }
+
+    @Test func builderSharesAreOfTheBucketsTotal() {
+        var builder = PacerChartBucketBuilder()
+        builder.add("k", spread(6, input: 1, output: 1, read: 1), model: "a")
+        builder.add("k", spread(2, input: 1, output: 1, read: 1), model: "b")
+        builder.add("k", spread(1, input: 1, output: 1, read: 1), model: "c")
+        builder.add("k", spread(1, input: 1, output: 1, read: 1), model: "d")
+        let top: [PacerChartModelCost] = builder.buckets()[0].topModels
+        #expect(top.count == 3)
+        #expect(top[0].percentLabel == "60%")
+        #expect(top[1].percentLabel == "20%")
+    }
+
+    @Test func monthsRollUpEachModelsTokens() throws {
+        var builder = PacerChartBucketBuilder()
+        let days: [String] = ["2026-10-01", "2026-10-02", "2026-11-01"]
+        for day in days {
+            guard let month = PacerChartBucket.monthKey(day) else { continue }
+            builder.add(month, spread(1, input: 100, output: 0, read: 0), model: "opus")
+        }
+        let months: [PacerChartBucket] = builder.buckets()
+        let october: Int64 = try #require(months[0].topModels[0].tokens)
+        let octoberExpected: Int64 = 2 * (100 + 10)
+        #expect(october == octoberExpected)
+        let november: Int64 = try #require(months[1].topModels[0].tokens)
+        let novemberExpected: Int64 = 100 + 10
+        #expect(november == novemberExpected)
+    }
+
+    @Test func precomputedModelCostsLeaveTokensUnknown() {
+        var builder = PacerChartBucketBuilder()
+        let costs: [String: Double] = ["opus": 4, "haiku": 1]
+        builder.add("2026-10-01", spread(5, input: 9, output: 9, read: 9), modelCosts: costs)
+        let top: [PacerChartModelCost] = builder.buckets()[0].topModels
+        #expect(top.allSatisfy { $0.tokens == nil })
+        #expect(top[0].percentLabel == "80%")
     }
 
     @Test func builderOrdersByKeyAndKeepsTheNewest() {

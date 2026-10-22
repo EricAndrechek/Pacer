@@ -23,16 +23,36 @@ public enum PacerChartBucketKind: Sendable, Equatable {
     case month
 }
 
-/// One model's cost inside a bucket, for the hover card's top models.
+/// One model inside a bucket, for the hover card's top models: its cost, its
+/// share of the bucket's cost, and its tokens.
 public struct PacerChartModelCost: Sendable, Equatable, Identifiable {
     /// The raw model id; the card shows `pacerModelDisplayName` of it.
     public let model: String
     public let usd: Double
+    /// `usd` over the bucket's whole cost, in 0...1 — the bucket's, not the
+    /// top three's, so three models that are 60% of a day read 60%, not 100%.
+    public let share: Double
+    /// Every token the model used in the bucket (`TokenBreakdown.all`).
+    /// `nil` when the source does not carry all five parts per model — the
+    /// project rollup stores only input + output per model, and a figure
+    /// that is ~2% of the model's real tokens, in the column the parts above
+    /// print all of theirs in, would read as the total.
+    public let tokens: Int64?
     public var id: String { model }
 
-    public init(model: String, usd: Double) {
+    public init(model: String, usd: Double, share: Double = 0, tokens: Int64? = nil) {
         self.model = model
         self.usd = usd
+        self.share = share
+        self.tokens = tokens
+    }
+
+    /// "81%", "<1%" for a model too small to round to 1 but not nothing —
+    /// the same rule as a part's `CostBreakdown.Part.percentLabel`.
+    public var percentLabel: String {
+        let percent = Int((share * 100).rounded())
+        if percent == 0 && usd > 0 { return "<1%" }
+        return "\(percent)%"
     }
 }
 
@@ -72,11 +92,29 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
 
     /// The `limit` most expensive models, largest first, ties by name so the
     /// order does not change between refreshes.
-    public static func topModels(_ costs: [String: Double], limit: Int = 3) -> [PacerChartModelCost] {
+    ///
+    /// - Parameters:
+    ///   - tokens: each model's tokens; `nil` leaves every model's unknown.
+    ///   - total: the bucket's cost, the shares' denominator. Defaults to the
+    ///     models' sum, which is the same number for the daily and hourly
+    ///     rollups (one row per model).
+    public static func topModels(
+        _ costs: [String: Double],
+        tokens: [String: Int64]? = nil,
+        of total: Double? = nil,
+        limit: Int = 3
+    ) -> [PacerChartModelCost] {
+        let whole: Double = total ?? costs.values.reduce(0, +)
         let sorted = costs.sorted { a, b in
             a.value != b.value ? a.value > b.value : a.key < b.key
         }
-        return sorted.prefix(limit).map { PacerChartModelCost(model: $0.key, usd: $0.value) }
+        return sorted.prefix(limit).map { entry in
+            PacerChartModelCost(
+                model: entry.key,
+                usd: entry.value,
+                share: whole > 0 ? entry.value / whole : 0,
+                tokens: tokens?[entry.key])
+        }
     }
 
     /// `14` → `"14"`, `3` → `"03"`: two digits, so the ids sort as hours.
@@ -95,22 +133,30 @@ public struct PacerChartBucket: Sendable, Equatable, Identifiable {
 }
 
 /// Sums rollup rows into chart buckets: one per key, with the parts, the
-/// tokens and the per-model cost that becomes the top three.
+/// tokens, and the per-model cost and tokens that become the top three.
 public struct PacerChartBucketBuilder: Sendable {
     private var breakdowns: [String: CostBreakdown] = [:]
     private var modelCosts: [String: [String: Double]] = [:]
+    /// Filled only by the one-model-per-row `add`: a key that came only from
+    /// precomputed per-model costs has no entry, so its models' tokens stay
+    /// unknown rather than reading as zero.
+    private var modelTokens: [String: [String: Int64]] = [:]
 
     public init() {}
 
     /// A row that is one model's share of `key` — the daily and hourly
-    /// rollups, keyed (date|hour, model).
+    /// rollups, keyed (date|hour, model). The row's breakdown carries all five
+    /// parts' tokens, so the model's tokens are summed from it: a month adds up
+    /// its days' rows, and its models' tokens with them.
     public mutating func add(_ key: String, _ breakdown: CostBreakdown, model: String) {
         breakdowns[key, default: .zero] += breakdown
         modelCosts[key, default: [:]][model, default: 0] += breakdown.total
+        modelTokens[key, default: [:]][model, default: 0] += breakdown.tokens.all
     }
 
     /// A row that already carries its per-model costs — the project rollup's
-    /// `modelCostJSON`.
+    /// `modelCostJSON`. Its models' tokens are left unknown: that rollup
+    /// keeps only input + output per model (see `PacerChartModelCost.tokens`).
     public mutating func add(_ key: String, _ breakdown: CostBreakdown, modelCosts costs: [String: Double]) {
         breakdowns[key, default: .zero] += breakdown
         for (model, usd) in costs {
@@ -124,10 +170,12 @@ public struct PacerChartBucketBuilder: Sendable {
         var ordered = keys ?? breakdowns.keys.sorted()
         if let last { ordered = Array(ordered.suffix(last)) }
         return ordered.map { key in
-            PacerChartBucket(
+            let breakdown = breakdowns[key] ?? .zero
+            return PacerChartBucket(
                 id: key,
-                breakdown: breakdowns[key] ?? .zero,
-                topModels: PacerChartBucket.topModels(modelCosts[key] ?? [:]))
+                breakdown: breakdown,
+                topModels: PacerChartBucket.topModels(
+                    modelCosts[key] ?? [:], tokens: modelTokens[key], of: breakdown.total))
         }
     }
 }

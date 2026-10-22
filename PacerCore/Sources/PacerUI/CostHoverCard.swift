@@ -2,7 +2,9 @@ import SwiftUI
 import PacerCore
 
 /// The card a cost chart shows over the hovered bar: the bucket's cost and
-/// tokens, what the cost was made of, and its top models.
+/// tokens, what the cost was made of, and its top models — each with its
+/// dollars, its share of the bucket's cost and its tokens, in the same
+/// columns as the parts above them.
 ///
 /// A tooltip, so it is exempt from "never print the same number twice": the
 /// bar's own label may say the same total. It floats over the chart in an
@@ -43,16 +45,40 @@ public struct PacerCostHoverCard: View {
             PacerCostBreakdownView(breakdown, style: .compact)
             if !topModels.isEmpty {
                 Divider()
-                VStack(alignment: .leading, spacing: 2) {
+                // Its own grid, but on the compact breakdown's column widths
+                // (`PacerCompactColumns`), so a model's dollars, share and
+                // tokens sit under the parts' and the "tokens" heading above
+                // serves both.
+                Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 3) {
                     ForEach(topModels) { m in
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        GridRow {
                             Text(pacerModelDisplayName(m.model))
                                 .font(.system(size: 11, weight: .medium))
                                 .lineLimit(1)
-                            Spacer(minLength: 0)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                // The name gives way first; the numbers never do.
+                                .layoutPriority(-1)
                             Text(pacerCost(m.usd))
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                                 .monospacedDigit()
+                                .lineLimit(1)
+                                .pacerCompactColumn(PacerCompactColumns.cost)
+                            Text(m.percentLabel)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .pacerCompactColumn(PacerCompactColumns.share)
+                            // An empty cell, not a missing one, where the
+                            // source has no per-model tokens: the row keeps
+                            // its columns.
+                            Text(m.tokens.map(pacerTokens) ?? "")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .pacerCompactColumn(PacerCompactColumns.tokens)
                         }
                     }
                 }

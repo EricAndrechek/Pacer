@@ -99,10 +99,39 @@ private struct LifetimeSummaryCard: View {
 
 private struct LifetimeSummaryContent: View {
     let range: TimeRange
+    /// The range's start and the account, as this copy was built with them:
+    /// the Projects and Sessions counts fetch with these. Both are in the
+    /// parent's `.id`, so a change builds a new copy rather than leaving
+    /// this one counting the old range or account.
+    private let since: Date?
+    private let scopeAccountId: String?
 
     @Query private var globalAggregates: [DailyAggregate]
     @Query private var scopedAggregates: [AccountDailyAggregate]
     @State private var scope = UsageScope.shared
+    @Environment(\.modelContext) private var modelContext
+    /// Fires once per scan cycle: the counts' refresh trigger. They are
+    /// fetched, not `@Query`-bound — see `ActivityCounts`.
+    @Query(ScanMetaFetchDescriptor.scanCompletedProbe)
+    private var scanMeta: [ClaudeCodeMeta]
+
+    /// Projects and sessions in the range, from the project-day and session
+    /// rollups (`RangeActivityCounts`). A `@Query` over either table would
+    /// re-read every row in range on every store save to answer two
+    /// numbers; sessions are a SQL COUNT instead, and projects — which need
+    /// the rows' paths — are read off the main actor, and only when the
+    /// range's project-day row count moved or attribution changed.
+    private struct ActivityCounts: Equatable {
+        var sessions: Int?
+        var projects: Int?
+        /// The project-day row count `projects` was last read at.
+        var projectDays: Int?
+    }
+    @State private var counts = ActivityCounts()
+    /// One projects read at a time; a trigger during one asks for another
+    /// after it, rather than starting a second detached read beside it.
+    @State private var projectsLoading = false
+    @State private var projectsRerun = false
 
     /// Every account, or one. Both queries are live, so switching is a
     /// re-read rather than a recompute.
@@ -114,6 +143,8 @@ private struct LifetimeSummaryContent: View {
 
     init(range: TimeRange, scopeAccountId: String? = nil) {
         self.range = range
+        self.since = range.since
+        self.scopeAccountId = scopeAccountId
         let acct = scopeAccountId ?? UsageScope.noAccountSentinel
         if let since = range.since {
             let cutoffString = TokenSample.formatDate(since)
@@ -178,6 +209,11 @@ private struct LifetimeSummaryContent: View {
         return t
     }
 
+    /// "1,284"; "—" until the first read lands.
+    private static func count(_ n: Int?) -> String {
+        n.map { $0.formatted() } ?? "—"
+    }
+
     private var cardTitle: String {
         switch range {
         case .sevenDays:  return "Last 7 days"
@@ -198,17 +234,64 @@ private struct LifetimeSummaryContent: View {
     var body: some View {
         let t = totals
         let parts = breakdown
+        // Read here and handed down, not read inside `PacerCard`'s stored
+        // closures, so a count landing redraws this view (#140).
+        let counts = self.counts
         VStack(alignment: .leading, spacing: PacerDesign.sectionSpacing) {
-            lifetimeCard(t)
+            lifetimeCard(t, counts: counts)
             if t.distinctDays > 0, PacerCostBreakdownView.hasContent(parts) {
                 PacerCard("Cost breakdown") {
                     PacerCostBreakdownView(parts)
                 }
             }
         }
+        .onAppear { refreshCounts(force: true) }
+        .onChange(of: scanMeta.first?.value) { _, _ in refreshCounts(force: false) }
+        // A merge can fold one project into another without changing how
+        // many project-day rows there are, so it re-reads regardless.
+        .onReceive(NotificationCenter.default.publisher(for: .pacerScanCycleDidComplete)) { note in
+            guard let summary = note.object as? ScanCycleSummary,
+                  summary.projectAttributionChanged else { return }
+            refreshCounts(force: true)
+        }
     }
 
-    private func lifetimeCard(_ t: Totals) -> some View {
+    /// Sessions every time (one COUNT); projects when the range's
+    /// project-day rows moved, or when `force`.
+    private func refreshCounts(force: Bool) {
+        counts.sessions = RangeActivityCounts.sessions(
+            modelContext, since: since, accountId: scopeAccountId)
+        let days = RangeActivityCounts.projectDays(
+            modelContext, since: since, accountId: scopeAccountId)
+        guard force || days != counts.projectDays else { return }
+        counts.projectDays = days
+        loadProjects()
+    }
+
+    private func loadProjects() {
+        guard !projectsLoading else {
+            projectsRerun = true
+            return
+        }
+        projectsLoading = true
+        let container = modelContext.container
+        let since = self.since, account = scopeAccountId
+        Task {
+            // Its own context, off the main actor: reading a lifetime of
+            // project-day rows faults every one of them.
+            let projects = await Task.detached(priority: .utility) {
+                RangeActivityCounts.projects(ModelContext(container), since: since, accountId: account)
+            }.value
+            counts.projects = projects
+            projectsLoading = false
+            if projectsRerun {
+                projectsRerun = false
+                loadProjects()
+            }
+        }
+    }
+
+    private func lifetimeCard(_ t: Totals, counts: ActivityCounts) -> some View {
         PacerCard(cardTitle, trailing: {
             if range == .all, let first = t.firstDate {
                 Text("since \(first)")
@@ -227,10 +310,12 @@ private struct LifetimeSummaryContent: View {
                 // read tiles that used to sit here are in the Cost breakdown
                 // card's legend now, each beside its dollars, so printing them
                 // here as well would put the same numbers on the page twice.
+                // Sessions and projects took their places: how much work the
+                // range held, which no other card on the page counts.
                 LazyVGrid(
                     columns: Array(
                         repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
-                        count: 4
+                        count: 6
                     ),
                     alignment: .leading,
                     spacing: 12
@@ -247,6 +332,8 @@ private struct LifetimeSummaryContent: View {
                         tooltip: pacerTokensExact(t.tokens.all)
                     )
                     MetricTile(value: "\(t.distinctDays)", label: "active days")
+                    MetricTile(value: Self.count(counts.sessions), label: "sessions")
+                    MetricTile(value: Self.count(counts.projects), label: "projects")
                     MetricTile(value: "\(t.distinctModels)", label: "models")
                 }
             }

@@ -55,7 +55,8 @@ public enum PacerCostBreakdownStyle: Sendable, Equatable {
 }
 
 /// The breakdown for one total: the stacked bar, the five parts with their
-/// dollars, share and tokens, and the cache hit rate.
+/// dollars, share and tokens, and the cache hit rate as one line of text
+/// under them.
 ///
 /// One line, not two: tokens are ~98% cache reads, so a token bar would be a
 /// single colour. Each part's token count rides in its legend entry instead,
@@ -66,7 +67,7 @@ public enum PacerCostBreakdownStyle: Sendable, Equatable {
 /// cost to split (every model unpriced) it is only the hit rate: five $0
 /// parts would say nothing.
 ///
-/// `cacheHitTrailing` goes at the end of the cache-hit row, for a screen that
+/// `cacheHitTrailing` goes after the hit rate on its line, for a screen that
 /// has something of its own to say about the cache (Today's savings).
 public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
     private let breakdown: CostBreakdown
@@ -84,11 +85,14 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: style == .compact ? 8 : 12) {
+        VStack(alignment: .leading, spacing: style == .compact ? 8 : 10) {
             if breakdown.total > 0 {
                 switch style {
                 case .regular:
                     PacerCostBar(breakdown, height: 10)
+                        // The bar-to-legend gap the stack had before the hit
+                        // rate became a line of text and the stack tightened.
+                        .padding(.bottom, 2)
                     LazyVGrid(
                         columns: Array(
                             repeating: GridItem(.flexible(), spacing: 12, alignment: .topLeading),
@@ -101,7 +105,7 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                         }
                     }
                 case .compact:
-                    Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 4) {
+                    Grid(alignment: .leading, horizontalSpacing: PacerCompactColumns.spacing, verticalSpacing: 4) {
                         // "tokens" once, over its column, rather than on every
                         // row: five "21.5B tokens" cost the 37 pt that kept
                         // "5m cache writes" from truncating at hover-card width.
@@ -112,7 +116,7 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                             Text("tokens")
                                 .font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.tertiary)
-                                .gridColumnAlignment(.trailing)
+                                .pacerCompactColumn(PacerCompactColumns.tokens)
                         }
                         ForEach(breakdown.parts) { part in
                             PartRow(part: part)
@@ -121,7 +125,7 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                 }
             }
             if let ratio = breakdown.cacheHitRatio {
-                PacerCacheHitRow(ratio: ratio) { cacheHitTrailing }
+                PacerCacheHitLine(ratio: ratio) { cacheHitTrailing }
             }
         }
     }
@@ -189,17 +193,17 @@ public struct PacerCostBreakdownView<CacheHitTrailing: View>: View {
                 .layoutPriority(-1)
                 Text(pacerCost(part.usd))
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .gridColumnAlignment(.trailing)
+                    .pacerCompactColumn(PacerCompactColumns.cost)
                     .modifier(PartCellStyle(part: part))
                 Text(part.percentLabel)
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
-                    .gridColumnAlignment(.trailing)
+                    .pacerCompactColumn(PacerCompactColumns.share)
                     .modifier(PartCellStyle(part: part))
                 Text(pacerTokens(part.tokens))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                    .gridColumnAlignment(.trailing)
+                    .pacerCompactColumn(PacerCompactColumns.tokens)
                     .modifier(PartCellStyle(part: part))
             }
         }
@@ -285,10 +289,14 @@ public extension PacerCostBreakdownRow where Trailing == EmptyView {
     }
 }
 
-/// The cache hit rate as a filled track and a percentage, with a
-/// caller-supplied trailing slot.
+/// The cache hit rate as one quiet line of text — "Cache hits 98.1%" — with
+/// a caller-supplied trailing slot.
+///
+/// Text, not a bar: a filled track beside the five-part cost bar was a second
+/// bar that read as part of the first, and it spent a row on one number. As a
+/// line under the legend it starts where the legend does and costs one line.
 /// `ratio` is `TokenBreakdown.cacheHitRatio`, the one definition.
-public struct PacerCacheHitRow<Trailing: View>: View {
+public struct PacerCacheHitLine<Trailing: View>: View {
     private let ratio: Double
     private let trailing: Trailing
 
@@ -298,42 +306,45 @@ public struct PacerCacheHitRow<Trailing: View>: View {
     }
 
     public var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "bolt.horizontal.circle.fill")
-                .foregroundStyle(.tint)
-                .font(.system(size: 13))
-            Text("Cache hit rate")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                // One line in a narrow card: the track gives way instead.
-                .lineLimit(1)
-                .fixedSize()
-            Spacer(minLength: 0)
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(height: 6)
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.accentColor)
-                        .frame(width: geo.size.width * min(max(ratio, 0), 1), height: 6)
-                }
-                .frame(height: 6)
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("Cache hits")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(pacerCacheHitText(ratio))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
             }
-            .frame(maxWidth: 220)
-            Text(pacerCacheHitText(ratio))
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .frame(width: 56, alignment: .trailing)
+            .help("\(pacerCacheHitText(ratio)) of prompt tokens served from cache")
+            .accessibilityElement(children: .combine)
             trailing
         }
-        .help("Prompt tokens served from cache")
+        .lineLimit(1)
     }
 }
 
-public extension PacerCacheHitRow where Trailing == EmptyView {
+public extension PacerCacheHitLine where Trailing == EmptyView {
     init(ratio: Double) {
         self.init(ratio: ratio) { EmptyView() }
+    }
+}
+
+/// The compact breakdown's number columns, shared with the hover card's
+/// top-models rows (`PacerCostHoverCard`) so the two grids' dollars, shares
+/// and tokens sit in the same columns. A minimum, not a fixed width: a value
+/// wider than its column widens it rather than truncating.
+enum PacerCompactColumns {
+    static let cost: CGFloat = 44
+    static let share: CGFloat = 32
+    static let tokens: CGFloat = 40
+    static let spacing: CGFloat = 6
+}
+
+extension View {
+    /// A trailing-aligned number cell at least `width` wide.
+    func pacerCompactColumn(_ width: CGFloat) -> some View {
+        frame(minWidth: width, alignment: .trailing)
+            .gridColumnAlignment(.trailing)
     }
 }
 

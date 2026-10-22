@@ -9,7 +9,8 @@ import PacerUI
 ///   2. Now strip — Live (last-hour burn) + Today (spend, outlook, budget).
 ///   3. PaceChart card (full width, the two big 5h/7d charts with their
 ///      status + burn chips).
-///   4. Today's breakdowns, weekly comparison, 30-day cost, month outlook.
+///   4. Today's breakdowns, weekly comparison, then the last 30 days with
+///      this month in the same card.
 ///
 /// Each card is its own `View` and owns its own `@Query` so SwiftData
 /// updates stay incremental: a new TokenSample only invalidates the
@@ -76,12 +77,12 @@ struct DashboardView: View {
                 .layoutShiftProbe("per-model")
             WeeklyComparisonCard(scopeAccountId: scopeAccountId)
                 .layoutShiftProbe("weekly")
+            // The last 30 days and this month, one card: they read the same
+            // daily rows, and the month was a slim card of its own below.
             DailyCostChartCard(scopeAccountId: scopeAccountId, onDayTap: { dayKey in
                 modalRoot = .day(date: dayKey)
             })
             .layoutShiftProbe("daily-cost")
-            MonthOutlookCard(scopeAccountId: scopeAccountId)
-                .layoutShiftProbe("month-outlook")
         }
         .pacerModalNavigation(modalRoot, root: $modalRoot)
     }

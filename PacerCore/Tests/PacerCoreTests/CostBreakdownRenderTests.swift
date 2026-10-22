@@ -85,15 +85,20 @@ struct CostBreakdownRenderTests {
                        PacerCostBreakdownView(Self.today, style: .compact))
             // Roughly the History page: the Lifetime tiles, then the
             // breakdown card — to see the two read as one page.
-            try render("history-mock", width: 720, dark: dark, VStack(spacing: 16) {
+            try render("history-mock", width: 760, dark: dark, VStack(spacing: 16) {
                 PacerCard("Lifetime") {
                     LazyVGrid(
-                        columns: Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: 4),
-                        alignment: .leading
+                        columns: Array(
+                            repeating: GridItem(.flexible(), spacing: 16, alignment: .topLeading),
+                            count: 6),
+                        alignment: .leading,
+                        spacing: 12
                     ) {
                         MetricTile(value: pacerCost(Self.lifetime.total), label: "cost", size: .hero)
                         MetricTile(value: pacerTokens(Self.lifetime.tokens.all), label: "tokens")
                         MetricTile(value: "214", label: "active days")
+                        MetricTile(value: 1_284.formatted(), label: "sessions")
+                        MetricTile(value: "37", label: "projects")
                         MetricTile(value: "9", label: "models")
                     }
                 }

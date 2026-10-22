@@ -74,7 +74,7 @@ struct TodayDetailsCard: View {
         }
     }
 
-    /// What Today adds to the shared cache-hit row: how many times each
+    /// What Today adds after the shared cache-hit line: how many times each
     /// written token was read back, and the dollars the cache saved against
     /// a no-cache day. The read and written counts the old sub-line printed
     /// are in the breakdown's legend now (cache reads, 5m and 1h writes).
