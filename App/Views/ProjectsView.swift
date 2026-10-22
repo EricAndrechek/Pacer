@@ -388,6 +388,8 @@ private struct ProjectsContent: View {
         /// use, so all three agree (#215).
         let tokens: TokenBreakdown
         var totalTokens: Int64 { tokens.all }
+        /// `cost` by priced part, for the table's ratio and Mix columns.
+        let costParts: CostComponents
         let sessionCount: Int
         let lastActive: Date
         let modelCount: Int
@@ -555,6 +557,7 @@ private struct ProjectsContent: View {
                 displayName: names[key] ?? pacerShortPath(key),
                 cost: a.totals.cost,
                 tokens: a.totals.tokens,
+                costParts: a.totals.costParts,
                 sessionCount: a.totals.sessionCount,
                 lastActive: a.totals.lastActive,
                 modelCount: a.modelCount,
@@ -590,6 +593,7 @@ private struct ProjectsContent: View {
                 subtitle: row.path,
                 color: pacerProjectColor(path: row.path, seed: row.colorSeed, hex: row.colorHex),
                 tokens: row.tokens,
+                costParts: row.costParts,
                 cost: row.cost,
                 extra: row)
         }
@@ -1021,7 +1025,7 @@ private struct ProjectsContent: View {
                     extraColumns: {
                         PacerUsageColumns.extra(ProjectRow.sessionsColumn, title: "Sessions",
                                                 of: ProjectRow.self,
-                                                minWidth: 44, idealWidth: 60) { row in
+                                                minWidth: 44, idealWidth: 56) { row in
                             Text("\(row.extra.sessionCount)")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)

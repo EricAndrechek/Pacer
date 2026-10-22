@@ -118,6 +118,7 @@ struct DayDetailView: View {
         /// From the same `ProjectUsageTotals` fold the Projects list and
         /// Project detail use, so the three agree (#215).
         let tokens: TokenBreakdown
+        let costParts: CostComponents
         var id: String { path }
     }
 
@@ -161,7 +162,8 @@ struct DayDetailView: View {
                 path: path,
                 displayName: pacerShortPath(path),
                 cost: totals.cost,
-                tokens: totals.tokens
+                tokens: totals.tokens,
+                costParts: totals.costParts
             )
         }.sorted { lhs, rhs in
             // Stable sort: by cost desc, with displayName as a
@@ -187,12 +189,13 @@ struct DayDetailView: View {
                 label: pacerModelDisplayName(agg.model),
                 color: pacerModelColor(agg.model),
                 tokens: agg.tokens,
+                costParts: agg.cost,
                 cost: agg.totalCostUSD,
                 extra: DayModelShare(share: dayCost > 0 ? agg.totalCostUSD / dayCost : 0))
         }
         let projectTableRows = rows.map { row in
             PacerUsageRow(id: row.path, label: row.displayName, subtitle: row.path,
-                          tokens: row.tokens, cost: row.cost)
+                          tokens: row.tokens, costParts: row.costParts, cost: row.cost)
         }
         cached = Cached(
             totals: t,
@@ -207,8 +210,13 @@ struct DayDetailView: View {
     var body: some View {
         // Read here as well as inside `PacerModalContent`'s stored closure,
         // so a refresh redraws this view (#140; AGENTS.md, "SwiftUI state and
-        // data flow"). The Sessions sort reaches its table only as bindings.
+        // data flow").
         let _ = cached
+        let sessions = sessionRows
+        // The cached rows, or on the first frame (before `.onChange` has run)
+        // the same rows built once here, so the card opens full.
+        let sessionTable = sessionTableRows.isEmpty && !sessions.isEmpty
+            ? PacerSessionsTable.rows(sessions) : sessionTableRows
         let _ = (sessionsSortRaw, sessionsSortDescending)
         // The Models and Projects sorts are read inside the cards, which run
         // in that stored closure too; read here so a header click redraws.
@@ -223,9 +231,14 @@ struct DayDetailView: View {
             if PacerCostBreakdownView.hasContent(cached.breakdown) { breakdownCard }
             if !aggregates.isEmpty { modelsCard }
             if !projectRows.isEmpty { projectsCard }
-            if !sessionRows.isEmpty { sessionsCard }
+            if !sessions.isEmpty { sessionsCard(sessionTable) }
         }
         .onAppear { refreshCache() }
+        // The session rows are live `@Query` results (scans, a scope switch
+        // re-reading the other table); the table's rows follow them.
+        .onChange(of: sessions, initial: true) { _, new in
+            sessionTableRows = PacerSessionsTable.rows(new)
+        }
         .onChange(of: scanMeta.first?.value) { _, _ in refreshCache() }
         // The scope is an input to the cache: without this, switching scope
         // with a day open left Summary, Models and Projects on the old
@@ -351,11 +364,10 @@ struct DayDetailView: View {
         push(.project(path: path, displayName: displayName, since: nil))
     }
 
-    /// Every model the day used, in the shared usage table, with each
-    /// model's share of the day's cost. The donut that sat beside the list
-    /// drew that same share; beside seven columns it left the table too
-    /// narrow for a modal, so the share is a column now, and the Cost
-    /// breakdown card above draws each model's mix.
+    /// Every model the day used, in the shared usage table's narrow form
+    /// (Total, Out %, Write %, Cost; the token parts are in the header's
+    /// menu), with each model's share of the day's cost. The Cost breakdown
+    /// card above draws each model's mix.
     private var modelsCard: some View {
         let sort = PacerUsageSort(column: modelsSortRaw, descending: modelsSortDescending)
         return PacerCard("Models") {
@@ -364,14 +376,15 @@ struct DayDetailView: View {
                 tableId: "dayDetail.models",
                 labelTitle: "Model",
                 sort: sort,
-                onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending }
+                onSort: { modelsSortRaw = $0.column; modelsSortDescending = $0.descending },
+                defaultColumns: UsageColumn.narrowDefaults
             ) {
                 PacerUsageColumns.extra(DayModelShare.column, title: "Share",
-                                        of: DayModelShare.self,
+                                        of: DayModelShare.self, help: "Share of the day's cost",
                                         minWidth: 40, idealWidth: 48) { row in
                     Text("\(Int((row.extra.share * 100).rounded()))%")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
                         .monospacedDigit()
                         .help("Share of the day's cost")
                 }
@@ -413,37 +426,34 @@ struct DayDetailView: View {
     }
 
     @AppStorage("pacer.dayDetail.sessionsSort", store: PacerSettings.store)
-    private var sessionsSortRaw: String = SessionsTableSort.cost.rawValue
+    private var sessionsSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.dayDetail.sessionsSortDescending", store: PacerSettings.store)
     private var sessionsSortDescending: Bool = true
 
-    private var sessionsSort: SessionsTableSort {
-        SessionsTableSort(rawValue: sessionsSortRaw) ?? .cost
-    }
-    private var sessionsSortBinding: Binding<SessionsTableSort> {
-        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
-    }
+    /// The Sessions table's rows, rebuilt when the day's sessions change
+    /// (a scan, a scope switch) rather than on every body pass.
+    @State private var sessionTableRows: [PacerSessionsTable.Row] = []
 
-    /// Sessions active on this day — same shared SessionsTable that
-    /// the project modal uses, with the "Project" column enabled
-    /// because a day spans many projects. All rows reachable via the
-    /// table's inner scroll once the count exceeds the inline
-    /// threshold; no more "+N more" dead-end.
-    private var sessionsCard: some View {
-        PacerCard("Sessions", trailing: {
-            Text("\(sessionRows.count) on this day")
+    /// Sessions active on this day, in the shared sessions table with its
+    /// Project column, since a day spans many projects. Every row is
+    /// reachable through the table's own scroll.
+    private func sessionsCard(_ rows: [PacerSessionsTable.Row]) -> some View {
+        let sort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
+        return PacerCard("Sessions", trailing: {
+            Text("\(rows.count) on this day")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            SessionsTable(
-                rows: sessionRows,
-                showProjectColumn: true,
-                sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending,
-                onSessionTap: { session in
+            PacerSessionsTable(
+                rows: rows,
+                tableId: "dayDetail.sessions",
+                showProject: true,
+                sort: sort,
+                onSort: { sessionsSortRaw = $0.column; sessionsSortDescending = $0.descending },
+                onOpen: { row in
                     push(.session(
-                        sessionId: session.sessionId,
-                        projectDisplayName: pacerShortPath(session.projectPath)
+                        sessionId: row.id,
+                        projectDisplayName: row.extra.projectName
                     ))
                 }
             )

@@ -98,30 +98,23 @@ struct ModelsView: View {
 }
 
 /// What the Models table shows beyond the standard columns: the model id
-/// to copy, its active days, the day it was last seen, and its cost by part
-/// for the Mix bar.
+/// to copy, its active days and the day it was last seen. Its Mix bar is the
+/// shared table's Mix column now (`UsageColumn.mix`), under the same id and
+/// sorting the same way, so a saved sort or layout carries over.
 struct ModelTableExtra: PacerUsageExtra {
     static let days = "days"
     static let lastSeen = "lastSeen"
-    static let mix = "mix"
 
     /// Raw id to copy; empty when the row is a class.
     let model: String
     let activeDays: Int
     /// `YYYY-MM-DD`, so it sorts as text in date order.
     let lastSeen: String
-    let breakdown: CostBreakdown
 
     func sortKey(forColumn id: String) -> PacerUsageSortKey? {
         switch id {
         case Self.days:     return .number(Double(activeDays))
         case Self.lastSeen: return .text(lastSeen)
-        // The bar's left-hand segments are input and output, so ordering by
-        // their share of the cost lines the bars up by where the cache part
-        // starts: most uncached first.
-        case Self.mix:
-            let total = breakdown.total
-            return .number(total > 0 ? (breakdown.cost.input + breakdown.cost.output) / total : 0)
         default:            return nil
         }
     }
@@ -405,9 +398,10 @@ private struct ModelsContent: View {
                 subtitle: r.subtitle,
                 color: r.color,
                 tokens: r.tokens,
+                costParts: r.breakdown.cost,
                 cost: r.cost,
                 extra: ModelTableExtra(model: r.model, activeDays: r.activeDays,
-                                       lastSeen: r.lastSeen, breakdown: r.breakdown))
+                                       lastSeen: r.lastSeen))
         }
 
         // The donut is drawn largest-wedge-first, which is not the table's
@@ -828,9 +822,12 @@ private struct ModelsContent: View {
                     labelTitle: grouping.label,
                     sort: sort,
                     onSort: onSort,
+                    // The full token columns, and the Mix bar this table
+                    // has always had.
+                    defaultColumns: UsageColumn.wideDefaults.union([.mix]),
                     extraColumns: {
                         PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
-                                                of: ModelTableExtra.self,
+                                                of: ModelTableExtra.self, help: "Days with usage",
                                                 minWidth: 36, idealWidth: 44) { row in
                             Text("\(row.extra.activeDays)")
                                 .font(.system(size: 12))
@@ -843,11 +840,6 @@ private struct ModelsContent: View {
                             Text(row.extra.lastSeen)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
-                        }
-                        PacerUsageColumns.extra(ModelTableExtra.mix, title: "Mix",
-                                                of: ModelTableExtra.self, numeric: false,
-                                                minWidth: 60, idealWidth: 96) { row in
-                            PacerCostBar(row.extra.breakdown)
                         }
                     },
                     rowMenu: { row in

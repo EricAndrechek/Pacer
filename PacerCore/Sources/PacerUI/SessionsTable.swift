@@ -1,258 +1,187 @@
 import SwiftUI
-import SwiftData
 import PacerCore
 
-/// Shared sortable table of session rows. Used by both
-/// `ProjectDetailView` (project's sessions) and `DayDetailView`
-/// (sessions active on a specific day) so both surfaces have the
-/// same look-and-feel + sort behavior.
-///
-/// The user flagged that two different surfaces displayed sessions
-/// in two different layouts with two different feature sets — the
-/// day modal had no sortable columns, no chevron, and capped at
-/// "+ N more" rows that weren't reachable. Consolidating into one
-/// component eliminates that drift and gives both surfaces:
-///   - Sortable column headers with persistent direction
-///   - Hover-row affordance + chevron + pointing cursor
-///   - Inner scroll with a visible scrollbar past a row threshold
-///   - Optional "Project" column (used by Day modal; hidden for Project modal)
-///
-/// Sort fields and persistence are caller-supplied so each surface
-/// can store its preference under a distinct App Group key.
-public struct SessionsTable: View {
-    /// Already filtered + ready-to-sort. Caller supplies the rows
-    /// from its own @Query so SwiftData updates stay incremental.
-    public let rows: [SessionRow]
-    /// Show the "Project" column. The project-detail modal already
-    /// scopes by one project so the column is redundant there; the
-    /// day-detail modal benefits from it.
-    public let showProjectColumn: Bool
-    /// Callback for opening a session's detail modal.
-    public let onSessionTap: (SessionRow) -> Void
+// The sessions lists — Project detail's sessions and Day detail's sessions
+// on that day — in the shared usage table (#215 follow-up).
+//
+// They were the last hand-rolled table: a header row of `SortableColumnHeader`s
+// over `HoverRow`s, with its own sort, its own fonts and only two of the
+// numbers. Now a session is a row like a model or a project: the same header,
+// sort, column menu and saved layout, and every token part, the two ratios
+// and the Mix bar one right-click away.
 
-    @Binding public var sort: SessionsTableSort
-    @Binding public var sortDescending: Bool
+/// What a sessions table shows beyond the standard columns: the session's
+/// project, how long it ran, and when it was last seen.
+public struct PacerSessionExtra: PacerUsageExtra, Sendable, Equatable {
+    public static let project = "project"
+    public static let duration = "duration"
+    /// "lastSeen", the raw value both screens stored for this sort before.
+    public static let lastSeen = "lastSeen"
 
+    public let projectPath: String
+    /// The project's short name, as the Project column prints it.
+    public let projectName: String
+    public let firstSeenAt: Date
+    public let lastSeenAt: Date
+
+    public init(projectPath: String, projectName: String, firstSeenAt: Date, lastSeenAt: Date) {
+        self.projectPath = projectPath
+        self.projectName = projectName
+        self.firstSeenAt = firstSeenAt
+        self.lastSeenAt = lastSeenAt
+    }
+
+    /// First seen to last seen.
+    public var duration: TimeInterval { max(0, lastSeenAt.timeIntervalSince(firstSeenAt)) }
+
+    public func sortKey(forColumn id: String) -> PacerUsageSortKey? {
+        switch id {
+        case Self.project:  return .text(projectName)
+        case Self.duration: return .number(duration)
+        case Self.lastSeen: return .date(lastSeenAt)
+        default:            return nil
+        }
+    }
+}
+
+/// A sessions table: the session's top model over its short id, the Project
+/// column when the list spans projects, Total, Cost and a Last seen that
+/// keeps ticking. Duration, every token part, Out %, Write % and Mix are in
+/// the header's menu.
+public struct PacerSessionsTable: View {
+    public typealias Row = PacerUsageRow<PacerSessionExtra>
+
+    let rows: [Row]
+    let tableId: String
+    let showProject: Bool
+    let sort: PacerUsageSort
+    let onSort: (PacerUsageSort) -> Void
+    let onOpen: (Row) -> Void
+    let store: UserDefaults
+
+    /// About eight two-line rows before it scrolls, the height the
+    /// hand-rolled list stopped at.
+    public static let maxVisibleRows = 8
+
+    /// The standard columns a sessions table shows by default: a session's
+    /// line is long enough with its label, project and times, so the parts
+    /// and ratios wait in the column menu.
+    public static let defaultColumns: Set<UsageColumn> = [.name, .tokens, .cost]
+
+    /// - `rows`: from `rows(_:)`, cached by the screen.
+    /// - `showProject`: the Project column, for a list that spans projects
+    ///   (Day detail). Project detail's sessions are all one project.
     public init(
-        rows: [SessionRow],
-        showProjectColumn: Bool,
-        sort: Binding<SessionsTableSort>,
-        sortDescending: Binding<Bool>,
-        onSessionTap: @escaping (SessionRow) -> Void
+        rows: [Row],
+        tableId: String,
+        showProject: Bool,
+        sort: PacerUsageSort,
+        onSort: @escaping (PacerUsageSort) -> Void,
+        onOpen: @escaping (Row) -> Void,
+        store: UserDefaults = PacerPreferences.store
     ) {
         self.rows = rows
-        self.showProjectColumn = showProjectColumn
-        self._sort = sort
-        self._sortDescending = sortDescending
-        self.onSessionTap = onSessionTap
+        self.tableId = tableId
+        self.showProject = showProject
+        self.sort = sort
+        self.onSort = onSort
+        self.onOpen = onOpen
+        self.store = store
     }
-
-    /// The tallest the rows get before they scroll. About twelve rows: a
-    /// short list hugs its rows, a long one stops here with a visible
-    /// scrollbar.
-    static let scrollMaxHeight: CGFloat = 320
 
     public var body: some View {
-        // Sort once per body eval — `sortedRows` is read up to four times
-        // below, and a parent's un-debounced donut-hover `@State` re-fires
-        // this body on every pointer tick, so recomputing the sort inline
-        // would re-sort the whole list several times per hover frame.
-        let visibleRows = sortedRows
-        return VStack(alignment: .leading, spacing: 4) {
-            header
-            Divider().padding(.vertical, 2)
-            if visibleRows.isEmpty {
-                Text("No sessions in scope.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .padding(.vertical, 8)
-            } else {
-                // One container for every length (#161). Short lists used to
-                // be an inline `ForEach` and long ones a `ScrollView`: two
-                // branches, so a session arriving that crossed the threshold
-                // while a detail was open rebuilt every row, losing each
-                // `HoverRow`'s state and the scroll position. Now the scroll
-                // view is always there and only its height changes: it hugs
-                // the rows up to `scrollMaxHeight`, then scrolls.
-                CappedHeight(maxHeight: Self.scrollMaxHeight) {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(visibleRows, id: \.sessionId) { row in
-                                rowView(row)
-                            }
-                        }
-                    }
-                    // A list that fits does not bounce or offer to scroll.
-                    .scrollBounceBehavior(.basedOnSize)
-                    // Visible scrollbar so the user can see there's more
-                    // content + how far they've scrolled. User flagged
-                    // that hidden indicators on a long list felt like
-                    // missing affordance.
-                    .scrollIndicators(.visible)
-                }
-            }
-        }
-    }
-
-    private var sortedRows: [SessionRow] {
-        let primary: (SessionRow, SessionRow) -> Bool
-        switch sort {
-        case .id:
-            primary = { $0.sessionId < $1.sessionId }
-        case .model:
-            primary = { $0.topModel < $1.topModel }
-        case .project:
-            primary = { $0.projectPath.localizedCaseInsensitiveCompare($1.projectPath) == .orderedAscending }
-        case .tokens:
-            primary = { $0.tokens.all < $1.tokens.all }
-        case .cost:
-            primary = { $0.cumulativeCostUSD < $1.cumulativeCostUSD }
-        case .lastSeen:
-            primary = { $0.lastSeenAt < $1.lastSeenAt }
-        }
-        let sorted = rows.sorted { lhs, rhs in
-            if primary(lhs, rhs) { return true }
-            if primary(rhs, lhs) { return false }
-            // Stable tiebreaker — session IDs are unique, no shuffle.
-            return lhs.sessionId < rhs.sessionId
-        }
-        return sortDescending ? sorted.reversed() : sorted
-    }
-
-    @ViewBuilder
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            SortableColumnHeader(
-                "ID",
-                field: SessionsTableSort.id,
-                alignment: .leading,
-                active: $sort,
-                descending: $sortDescending,
-                defaultDescending: false
-            ).frame(width: 80, alignment: .leading)
-            SortableColumnHeader(
-                "Model",
-                field: SessionsTableSort.model,
-                alignment: .leading,
-                active: $sort,
-                descending: $sortDescending,
-                defaultDescending: false
-            ).frame(maxWidth: showProjectColumn ? 150 : 220, alignment: .leading)
-            if showProjectColumn {
-                SortableColumnHeader(
-                    "Project",
-                    field: SessionsTableSort.project,
-                    alignment: .leading,
-                    active: $sort,
-                    descending: $sortDescending,
-                    defaultDescending: false
-                ).frame(width: 130, alignment: .leading)
-            }
-            Spacer()
-            SortableColumnHeader(
-                "Tokens",
-                field: SessionsTableSort.tokens,
-                alignment: .trailing,
-                active: $sort,
-                descending: $sortDescending
-            ).frame(width: 80)
-            SortableColumnHeader(
-                "Cost",
-                field: SessionsTableSort.cost,
-                alignment: .trailing,
-                active: $sort,
-                descending: $sortDescending
-            ).frame(width: 70)
-            SortableColumnHeader(
-                "Last seen",
-                field: SessionsTableSort.lastSeen,
-                alignment: .trailing,
-                active: $sort,
-                descending: $sortDescending
-            ).frame(width: 90)
-            // Reserve room for the row's chevron-icon column.
-            Spacer().frame(width: 16)
-        }
-    }
-
-    @ViewBuilder
-    private func rowView(_ row: SessionRow) -> some View {
-        HoverRow(action: { onSessionTap(row) }) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(String(row.sessionId.prefix(8)))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 80, alignment: .leading)
-                Text(pacerModelDisplayName(row.topModel))
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: showProjectColumn ? 150 : 220, alignment: .leading)
-                if showProjectColumn {
-                    Text(pacerShortPath(row.projectPath))
-                        .font(.system(size: 11))
+        let showProject = self.showProject
+        PacerUsageTable(
+            rows: rows,
+            tableId: tableId,
+            labelTitle: "Session",
+            sort: sort,
+            onSort: onSort,
+            onOpen: onOpen,
+            maxVisibleRows: Self.maxVisibleRows,
+            defaultColumns: Self.defaultColumns,
+            store: store
+        ) {
+            // Beside the label: which project a session was in reads with
+            // which session it was.
+            if showProject {
+                PacerUsageColumns.extra(PacerSessionExtra.project, title: "Project",
+                                        of: PacerSessionExtra.self, numeric: false,
+                                        minWidth: 70, idealWidth: 120, descendingFirst: false) { row in
+                    Text(row.extra.projectName)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .frame(width: 130, alignment: .leading)
+                        .help(row.extra.projectPath)
                 }
-                Spacer(minLength: 8)
-                Text(pacerTokens(row.tokens.all)).help(pacerTokensExact(row.tokens.all))
-                    .font(.system(size: 11))
+            }
+        } extraColumns: {
+            PacerUsageColumns.extra(PacerSessionExtra.duration, title: "Duration",
+                                    of: PacerSessionExtra.self, help: "First seen to last seen",
+                                    minWidth: 48, idealWidth: 60, visibleByDefault: false) { row in
+                Text(pacerSessionDuration(row.extra.duration))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                    .frame(width: 80, alignment: .trailing)
-                Text(pacerCost(row.cumulativeCostUSD)).help(pacerCostExact(row.cumulativeCostUSD))
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .frame(width: 70, alignment: .trailing)
+                    .help("\(pacerRelativeExact(row.extra.firstSeenAt)) → \(pacerRelativeExact(row.extra.lastSeenAt))")
+            }
+            PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last seen",
+                                    of: PacerSessionExtra.self,
+                                    minWidth: 60, idealWidth: 76) { row in
                 // Judged against the clock, so it needs one: nothing else
                 // redraws an open detail on an idle machine, and "2 min ago"
                 // stayed "2 min ago".
                 TimelineView(.everyMinute) { _ in
-                    Text(pacerRelative(row.lastSeenAt)).help(pacerRelativeExact(row.lastSeenAt))
+                    Text(pacerRelative(row.extra.lastSeenAt))
+                        .help(pacerRelativeExact(row.extra.lastSeenAt))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
-                .frame(width: 90, alignment: .trailing)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16, alignment: .trailing)
             }
         }
     }
-}
 
-/// Shared sort field for the sessions table. Matches what both
-/// surfaces persist; legal values include `.project` for the Day
-/// modal which renders the extra column. The Project modal's
-/// previous SessionsSort enum had only the first five — moved to
-/// this superset so we don't fork the type.
-public enum SessionsTableSort: String, CaseIterable, Identifiable {
-    case id, model, project, tokens, cost, lastSeen
-    public var id: String { rawValue }
-}
-
-/// Sizes its one child to the child's own height, but no taller than
-/// `maxHeight`: a scroll view that hugs short content and scrolls long
-/// content, as one view whose identity never changes with the length.
-///
-/// A scroll view's ideal height is its content's, so asking the child with
-/// no height proposed measures the rows; placing it at the capped height is
-/// what makes the rest scroll.
-struct CappedHeight: Layout {
-    var maxHeight: CGFloat
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        guard let child = subviews.first else { return .zero }
-        let ideal = child.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-        return CGSize(width: proposal.width ?? ideal.width, height: min(ideal.height, maxHeight))
+    /// The rows for `sessions`. A screen builds these once per change of its
+    /// sessions and keeps them; the table sorts them itself.
+    public static func rows(_ sessions: [SessionRow]) -> [Row] {
+        sessions.map { session in
+            PacerUsageRow(
+                id: session.sessionId,
+                label: pacerModelDisplayName(session.topModel),
+                subtitle: String(session.sessionId.prefix(8)),
+                color: pacerModelColor(session.topModel),
+                tokens: session.tokens,
+                costParts: session.cost,
+                cost: session.cumulativeCostUSD,
+                extra: PacerSessionExtra(
+                    projectPath: session.projectPath,
+                    projectName: pacerShortPath(session.projectPath),
+                    firstSeenAt: session.firstSeenAt,
+                    lastSeenAt: session.lastSeenAt))
+        }
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
-                       cache: inout ()) {
-        subviews.first?.place(at: bounds.origin, anchor: .topLeading,
-                              proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    /// A sort stored before the shared table. Its "id" and "model" columns
+    /// are both the label column now (the label is the model, over the id);
+    /// "project", "tokens", "cost" and "lastSeen" are column ids already.
+    public static func sort(stored column: String, descending: Bool) -> PacerUsageSort {
+        let migrated = column == "id" || column == "model" ? UsageColumn.name.rawValue : column
+        return PacerUsageSort(column: migrated, descending: descending)
     }
+}
+
+/// `firstSeen → lastSeen` as "45s", "12m", "3h 12m", "2d 4h": second
+/// granularity under a minute so "0m" is never the answer.
+public func pacerSessionDuration(_ seconds: TimeInterval) -> String {
+    let seconds = max(0, seconds)
+    if seconds < 60 { return "\(Int(seconds))s" }
+    let minutes = Int(seconds / 60)
+    if minutes < 60 { return "\(minutes)m" }
+    let hours = minutes / 60
+    let remMin = minutes % 60
+    if hours < 24 { return remMin == 0 ? "\(hours)h" : "\(hours)h \(remMin)m" }
+    let days = hours / 24
+    let remHr = hours % 24
+    return remHr == 0 ? "\(days)d" : "\(days)d \(remHr)h"
 }

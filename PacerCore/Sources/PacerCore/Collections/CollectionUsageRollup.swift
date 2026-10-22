@@ -10,6 +10,9 @@ public struct ProjectUsageTotals: Sendable, Equatable {
     /// output + cache reads once, so a project's leaderboard row and its
     /// detail page disagreed about the same range.
     public var tokens = TokenBreakdown.zero
+    /// `cost` by priced part (#296), for the ratio and Mix columns of the
+    /// tables that list projects.
+    public var costParts = CostComponents.zero
     public var sessionCount: Int = 0
     public var lastActive: Date = .distantPast
 
@@ -29,6 +32,7 @@ public struct ProjectUsageTotals: Sendable, Equatable {
     public mutating func add(_ r: any ProjectDailyReadable) {
         cost += r.totalCostUSD
         tokens += r.tokens
+        costParts += r.costComponents
         sessionCount += r.sessionCount
         if r.lastActive > lastActive { lastActive = r.lastActive }
     }
@@ -37,6 +41,7 @@ public struct ProjectUsageTotals: Sendable, Equatable {
     public mutating func add(_ other: ProjectUsageTotals) {
         cost += other.cost
         tokens += other.tokens
+        costParts += other.costParts
         sessionCount += other.sessionCount
         if other.lastActive > lastActive { lastActive = other.lastActive }
     }

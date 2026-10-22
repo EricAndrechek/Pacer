@@ -8,6 +8,7 @@ import Foundation
 public enum TopDaysSort: String, CaseIterable, Identifiable, Sendable {
     case date, tokens, cost
     case input, output, cacheRead, cacheWrite, cacheWrite5m, cacheWrite1h
+    case outShare, writeShare, mix
     public var id: String { rawValue }
 
     /// The table column this sort is. `date` is the label column.
@@ -22,16 +23,20 @@ public enum TopDaysSort: String, CaseIterable, Identifiable, Sendable {
 }
 
 /// One day summed across every model.
-public struct DayTotal: Sendable, Equatable, Identifiable {
+public struct DayTotal: Sendable, Equatable, Identifiable, UsageColumnValues {
     public let date: String
     public var cost: Double
     public var tokens: TokenBreakdown
+    /// `cost` by priced part, for the ratio and Mix columns.
+    public var costParts: CostComponents
     public var id: String { date }
 
-    public init(date: String, cost: Double = 0, tokens: TokenBreakdown = .zero) {
+    public init(date: String, cost: Double = 0, tokens: TokenBreakdown = .zero,
+                costParts: CostComponents = .zero) {
         self.date = date
         self.cost = cost
         self.tokens = tokens
+        self.costParts = costParts
     }
 }
 
@@ -45,7 +50,8 @@ public struct DayTotal: Sendable, Equatable, Identifiable {
 /// The card shows the top 10 (or 100) of this ranking in the shared usage
 /// table, which sorts what it is given by the same column. The two orders
 /// have to agree, ties included, or the table would reshuffle the days this
-/// picked; `UsageTableTests` checks every column in both directions.
+/// picked; both compare through `UsageColumn.compare`, and
+/// `UsageTableTests` checks every column in both directions.
 public enum DayRanking {
 
     /// The rows folded to one total per date, in no particular order.
@@ -55,6 +61,7 @@ public enum DayRanking {
             var day = byDate[row.date] ?? DayTotal(date: row.date)
             day.cost += row.totalCostUSD
             day.tokens += row.tokens
+            day.costParts += row.cost
             byDate[row.date] = day
         }
         return Array(byDate.values)
@@ -75,17 +82,11 @@ public enum DayRanking {
     ) -> [DayTotal] {
         let column = sort.column
         let ascending = days.sorted { lhs, rhs in
-            switch column {
-            case .name:
-                break
-            case .cost:
-                if lhs.cost != rhs.cost { return lhs.cost < rhs.cost }
-            default:
-                let l: Int64 = column.tokenCount(of: lhs.tokens) ?? 0
-                let r: Int64 = column.tokenCount(of: rhs.tokens) ?? 0
-                if l != r { return l < r }
+            switch column.compare(lhs, rhs) {
+            case .orderedAscending:  return true
+            case .orderedDescending: return false
+            case .orderedSame:       return lhs.date < rhs.date
             }
-            return lhs.date < rhs.date
         }
         return descending ? ascending.reversed() : ascending
     }

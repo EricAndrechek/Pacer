@@ -4,9 +4,6 @@ import Charts
 import PacerCore
 import PacerUI
 
-// Sort enum was forked into the shared SessionsTable component; this
-// view now reuses `SessionsTableSort` directly.
-
 /// Drill-down for a single project. Presented as a sheet from
 /// `ProjectsView`. Shows:
 ///   - Cost / tokens summary headline
@@ -456,9 +453,14 @@ struct ProjectDetailView: View {
         // read it: the collections sheet opened only after an unrelated
         // redraw, seconds later (#140; AGENTS.md, "SwiftUI state and data flow").
         let _ = (bulkMergeDraft?.id, mergeError)
-        // The Sessions sort reaches its table only as bindings; read here so
-        // clicking a header re-sorts at once.
+        // The Sessions sort is read inside the card, in that stored closure;
+        // read here so clicking a header re-sorts at once.
         let _ = (sessionsSortRaw, sessionsSortDescending)
+        let sessions = sessionRows
+        // The cached rows, or on the first frame (before `.onChange` has run)
+        // the same rows built once here, so the card opens full.
+        let sessionTable = sessionTableRows.isEmpty && !sessions.isEmpty
+            ? PacerSessionsTable.rows(sessions) : sessionTableRows
         PacerModalContent(
             title: displayName,
             subtitle: projectPath,
@@ -503,12 +505,17 @@ struct ProjectDetailView: View {
             // drill-down value).
             if subprojects.count > 1 { subprojectsCard }
             if !modelSlices.isEmpty { modelsCard }
-            if !sessionRows.isEmpty { sessionsCard }
+            if !sessions.isEmpty { sessionsCard(sessionTable) }
         }
         .onAppear {
             refreshDerived()
             refreshSubprojects()
             refreshKnownProjectPaths()
+        }
+        // The session rows are live `@Query` results (scans, a scope switch
+        // re-reading the other table); the table's rows follow them.
+        .onChange(of: sessions, initial: true) { _, new in
+            sessionTableRows = PacerSessionsTable.rows(new)
         }
         // Totals, daily series and model slices follow the rows they are
         // built from. See `aggregatesFingerprint`.
@@ -920,34 +927,32 @@ struct ProjectDetailView: View {
     }
 
     @AppStorage("pacer.projectDetail.sessionsSortField", store: PacerSettings.store)
-    private var sessionsSortRaw: String = SessionsTableSort.lastSeen.rawValue
+    private var sessionsSortRaw: String = PacerSessionExtra.lastSeen
     @AppStorage("pacer.projectDetail.sessionsSortDescending", store: PacerSettings.store)
     private var sessionsSortDescending: Bool = true
 
-    private var sessionsSort: SessionsTableSort {
-        SessionsTableSort(rawValue: sessionsSortRaw) ?? .lastSeen
-    }
-    private var sessionsSortBinding: Binding<SessionsTableSort> {
-        Binding(get: { sessionsSort }, set: { sessionsSortRaw = $0.rawValue })
-    }
+    /// The Sessions table's rows, rebuilt when the project's sessions change
+    /// (a scan, a scope switch) rather than on every body pass.
+    @State private var sessionTableRows: [PacerSessionsTable.Row] = []
 
-    private var sessionsCard: some View {
-        PacerCard("Sessions", trailing: {
-            Text("\(sessionRows.count) total")
+    private func sessionsCard(_ rows: [PacerSessionsTable.Row]) -> some View {
+        let sort = PacerSessionsTable.sort(stored: sessionsSortRaw, descending: sessionsSortDescending)
+        return PacerCard("Sessions", trailing: {
+            Text("\(rows.count) total")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }) {
-            // Single shared sortable table. Project-detail hides the
-            // "Project" column since the modal is already scoped to
-            // one project; day-detail enables the same column.
-            SessionsTable(
-                rows: sessionRows,
-                showProjectColumn: false,
-                sort: sessionsSortBinding,
-                sortDescending: $sessionsSortDescending,
-                onSessionTap: { session in
+            // The shared sessions table, without the Project column: the
+            // modal is one project.
+            PacerSessionsTable(
+                rows: rows,
+                tableId: "projectDetail.sessions",
+                showProject: false,
+                sort: sort,
+                onSort: { sessionsSortRaw = $0.column; sessionsSortDescending = $0.descending },
+                onOpen: { row in
                     push(.session(
-                        sessionId: session.sessionId,
+                        sessionId: row.id,
                         projectDisplayName: displayName
                     ))
                 }

@@ -559,6 +559,9 @@ private struct TopDaysContent: View {
         case .cacheWrite:   return "Heaviest cache-write days"
         case .cacheWrite5m: return "Heaviest 5m-write days"
         case .cacheWrite1h: return "Heaviest 1h-write days"
+        case .outShare:     return descending ? "Most output-heavy days" : "Least output-heavy days"
+        case .writeShare:   return descending ? "Most cache-rebuilding days" : "Least cache-rebuilding days"
+        case .mix:          return descending ? "Most uncached days" : "Most cached days"
         }
     }
 
@@ -572,7 +575,7 @@ private struct TopDaysContent: View {
         // (`DayRanking`), so it shows these days in this order.
         let tableRows: [PacerUsageRow<PacerUsageNoExtra>] = visible.map { day in
             PacerUsageRow(id: day.date, label: prettyDate(day.date), sortLabel: day.date,
-                          tokens: day.tokens, cost: day.cost)
+                          tokens: day.tokens, costParts: day.costParts, cost: day.cost)
         }
         let tableSort = PacerUsageSort(sort.column, descending: descending)
         return PacerCard(title, trailing: {

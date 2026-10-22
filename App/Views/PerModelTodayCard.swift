@@ -3,16 +3,16 @@ import SwiftData
 import PacerCore
 import PacerUI
 
-/// Today's per-model breakdown, in the shared usage table: every token part,
-/// the total, the cost, and each model's share of today's tokens. Pulls from
-/// `DailyAggregate` filtered to today — same source as `TodayDetailsCard` but
-/// kept as its own card so the @Query stays scoped (a model-only view doesn't
-/// need to invalidate when the total-cost number changes).
+/// Today's per-model breakdown: the token-share donut on the left, the shared
+/// usage table on the right in its narrow form (Total, Out %, Write %, Cost;
+/// the token parts are in the header's menu). Pulls from `DailyAggregate`
+/// filtered to today — same source as `TodayDetailsCard` but kept as its own
+/// card so the @Query stays scoped (a model-only view doesn't need to
+/// invalidate when the total-cost number changes).
 ///
-/// It had a token-share donut beside a short legend. The table now carries
-/// the share as a column, and a donut beside seven columns would have left the
-/// table too narrow to read at the window's minimum width, so the share is
-/// shown once, as a number (the "no number twice" rule).
+/// The donut is the share, so the table has no Share column: one encoding,
+/// and no number printed twice. Hovering a wedge names its model and share in
+/// the card's header, as it always did.
 struct PerModelTodayCard: View {
     @Query private var globalAggregates: [DailyAggregate]
     /// The same rollup sliced to one account. Which of the two is
@@ -28,7 +28,12 @@ struct PerModelTodayCard: View {
             : scopedAggregates.map(\.dailyRow)
     }
     @Query(PerModelTodayCard.scanMetaProbe) private var scanMeta: [ClaudeCodeMeta]
-    @State private var cached: [PacerUsageRow<TodayModelShare>] = []
+    @State private var cached = Cached()
+
+    /// Selected wedge in the donut. Bound via `chartAngleSelection`
+    /// — Charts hands us the angle hovered, mapped back to a row by
+    /// accumulating slice widths (`Cached.cumulative`).
+    @State private var hoveredAngle: Double?
 
     @AppStorage("pacer.todayByModel.sortField", store: PacerSettings.store)
     private var sortRaw: String = UsageColumn.cost.rawValue
@@ -59,46 +64,105 @@ struct PerModelTodayCard: View {
         )
     }()
 
+    /// Everything the card draws, built once per scan tick or scope switch.
+    private struct Cached {
+        var rows: [PacerUsageRow<PacerUsageNoExtra>] = []
+        /// The donut's wedges, largest first.
+        var slices: [PacerDonutSlice] = []
+        /// Each wedge's end angle (running token total), for hover lookups:
+        /// O(models) per pointer move over an array built here, not a
+        /// `reduce` per move.
+        var cumulative: [(id: String, label: String, end: Double)] = []
+        var totalTokens: Int64 = 0
+    }
+
     private func refreshCache() {
-        let totalTokens = aggregates.reduce(Int64(0)) { $0 + $1.tokens.all }
-        cached = aggregates.map { agg in
-            let share = totalTokens > 0 ? Double(agg.tokens.all) / Double(totalTokens) : 0
-            return PacerUsageRow(
+        let rows = aggregates
+        var next = Cached()
+        next.rows = rows.map { agg in
+            PacerUsageRow(
                 id: agg.model,
                 label: pacerModelDisplayName(agg.model),
                 color: pacerModelColor(agg.model),
                 tokens: agg.tokens,
-                cost: agg.totalCostUSD,
-                extra: TodayModelShare(share: share))
+                costParts: agg.cost,
+                cost: agg.totalCostUSD)
         }
+        // The donut's order is its own, largest wedge first: the table can be
+        // sorted any way, and the wedges and the hover table must walk one
+        // array or a hover names the wrong model.
+        let byTokens = rows.sorted {
+            $0.tokens.all != $1.tokens.all ? $0.tokens.all > $1.tokens.all : $0.model < $1.model
+        }
+        var running = 0.0
+        for agg in byTokens {
+            let tokens = agg.tokens.all
+            next.slices.append(PacerDonutSlice(id: agg.model, value: Double(tokens),
+                                               color: pacerModelColor(agg.model)))
+            running += Double(tokens)
+            next.cumulative.append((agg.model, pacerModelDisplayName(agg.model), running))
+            next.totalTokens += tokens
+        }
+        cached = next
+    }
+
+    /// The wedge under the pointer: its model id, name, and share of today's
+    /// tokens.
+    private func hovered(_ cached: Cached) -> (id: String, label: String, share: Double)? {
+        guard let angle = hoveredAngle, cached.totalTokens > 0,
+              let last = cached.cumulative.last else { return nil }
+        var previous = 0.0
+        for entry in cached.cumulative {
+            if angle <= entry.end {
+                return (entry.id, entry.label, (entry.end - previous) / Double(cached.totalTokens))
+            }
+            previous = entry.end
+        }
+        let start = cached.cumulative.dropLast().last?.end ?? 0
+        return (last.id, last.label, (last.end - start) / Double(cached.totalTokens))
     }
 
     var body: some View {
-        // Read here as well as inside `PacerCard`'s stored closure (#140).
-        let rows = cached
+        // Read here as well as inside `PacerCard`'s stored closures (#140).
+        let cached = self.cached
+        let hover = hovered(cached)
         let sort = PacerUsageSort(column: sortRaw, descending: sortDescending)
-        PacerCard("Today by model") {
-            if rows.isEmpty {
+        PacerCard("Today by model", trailing: {
+            // The hovered wedge's model and share. A tooltip-like readout,
+            // shown only while the pointer is on the donut.
+            if let hover {
+                HStack(spacing: 8) {
+                    Text(hover.label)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("\(Int((hover.share * 100).rounded()))%")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                }
+            }
+        }) {
+            if cached.rows.isEmpty {
                 Text("No usage logged today yet.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                PacerUsageTable(
-                    rows: rows,
-                    tableId: "todayByModel",
-                    labelTitle: "Model",
-                    sort: sort,
-                    onSort: { sortRaw = $0.column; sortDescending = $0.descending }
-                ) {
-                    PacerUsageColumns.extra(TodayModelShare.column, title: "Share",
-                                            of: TodayModelShare.self,
-                                            minWidth: 40, idealWidth: 48) { row in
-                        Text("\(Int((row.extra.share * 100).rounded()))%")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                            .help("Share of today's tokens")
-                    }
+                HStack(alignment: .top, spacing: 24) {
+                    PacerDonut(
+                        slices: cached.slices,
+                        innerRatio: 0.62,
+                        size: 140,
+                        hoveredID: hover?.id,
+                        hoveredAngle: $hoveredAngle,
+                        accessibilityLabel: "Today's token share by model",
+                        accessibilityValue: shareSummary(cached)
+                    )
+                    PacerUsageTable(
+                        rows: cached.rows,
+                        tableId: "todayByModel",
+                        labelTitle: "Model",
+                        sort: sort,
+                        onSort: { sortRaw = $0.column; sortDescending = $0.descending },
+                        defaultColumns: UsageColumn.narrowDefaults)
                 }
             }
         }
@@ -109,14 +173,13 @@ struct PerModelTodayCard: View {
         // ingested something, which on an idle machine may be never (#141).
         .onChange(of: scope.accountId) { _, _ in refreshCache() }
     }
-}
 
-/// A model's share of today's tokens, all five parts (#215).
-struct TodayModelShare: PacerUsageExtra {
-    static let column = "share"
-    let share: Double
-
-    func sortKey(forColumn id: String) -> PacerUsageSortKey? {
-        id == Self.column ? .number(share) : nil
+    /// What VoiceOver reads in place of the donut: each model's share.
+    private func shareSummary(_ cached: Cached) -> String {
+        guard cached.totalTokens > 0 else { return "no data yet" }
+        return cached.slices.prefix(5).map { slice in
+            let pct = Int((slice.value / Double(cached.totalTokens) * 100).rounded())
+            return "\(pacerModelDisplayName(slice.id)) \(pct) percent"
+        }.joined(separator: ", ")
     }
 }

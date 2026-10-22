@@ -145,6 +145,10 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
     public let cumulativeCacheCreation5mTokens: Int64
     public let cumulativeCacheCreation1hTokens: Int64
     public let topModel: String
+    /// `cumulativeCostUSD` split into its five priced parts (#296), carried
+    /// like `DailyRow.cost` so a sessions table can show what the money went
+    /// on.
+    public let cost: CostComponents
 
     public var id: String { sessionId }
 
@@ -153,7 +157,8 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
         ccVersion: String?, cumulativeCostUSD: Double,
         cumulativeInputTokens: Int64, cumulativeOutputTokens: Int64,
         cumulativeCacheReadTokens: Int64, cumulativeCacheCreation5mTokens: Int64,
-        cumulativeCacheCreation1hTokens: Int64, topModel: String
+        cumulativeCacheCreation1hTokens: Int64, topModel: String,
+        cost: CostComponents = .zero
     ) {
         self.sessionId = sessionId
         self.firstSeenAt = firstSeenAt
@@ -167,6 +172,7 @@ public struct SessionRow: Sendable, Equatable, Identifiable {
         self.cumulativeCacheCreation5mTokens = cumulativeCacheCreation5mTokens
         self.cumulativeCacheCreation1hTokens = cumulativeCacheCreation1hTokens
         self.topModel = topModel
+        self.cost = cost
     }
 }
 
@@ -181,7 +187,7 @@ public extension SessionInfo {
             cumulativeCacheReadTokens: cumulativeCacheReadTokens,
             cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
-            topModel: topModel)
+            topModel: topModel, cost: costComponents)
     }
 }
 
@@ -196,7 +202,7 @@ public extension AccountSessionInfo {
             cumulativeCacheReadTokens: cumulativeCacheReadTokens,
             cumulativeCacheCreation5mTokens: cumulativeCacheCreation5mTokens,
             cumulativeCacheCreation1hTokens: cumulativeCacheCreation1hTokens,
-            topModel: topModel)
+            topModel: topModel, cost: costComponents)
     }
 }
 
