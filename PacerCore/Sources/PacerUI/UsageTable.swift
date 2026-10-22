@@ -22,6 +22,10 @@ import PacerCore
 // included: they are how a Mac table says its columns resize. The right-click
 // column menu, reordering, resizing and the saved layout are all SwiftUI's.
 //
+// It opens on at most six columns (`UsageColumn.wideDefaults`, plus at most
+// two of the screen's own): the owner found every token part at once too many
+// to read. Everything else is in the header's menu.
+//
 // It never scrolls sideways. Columns start at widths their content needs
 // (`UsageColumn.idealWidth`), and each screen's defaults fit its card at the
 // window's default size (`UsageTableLayoutTests` measures that). AppKit's
@@ -55,7 +59,10 @@ public extension UsageColumn {
         case .cacheWrite:   return "Cache write"
         case .cacheWrite5m: return "5m write"
         case .cacheWrite1h: return "1h write"
-        case .tokens:       return "Total"
+        // Every token, named the same in a table, a donut list and a
+        // donut's centre. "Total" read as total cost once the table opened
+        // without the parts beside it (round 5).
+        case .tokens:       return "Tokens"
         case .cacheHitRate: return "Hit %"
         case .outputShare:  return "Out %"
         case .cost:         return "Cost"
@@ -157,6 +164,56 @@ public struct PacerUsageCellText: Equatable, Sendable {
         let text = percent == 0 && share > 0 ? "<1%" : "\(percent)%"
         self.init(text: text, help: help)
     }
+}
+
+/// "Last active" for a row known only to the day it was last active (a
+/// model, from the daily rollup): that day relative to today, as a row known
+/// to the minute prints relative to now ("today", "yesterday", "3d ago",
+/// "2w ago"), and the date in its tooltip. `day` is a rollup date key,
+/// "2026-10-21"; a key that is not one prints as it is.
+///
+/// Models printed the key itself under "Last seen" while Projects printed
+/// "2h ago" under "Last active": two names and two formats for one fact.
+public func pacerLastActiveDay(_ day: String, now: Date = PacerClock.now) -> PacerUsageCellText {
+    guard let date = PacerLastActiveFormat.key.date(from: day) else {
+        return PacerUsageCellText(text: day, help: day)
+    }
+    let calendar = Calendar.current
+    let start: Date = calendar.startOfDay(for: date)
+    let today: Date = calendar.startOfDay(for: now)
+    let help: String = PacerLastActiveFormat.help.string(from: date)
+    // The same day, or a key a clock skew put after today.
+    if start >= today {
+        return PacerUsageCellText(text: PacerLastActiveFormat.relative.localizedString(
+            from: DateComponents(day: 0)), help: help)
+    }
+    return PacerUsageCellText(text: PacerLastActiveFormat.relative.localizedString(
+        for: start, relativeTo: today), help: help)
+}
+
+/// The formatters `pacerLastActiveDay` reuses: a table prints one per row.
+private enum PacerLastActiveFormat {
+    nonisolated(unsafe) static let key: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+    nonisolated(unsafe) static let help: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        return f
+    }()
+    /// "today", "yesterday", then the abbreviated units `pacerRelative`
+    /// prints ("3d ago", "2w ago").
+    nonisolated(unsafe) static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        f.dateTimeStyle = .named
+        return f
+    }()
 }
 
 // MARK: - Rows
@@ -448,6 +505,52 @@ public enum PacerUsageTableMetrics {
         store.set(migrated, forKey: key)
     }
 
+    /// The layout-defaults version of each table whose defaults have changed
+    /// since its users saved layouts. A layout stored before a table reached
+    /// its version is cleared once, the first time the table is built, so the
+    /// table opens on its new defaults rather than on whatever SwiftUI kept
+    /// of the old ones (a saved layout records widths and order, and can
+    /// record visibility, so a changed `.defaultVisibility` alone does not
+    /// reach it). A table not listed is at version 0 and never cleared.
+    ///
+    /// Bump a table's version, deliberately, when its defaults change enough
+    /// that a user should see them; the cost is that table's widths, order
+    /// and shown columns, once. Version 1 is round 5, which cut every wide
+    /// table from up to ten columns to six (`UsageColumn.wideDefaults`): the
+    /// tables that opened on the token parts. The sessions tables' defaults
+    /// did not change, so their layouts are kept.
+    static let layoutDefaultsVersions: [String: Int] = [
+        "models": 1,
+        "projects": 1,
+        "topDays": 1,
+        "dayDetail.models": 1,
+        "dayDetail.projects": 1,
+    ]
+
+    /// Where the layout-defaults version a table's saved layout is at is
+    /// kept, beside the layout.
+    static func layoutDefaultsKey(tableId: String) -> String {
+        "pacer.table.\(tableId).defaultsVersion"
+    }
+
+    /// Clears the layout stored for `tableId` if it predates the table's
+    /// layout-defaults version, and records the version either way. Once per
+    /// version: a layout the user makes afterwards is theirs to keep. Returns
+    /// whether it cleared anything.
+    @discardableResult
+    static func applyLayoutDefaults(tableId: String, store: UserDefaults,
+                                    versions: [String: Int] = layoutDefaultsVersions) -> Bool {
+        guard let current = versions[tableId], current > 0 else { return false }
+        let key = layoutDefaultsKey(tableId: tableId)
+        // Absent reads as 0: every layout saved before versions existed.
+        guard store.integer(forKey: key) < current else { return false }
+        let columns = columnsKey(tableId: tableId)
+        let cleared = store.object(forKey: columns) != nil
+        store.removeObject(forKey: columns)
+        store.set(current, forKey: key)
+        return cleared
+    }
+
     /// Puts the table `tableId` back to its defaults: its default columns,
     /// in declaration order, at their starting widths. The sort is the
     /// screen's and stays. What "Reset columns" in the table's context menu
@@ -477,9 +580,10 @@ extension Notification.Name {
 ///   the arrow keys reached. Rows that open nothing keep the native
 ///   selection instead.
 /// - `defaultColumns`: the standard columns shown until the user changes
-///   them — `UsageColumn.wideDefaults` or `.narrowDefaults`, plus whatever a
-///   screen adds. The rest are one right-click away. A screen's defaults fit
-///   its card at the window's default size, with its own columns.
+///   them — `UsageColumn.wideDefaults` or `.narrowDefaults`. With the
+///   screen's own columns that is at most `UsageColumn.maxDefaultColumns`;
+///   the rest are one right-click away. A screen's defaults fit its card at
+///   the window's default size, with its own columns.
 /// - `leadingColumns`: screen columns that belong beside the label (a
 ///   sessions list's Project), built with `PacerUsageColumns.extra`.
 /// - `extraColumns`: the screen's own columns, built with
@@ -545,6 +649,7 @@ where Leading.TableRowValue == PacerUsageRow<Extra>,
         self.extraColumns = extraColumns
         self.labelAccessory = labelAccessory
         self.rowMenu = rowMenu
+        PacerUsageTableMetrics.applyLayoutDefaults(tableId: tableId, store: store)
         PacerUsageTableMetrics.migrateLayout(tableId: tableId, store: store)
         _columns = AppStorage(
             wrappedValue: TableColumnCustomization<Row>(),

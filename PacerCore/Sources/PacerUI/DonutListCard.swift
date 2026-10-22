@@ -2,8 +2,8 @@ import SwiftUI
 import PacerCore
 
 // A share donut beside a short list of what it measures: Today by model,
-// Projects' Top projects, the Models tab's Share card and Project detail's
-// By model card.
+// Projects' Top projects, the Models tab's Share card and the detail modals'
+// By model cards.
 //
 // Round 3 put a native table beside the donut, and the owner found it very
 // bad in a donut card: the table's header, dividers and rounded border were a
@@ -12,6 +12,15 @@ import PacerCore
 // title to sort the list, and the donut turns to measure that column when its
 // values add up (`PacerShareDonutData`). A full table, where a screen has
 // one, is its own card below (`PacerTableCard`), never inside this one.
+//
+// Every donut list has the same columns, in the same order, under the same
+// titles: Tokens, Cost, Share (`PacerShareListColumn.standard`), Tokens before
+// Cost as every table has them. Round 4 let each card pick its own (Today's
+// Total, Hit %, Out %, Cost and Share; Top projects' shares of cost, tokens
+// and sessions; By model's Cost and In + out), and the owner found the cards
+// disagreeing with each other and with the tables. A list takes only amounts
+// that add up (`UsageAmount`, a screen's own count): Hit % and Out % are not
+// shares of anything, so they cannot be a ring or be compared as one.
 
 // MARK: - Columns
 
@@ -27,8 +36,8 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
     }
 
     enum Kind: Sendable, Equatable {
-        /// A usage table column's number, printed as the table prints it.
-        case usage(UsageColumn)
+        /// A usage table column's amount, printed as the table prints it.
+        case usage(UsageAmount)
         /// A screen's own number that adds up (`PacerUsageExtra.shareValue`).
         case extra(Format)
         /// Each row's share of the whole of the column `id` measures.
@@ -51,20 +60,29 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
     /// sorting by it is sorting by whatever the ring measures.
     public var isSortable: Bool { kind != .ringShare }
 
-    /// A usage table column's own number: Total, Hit %, Out %, Cost, a part.
-    public static func usage(_ column: UsageColumn, width: CGFloat? = nil, help: String? = nil) -> Self {
+    /// The columns every donut list shows: Tokens, Cost, Share, under the
+    /// titles and in the order a table gives them. Sorted by cost unless the
+    /// screen asks otherwise, as every table is.
+    public static let standard: [PacerShareListColumn] = standard()
+
+    /// `standard`, for a card that holds less than every token for its rows
+    /// (Project detail's models carry uncached input and output only): the
+    /// same columns in the same places, with what the card has under Tokens,
+    /// and a tooltip that says what it is.
+    public static func standard(tokens: PacerShareListColumn = .usage(.tokens)) -> [PacerShareListColumn] {
+        [tokens, .usage(.cost), .ringShare]
+    }
+
+    /// A usage table column's amount: Cost, Tokens or a token part. Only
+    /// amounts that add up have a `UsageAmount`, so a ratio (Hit %, Out %)
+    /// or the Mix bar cannot be put in a donut list.
+    public static func usage(_ amount: UsageAmount, width: CGFloat? = nil, help: String? = nil) -> Self {
         let defaultWidth: CGFloat
         let defaultHelp: String?
-        switch column {
+        switch amount {
         case .cost:
             defaultWidth = 60
             defaultHelp = nil
-        case .cacheHitRate:
-            defaultWidth = 52
-            defaultHelp = "Share of prompt tokens served from the cache"
-        case .outputShare:
-            defaultWidth = 44
-            defaultHelp = "Output's share of the cost"
         case .tokens:
             defaultWidth = 54
             defaultHelp = "Every token: cached, uncached and output"
@@ -72,25 +90,37 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
             defaultWidth = 54
             defaultHelp = nil
         }
-        return Self(id: column.rawValue, title: column.title(label: ""), help: help ?? defaultHelp,
-                    width: width ?? defaultWidth, kind: .usage(column))
+        return Self(id: amount.column.rawValue, title: amount.column.title(label: ""),
+                    help: help ?? defaultHelp, width: width ?? defaultWidth, kind: .usage(amount))
     }
 
     /// A screen's own number that adds up across rows, read through
     /// `PacerUsageExtra.shareValue(forColumn: id)`: a project's sessions, a
-    /// model's uncached tokens.
+    /// model's uncached tokens. `id` is the screen's, never a usage column's,
+    /// which the list would read in its place.
     public static func count(_ id: String, title: String, format: Format, help: String? = nil,
                              width: CGFloat = 56) -> Self {
-        Self(id: id, title: title, help: help, width: width, kind: .extra(format))
+        precondition(UsageColumn(storedId: id) == nil,
+                     "\(id) is a usage column's id: list it with .usage")
+        return Self(id: id, title: title, help: help, width: width, kind: .extra(format))
     }
 
-    /// Each row's share of the whole of `id` as a percent: a Projects "Cost"
-    /// column printing 38% for a project with 38% of the cost. For a card
-    /// whose numbers a table further down the page already prints: the card
-    /// says how the whole divides, the table how much.
+    /// Each row's share of the whole of `id` as a percent: a "Cost" column
+    /// printing 38% for a project with 38% of the cost. `id` is an amount
+    /// that adds up (`accepts(id:)`): a share of Hit % is a share of
+    /// nothing.
     public static func share(of id: String, title: String, format: Format, help: String? = nil,
                              width: CGFloat = 56) -> Self {
-        Self(id: id, title: title, help: help, width: width, kind: .share(format))
+        precondition(accepts(id: id), "\(id) does not add up: a donut list cannot share it")
+        return Self(id: id, title: title, help: help, width: width, kind: .share(format))
+    }
+
+    /// Whether a column id may be in a donut list: one of the screen's own
+    /// (whose `shareValue` adds up by contract), or a usage column that adds
+    /// up (`UsageColumn.isAdditive`). Never the label, a ratio or Mix.
+    public static func accepts(id: String) -> Bool {
+        guard let standard = UsageColumn(storedId: id) else { return true }
+        return standard.isAdditive
     }
 
     /// Each row's share of what the ring measures, which is what the list is
@@ -112,6 +142,8 @@ public struct PacerShareListColumn: Identifiable, Sendable, Equatable {
 public struct PacerShareListData<Extra: PacerUsageExtra> {
     /// The ring: what the sort measures when that adds up, cost otherwise.
     public let donut: PacerShareDonutData
+    /// The sort the list runs in: the one asked for, or cost when that names
+    /// a column the list does not have (`effectiveSort`).
     public let sort: PacerUsageSort
     public let columns: [PacerShareListColumn]
     /// The listed rows, in the list's order.
@@ -134,8 +166,13 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
 
     /// - `maxSlices`: rows with a wedge, and a line, of their own; the rest
     ///   fold into one (`PacerShareDonutData`).
-    public init(rows: [PacerUsageRow<Extra>], sort: PacerUsageSort,
+    /// - `sort`: as the screen stored it. A sort by a column the list does
+    ///   not have (a Hit % or a Sessions sort stored before round 5) sorts
+    ///   by cost instead (`effectiveSort`), so the list never runs in an
+    ///   order no title on it explains.
+    public init(rows: [PacerUsageRow<Extra>], sort requested: PacerUsageSort,
                 columns: [PacerShareListColumn], maxSlices: Int = .max) {
+        let sort = Self.effectiveSort(requested, columns: columns)
         let donut = PacerShareDonutData(rows: rows, sort: sort, maxSlices: maxSlices)
         let folds = donut.slices.last?.id == PacerShareDonutData.otherID
         let named: Set<String> = Set(donut.slices.map(\.id))
@@ -173,6 +210,18 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
         }
     }
 
+    /// The sort a list with `columns` runs in when asked for `sort`: `sort`
+    /// itself when it names the label or one of the list's sortable
+    /// columns, otherwise cost, largest first, as every table opens (or the
+    /// list's first column, for a list with no Cost).
+    public static func effectiveSort(_ sort: PacerUsageSort, columns: [PacerShareListColumn]) -> PacerUsageSort {
+        if sort.column == UsageColumn.name.rawValue { return sort }
+        let sortable: [String] = columns.filter(\.isSortable).map(\.id)
+        if sortable.contains(sort.column) { return sort }
+        let cost: String = UsageColumn.cost.rawValue
+        return PacerUsageSort(column: sortable.contains(cost) ? cost : sortable.first ?? cost, descending: true)
+    }
+
     /// A row's amount in column `id`: its cost, a token count, or the
     /// screen's own number.
     static func value(of row: PacerUsageRow<Extra>, column id: String) -> Double {
@@ -187,8 +236,8 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
     public func cell(_ column: PacerShareListColumn, row: PacerUsageRow<Extra>) -> PacerUsageCellText {
         let amount: Double = Self.value(of: row, column: column.id)
         switch column.kind {
-        case .usage(let usage):
-            return usage.cellText(tokens: row.tokens, cost: row.cost, costParts: row.costParts)
+        case .usage(let amount):
+            return amount.column.cellText(tokens: row.tokens, cost: row.cost, costParts: row.costParts)
                 ?? PacerUsageCellText(text: "–", help: "")
         case .extra(let format):
             return Self.amountText(row.extra.shareValue(forColumn: column.id) ?? 0, format)
@@ -203,8 +252,8 @@ public struct PacerShareListData<Extra: PacerUsageExtra> {
     /// What the cell in `column` prints for the folded tail.
     public func otherCell(_ column: PacerShareListColumn, _ other: Other) -> PacerUsageCellText {
         switch column.kind {
-        case .usage(let usage):
-            return usage.cellText(tokens: other.tokens, cost: other.cost, costParts: other.costParts)
+        case .usage(let amount):
+            return amount.column.cellText(tokens: other.tokens, cost: other.cost, costParts: other.costParts)
                 ?? PacerUsageCellText(text: "–", help: "")
         case .extra(let format):
             return Self.amountText(other.extras[column.id] ?? 0, format)

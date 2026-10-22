@@ -53,7 +53,9 @@ struct ProjectsView: View {
 
     /// The Top projects card's sort, its own: the card ranks the five
     /// largest by it and its ring measures it, while the table below keeps
-    /// whatever order its user chose. "cost", "tokens" or "sessions".
+    /// whatever order its user chose. "cost" or "tokens". A "sessions" sort
+    /// stored before round 5, when the card had a Sessions column, ranks by
+    /// cost (`PacerShareListData.effectiveSort`).
     @AppStorage("pacer.projects.topSort", store: PacerSettings.store)
     private var topSortRaw: String = UsageColumn.cost.rawValue
     @AppStorage("pacer.projects.topSortDescending", store: PacerSettings.store)
@@ -422,16 +424,6 @@ private struct ProjectsContent: View {
             default:                    return nil
             }
         }
-
-        /// Sessions add up across projects, so sorting Top projects by them
-        /// turns its ring to sessions. Last active is a date and does not.
-        static func shareMetric(forColumn id: String) -> PacerShareMetric? {
-            id == sessionsColumn ? PacerShareMetric(column: id, title: "Sessions") : nil
-        }
-
-        func shareValue(forColumn id: String) -> Double? {
-            id == Self.sessionsColumn ? Double(sessionCount) : nil
-        }
     }
 
     /// A pending source→canonical pair waiting on the user's confirm
@@ -607,15 +599,11 @@ private struct ProjectsContent: View {
         cachedTop = Self.top(tableRows, sort: builtTopSort)
     }
 
-    /// Top projects' columns: each project's share of the cost, the tokens
-    /// and the sessions. Shares, not amounts: the table below prints every
-    /// project's amounts, and the page prints a number once.
-    private static let topColumns: [PacerShareListColumn] = [
-        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
-        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
-        .share(of: ProjectRow.sessionsColumn, title: "Sessions", format: .count, help: "Share of the sessions",
-               width: 66),
-    ]
+    /// Top projects' columns: every donut card's, Tokens, Cost and Share.
+    /// Round 4 printed shares of the cost, the tokens and the sessions under
+    /// those titles, where every other card printed amounts: the same title
+    /// meant a percent here and dollars a card away.
+    private static let topColumns: [PacerShareListColumn] = PacerShareListColumn.standard
 
     /// The five largest projects by the card's sort, and the rest as one
     /// Other line and wedge: the share is of everything the table lists.
@@ -898,10 +886,10 @@ private struct ProjectsContent: View {
     }
 
     /// The five projects with the largest share of the card's sort (cost by
-    /// default), and the rest as one line: the shared donut card. Its
-    /// columns are shares, so none of the table's amounts is printed twice;
-    /// clicking one ranks the list by it and turns the ring to it. A line
-    /// opens its project, as the table's rows do.
+    /// default), and the rest as one line: the shared donut card, with the
+    /// columns every donut card has. Clicking one ranks the list by it and
+    /// turns the ring to it. A line opens its project, as the table's rows
+    /// do.
     private var topProjectsCard: some View {
         let tableRows = cachedTableRows ?? Self.tableRows(rows)
         let top = cachedTop ?? Self.top(tableRows, sort: topSort)
@@ -914,12 +902,13 @@ private struct ProjectsContent: View {
             onOpen: { row in onSelectProject(row.extra.path, row.extra.displayName, rangeSince) })
     }
 
-    /// Every project, in the shared usage table as its own card: the token
-    /// parts, the total and the cost, plus Sessions and Last active. Click a
-    /// row for Project detail; right-click for collections, merges and
-    /// copying. The range picker and the alias manager live in the page
-    /// header, and the search field in the window toolbar (`.searchable` on
-    /// the parent view).
+    /// Every project, in the shared usage table as its own card: Tokens,
+    /// Cost, Sessions, Last active and the Mix bar, six columns with the
+    /// label (`UsageColumn.wideDefaults`); the token parts and ratios are in
+    /// the header's menu. Click a row for Project detail; right-click for
+    /// collections, merges and copying. The range picker and the alias
+    /// manager live in the page header, and the search field in the window
+    /// toolbar (`.searchable` on the parent view).
     ///
     /// Round 3 put this table beside the Top projects donut in one card, and
     /// the owner found it very hard to read; the donut is its own card above

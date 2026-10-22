@@ -17,6 +17,12 @@ public struct PacerTableCard<Trailing: View, Content: View, Footer: View>: View 
     let content: () -> Content
     let footer: () -> Footer
 
+    /// Space between the card's title and the table's header: what every
+    /// `PacerCard` puts between its title and its content. Round 4 left 2pt,
+    /// and the owner found the column titles crowding the card's ("Most
+    /// expensive days", "All projects").
+    public static var titleSpacing: CGFloat { 12 }
+
     /// Horizontal inset of the table inside the card. The inset table style
     /// starts its first cell 16pt in, so 4 more puts the label under the
     /// title at the card's 20pt padding.
@@ -46,7 +52,7 @@ public struct PacerTableCard<Trailing: View, Content: View, Footer: View>: View 
             }
             .padding(.horizontal, PacerDesign.cardPadding)
             .padding(.top, PacerDesign.cardPadding)
-            .padding(.bottom, 2)
+            .padding(.bottom, Self.titleSpacing)
             content()
                 .padding(.horizontal, Self.tableInset)
                 .padding(.bottom, Footer.self == EmptyView.self ? 6 : 0)

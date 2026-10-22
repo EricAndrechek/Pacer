@@ -118,6 +118,48 @@ struct UsageColumnTests {
         #expect(UsageColumn.mix.cellText(tokens: t, cost: 1, costParts: Self.parts) == nil)
     }
 
+    @Test("only amounts that add up have a UsageAmount: no ratio, no label, no Mix")
+    func amounts() {
+        let additive: [UsageColumn] = UsageColumn.allCases.filter(\.isAdditive)
+        #expect(additive == [.input, .output, .cacheRead, .cacheWrite, .cacheWrite5m, .cacheWrite1h,
+                             .tokens, .cost])
+        for column in [UsageColumn.cacheHitRate, .outputShare, .mix, .name] {
+            #expect(UsageAmount(column) == nil, "\(column) is not an amount")
+            #expect(!column.isAdditive)
+        }
+        // Every amount is the column of the same id, and round-trips.
+        for amount in UsageAmount.allCases {
+            #expect(amount.column.rawValue == amount.rawValue)
+            #expect(UsageAmount(amount.column) == amount)
+            #expect(amount.column.isAdditive)
+            #expect(!amount.column.isRatio)
+        }
+        #expect(UsageAmount.allCases.count == additive.count)
+    }
+
+    @Test("Last active for a row known to the day: the day relative to today, the date in its tooltip")
+    func lastActiveDay() throws {
+        let calendar = Calendar.current
+        let now: Date = try #require(calendar.date(from: DateComponents(year: 2026, month: 10, day: 22, hour: 15)))
+        let today = pacerLastActiveDay("2026-10-22", now: now)
+        let yesterday = pacerLastActiveDay("2026-10-21", now: now)
+        let earlier = pacerLastActiveDay("2026-10-12", now: now)
+        // Today is today whatever the hour, and a key past today (clock
+        // skew) reads as today too, never "in 1 day".
+        #expect(pacerLastActiveDay("2026-10-23", now: now).text == today.text)
+        #expect(Set([today.text, yesterday.text, earlier.text]).count == 3)
+        // The day, never the key, in the cell; the date in the tooltip.
+        #expect(today.text != "2026-10-22")
+        #expect(today.help != today.text)
+        if Locale.current.language.languageCode == "en" {
+            #expect(today.text == "today")
+            #expect(yesterday.text == "yesterday")
+        }
+        // Not a date key: printed as it is.
+        #expect(pacerLastActiveDay("0000-00-00", now: now).text == "0000-00-00")
+        #expect(pacerLastActiveDay("soon", now: now).text == "soon")
+    }
+
     @Test("no two token columns print the same number for the distinct row")
     func distinctCells() {
         let columns: [UsageColumn] = UsageColumn.allCases.filter { $0 != .name && $0 != .mix }
@@ -149,12 +191,16 @@ struct UsageColumnTests {
         #expect(UsageColumn.name.cellText(tokens: big, cost: 1, costParts: .zero) == nil)
     }
 
-    @Test("titles are short; input is Uncached; Total keeps the persisted raw value \"tokens\"")
+    @Test("titles are short; input is Uncached; every token is Tokens, under the persisted raw value \"tokens\"")
     func titles() {
         let titles: [String] = UsageColumn.allCases.map { $0.title(label: "Model") }
         #expect(titles == ["Model", "Uncached", "Output", "Cache read", "Cache write",
-                           "5m write", "1h write", "Total", "Hit %", "Out %", "Cost", "Mix"])
+                           "5m write", "1h write", "Tokens", "Hit %", "Out %", "Cost", "Mix"])
         #expect(UsageColumn.tokens.rawValue == "tokens")
+        // One name for every token: the table's header, the donut list's
+        // title and the ring's centre.
+        #expect(PacerShareListColumn.usage(.tokens).title == "Tokens")
+        #expect(UsageColumn.tokens.shareMetric?.title == "Tokens")
         // Persisted as sort columns and layout ids. "mix" is the id the
         // Models table's own Mix column had, so its saved layout carries over.
         #expect(UsageColumn.outputShare.rawValue == "outShare")
@@ -199,15 +245,18 @@ struct UsageColumnTests {
         #expect(UsageColumn.displayOrder.count == UsageColumn.allCases.count)
     }
 
-    @Test("wide tables show the token parts; narrow ones Total, Hit %, Out % and Cost")
+    @Test("a table opens on its label, Tokens, Cost and Mix (narrow: no Mix), room for two of its own")
     func defaults() {
         let wide: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.wideDefaults.contains($0) }
         let narrow: [UsageColumn] = UsageColumn.displayOrder.filter { UsageColumn.narrowDefaults.contains($0) }
-        let parts: [UsageColumn] = UsageColumn.partColumns.filter {
-            [.input, .output, .cacheRead, .cacheWrite].contains($0)
-        }
-        #expect(wide == [.name] + parts + [.tokens, .cost])
-        #expect(narrow == [.name, .tokens, .cacheHitRate, .outputShare, .cost])
+        #expect(wide == [.name, .tokens, .cost, .mix])
+        #expect(narrow == [.name, .tokens, .cost])
+        // No token part and no ratio opens shown: they are in the menu.
+        #expect(UsageColumn.wideDefaults.isDisjoint(with: UsageColumn.partColumns))
+        #expect(!UsageColumn.wideDefaults.contains { $0.isRatio && $0 != .mix })
+        // Six at most, with a screen's two own columns.
+        #expect(UsageColumn.maxDefaultColumns == 6)
+        #expect(UsageColumn.wideDefaults.count + 2 <= UsageColumn.maxDefaultColumns)
         let ascendingFirst: [UsageColumn] = UsageColumn.allCases.filter { !$0.sortsDescendingFirst }
         #expect(ascendingFirst == [.name])
         #expect(PacerUsageSort.costDescending == PacerUsageSort(column: "cost", descending: true))

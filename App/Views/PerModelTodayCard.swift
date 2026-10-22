@@ -4,15 +4,18 @@ import PacerCore
 import PacerUI
 
 /// Today's per-model breakdown: the shared donut card (`PacerDonutListCard`),
-/// the ring beside a list of Total, Hit %, Out %, Cost and Share. Pulls from
+/// the ring beside the list every donut card has, Tokens, Cost and Share
+/// (`PacerShareListColumn.standard`). Pulls from
 /// `DailyAggregate` filtered to today — same source as `TodayDetailsCard` but
 /// kept as its own card so the @Query stays scoped (a model-only view
 /// doesn't need to invalidate when the total-cost number changes).
 ///
 /// Clicking a column title sorts the list, and the ring measures that column
-/// when its values add up (cost by default, tokens when sorted by Total) and
-/// names it in its centre; Share is each model's share of what the ring
-/// measures. A hovered wedge shows its share and name there instead.
+/// (cost by default, or tokens) and names it in its centre; Share is each
+/// model's share of what the ring measures. A hovered wedge shows its share
+/// and name there instead. Hit % and Out %, which round 4 listed here, are
+/// not shares of anything and are in no donut list (`UsageAmount`); a sort
+/// stored by one of them sorts by cost.
 struct PerModelTodayCard: View {
     @Query private var globalAggregates: [DailyAggregate]
     /// The same rollup sliced to one account. Which of the two is
@@ -34,12 +37,8 @@ struct PerModelTodayCard: View {
     @AppStorage("pacer.todayByModel.sortField", store: PacerSettings.store)
     private var sortRaw: String = UsageColumn.cost.rawValue
 
-    /// The list's columns: the narrow table's numbers, in the parts' order
-    /// (Hit % with the cache, Out % with output), then each model's share of
-    /// the ring.
-    private static let columns: [PacerShareListColumn] = [
-        .usage(.tokens), .usage(.cacheHitRate), .usage(.outputShare), .usage(.cost), .ringShare,
-    ]
+    /// The list's columns: every donut card's.
+    private static let columns: [PacerShareListColumn] = PacerShareListColumn.standard
     @AppStorage("pacer.todayByModel.sortDescending", store: PacerSettings.store)
     private var sortDescending: Bool = true
 

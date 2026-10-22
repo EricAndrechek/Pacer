@@ -12,11 +12,12 @@ import PacerCore
 // (`PacerTableCard`).
 
 /// What a sessions table shows beyond the standard columns: the session's
-/// project, how long it ran, and when it was last seen.
+/// project, how long it ran, and when it was last active.
 public struct PacerSessionExtra: PacerUsageExtra, Sendable, Equatable {
     public static let project = "project"
     public static let duration = "duration"
-    /// "lastSeen", the raw value both screens stored for this sort before.
+    /// The Last active column. "lastSeen", the raw value both screens stored
+    /// for this sort before it was renamed, so a stored sort carries over.
     public static let lastSeen = "lastSeen"
 
     public let projectPath: String
@@ -46,7 +47,7 @@ public struct PacerSessionExtra: PacerUsageExtra, Sendable, Equatable {
 }
 
 /// A sessions table: the session's top model over its short id, the Project
-/// column when the list spans projects, Total, Cost and a Last seen that
+/// column when the list spans projects, Tokens, Cost and a Last active that
 /// keeps ticking. Duration, every token part, Hit %, Out % and Mix are in the
 /// header's menu.
 public struct PacerSessionsTable: View {
@@ -64,10 +65,10 @@ public struct PacerSessionsTable: View {
     /// hand-rolled list stopped at.
     public static let maxVisibleRows = 8
 
-    /// The standard columns a sessions table shows by default: a session's
-    /// line is long enough with its label, project and times, so the parts
-    /// and ratios wait in the column menu.
-    public static let defaultColumns: Set<UsageColumn> = [.name, .tokens, .cost]
+    /// The standard columns a sessions table shows by default, the narrow
+    /// table's: a session's line is long enough with its label, project and
+    /// times, so the parts, ratios and Mix wait in the column menu.
+    public static let defaultColumns: Set<UsageColumn> = UsageColumn.narrowDefaults
 
     /// - `rows`: from `rows(_:)`, cached by the screen.
     /// - `showProject`: the Project column, for a list that spans projects
@@ -128,9 +129,11 @@ public struct PacerSessionsTable: View {
                     .lineLimit(1)
                     .help("\(pacerRelativeExact(row.extra.firstSeenAt)) → \(pacerRelativeExact(row.extra.lastSeenAt))")
             }
-            PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last seen",
+            // "Last active", as every table names when a row last had usage
+            // (`UsageColumn`'s conventions).
+            PacerUsageColumns.extra(PacerSessionExtra.lastSeen, title: "Last active",
                                     of: PacerSessionExtra.self,
-                                    minWidth: 36, idealWidth: 64) { row in
+                                    minWidth: 36, idealWidth: 70) { row in
                 // Judged against the clock, so it needs one: nothing else
                 // redraws an open detail on an idle machine, and "2 min ago"
                 // stayed "2 min ago".
@@ -138,7 +141,7 @@ public struct PacerSessionsTable: View {
                     Text(pacerRelative(row.extra.lastSeenAt))
                         .help(pacerRelativeExact(row.extra.lastSeenAt))
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }

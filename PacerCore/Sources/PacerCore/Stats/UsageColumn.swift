@@ -4,11 +4,12 @@ import Foundation
 /// list (#215).
 ///
 /// One definition of which number each column is, shared by the table that
-/// draws them (`PacerUsageTable` in PacerUI) and by anything that ranks rows
-/// the way that table sorts them (History's Top days, `DayRanking`). A column
-/// that read the wrong `TokenBreakdown` field or cost part would be wrong on
-/// every screen at once, and `UsageColumnTests` gives each field and each part
-/// a distinct value so a swap fails.
+/// draws them (`PacerUsageTable` in PacerUI), the short list beside a donut
+/// (`PacerDonutListCard`) and anything that ranks rows the way a table sorts
+/// them (History's Top days, `DayRanking`). A column that read the wrong
+/// `TokenBreakdown` field or cost part would be wrong on every screen at once,
+/// and `UsageColumnTests` gives each field and each part a distinct value so a
+/// swap fails.
 ///
 /// Raw values are persisted as each table's sort column and as the ids of its
 /// saved column layout. `name`, `tokens` and `cost` are what the per-screen
@@ -19,6 +20,41 @@ import Foundation
 /// The declaration order is not the order a table shows the columns in: that
 /// is `displayOrder`, which takes the token parts' order from
 /// `CostComponent`.
+///
+/// ## Conventions: every table and every donut list
+///
+/// The owner found the donut cards and the tables disagreeing about what a
+/// column was called, where it sat and how it printed. These hold everywhere
+/// a usage number is listed, so a screen picks columns, never their names,
+/// order or formats:
+///
+/// - **One name per number.** "Tokens" is every token, `TokenBreakdown.all`,
+///   in a table header, a donut list and a donut's centre alike (never
+///   "Total"); "Cost" is the row's cost; "Share" is the row's part of a whole,
+///   which in a donut list is the whole the ring measures. A token part is
+///   named for what it is ("Uncached", "Cache read").
+/// - **One order.** A table: the label, a screen's leading columns, the token
+///   parts in the parts' order, Tokens, Hit %, Out %, Cost, the screen's own
+///   columns, Mix (`displayOrder`). A donut list keeps the table's order for
+///   what it has: the label, Tokens, Cost, then Share
+///   (`PacerShareListColumn.standard`).
+/// - **One format per kind.** A cost prints compact ("$12.3k",
+///   `pacerCost`), exact in its tooltip; a token count compact ("86.0M",
+///   `pacerTokens`), exact in its tooltip; a share as a whole percent ("38%",
+///   "<1%"), with the amounts it divides in its tooltip; Hit % at one decimal
+///   (`pacerCacheHitText`), as every hit rate prints.
+/// - **"Last active", never "Last seen"**, for when a row last had usage.
+///   Relative to now ("2h ago"), the exact time in its tooltip; a row known
+///   only to the day (a model, from the daily rollup) prints the day relative
+///   to today ("yesterday").
+/// - **Six columns by default, at most.** A table opens on the label,
+///   Tokens, Cost and Mix (`wideDefaults`; `narrowDefaults` leaves out Mix),
+///   plus at most two columns of the screen's own (`maxDefaultColumns`).
+///   Everything else is one right-click on the header away.
+/// - **A donut list holds only amounts that add up**, the kind a ring can be
+///   made of: cost, tokens, a token part, a screen's own count
+///   (`UsageAmount`). Never a ratio: Hit % and Out % are not shares of
+///   anything, so they cannot make a ring or be compared as one.
 public enum UsageColumn: String, CaseIterable, Sendable {
     /// The row's label: a model, a project, a date, a session.
     case name
@@ -87,6 +123,11 @@ public enum UsageColumn: String, CaseIterable, Sendable {
         }
     }
 
+    /// Whether this column's values add up across rows to a whole a ring
+    /// can be made of: cost, Tokens, a token part. Not the label, a ratio or
+    /// the Mix bar. What a donut list may show (`UsageAmount`).
+    public var isAdditive: Bool { UsageAmount(self) != nil }
+
     /// `a` against `b` by this column's value, ascending, with no tiebreak.
     /// `.orderedSame` for the label: each caller orders its labels its own
     /// way (a table by its sort label, Top days by date). A ratio with no
@@ -120,20 +161,25 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// label A to Z.
     public var sortsDescendingFirst: Bool { self != .name }
 
-    /// What a wide table shows until its user changes it: every token part
-    /// (the two write tiers folded into Cache write, whose tooltip splits
-    /// them), the total and the cost. Models, Projects, Top days, Day
-    /// detail's projects.
-    public static let wideDefaults: Set<UsageColumn> = [
-        .name, .input, .output, .cacheRead, .cacheWrite, .tokens, .cost,
-    ]
+    /// What a table shows until its user changes it: the label, Tokens, Cost
+    /// and the Mix bar. A screen adds at most two of its own (Models' Days
+    /// and Last active, Projects' Sessions and Last active), which is six;
+    /// the token parts, Hit % and Out % are in the header's menu.
+    ///
+    /// Round 4 opened every wide table on all four token parts as well, and
+    /// the owner found it too many columns to read at a glance. A table that
+    /// opened that way before keeps nothing of it: its saved layout is
+    /// cleared once (`PacerUsageTableMetrics.layoutDefaultsVersions`).
+    public static let wideDefaults: Set<UsageColumn> = [.name, .tokens, .cost, .mix]
 
-    /// What a table in a tight space shows: Total · Hit % · Out % · Cost.
-    /// The token parts stay one right-click away. Day detail's models, and
-    /// anywhere else a table has little room.
-    public static let narrowDefaults: Set<UsageColumn> = [
-        .name, .tokens, .cacheHitRate, .outputShare, .cost,
-    ]
+    /// What a table in a tight space shows: the label, Tokens and Cost. The
+    /// Mix bar waits in the menu with the rest. Day detail's models (whose
+    /// mix the Cost breakdown card above them draws) and the sessions lists.
+    public static let narrowDefaults: Set<UsageColumn> = [.name, .tokens, .cost]
+
+    /// The most columns a table opens on, label and the screen's own
+    /// columns included (`UsageTableLayoutTests` checks every screen's).
+    public static let maxDefaultColumns = 6
 
     /// The column showing one priced part's tokens. The two write tiers
     /// have their own columns; Cache write is both of them together.
@@ -187,6 +233,47 @@ public enum UsageColumn: String, CaseIterable, Sendable {
     /// The column a stored id names, retired ids included.
     public init?(storedId id: String) {
         self.init(rawValue: Self.migratedId(id))
+    }
+}
+
+/// A usage column whose values add up across rows: the only standard
+/// columns a donut list takes (`PacerShareListColumn.usage`), so no screen can
+/// put a ratio beside a ring. Hit %, Out % and Mix have no case here, and a
+/// list that names one does not compile.
+///
+/// The owner's round-5 review: Hit % and Out % "don't really make sense to
+/// compare or be options in the pie chart view", where only money and
+/// tokens, all of them or one part's, do. A share of a ratio is not a share
+/// of anything.
+public enum UsageAmount: String, CaseIterable, Sendable {
+    case cost
+    case tokens
+    case input
+    case output
+    case cacheRead
+    case cacheWrite
+    case cacheWrite5m
+    case cacheWrite1h
+
+    /// The table column this amount is, and whose title, cell text and sort
+    /// it shares.
+    public var column: UsageColumn {
+        switch self {
+        case .cost:         return .cost
+        case .tokens:       return .tokens
+        case .input:        return .input
+        case .output:       return .output
+        case .cacheRead:    return .cacheRead
+        case .cacheWrite:   return .cacheWrite
+        case .cacheWrite5m: return .cacheWrite5m
+        case .cacheWrite1h: return .cacheWrite1h
+        }
+    }
+
+    /// The amount a table column is, or nil for one that does not add up.
+    public init?(_ column: UsageColumn) {
+        guard let amount = UsageAmount.allCases.first(where: { $0.column == column }) else { return nil }
+        self = amount
     }
 }
 

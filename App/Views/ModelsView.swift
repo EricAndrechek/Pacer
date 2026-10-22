@@ -103,11 +103,13 @@ struct ModelsView: View {
 }
 
 /// What the Models table shows beyond the standard columns: the model id
-/// to copy, its active days and the day it was last seen. Its Mix bar is the
-/// shared table's Mix column now (`UsageColumn.mix`), under the same id and
-/// sorting the same way, so a saved sort or layout carries over.
+/// to copy, its active days and the day it was last active. Its Mix bar is
+/// the shared table's Mix column now (`UsageColumn.mix`), under the same id
+/// and sorting the same way, so a saved sort or layout carries over.
 struct ModelTableExtra: PacerUsageExtra {
     static let days = "days"
+    /// The Last active column. "lastSeen", the id it had as "Last seen", so
+    /// a stored sort carries over.
     static let lastSeen = "lastSeen"
 
     /// Raw id to copy; empty when the row is a class.
@@ -180,10 +182,8 @@ private struct ModelsContent: View {
     /// not an input to the cache.
     let sort: PacerUsageSort
     let onSort: (PacerUsageSort) -> Void
-    /// The Share card's sort. Sessions are not one of its columns: unlike
-    /// projects, the per-model rollup carries no session count, and the only
-    /// proxy (a session's single dominant model) would misattribute
-    /// mixed-model sessions.
+    /// The Share card's sort: Tokens, Cost or the label, the titles every
+    /// donut list has.
     let shareSort: PacerUsageSort
     let onShareSort: (PacerUsageSort) -> Void
     let grouping: ModelGrouping
@@ -442,13 +442,11 @@ private struct ModelsContent: View {
         )
     }
 
-    /// The Share card's columns: each model's share of the cost and of the
-    /// tokens. Shares, not amounts: the All models table prints every
-    /// model's amounts, and the page prints a number once.
-    private static let shareColumns: [PacerShareListColumn] = [
-        .share(of: UsageColumn.cost.rawValue, title: "Cost", format: .cost, help: "Share of the cost"),
-        .share(of: UsageColumn.tokens.rawValue, title: "Tokens", format: .tokens, help: "Share of every token"),
-    ]
+    /// The Share card's columns: every donut card's, Tokens, Cost and Share,
+    /// so this card reads like Today by model and Top projects. Round 4
+    /// printed shares under Cost and Tokens here, and dollars under the
+    /// same titles on the other cards.
+    private static let shareColumns: [PacerShareListColumn] = PacerShareListColumn.standard
 
     /// Eight models with a wedge and a line of their own, and the rest as
     /// one: the legend used to stop at eight while the donut drew every row,
@@ -516,7 +514,10 @@ private struct ModelsContent: View {
     /// where a picker in the header used to.
     private var shareCard: some View {
         let derived = self.derived
-        let share = derived.share.flatMap { $0.sort == shareSort ? $0 : nil }
+        // Compared with the sort the list runs in, which for a sort it has
+        // no column for is not the stored one.
+        let effective = PacerShareListData<ModelTableExtra>.effectiveSort(shareSort, columns: Self.shareColumns)
+        let share = derived.share.flatMap { $0.sort == effective ? $0 : nil }
             ?? Self.share(derived.tableRows, sort: shareSort)
         return PacerDonutListCard(
             "Share",
@@ -688,9 +689,9 @@ private struct ModelsContent: View {
                 labelTitle: grouping.label,
                 sort: sort,
                 onSort: onSort,
-                // The full token columns, and the Mix bar this table
-                // has always had.
-                defaultColumns: UsageColumn.wideDefaults.union([.mix]),
+                // Model, Tokens, Cost, Days, Last active and the Mix bar:
+                // six. The token parts are in the header's menu.
+                defaultColumns: UsageColumn.wideDefaults,
                 extraColumns: {
                     PacerUsageColumns.extra(ModelTableExtra.days, title: "Days",
                                             of: ModelTableExtra.self,
@@ -701,11 +702,17 @@ private struct ModelsContent: View {
                             .monospacedDigit()
                             .lineLimit(1)
                     }
-                    PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last seen",
+                    // Known to the day only (the daily rollup), so the day,
+                    // relative to today, as Projects prints its Last active
+                    // relative to now. The page is rebuilt at midnight
+                    // (`ContentView`'s day key), so "today" rolls over.
+                    PacerUsageColumns.extra(ModelTableExtra.lastSeen, title: "Last active",
                                             of: ModelTableExtra.self,
-                                            minWidth: 36, idealWidth: 72) { row in
-                        Text(row.extra.lastSeen)
-                            .font(.system(size: 11, design: .monospaced))
+                                            minWidth: 36, idealWidth: 70) { row in
+                        let day = pacerLastActiveDay(row.extra.lastSeen)
+                        Text(day.text)
+                            .help(day.help)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }

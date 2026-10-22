@@ -141,21 +141,12 @@ public struct PacerShareMetric: Equatable, Sendable {
 
 public extension UsageColumn {
     /// The metric a share donut measures while its list is sorted by this
-    /// column, or nil for a column whose values do not add up to a whole:
-    /// the label, the two ratios, the Mix bar.
+    /// column, or nil for a column whose values do not add up to a whole
+    /// (`isAdditive`): the label, the two ratios, the Mix bar. Named as the
+    /// column is, so the ring's centre and the list's title agree ("Tokens").
     var shareMetric: PacerShareMetric? {
-        switch self {
-        case .cost:
-            return .cost
-        case .name, .cacheHitRate, .outputShare, .mix:
-            return nil
-        case .tokens:
-            // "Total" is the column's title; on its own in the donut it
-            // would not say total of what.
-            return PacerShareMetric(column: rawValue, title: "Tokens")
-        case .input, .output, .cacheRead, .cacheWrite, .cacheWrite5m, .cacheWrite1h:
-            return PacerShareMetric(column: rawValue, title: title(label: ""))
-        }
+        guard isAdditive else { return nil }
+        return self == .cost ? .cost : PacerShareMetric(column: rawValue, title: title(label: ""))
     }
 }
 
