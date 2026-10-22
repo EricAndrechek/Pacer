@@ -203,28 +203,48 @@ struct CostBreakdownTests {
         }
     }
 
-    @Test("neighbouring parts stay apart under red- and green-weak vision")
-    func neighboursSurviveColourBlindness() throws {
-        // Parts stack in `CostComponent` order, so each touches the next in
-        // every bar. The bar for that is the data-viz CVD check: Machado 2009
-        // at severity 1.0, distance in OKLab ×100, target 8. Output was purple
-        // beside the blue reads and measured 5.9 under protanopia.
+    @Test("every pair of parts stays apart under red- and green-weak vision, light and dark",
+          arguments: [NSAppearance.Name.aqua, .darkAqua])
+    func partsSurviveColourBlindness(_ appearance: NSAppearance.Name) throws {
+        // The data-viz CVD check: Machado 2009 at severity 1.0, distance in
+        // OKLab ×100, target 8. Output at the ridge's purple measured 5.9
+        // against the blue reads under protanopia.
         let protan: [[Double]] = [[0.152286, 1.052583, -0.204868],
                                   [0.114503, 0.786281, 0.099216],
                                   [-0.003882, -0.048116, 1.051998]]
         let deutan: [[Double]] = [[0.367322, 0.860646, -0.227968],
                                   [0.280085, 0.672501, 0.047413],
                                   [-0.011820, 0.042940, 0.968881]]
+        // Every pair, not just neighbours: a legend puts any two side by side.
         let parts: [CostComponent] = CostComponent.allCases
-        let linear: [[Double]] = try parts.map { try #require(Self.linearRGB(hex($0.color))) }
-        for i in 0..<(parts.count - 1) {
-            for m in [protan, deutan] {
-                let a: [Double] = Self.oklab(Self.apply(m, linear[i]))
-                let b: [Double] = Self.oklab(Self.apply(m, linear[i + 1]))
-                let d: Double = Self.distance(a, b) * 100
-                #expect(d >= 8, "\(parts[i]) vs \(parts[i + 1]): ΔE \(d)")
+        var hexes: [String?] = []
+        try #require(NSAppearance(named: appearance)).performAsCurrentDrawingAppearance {
+            hexes = parts.map { pacerHexString(from: $0.color) }
+        }
+        let linear: [[Double]] = try hexes.map { try #require(Self.linearRGB($0)) }
+        for i in 0..<parts.count {
+            for j in (i + 1)..<parts.count {
+                for m in [protan, deutan] {
+                    let a: [Double] = Self.oklab(Self.apply(m, linear[i]))
+                    let b: [Double] = Self.oklab(Self.apply(m, linear[j]))
+                    let d: Double = Self.distance(a, b) * 100
+                    #expect(d >= 8, "\(appearance.rawValue) \(parts[i]) vs \(parts[j]): ΔE \(d)")
+                }
             }
         }
+    }
+
+    @Test("output is a deep violet on light backgrounds and a lavender on dark ones")
+    func outputPurpleFollowsTheAppearance() throws {
+        var light: String?, dark: String?
+        try #require(NSAppearance(named: .aqua)).performAsCurrentDrawingAppearance {
+            light = pacerHexString(from: CostComponent.output.color)
+        }
+        try #require(NSAppearance(named: .darkAqua)).performAsCurrentDrawingAppearance {
+            dark = pacerHexString(from: CostComponent.output.color)
+        }
+        #expect(light == "#6F3BB2")
+        #expect(dark == "#BC88F4")
     }
 
     private static func linearRGB(_ hex: String?) -> [Double]? {
