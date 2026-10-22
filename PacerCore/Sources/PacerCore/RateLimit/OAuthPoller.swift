@@ -205,9 +205,10 @@ public actor OAuthPoller: TokenPoolTesting {
         public let misclassifiedLaneCount: Int
         /// Lanes the scheduler will poll ahead of its cadence gate (#214).
         public let probeFirstLaneCount: Int
-        /// Whether this launch has polled the token the Claude Code keychain
-        /// holds and had it answer — the `[OAuthPoller] ok keychain` line (#325).
-        public let keychainTokenPolled: Bool
+        /// Whether this launch has read a token from Claude Code's keychain
+        /// item, which is when the `[OAuthPoller] ok keychain` line is written
+        /// (#325).
+        public let keychainTokenRead: Bool
     }
 
     public typealias RandomSource = @Sendable () -> Double
@@ -290,10 +291,9 @@ public actor OAuthPoller: TokenPoolTesting {
     /// Which lane the last logged poll used, so a change of token is worth a
     /// line even when the outcome category has not moved.
     private var lastPolledLaneId: String?
-    /// Set by the first poll this launch of the token the Claude Code keychain
-    /// holds that the server answered, which is also when the `ok keychain`
-    /// line is written (#325).
-    private var keychainTokenPolled = false
+    /// Set by the first discovery this launch that reads a token from Claude
+    /// Code's keychain item, which also writes the `ok keychain` line (#325).
+    private var keychainTokenRead = false
     private var lastPollAt: Date?
     private var nextPollAt: Date?
 
@@ -440,7 +440,7 @@ public actor OAuthPoller: TokenPoolTesting {
                 return belongs != (lane.state.account == .primary)
             }.count,
             probeFirstLaneCount: lanes.filter { $0.state.probeFirst }.count,
-            keychainTokenPolled: keychainTokenPolled
+            keychainTokenRead: keychainTokenRead
         )
     }
 
@@ -1379,6 +1379,19 @@ public actor OAuthPoller: TokenPoolTesting {
         // did not).
         liveKeychainToken = candidates.first { $0.source == .keychain }?.credential.accessToken
         liveKeychainReadAt = liveKeychainToken == nil ? nil : now
+        // One line per launch saying the keychain read works (#325): the
+        // post-install check in AGENTS.md greps for it. It is written here,
+        // where launch's first discovery reads the item, rather than when the
+        // token is next polled. On a machine where an account switcher fetches
+        // the signed-in account's usage, Pacer can go well past fifteen
+        // minutes without polling that token, and the per-poll `ok 5h=` lines
+        // only appear for the active account on a change of outcome.
+        if !keychainTokenRead, let live = liveKeychainToken {
+            keychainTokenRead = true
+            Log.write("OAuthPoller", "ok keychain: read Claude Code's token; " + Self.laneLabel(
+                laneCount: lanes.count, lane: lanes.first { $0.credential.accessToken == live },
+                liveKeychainToken: live))
+        }
         // The token Claude Code is billing now, never polled: let the
         // scheduler poll it ahead of the endpoint-cadence gate (#214).
         if let live = liveKeychainToken,
@@ -1514,20 +1527,6 @@ public actor OAuthPoller: TokenPoolTesting {
                 outcome: outcome, laneCount: lanes.count,
                 lane: idx < lanes.count ? lanes[idx] : nil,
                 liveKeychainToken: liveKeychainToken))
-        }
-        // One line per launch that says the keychain read works end to end:
-        // Claude Code's item was read and its token answered (#325). That is
-        // what the post-install check in AGENTS.md looks for, and the lines
-        // above cannot carry it. They say `ok` only for the active account and
-        // only when the outcome changes, and with Desktop and parked tokens in
-        // the pool a healthy launch could spend its first hour logging nothing
-        // but `token is another account`.
-        if !keychainTokenPolled, credential.accessToken == liveKeychainToken,
-           let account = Self.answeredAccount(outcome) {
-            keychainTokenPolled = true
-            Log.write("OAuthPoller", "ok keychain: the signed-in token answered (\(account)); "
-                + Self.laneLabel(laneCount: lanes.count, lane: idx < lanes.count ? lanes[idx] : nil,
-                                 liveKeychainToken: liveKeychainToken))
         }
         // Persist the lane's freshly-learned state (account/org/last-poll/
         // cooldown) so it survives a restart.
@@ -1675,17 +1674,6 @@ public actor OAuthPoller: TokenPoolTesting {
             let nameX = Mirror(reflecting: x).children.first?.label ?? "\(x)"
             let nameY = Mirror(reflecting: y).children.first?.label ?? "\(y)"
             return nameX == nameY
-        }
-    }
-
-    /// Whose account a poll the server answered belongs to, or nil when it
-    /// failed. Both are a working token: `.secondaryAccount` is a successful
-    /// read of a token signed into some other account.
-    private static func answeredAccount(_ outcome: PollOutcome) -> String? {
-        switch outcome {
-        case .success: return "active account"
-        case .secondaryAccount: return "another account"
-        default: return nil
         }
     }
 
